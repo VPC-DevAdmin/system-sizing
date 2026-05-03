@@ -1,0 +1,127 @@
+"""Command-line interface."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from pathlib import Path
+
+import typer
+from rich.logging import RichHandler
+
+from .config import apply_cli_overrides, load_config
+from .engines import make_engine
+from .personas import COHORTS
+
+app = typer.Typer(add_completion=False, help="Persona Capacity Simulator")
+
+
+def _setup_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
+    )
+
+
+@app.command()
+def run(
+    engine: str = typer.Option("vllm", help="Engine type: vllm | sglang"),
+    model: str = typer.Option(..., help="Model ID (HF repo or local path)"),
+    cohort: str = typer.Option(..., help="Cohort ID"),
+    config: Path = typer.Option(Path("config/default.yaml"), help="Config file"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Run a single cohort end-to-end."""
+    _setup_logging(verbose)
+    cfg = load_config(config)
+    apply_cli_overrides(cfg, engine=engine, model=model)
+    if cohort not in COHORTS:
+        raise typer.BadParameter(f"Unknown cohort '{cohort}'. Known: {sorted(COHORTS)}")
+
+    from .runner import run_cohort
+    db_path = asyncio.run(run_cohort(cfg, cohort))
+    typer.echo(f"Run complete -> {db_path}")
+
+
+@app.command()
+def sweep(
+    engine: str = typer.Option("vllm"),
+    model: str = typer.Option(...),
+    config: Path = typer.Option(Path("config/default.yaml")),
+    cohorts: str = typer.Option(
+        ",".join(COHORTS.keys()),
+        help="Comma-separated cohort IDs (default: all)",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Run multiple cohorts back-to-back against the same engine."""
+    _setup_logging(verbose)
+    cfg = load_config(config)
+    apply_cli_overrides(cfg, engine=engine, model=model)
+    cohort_ids = [c.strip() for c in cohorts.split(",") if c.strip()]
+    for cid in cohort_ids:
+        if cid not in COHORTS:
+            raise typer.BadParameter(f"Unknown cohort '{cid}'")
+
+    from .runner import run_sweep
+    paths = asyncio.run(run_sweep(cfg, cohort_ids))
+    typer.echo(f"Sweep complete: {len(paths)} cohort runs")
+    for p in paths:
+        typer.echo(f"  {p}")
+
+
+@app.command("launch-engine")
+def launch_engine(
+    engine: str = typer.Option("vllm"),
+    model: str = typer.Option(...),
+    config: Path = typer.Option(Path("config/default.yaml")),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Launch the engine without running simulations (manual testing)."""
+    _setup_logging(verbose)
+    cfg = load_config(config)
+    apply_cli_overrides(cfg, engine=engine, model=model)
+    eng = make_engine(cfg.engine.type, cfg.engine)
+    eng.launch(log_dir=cfg.output.db_directory)
+    typer.echo(f"Engine up at {eng.base_url}. Ctrl-C to stop.")
+    try:
+        import time
+        while True:
+            time.sleep(60)
+    except KeyboardInterrupt:
+        eng.shutdown()
+
+
+@app.command()
+def dashboard(
+    run_dir: Path = typer.Option(Path("runs"), "--run-dir", help="Run directory"),
+    refresh: float = typer.Option(2.0, help="Refresh interval (seconds)"),
+):
+    """Live progress view of the most recent run."""
+    from .dashboard import watch
+    watch(run_dir=run_dir, refresh_s=refresh)
+
+
+@app.command("export")
+def export_cmd(
+    input_dir: Path = typer.Option(Path("runs"), "--input-dir"),
+    output: Path = typer.Option(Path("buyer_page_data.json"), "--output"),
+):
+    """Export simplified JSON for the buyer-facing webpage."""
+    from .export import export_dir
+    doc = export_dir(input_dir, output)
+    typer.echo(f"Exported {doc['meta']['cohort_count']} cohorts -> {output}")
+
+
+@app.command("list-cohorts")
+def list_cohorts():
+    """List available cohorts."""
+    for cid, cohort in COHORTS.items():
+        typer.echo(f"  {cid}: {cohort.name} — {cohort.description}")
+
+
+if __name__ == "__main__":
+    app()

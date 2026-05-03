@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+runs/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.DS_Store
+buyer_page_data.json
+.pytest_cache/
+.ruff_cache/

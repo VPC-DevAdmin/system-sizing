@@ -1,0 +1,64 @@
+# Persona Capacity Simulator — default configuration.
+# CLI flags override these values.
+
+engine:
+  type: vllm                    # vllm | sglang
+  model_id: Qwen/Qwen2.5-7B-Instruct
+  quantization: null            # null | compressed-tensors | gptq_marlin | awq
+  max_model_len: 8192
+  tensor_parallel_size: 4
+  kv_cache_gb: 64
+  port: 9100
+  host: 127.0.0.1
+  startup_timeout_s: 600
+
+  vllm_extra_flags:
+    - --no-enforce-eager
+    - --distributed-executor-backend
+    - mp
+    - --compilation-config
+    - '{"backend":"inductor","mode":3}'
+
+  vllm_extra_env:
+    VLLM_CPU_OMP_THREADS_BIND: '0-15|16-31|32-47|48-63'
+    OMP_NUM_THREADS: '16'
+    VLLM_CPU_NUM_OF_RESERVED_CPU: '2'
+    VLLM_CPU_KVCACHE_SPACE: '64'
+
+  sglang_extra_flags: []
+  sglang_extra_env:
+    OMP_NUM_THREADS: '64'
+
+simulation:
+  initial_pool_size: 4
+  max_pool_size: 1024
+  target_samples_per_step: 500
+  measurement_timeout_s: 300
+  stabilization_cv_threshold: 0.15
+  stabilization_min_duration_s: 60
+  stabilization_max_duration_s: 300
+  knee_slope_threshold: 0.005
+  stop_violation_threshold: 0.5
+  max_total_duration_minutes: 180
+
+  enable_token_timestamps: false
+  snapshot_interval_s: 1
+
+  # Cap how long any single virtual user request can take before timeout.
+  request_timeout_s: 300
+
+telemetry:
+  enable_pmu: true
+  enable_memory_bandwidth: true
+  enable_engine_metrics: true
+  perf_events:
+    - cycles
+    - instructions
+    - cycle_activity.stalls_mem_any
+    - cycle_activity.stalls_l3_miss
+    - cache-misses
+    - cache-references
+
+output:
+  db_directory: runs
+  json_export: true

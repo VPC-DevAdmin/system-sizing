@@ -69,7 +69,10 @@ CREATE TABLE IF NOT EXISTS turn_events (
     in_flight_avg_during REAL,
     in_flight_peak_during INTEGER,
     sla_ttft_violation INTEGER NOT NULL,
-    sla_tpot_violation INTEGER NOT NULL
+    sla_tpot_violation INTEGER NOT NULL,
+    -- Tier-3 opt-in: JSON array of [elapsed_ms_from_submit, cumulative_token_count]
+    -- pairs, one per emitted streaming chunk. NULL when tier-3 capture is off.
+    token_timestamps_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_measurement ON turn_events(measurement_id);

@@ -42,6 +42,7 @@ class PoolManager:
         request_timeout_s: int,
         rng_seed: int = 0xC0FFEE,
         on_user_terminated=None,
+        capture_token_timestamps: bool = False,
     ):
         self.cohort = cohort
         self.client = client
@@ -55,6 +56,7 @@ class PoolManager:
         self._reaper_task: asyncio.Task | None = None
         self._stopped = False
         self._on_user_terminated = on_user_terminated
+        self._capture_token_timestamps = capture_token_timestamps
 
     @property
     def target_size(self) -> int:
@@ -134,6 +136,7 @@ class PoolManager:
                 stats=stats,
                 request_timeout_s=self.request_timeout_s,
                 cancel_event=cancel_event,
+                capture_token_timestamps=self._capture_token_timestamps,
             ),
             name=f"vu:{persona_id}:{user_id[:8]}",
         )

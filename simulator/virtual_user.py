@@ -42,6 +42,9 @@ class TurnEvent:
     in_flight_peak_during: int = 0
     error: Optional[str] = None
     persona: Persona = field(default=None, repr=False)  # for SLA verdict at capture time
+    # Tier-3 opt-in: per-emitted-chunk (elapsed_ms_from_submit, cumulative_tokens).
+    # Empty list when capture is off. Persisted as JSON on the turn_events row.
+    token_timestamps: list = field(default_factory=list, repr=False)
 
     def ttft_violation(self) -> bool:
         return self.ttft_ms / 1000.0 > self.persona.ttft_floor_seconds
@@ -115,6 +118,7 @@ async def run_virtual_user(
     stats: UserStats,
     request_timeout_s: int,
     cancel_event: asyncio.Event,
+    capture_token_timestamps: bool = False,
 ) -> None:
     """Run one virtual user to completion (or until cancelled)."""
     sessions_target = stats.sessions_target
@@ -149,6 +153,7 @@ async def run_virtual_user(
                 output_text_parts: list[str] = []
                 output_tokens = 0
                 error: str | None = None
+                token_timestamps: list[list[float]] = []
 
                 try:
                     stream = await asyncio.wait_for(
@@ -164,10 +169,18 @@ async def run_virtual_user(
                     async for chunk in stream:
                         delta = chunk.choices[0].delta if chunk.choices else None
                         if delta and delta.content:
+                            now_rel = time.monotonic() - submitted_at
                             if ttft_obs is None:
-                                ttft_obs = time.monotonic() - submitted_at
+                                ttft_obs = now_rel
                             output_text_parts.append(delta.content)
                             output_tokens += 1
+                            if capture_token_timestamps:
+                                # Stored as [ms_from_submit, cumulative_tokens].
+                                # Floats, not strings — JSON encoder is faster
+                                # and the round-trip is exact for moderate runs.
+                                token_timestamps.append(
+                                    [round(now_rel * 1000.0, 3), output_tokens]
+                                )
                 except asyncio.TimeoutError:
                     error = "timeout"
                 except Exception as e:  # noqa: BLE001
@@ -203,6 +216,7 @@ async def run_virtual_user(
                     output_tokens=output_tokens,
                     in_flight_at_submit=in_flight_at_submit,
                     persona=persona,
+                    token_timestamps=token_timestamps,
                 )
 
                 await state.complete()

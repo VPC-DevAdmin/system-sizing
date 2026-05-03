@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Persona Capacity — Buyer Page</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!--
+    Reference renderer for buyer_page_data.json (produced by `make export`).
+    Single self-contained HTML — no build step, Chart.js from CDN.
+
+    Three load paths, in priority order:
+      1. ?data=<url>  — fetches JSON from a URL
+      2. ?path=runs/  — fetches buyer_page_data.json from a relative path
+      3. drag-drop a buyer_page_data.json file onto the window
+      4. fall back to ./buyer_page_data.json (sibling to this file)
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #181f29;
+      --border: #2a3340;
+      --fg: #e6edf3;
+      --dim: #8b96a3;
+      --ok: #4caf50;
+      --marginal: #ff9800;
+      --fail: #f44336;
+      --accent: #58a6ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--fg);
+    }
+    header {
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 16px;
+      flex-wrap: wrap;
+    }
+    header h1 {
+      margin: 0; font-size: 18px; font-weight: 600;
+    }
+    header .meta { color: var(--dim); font-size: 13px; }
+    header input[type="file"] { color: var(--dim); }
+    main { padding: 18px 24px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
+      gap: 18px;
+    }
+    .cohort {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .cohort h2 {
+      margin: 0 0 4px 0;
+      font-size: 16px; font-weight: 600;
+    }
+    .cohort .desc { color: var(--dim); margin-bottom: 12px; font-size: 13px; }
+    .row {
+      display: flex; gap: 12px; flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .stat {
+      flex: 1; min-width: 110px;
+      background: rgba(0,0,0,.18);
+      border-radius: 6px;
+      padding: 8px 10px;
+    }
+    .stat .label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+    .stat .value { font-size: 18px; font-weight: 600; margin-top: 2px; }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+    }
+    .badge.pass { background: rgba(76,175,80,.18); color: var(--ok); }
+    .badge.marginal { background: rgba(255,152,0,.18); color: var(--marginal); }
+    .badge.fail { background: rgba(244,67,54,.18); color: var(--fail); }
+    .badge.unknown { background: rgba(139,150,163,.18); color: var(--dim); }
+    .chart-wrap { position: relative; height: 220px; margin: 8px 0 14px 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { padding: 6px 8px; text-align: left; font-size: 12px; }
+    th { color: var(--dim); border-bottom: 1px solid var(--border); font-weight: 500; }
+    td { border-bottom: 1px solid rgba(42,51,64,.5); }
+    .reco {
+      margin-top: 8px;
+      padding: 10px;
+      border-left: 3px solid var(--accent);
+      background: rgba(88,166,255,.06);
+      border-radius: 0 6px 6px 0;
+      font-size: 13px;
+    }
+    .reco .what { color: var(--accent); font-weight: 600; margin-bottom: 4px; }
+    .empty {
+      padding: 60px 24px; text-align: center; color: var(--dim);
+    }
+    code { background: rgba(0,0,0,.3); padding: 2px 5px; border-radius: 3px; font-size: 12px; }
+    .persona-pill {
+      display: inline-block;
+      background: rgba(88,166,255,.12);
+      color: var(--accent);
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      margin: 2px 4px 2px 0;
+    }
+    .small { font-size: 12px; color: var(--dim); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Persona Capacity Simulator</h1>
+    <div class="meta" id="meta"></div>
+    <span style="flex:1"></span>
+    <input type="file" id="fileInput" accept=".json,application/json" />
+  </header>
+  <main id="main"></main>
+
+  <script>
+    "use strict";
+
+    const STATUS_TO_BADGE = {
+      pass: "pass",
+      marginal: "marginal",
+      fail: "fail",
+      unstable: "fail",
+    };
+
+    const BOTTLENECK_LABEL = {
+      kv_cache: "KV cache exhaustion",
+      memory_bandwidth: "Memory bandwidth",
+      amx_underutilised: "AMX under-utilised",
+      frequency_droop: "Frequency droop",
+      prefill_throughput: "Prefill throughput",
+      decode_throughput: "Decode throughput",
+      unknown: "Unknown",
+    };
+
+    const PREFIX_CACHE_LABEL = {
+      prefix_cache_effective: { text: "prefix cache effective", cls: "pass" },
+      prefix_cache_partial:   { text: "prefix cache partial",   cls: "marginal" },
+      prefix_cache_ineffective: { text: "prefix cache ineffective", cls: "fail" },
+      insufficient_data:      { text: "prefix cache: insufficient data", cls: "unknown" },
+    };
+
+    function pct(v, digits = 1) {
+      if (v == null) return "—";
+      return (v * 100).toFixed(digits) + "%";
+    }
+    function fmt(v, digits = 1) {
+      if (v == null) return "—";
+      return Number(v).toFixed(digits);
+    }
+    function el(tag, attrs = {}, ...children) {
+      const node = document.createElement(tag);
+      for (const [k, v] of Object.entries(attrs)) {
+        if (k === "class") node.className = v;
+        else if (k === "style") node.style.cssText = v;
+        else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+        else node.setAttribute(k, v);
+      }
+      for (const c of children) {
+        if (c == null) continue;
+        node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+      }
+      return node;
+    }
+
+    function render(doc) {
+      document.getElementById("meta").textContent = doc.meta
+        ? `${doc.meta.cohort_count} cohort(s) · engines: ${doc.meta.engines.join(", ") || "—"} · models: ${doc.meta.models.join(", ") || "—"} · ${doc.meta.generated_at}`
+        : "";
+
+      const main = document.getElementById("main");
+      main.innerHTML = "";
+
+      if (!doc.cohorts || doc.cohorts.length === 0) {
+        main.appendChild(el("div", { class: "empty" },
+          "No cohort data found. Run ", el("code", {}, "make run-sweep"),
+          " then ", el("code", {}, "make export"), "."));
+        return;
+      }
+
+      const grid = el("div", { class: "grid" });
+      doc.cohorts.forEach((cohort, i) => grid.appendChild(buildCohortCard(cohort, i)));
+      main.appendChild(grid);
+    }
+
+    function buildCohortCard(cohort, idx) {
+      const knee = cohort.knee_pool_size ?? "—";
+      const cap  = cohort.capacity_pool_size ?? "—";
+      const bottleneckLabel = BOTTLENECK_LABEL[cohort.bottleneck] || cohort.bottleneck;
+
+      const personaRow = el("div", { class: "small", style: "margin: 4px 0 12px 0;" },
+        ...Object.entries(cohort.persona_weights || {}).map(([pid, w]) =>
+          el("span", { class: "persona-pill" }, `${pid} ${(w * 100).toFixed(0)}%`)));
+
+      const stats = el("div", { class: "row" },
+        statBlock("Capacity (pool size)", cap),
+        statBlock("Knee", knee),
+        statBlock("Bottleneck", bottleneckLabel),
+      );
+
+      const chartWrap = el("div", { class: "chart-wrap" });
+      const canvas = el("canvas", { id: `chart-${idx}` });
+      chartWrap.appendChild(canvas);
+
+      const tbl = buildCurveTable(cohort.curve || []);
+
+      const recoBox = el("div", { class: "reco" },
+        el("div", { class: "what" }, bottleneckLabel),
+        el("div", {}, cohort.hardware_recommendation || ""),
+        evidenceList(cohort.bottleneck_evidence),
+      );
+
+      const prefixBadge = renderPrefixCache(cohort.prefix_cache);
+
+      const card = el("div", { class: "cohort" },
+        el("div", { style: "display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;" },
+          el("h2", {}, cohort.name || cohort.id),
+          prefixBadge,
+        ),
+        el("div", { class: "desc" }, cohort.description || ""),
+        personaRow,
+        stats,
+        chartWrap,
+        recoBox,
+        tbl,
+      );
+
+      // Defer chart construction until the canvas is in the DOM.
+      requestAnimationFrame(() => drawCurve(canvas, cohort));
+
+      return card;
+    }
+
+    function statBlock(label, value) {
+      return el("div", { class: "stat" },
+        el("div", { class: "label" }, label),
+        el("div", { class: "value" }, String(value)),
+      );
+    }
+
+    function evidenceList(ev) {
+      if (!ev || Object.keys(ev).length === 0) return null;
+      const div = el("div", { class: "small", style: "margin-top: 6px;" });
+      for (const [k, v] of Object.entries(ev)) {
+        const label = k.replace(/_/g, " ");
+        const value = typeof v === "number"
+          ? (k.includes("rate") || k.includes("fraction") ? pct(v) : fmt(v, 2))
+          : String(v);
+        div.appendChild(el("span", { style: "margin-right: 12px;" }, `${label}: `, el("strong", {}, value)));
+      }
+      return div;
+    }
+
+    function renderPrefixCache(pc) {
+      if (!pc || !pc.verdict) return null;
+      const meta = PREFIX_CACHE_LABEL[pc.verdict] || { text: pc.verdict, cls: "unknown" };
+      const text = pc.overall_hit_rate != null
+        ? `${meta.text} (${pct(pc.overall_hit_rate, 0)} of ${pc.sessions_analysed})`
+        : meta.text;
+      return el("span", { class: `badge ${meta.cls}` }, text);
+    }
+
+    function buildCurveTable(curve) {
+      const tbl = el("table");
+      tbl.appendChild(el("thead", {}, el("tr", {},
+        el("th", {}, "pool"),
+        el("th", {}, "n"),
+        el("th", {}, "violations"),
+        el("th", {}, "TTFT p95"),
+        el("th", {}, "TPOT p95"),
+        el("th", {}, "kv%"),
+        el("th", {}, "status"),
+      )));
+      const tbody = el("tbody");
+      curve.forEach((p) => {
+        const cls = STATUS_TO_BADGE[p.status] || "unknown";
+        tbody.appendChild(el("tr", {},
+          el("td", {}, String(p.pool_size)),
+          el("td", {}, String(p.sample_size)),
+          el("td", {}, pct(p.violation_rate)),
+          el("td", {}, fmt(p.ttft_p95_ms, 0) + " ms"),
+          el("td", {}, fmt(p.tpot_p95_ms, 0) + " ms"),
+          el("td", {}, p.kv_cache_pct != null ? fmt(p.kv_cache_pct, 0) : "—"),
+          el("td", {}, el("span", { class: `badge ${cls}` }, p.status || "—")),
+        ));
+      });
+      tbl.appendChild(tbody);
+      return tbl;
+    }
+
+    function drawCurve(canvas, cohort) {
+      const curve = cohort.curve || [];
+      if (curve.length === 0) return;
+      const labels = curve.map(p => p.pool_size);
+
+      const ctx = canvas.getContext("2d");
+      new Chart(ctx, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: "Violation rate",
+              data: curve.map(p => (p.violation_rate ?? 0) * 100),
+              borderColor: "#58a6ff",
+              backgroundColor: "rgba(88,166,255,0.16)",
+              tension: 0.25,
+              pointRadius: 4,
+              fill: false,
+              yAxisID: "y",
+            },
+            // CI band drawn as two clamped datasets so Chart.js fills between them.
+            {
+              label: "CI lower",
+              data: curve.map(p => (p.ci_lower ?? 0) * 100),
+              borderColor: "rgba(88,166,255,0.0)",
+              backgroundColor: "rgba(88,166,255,0.10)",
+              pointRadius: 0,
+              fill: "+1",
+              yAxisID: "y",
+            },
+            {
+              label: "CI upper",
+              data: curve.map(p => (p.ci_upper ?? 0) * 100),
+              borderColor: "rgba(88,166,255,0.0)",
+              backgroundColor: "rgba(88,166,255,0.10)",
+              pointRadius: 0,
+              fill: false,
+              yAxisID: "y",
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: {
+              label: (item) => `${item.dataset.label}: ${item.parsed.y.toFixed(1)}%`,
+            }},
+            annotation: {},
+          },
+          scales: {
+            x: {
+              title: { display: true, text: "Virtual user pool size", color: "#8b96a3" },
+              ticks: { color: "#8b96a3" }, grid: { color: "rgba(42,51,64,0.5)" },
+            },
+            y: {
+              title: { display: true, text: "Violation rate (%)", color: "#8b96a3" },
+              min: 0, max: 100,
+              ticks: { color: "#8b96a3" }, grid: { color: "rgba(42,51,64,0.5)" },
+            },
+          },
+        },
+      });
+    }
+
+    // ── Loading ──────────────────────────────────────────────────────
+
+    async function loadFromUrl(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`);
+      return res.json();
+    }
+    async function loadDefault() {
+      const params = new URLSearchParams(location.search);
+      if (params.get("data")) return loadFromUrl(params.get("data"));
+      if (params.get("path")) return loadFromUrl(params.get("path") + "/buyer_page_data.json");
+      return loadFromUrl("./buyer_page_data.json");
+    }
+
+    document.getElementById("fileInput").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      render(JSON.parse(text));
+    });
+
+    window.addEventListener("dragover", (e) => e.preventDefault());
+    window.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      const file = e.dataTransfer?.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      render(JSON.parse(text));
+    });
+
+    loadDefault().then(render).catch((err) => {
+      const main = document.getElementById("main");
+      main.innerHTML = "";
+      main.appendChild(el("div", { class: "empty" },
+        "No data loaded. Drop a ",
+        el("code", {}, "buyer_page_data.json"),
+        " onto the window, choose a file, or run ",
+        el("code", {}, "make export"),
+        " in the sibling directory and reload.",
+        el("br"), el("br"),
+        el("span", { class: "small" }, String(err)),
+      ));
+    });
+  </script>
+</body>
+</html>

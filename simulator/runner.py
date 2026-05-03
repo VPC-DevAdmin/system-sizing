@@ -98,6 +98,7 @@ async def run_cohort(
         state=state,
         request_timeout_s=cfg.simulation.request_timeout_s,
         on_user_terminated=lambda s: user_termination_buffer.append(s),
+        capture_token_timestamps=cfg.simulation.enable_token_timestamps,
     )
     pool.start()
 

@@ -22,6 +22,9 @@ help:
 	@echo "  make run-sweep               Run all cohorts back-to-back"
 	@echo "  make dashboard               Live progress view of active run"
 	@echo "  make export                  Export buyer-page JSON from runs/"
+	@echo "  make web                     Static-serve the reference buyer page"
+	@echo "  make analyze-prefix-cache    Prefix-cache hit-rate analysis on the latest .db"
+	@echo "  make test                    Run pytest"
 	@echo "  make clean                   Remove caches"
 	@echo "  make clean-runs              Remove all run databases"
 	@echo ""
@@ -63,6 +66,26 @@ export:
 	$(PY) -m simulator.cli export \
 		--input-dir $(RUN_DIR) \
 		--output buyer_page_data.json
+
+# Static-serve the reference buyer page on http://localhost:8765.
+# Copies / symlinks buyer_page_data.json next to web/index.html so the
+# default fetch path works without query params.
+.PHONY: web
+web: export
+	@cp -f buyer_page_data.json web/buyer_page_data.json
+	@echo "Reference buyer page at http://localhost:8765/"
+	@cd web && $(PY) -m http.server 8765
+
+# Prefix-cache analysis on a single .db (latest in $(RUN_DIR) by default).
+.PHONY: analyze-prefix-cache
+analyze-prefix-cache:
+	@DB=$$(ls -t $(RUN_DIR)/*.db 2>/dev/null | head -n 1); \
+	if [ -z "$$DB" ]; then echo "No .db in $(RUN_DIR)"; exit 1; fi; \
+	$(PY) -m simulator.cli analyze-prefix-cache "$$DB"
+
+.PHONY: test
+test:
+	$(PY) -m pytest tests/ -q
 
 .PHONY: clean
 clean:

@@ -22,6 +22,9 @@ make export                                         # buyer_page_data.json
 | `make run-sweep` | Run all cohorts back-to-back against one engine |
 | `make dashboard` | Live `rich`-based progress view of the latest run |
 | `make export` | Build `buyer_page_data.json` from `runs/*.db` |
+| `make web` | Serve the reference buyer page on `http://localhost:8765` |
+| `make analyze-prefix-cache` | Prefix-cache hit-rate report on the latest `.db` |
+| `make test` | Run pytest |
 | `make clean` / `clean-runs` | Tidy caches / wipe run databases |
 
 Variables: `ENGINE` (vllm|sglang), `MODEL`, `COHORT`, `CONFIG`, `RUN_DIR`.
@@ -48,6 +51,16 @@ simulator/
   database.py         # SQLite schema + capture
   dashboard.py        # rich live view
   export.py           # buyer-page JSON
+  prefix_cache.py     # post-hoc prefix-cache hit-rate analysis
+  bandwidth.py        # IMC-uncore memory bandwidth (per-controller on GNR)
+  perf_collector.py   # PMU events with AMX raw fallback for GNR
+  power_probe.py      # RAPL package power
+  frequency.py        # bound-CPU effective frequency, three-tier read
+  amx_utilization.py  # oneDNN verbose log -> AMX dispatch fraction
+  cpu_binding.py      # parse VLLM_CPU_OMP_THREADS_BIND
+web/
+  index.html          # self-contained Chart.js renderer for buyer_page_data.json
+tests/                # pytest suites
 config/default.yaml
 Makefile
 ```

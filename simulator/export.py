@@ -18,6 +18,24 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .prefix_cache import (
+    PrefixCacheReport,
+    analyse_rows,
+    read_turn_rows_with_step,
+)
+
+
+def _read_prefix_cache_report(path: Path) -> dict | None:
+    try:
+        rows = read_turn_rows_with_step(path)
+    except Exception:
+        return None
+    if not rows:
+        return None
+    pure_rows = [r for _, r in rows]
+    report = analyse_rows(pure_rows, rows_with_step=rows)
+    return report.to_dict()
+
 
 def _read_run(path: Path) -> dict | None:
     try:
@@ -156,7 +174,7 @@ def _hardware_recommendation(bottleneck: str) -> str:
     }.get(bottleneck, "")
 
 
-def _summarise_cohort(run: dict) -> dict:
+def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
     measurements = run.get("measurements", [])
     curve = []
     capacity_pool = None
@@ -200,6 +218,7 @@ def _summarise_cohort(run: dict) -> dict:
         "bottleneck": bottleneck,
         "bottleneck_evidence": evidence,
         "hardware_recommendation": _hardware_recommendation(bottleneck),
+        "prefix_cache": prefix_cache,
     }
 
 
@@ -215,7 +234,8 @@ def export_dir(input_dir: str | Path, output_path: str | Path) -> dict:
             continue
         engine_seen.add(run["engine_type"])
         model_seen.add(run["model_id"])
-        cohorts.append(_summarise_cohort(run))
+        prefix_cache = _read_prefix_cache_report(db)
+        cohorts.append(_summarise_cohort(run, prefix_cache))
 
     doc = {
         "meta": {

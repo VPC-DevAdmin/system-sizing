@@ -123,5 +123,37 @@ def list_cohorts():
         typer.echo(f"  {cid}: {cohort.name} — {cohort.description}")
 
 
+@app.command("analyze-prefix-cache")
+def analyze_prefix_cache(
+    db: Path = typer.Argument(..., help="Path to a cohort run .db"),
+    hit_ratio: float = typer.Option(
+        0.5, help="A session is a hit if later-turn TTFT median is "
+        "<= this fraction of turn-0 TTFT",
+    ),
+):
+    """Compute prefix-cache hit rate from captured turn events.
+
+    Validates the multi-turn premise: turn-N+1 TTFT should be much
+    lower than turn-0 TTFT for the same session. If it isn't, the
+    engine isn't reusing the prefix and the multi-turn cohorts are
+    being measured as if every turn were a fresh request.
+    """
+    from .prefix_cache import analyse_db
+    report = analyse_db(db, hit_ratio=hit_ratio)
+    typer.echo(f"Verdict: {report.verdict}")
+    typer.echo(f"Sessions analysed: {report.sessions_analysed}")
+    typer.echo(f"Overall hit rate: {report.overall_hit_rate:.1%}")
+    if report.median_ttft_ratio is not None:
+        typer.echo(f"Median later/turn0 TTFT ratio: {report.median_ttft_ratio:.2f}")
+    typer.echo("Per persona:")
+    for pid, info in sorted(report.per_persona.items()):
+        typer.echo(
+            f"  {pid:<16} sessions={info['sessions']:<5} "
+            f"hit_rate={info['hit_rate']:.1%} median_ratio={info['median_ratio']:.2f}"
+        )
+    if report.notes:
+        typer.echo("Notes: " + "; ".join(report.notes))
+
+
 if __name__ == "__main__":
     app()

@@ -11,5 +11,6 @@ runs/
 *.db-shm
 .DS_Store
 buyer_page_data.json
+web/buyer_page_data.json
 .pytest_cache/
 .ruff_cache/

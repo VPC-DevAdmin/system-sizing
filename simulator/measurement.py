@@ -347,6 +347,7 @@ async def _in_flight_sampler(state: SharedState, store: list[int]) -> None:
 
 
 def _event_to_row(e: TurnEvent, measurement_id: int) -> dict:
+    import json as _json
     return {
         "measurement_id": measurement_id,
         "persona_id": e.persona_id,
@@ -366,6 +367,9 @@ def _event_to_row(e: TurnEvent, measurement_id: int) -> dict:
         "in_flight_peak_during": e.in_flight_peak_during,
         "sla_ttft_violation": int(e.ttft_violation()),
         "sla_tpot_violation": int(e.tpot_violation()),
+        "token_timestamps_json": (
+            _json.dumps(e.token_timestamps) if e.token_timestamps else None
+        ),
     }
 
 

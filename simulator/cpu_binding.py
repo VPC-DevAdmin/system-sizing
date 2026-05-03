@@ -22,6 +22,30 @@ ranges, whitespace, and stray empty groups. Parse errors return
 from __future__ import annotations
 
 
+def flatten_for_taskset(bind_string: str | None) -> str | None:
+    """Convert a vLLM-style group string into a flat ``taskset -c`` arg.
+
+    ``"0-7|8-15|16-23|24-31"`` -> ``"0-31"`` (or a comma list when ranges
+    aren't contiguous). Returns ``None`` for empty input so the caller
+    knows to skip the wrapper.
+    """
+    cpus = sorted(expand_thread_binding(bind_string))
+    if not cpus:
+        return None
+    # Compact contiguous runs into ranges for readability; taskset accepts
+    # a CSV of ranges either way.
+    out: list[str] = []
+    run_lo = run_hi = cpus[0]
+    for c in cpus[1:]:
+        if c == run_hi + 1:
+            run_hi = c
+        else:
+            out.append(f"{run_lo}-{run_hi}" if run_hi > run_lo else f"{run_lo}")
+            run_lo = run_hi = c
+    out.append(f"{run_lo}-{run_hi}" if run_hi > run_lo else f"{run_lo}")
+    return ",".join(out)
+
+
 def expand_thread_binding(bind_string: str | None) -> set[int]:
     """Parse a vLLM-style thread-binding string to a set of CPU ids.
 

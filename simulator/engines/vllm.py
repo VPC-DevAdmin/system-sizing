@@ -42,6 +42,11 @@ class VLLMEngine(Engine):
         for k, v in defaults.items():
             env.setdefault(k, v)
         env.update(self.cfg.vllm_extra_env)
+        # Engine-agnostic cpu_bind backfills VLLM_CPU_OMP_THREADS_BIND
+        # only if the caller didn't set it explicitly — explicit env wins
+        # so existing configs don't change behaviour.
+        if self.cfg.cpu_bind and "VLLM_CPU_OMP_THREADS_BIND" not in env:
+            env["VLLM_CPU_OMP_THREADS_BIND"] = self.cfg.cpu_bind
         return env
 
     def _health_path(self) -> str:

@@ -26,7 +26,7 @@ from simulator.bandwidth import (
     _discover_imc_events,
     bandwidth_summary,
 )
-from simulator.cpu_binding import expand_thread_binding
+from simulator.cpu_binding import expand_thread_binding, flatten_for_taskset
 from simulator.frequency import FrequencyCollector
 from simulator.perf_collector import (
     AMX_CANDIDATE_EVENTS,
@@ -56,6 +56,25 @@ def test_expand_binding_empty_or_garbage_returns_empty_set() -> None:
     assert expand_thread_binding("") == set()
     # Empty set means "no filter, use all CPUs" downstream, not crash.
     assert expand_thread_binding("not,parseable,values") == set()
+
+
+def test_flatten_for_taskset_collapses_contiguous_groups() -> None:
+    """SGLang has no native bind-string flag, so we wrap launch with
+    ``taskset -c <list>``. The flat form must compact contiguous CPUs
+    back into a range — keeps the command line readable."""
+    assert flatten_for_taskset("0-7|8-15|16-23|24-31") == "0-31"
+
+
+def test_flatten_for_taskset_keeps_disjoint_runs_separate() -> None:
+    """Interleaved binding stays interleaved: e.g. socket-0-only
+    physical cores when SMT siblings are excluded."""
+    assert flatten_for_taskset("0-3|8-11") == "0-3,8-11"
+
+
+def test_flatten_for_taskset_returns_none_for_empty_input() -> None:
+    """Caller treats None as 'don't wrap with taskset'."""
+    assert flatten_for_taskset(None) is None
+    assert flatten_for_taskset("") is None
 
 
 # ── Bandwidth: per-IMC discovery on GNR ───────────────────────────────

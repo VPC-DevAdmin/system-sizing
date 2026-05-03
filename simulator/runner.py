@@ -115,7 +115,14 @@ async def run_cohort(
     # Engine bound-CPU set drives frequency aggregation. Without this filter,
     # idle cores on the unused socket pull the host-wide average toward
     # half-nominal — the number lies. See cpu_binding.py.
-    bind_str = cfg.engine.vllm_extra_env.get("VLLM_CPU_OMP_THREADS_BIND", "")
+    #
+    # Prefer the engine-agnostic cpu_bind field; fall back to vLLM's
+    # specific env var so existing configs keep working.
+    bind_str = (
+        cfg.engine.cpu_bind
+        or cfg.engine.vllm_extra_env.get("VLLM_CPU_OMP_THREADS_BIND")
+        or ""
+    )
     bound_cpus = expand_thread_binding(bind_str) or None
 
     telemetry = MeasurementTelemetry(

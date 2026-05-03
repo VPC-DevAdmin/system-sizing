@@ -1,0 +1,72 @@
+# SGLang + Qwen3-30B-A3B on the R7735 (2-socket EPYC, 32 physical cores
+# per socket, 8 CCDs per socket of 4 cores each, SMT enabled).
+#
+# Single-socket TP=1 baseline. Rationale:
+#   * Qwen3-30B-A3B is a Mixture-of-Experts model (30B params total,
+#     3B activated per token). Compute is comparable to a 3B dense model
+#     but the full 30B weights occupy memory.
+#   * SGLang CPU + MoE is genuinely new ground. TP=1 keeps the dispatch
+#     path simple and avoids cross-process expert routing on CPU. Bump
+#     TP to 2 / 4 once a TP=1 baseline is captured.
+#   * One socket = one NUMA node here, so memory locality is automatic
+#     when we taskset to physical cores 0-31.
+#
+# Memory budget: ~60 GB BF16 weights + ~32 GB KV cache scratch =
+# leave at least 100 GB free on the node before starting the engine.
+
+engine:
+  type: sglang
+  model_id: Qwen/Qwen3-30B-A3B
+  quantization: null
+  max_model_len: 8192
+  tensor_parallel_size: 1
+  kv_cache_gb: 32
+  port: 30000               # SGLang default
+  host: 127.0.0.1
+  startup_timeout_s: 1200   # 30B MoE load is slow on cold start
+
+  # Engine-agnostic CPU pinning. The simulator:
+  #   * filters frequency aggregation to this set (so idle socket-1
+  #     cores don't drag the mean), and
+  #   * wraps the SGLang launch with ``taskset -c 0-31`` so OpenMP
+  #     threads stay on socket 0 / NUMA node 0.
+  cpu_bind: '0-31'
+
+  sglang_extra_flags: []
+  sglang_extra_env:
+    OMP_NUM_THREADS: '32'
+    OMP_PROC_BIND: 'close'
+    OMP_PLACES: 'cores'
+
+simulation:
+  initial_pool_size: 2          # MoE is slower per-request than dense 7B
+  max_pool_size: 256
+  target_samples_per_step: 300
+  measurement_timeout_s: 360
+  stabilization_cv_threshold: 0.15
+  stabilization_min_duration_s: 60
+  stabilization_max_duration_s: 300
+  knee_slope_threshold: 0.005
+  stop_violation_threshold: 0.5
+  max_total_duration_minutes: 240
+  enable_token_timestamps: false
+  snapshot_interval_s: 1
+  request_timeout_s: 360
+
+telemetry:
+  # AMX collectors will return ``not_supported`` on AMD — leaving them
+  # enabled is harmless (they self-report) and keeps the config portable.
+  enable_pmu: true
+  enable_memory_bandwidth: true   # uncore_imc isn't on AMD; collector reports unavailable
+  enable_power: true
+  enable_engine_metrics: true
+  enable_amx_utilization: false   # no AMX on EPYC; skip oneDNN log parse
+  perf_events:
+    - cycles
+    - instructions
+    - cache-misses
+    - cache-references
+
+output:
+  db_directory: runs
+  json_export: true

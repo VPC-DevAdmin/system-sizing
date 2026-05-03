@@ -21,6 +21,13 @@ class EngineConfig:
     port: int = 9100
     host: str = "127.0.0.1"
     startup_timeout_s: int = 600
+    # Engine-agnostic CPU pinning. Same syntax as vLLM's
+    # ``VLLM_CPU_OMP_THREADS_BIND`` (``|`` separates per-worker groups,
+    # ``,`` and ``-`` work inside a group). Used for:
+    #   * frequency-collector filter
+    #   * vLLM: passed straight to VLLM_CPU_OMP_THREADS_BIND if unset
+    #   * SGLang: flattened and used to wrap launch with ``taskset -c``
+    cpu_bind: str | None = None
     vllm_extra_flags: list[str] = field(default_factory=list)
     vllm_extra_env: dict[str, str] = field(default_factory=dict)
     sglang_extra_flags: list[str] = field(default_factory=list)

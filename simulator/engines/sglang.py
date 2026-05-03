@@ -233,6 +233,8 @@ class SGLangEngine(Engine):
         # The image's venv is at /opt/.venv per upstream convention.
         model_arg = cfg.model_local_path or cfg.model_id
         served_name = cfg.served_model_name or cfg.model_id
+        # Match the minimal-but-working launch shape from the runbook;
+        # optional knobs are only emitted when explicitly set in config.
         inner = [
             "/opt/.venv/bin/python", "-m", "sglang.launch_server",
             "--model", model_arg,
@@ -240,25 +242,29 @@ class SGLangEngine(Engine):
             "--host", "0.0.0.0",
             "--port", str(cfg.port),
             "--tp", str(cfg.tensor_parallel_size),
-            "--context-length", str(cfg.max_model_len),
-            "--max-total-tokens", str(cfg.max_total_tokens),
-            "--chunked-prefill-size", str(cfg.chunked_prefill_size),
-            "--mem-fraction-static", str(cfg.mem_fraction_static),
             "--served-model-name", served_name,
             "--trust-remote-code",
-            "--enable-metrics",
         ]
         if cfg.disable_overlap_schedule:
             inner.append("--disable-overlap-schedule")
+        if cfg.enable_metrics:
+            inner.append("--enable-metrics")
+        if cfg.context_length is not None:
+            inner += ["--context-length", str(cfg.context_length)]
+        if cfg.max_total_tokens is not None:
+            inner += ["--max-total-tokens", str(cfg.max_total_tokens)]
+        if cfg.chunked_prefill_size is not None:
+            inner += ["--chunked-prefill-size", str(cfg.chunked_prefill_size)]
+        if cfg.mem_fraction_static is not None:
+            inner += ["--mem-fraction-static", str(cfg.mem_fraction_static)]
         if cfg.attention_backend:
             inner += ["--attention-backend", cfg.attention_backend]
-        if cfg.quantization_kind:
-            inner += ["--quantization", cfg.quantization_kind]
-        elif cfg.quantization:  # legacy field name
-            inner += ["--quantization", cfg.quantization]
-        # Don't pass --dtype when fp8 quantization is in play; SGLang
-        # wants the model in its native quantized form.
-        if not (cfg.quantization_kind or cfg.quantization):
+        quantization = cfg.quantization_kind or cfg.quantization
+        if quantization:
+            inner += ["--quantization", quantization]
+        else:
+            # Don't pass --dtype when quantization is in play; SGLang
+            # wants the model in its native quantized form.
             inner += ["--dtype", "bfloat16"]
         inner += list(cfg.sglang_extra_flags or [])
 

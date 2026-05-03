@@ -1,57 +1,55 @@
-# SGLang + Qwen3-30B-A3B (FP8) on the R7735 (2-socket EPYC, 32 physical
-# cores per socket, 8 CCDs of 4 cores per socket, SMT enabled).
+# SGLang + Qwen3-30B-A3B-Instruct (BF16) on the R7735.
+# 2-socket EPYC, 32 physical cores per socket, 8 CCDs of 4 cores per
+# socket, SMT enabled. Total 64 physical cores (CPUs 0-63).
 #
-# Single-socket TP=1 baseline. Per the GNR runbook, TP=1 and TP=4 are
-# the ONLY known-good parallelism shapes on SGLang CPU; DP / EP combos
-# are upstream-broken at time of writing. Stick to these.
+# Uses the SGLang CPU Docker image; build instructions are in the
+# README's "SGLang on CPU (Docker required)" section.
 #
-# This configuration runs SGLang inside Docker (sglang-cpu:xeon-fixed)
-# because the mainline pip wheel ships GPU-only sgl_kernel binaries.
-# Build the image with:
+# Per the GNR runbook, TP=1 baseline + TP=4 are the only known-good
+# parallelism shapes on SGLang CPU. Anything else (DP/EP combos)
+# is upstream-broken at time of writing.
 #
-#   docker pull lmsysorg/sglang:latest-cpu
-#   docker tag  lmsysorg/sglang:latest-cpu sglang-cpu:xeon
-#   docker build -f Dockerfile.xeon-fixed -t sglang-cpu:xeon-fixed .
+# This config keeps the SGLang launch flag list to the minimum the
+# runbook proved out. ``mem_fraction_static`` and ``chunked_prefill_size``
+# are left null so SGLang picks defaults; override only with evidence.
 #
-# AMD-specific divergence from the GNR runbook:
-#   * attention_backend left null (no AMX on AMD; SGLang falls back to
-#     torch_native automatically and prints "current platform does not
-#     support Intel AMX, will fallback to torch_native backend").
-#   * The IPEX-based base image still works on AMD, though some Intel-
-#     only optimisations are silently skipped — that's fine for this
-#     baseline measurement.
+# AMD-specific divergence: ``attention_backend`` is null. SGLang prints
+# "current platform does not support Intel AMX, will fallback to
+# torch_native backend" on AMD and proceeds — that's fine.
 
 engine:
   type: sglang
-  # Local mounted path inside the container; weights live at
-  # /data/ml/models/Qwen3-30B-A3B-Instruct-FP8 on the host.
-  model_id: Qwen/Qwen3-30B-A3B-Instruct-FP8
-  model_local_path: /models/Qwen3-30B-A3B-Instruct-FP8
-  served_model_name: qwen3_30b_a3b_fp8
-  quantization_kind: fp8
+  # HF id for log identification. Actual weights are read from
+  # model_local_path (the in-container path).
+  model_id: Qwen/Qwen3-30B-A3B-Instruct
+  model_local_path: /models/Qwen3-30B-A3B-Instruct
+  served_model_name: qwen3_30b_a3b
+  quantization_kind: null      # BF16
 
   tensor_parallel_size: 1
   max_model_len: 8192
-  max_total_tokens: 16384
-  chunked_prefill_size: 4096
-  mem_fraction_static: 0.85
+  max_total_tokens: 16384      # KV pool cap from the runbook
+  context_length: null         # let SGLang use the model default
+  chunked_prefill_size: null   # SGLang default
+  mem_fraction_static: null    # SGLang default
   disable_overlap_schedule: true
+  enable_metrics: true
+  attention_backend: null      # AMD: torch_native via fallback
 
   port: 30000
   host: 127.0.0.1
-  startup_timeout_s: 1800       # 30B FP8 cold load is ~10–20 minutes
+  startup_timeout_s: 1800      # ~10-20 min for 30B BF16 cold load
 
-  # Engine-agnostic CPU pinning. Used for:
+  # Engine-agnostic CPU pinning. Drives:
   #   * frequency-collector filter
   #   * docker --cpuset-cpus
   #   * SGLANG_CPU_OMP_THREADS_BIND derivation (must align with TP)
+  #
+  # The runbook uses '0-63' (full machine, both sockets) for TP=1.
+  # That works here too — switch to '0-63' if you want both sockets.
+  # Single-socket '0-31' is the cleaner NUMA-isolated baseline.
   cpu_bind: '0-31'
 
-  # AMD-specific: leave attention backend at SGLang default (torch_native
-  # via fallback). On Intel Xeon you'd set this to 'intel_amx'.
-  attention_backend: null
-
-  # Docker layer-fixed image. Build per the comment block above.
   docker_image: sglang-cpu:xeon-fixed
   docker_shm_size: 32g
   docker_network: host
@@ -59,9 +57,8 @@ engine:
     /data/ml/models: /models
     /data/ml/huggingface: /root/.cache/huggingface
 
-  # OpenMP placement defaults inside the container.
+  # In-container OpenMP placement.
   sglang_extra_env:
-    OMP_NUM_THREADS: '32'
     OMP_PROC_BIND: 'close'
     OMP_PLACES: 'cores'
 

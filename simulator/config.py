@@ -60,10 +60,16 @@ class EngineConfig:
     # ``intel_amx`` on Xeon GNR/SPR/EMR; on AMD let SGLang fall back
     # (set to None to omit the flag entirely — SGLang picks torch_native).
     attention_backend: str | None = None
-    mem_fraction_static: float = 0.85
-    max_total_tokens: int = 16384
-    chunked_prefill_size: int = 4096
+    # All four below default to None → flag omitted, SGLang picks its own
+    # default. Set explicitly only when you need to cap KV pool / fix a
+    # tuning knob. The minimal "known-working" launch from the GNR
+    # runbook uses only max_total_tokens=16384 and disable_overlap_schedule.
+    mem_fraction_static: float | None = None
+    max_total_tokens: int | None = 16384
+    chunked_prefill_size: int | None = None
+    context_length: int | None = None  # if None we use max_model_len; set explicitly to skip
     disable_overlap_schedule: bool = True
+    enable_metrics: bool = True       # required for /metrics telemetry path
     # Path INSIDE the container where the model lives. When set, used
     # in place of ``model_id`` for the SGLang ``--model`` flag — useful
     # for pre-downloaded weights mounted into /models.

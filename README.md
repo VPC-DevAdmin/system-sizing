@@ -69,18 +69,56 @@ Each cohort run produces one SQLite file in `runs/`.
 
 ## SGLang on CPU (Docker required)
 
-SGLang's mainline pip wheel ships GPU-only `sgl_kernel` binaries; the working CPU path is the upstream `sglang-cpu` Docker image. Build the local layer once:
+SGLang's mainline pip wheel ships GPU-only `sgl_kernel` binaries — importing the package on a CPU-only host fails before the launcher sees its arguments. The working CPU path is the upstream `sglang-cpu` Docker image, layered with `sentencepiece` / `tiktoken` / `protobuf` so modern HF tokenizers (Qwen3, GLM, Mistral, Llama 3) load.
+
+There's no published Docker Hub tag for the CPU build; build from SGLang source.
+
+### One-time: build the images
 
 ```bash
-docker pull lmsysorg/sglang:latest-cpu
-docker tag  lmsysorg/sglang:latest-cpu sglang-cpu:xeon
+# Base — ~15-20 min. Uses uv as package manager; venv lands at /opt/.venv.
+git clone --depth 1 https://github.com/sgl-project/sglang.git /tmp/sglang
+docker build -f /tmp/sglang/docker/xeon.Dockerfile -t sglang-cpu:xeon /tmp/sglang
+
+# Layered fix — ~1-2 min. Bootstraps pip via ensurepip, installs the
+# three tokenizer deps the base image lacks.
 docker build -f Dockerfile.xeon-fixed -t sglang-cpu:xeon-fixed .
+
+# Verify
+docker run --rm sglang-cpu:xeon-fixed /opt/.venv/bin/python -c \
+  "import sglang, sgl_kernel, sentencepiece, tiktoken; \
+   from google import protobuf; \
+   print('OK', sglang.__version__)"
 ```
 
-The `-fixed` layer adds `sentencepiece`, `tiktoken`, and `protobuf` — modern HF tokenizers (Qwen3, GLM, Mistral, Llama 3) won't load without them.
+### One-time: stage the model
 
-Stage the model on the host at `/data/ml/models/<model-dir>` and reference it as `model_local_path: /models/<model-dir>` in the engine config. Hugging Face cache mounts at `/data/ml/huggingface`.
+```bash
+sudo mkdir -p /data/ml/models /data/ml/huggingface
+sudo chown -R $USER:$USER /data/ml
 
-Known-good parallelism shapes on SGLang CPU: **TP=1 baseline** and **TP=4**. Anything else (DP/EP combos) is upstream-broken at time of writing.
+cd /data/ml/models
+hf download Qwen/Qwen3-30B-A3B-Instruct \
+    --local-dir Qwen3-30B-A3B-Instruct
+```
 
-The simulator derives `SGLANG_CPU_OMP_THREADS_BIND` from `engine.cpu_bind` and validates it aligns with `tensor_parallel_size`; misconfigurations surface at launch instead of 20 minutes into a model load.
+For long downloads, run inside `tmux` so an SSH disconnect doesn't kill the transfer. If only the safetensors finish but tokenizer files are missing, re-run the same command with `--include "tokenizer*" "*.json"`. Note: `protobuf` installs as `protobuf` but imports as `google.protobuf` — `import protobuf` will fail even though the install is fine.
+
+### Run
+
+```bash
+make launch-engine ENGINE=sglang \
+                   MODEL=Qwen/Qwen3-30B-A3B-Instruct \
+                   CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml
+```
+
+The container streams its stdout/stderr to `runs/engine_sglang_*.log`. Wait for the simulator's `SGLang ready after Xs` message — this only fires once `/v1/models` returns 200, which means the model is fully loaded. Expected times:
+
+| Variant | Resident | Cold load |
+|---|---|---|
+| BF16 (`Qwen3-30B-A3B-Instruct`) | ~58 GB | ~2-3 min |
+| FP8 (`Qwen3-30B-A3B-Instruct-FP8`) | ~32 GB | ~1-2 min |
+
+### Known-good parallelism shapes
+
+**TP=1** baseline and **TP=4** only. DP/EP combos are upstream-broken on CPU. The simulator's `derive_sglang_thread_binding` validates `tensor_parallel_size` against `engine.cpu_bind` at launch — misconfigurations surface immediately instead of 20 minutes into a model load.

@@ -1,27 +1,38 @@
 # Layered on top of the upstream SGLang CPU image.
 #
-# Upstream (lmsysorg/sglang:latest-cpu or a self-built sglang-cpu:xeon)
+# Upstream `sglang-cpu:xeon` (built from sglang/docker/xeon.Dockerfile)
 # ships the AMX-aware kernels and the binary sgl_kernel built for CPU,
-# but does NOT ship the tokenizer dependencies most modern HF models
-# need. Without these three, model load on Qwen3 / GLM / Mistral /
-# Llama 3 dies with cryptic ``ModuleNotFoundError: sentencepiece`` /
-# ``tiktoken`` errors well into a 60GB+ download.
+# but does NOT ship sentencepiece / tiktoken / protobuf which most
+# modern HF tokenizers (Qwen3, GLM, Mistral, Llama 3) need to load.
+#
+# It also installs Python via `uv`, so the resulting venv has neither
+# `pip` nor `uv` on PATH inside the container — only `/opt/.venv/bin/python`.
+# We bootstrap pip via `python -m ensurepip` (CPython stdlib), then
+# install the missing tokenizer deps.
 #
 # Build with one of:
 #
-#   docker pull lmsysorg/sglang:latest-cpu
-#   docker tag  lmsysorg/sglang:latest-cpu sglang-cpu:xeon
+#   # Build the upstream base from source (~15-20 minutes first run):
+#   git clone --depth 1 https://github.com/sgl-project/sglang.git /tmp/sglang
+#   docker build -f /tmp/sglang/docker/xeon.Dockerfile -t sglang-cpu:xeon /tmp/sglang
+#
+#   # Then layer this fix on top (~1-2 minutes):
 #   docker build -f Dockerfile.xeon-fixed -t sglang-cpu:xeon-fixed .
 #
-# or build the upstream image from source first:
+# Verify the fix works:
 #
-#   git clone https://github.com/sgl-project/sglang
-#   docker build -f sglang/docker/Dockerfile.xeon -t sglang-cpu:xeon ./sglang
-#   docker build -f Dockerfile.xeon-fixed -t sglang-cpu:xeon-fixed .
+#   docker run --rm sglang-cpu:xeon-fixed /opt/.venv/bin/python -c \
+#     "import sentencepiece, tiktoken; from google import protobuf; \
+#      print('OK', sentencepiece.__version__, tiktoken.__version__, protobuf.__version__)"
+#
+# Note on protobuf: the package is installed via the name `protobuf` but
+# imports as `google.protobuf` — `import protobuf` will fail even though
+# the install succeeded.
 
 FROM sglang-cpu:xeon
 
-RUN /opt/.venv/bin/pip install --no-cache-dir \
-    sentencepiece \
-    tiktoken \
-    protobuf
+RUN /opt/.venv/bin/python -m ensurepip --upgrade && \
+    /opt/.venv/bin/python -m pip install --no-cache-dir \
+        sentencepiece \
+        tiktoken \
+        protobuf

@@ -27,6 +27,12 @@ class SGLangEngine(Engine):
             "--port", str(cfg.port),
             "--host", cfg.host,
             "--context-length", str(cfg.max_model_len),
+            # SGLang's get_device() probes CUDA/XPU/HPU/NPU/MUSA/MPS and
+            # raises if none are present — it does NOT fall through to
+            # CPU on its own. The simulator is CPU-targeted, so be
+            # explicit. Override via sglang_extra_flags if you ever want
+            # to point at a GPU box.
+            "--device", "cpu",
         ]
         if cfg.quantization:
             inner += ["--quantization", cfg.quantization]

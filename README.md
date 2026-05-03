@@ -73,38 +73,27 @@ SGLang's mainline pip wheel ships GPU-only `sgl_kernel` binaries — importing t
 
 There's no published Docker Hub tag for the CPU build; build from SGLang source.
 
-### One-time: build the images
+### One-shot setup (clone + build + download)
 
 ```bash
-# Base — ~15-20 min. Uses uv as package manager; venv lands at /opt/.venv.
-git clone --depth 1 https://github.com/sgl-project/sglang.git /tmp/sglang
-docker build -f /tmp/sglang/docker/xeon.Dockerfile -t sglang-cpu:xeon /tmp/sglang
-
-# Layered fix — ~1-2 min. Bootstraps pip via ensurepip, installs the
-# three tokenizer deps the base image lacks.
-docker build -f Dockerfile.xeon-fixed -t sglang-cpu:xeon-fixed .
-
-# Verify
-docker run --rm sglang-cpu:xeon-fixed /opt/.venv/bin/python -c \
-  "import sglang, sgl_kernel, sentencepiece, tiktoken; \
-   from google import protobuf; \
-   print('OK', sglang.__version__)"
+make sglang-setup MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507
 ```
 
-### One-time: stage the model
+That runs four steps in order: `sglang-clone` (git clone the upstream repo), `sglang-base` (build `sglang-cpu:xeon`, ~15-20 min first run), `sglang-fixed` (layer the tokenizer-deps fix, ~1-2 min), and `download-model` (`hf download` to `/data/ml/models/<basename>` with `HF_HUB_ENABLE_HF_TRANSFER=1`). For an SSH-resilient run, wrap in `tmux`.
+
+If you'd rather run the steps individually:
 
 ```bash
-sudo mkdir -p /data/ml/models /data/ml/huggingface
-sudo chown -R $USER:$USER /data/ml
-
-cd /data/ml/models
-hf download Qwen/Qwen3-30B-A3B-Instruct-2507 \
-    --local-dir Qwen3-30B-A3B-Instruct-2507
+make sglang-clone        # update / clone /tmp/sglang
+make sglang-base         # build sglang-cpu:xeon
+make sglang-fixed        # build sglang-cpu:xeon-fixed
+make sglang-verify       # smoke-test imports inside the fixed image
+make download-model MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507
 ```
 
-The `-2507` suffix is part of the actual published HF repo name, not a separate version tag.
+`make sglang-shell` drops you into an interactive bash inside the fixed image with `/data/ml/models` mounted — handy for debugging tokenizer issues.
 
-For long downloads, run inside `tmux` so an SSH disconnect doesn't kill the transfer. If only the safetensors finish but tokenizer files are missing, re-run the same command with `--include "tokenizer*" "*.json"`. Note: `protobuf` installs as `protobuf` but imports as `google.protobuf` — `import protobuf` will fail even though the install is fine.
+The `-2507` suffix is part of the actual published HF repo name, not a separate version tag. Two variants exist: `-Instruct-2507` (BF16) and `-Instruct-2507-FP8`. If `make download-model` reports missing tokenizer files, re-run with the includes filter — `hf download $MODEL --local-dir ... --include 'tokenizer*' '*.json'`. Note: `protobuf` installs as `protobuf` but imports as `google.protobuf` — `import protobuf` will fail even though the install is fine.
 
 ### Run
 

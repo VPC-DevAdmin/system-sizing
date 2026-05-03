@@ -116,6 +116,8 @@ The container streams its stdout/stderr to `runs/engine_sglang_*.log`. Wait for 
 | BF16 (`Qwen3-30B-A3B-Instruct-2507`) | ~58 GB | ~2-3 min |
 | FP8 (`Qwen3-30B-A3B-Instruct-2507-FP8`) | ~32 GB | ~1-2 min |
 
+**Important:** SGLang's CPU FP8 path is gated on Intel AMX (`Fp8LinearMethod on CPU requires that CPU has AMX support`). On AMD CPUs (R7735), use the BF16 variant. The FP8 config is preserved for the Xeon comparison run only.
+
 ### Known-good parallelism shapes
 
 **TP=1** baseline and **TP=4** only. DP/EP combos are upstream-broken on CPU. The simulator's `derive_sglang_thread_binding` validates `tensor_parallel_size` against `engine.cpu_bind` at launch — misconfigurations surface immediately instead of 20 minutes into a model load.

@@ -1,5 +1,15 @@
 # SGLang + Qwen3-30B-A3B-Instruct-2507-FP8 on the R7735.
 #
+# !!! INTEL-ONLY !!!
+# SGLang's CPU FP8 path requires Intel AMX. On AMD it aborts during
+# weight processing with::
+#
+#     AssertionError: Fp8LinearMethod on CPU requires that CPU has
+#     AMX support
+#
+# This config is preserved for the eventual Xeon comparison run; on
+# the R7735 (EPYC) use r7735_sglang_qwen3_30b_a3b.yaml (BF16) instead.
+#
 # Sibling of r7735_sglang_qwen3_30b_a3b.yaml — same machine, same
 # parallelism shape, same telemetry. The differences are:
 #

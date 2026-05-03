@@ -13,7 +13,9 @@ from pathlib import Path
 from openai import AsyncOpenAI
 
 from .adaptive import StepResult, choose_next_pool_size
+from .amx_utilization import parse_amx_utilization
 from .config import Config
+from .cpu_binding import expand_thread_binding
 from .database import Database
 from .engines import Engine, make_engine
 from .measurement import (
@@ -109,8 +111,18 @@ async def run_cohort(
     )
     snap.start()
 
+    # Engine bound-CPU set drives frequency aggregation. Without this filter,
+    # idle cores on the unused socket pull the host-wide average toward
+    # half-nominal — the number lies. See cpu_binding.py.
+    bind_str = cfg.engine.vllm_extra_env.get("VLLM_CPU_OMP_THREADS_BIND", "")
+    bound_cpus = expand_thread_binding(bind_str) or None
+
     telemetry = MeasurementTelemetry(
-        cfg.telemetry, engine, perf_events=cfg.telemetry.perf_events
+        cfg.telemetry,
+        engine,
+        bound_cpus=bound_cpus,
+        engine_pid=getattr(engine, "pid", None),
+        artifacts_dir=cfg.output.db_directory,
     )
 
     history: list[StepResult] = []
@@ -180,6 +192,31 @@ async def run_cohort(
         await snap.stop()
         await pool.stop()
         _flush_users(db, cohort_run_id, user_termination_buffer)
+
+        # Parse oneDNN verbose output (only meaningful after engine has run).
+        # AMX dispatch fraction is a run-level signal — store it against the
+        # last measurement so the export consumer can read it as the
+        # "near-knee" AMX picture for that cohort.
+        try:
+            log_path = getattr(engine, "log_path", None)
+            if log_path is not None and Path(log_path).exists():
+                amx = parse_amx_utilization(log_path)
+                if not amx.is_empty():
+                    last_mid = db.fetchone(
+                        "SELECT measurement_id FROM cohort_measurements "
+                        "WHERE cohort_run_id = ? ORDER BY step_index DESC LIMIT 1",
+                        (cohort_run_id,),
+                    )
+                    if last_mid is not None:
+                        db.upsert_aggregate({
+                            "measurement_id": last_mid["measurement_id"],
+                            "onednn_amx_time_fraction": amx.onednn_amx_time_fraction,
+                            "onednn_matmul_dispatches_amx": amx.onednn_matmul_dispatches_amx,
+                            "onednn_matmul_dispatches_non_amx": amx.onednn_matmul_dispatches_non_amx,
+                        })
+        except Exception as e:  # noqa: BLE001
+            log.debug("AMX util parse failed: %s", e)
+
         db.finalise_run(
             cohort_run_id=cohort_run_id,
             completed_at=datetime.now(timezone.utc).isoformat(),

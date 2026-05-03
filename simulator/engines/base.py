@@ -26,6 +26,7 @@ class Engine:
         self.cfg = engine_config
         self._proc: Optional[subprocess.Popen] = None
         self._log_file = None
+        self._log_path: Optional[Path] = None
 
     # -- Subclass interface ----------------------------------------------------
 
@@ -51,11 +52,20 @@ class Engine:
     def model_id(self) -> str:
         return self.cfg.model_id
 
+    @property
+    def pid(self) -> Optional[int]:
+        return self._proc.pid if self._proc is not None else None
+
+    @property
+    def log_path(self) -> Optional[Path]:
+        return self._log_path
+
     def launch(self, log_dir: str | Path = "runs") -> None:
         if self._proc is not None:
             raise RuntimeError("Engine already launched")
         Path(log_dir).mkdir(parents=True, exist_ok=True)
         log_path = Path(log_dir) / f"engine_{self.cfg.type}_{int(time.time())}.log"
+        self._log_path = log_path
         self._log_file = open(log_path, "w")
 
         cmd = self._build_command()

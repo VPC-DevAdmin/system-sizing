@@ -56,7 +56,9 @@ class SimulationConfig:
 class TelemetryConfig:
     enable_pmu: bool = True
     enable_memory_bandwidth: bool = True
+    enable_power: bool = True
     enable_engine_metrics: bool = True
+    enable_amx_utilization: bool = True
     perf_events: list[str] = field(default_factory=lambda: [
         "cycles",
         "instructions",
@@ -64,6 +66,12 @@ class TelemetryConfig:
         "cycle_activity.stalls_l3_miss",
         "cache-misses",
         "cache-references",
+        "longest_lat_cache.reference",
+        "longest_lat_cache.miss",
+        "offcore_requests.all_data_rd",
+        "offcore_requests.demand_data_rd",
+        "mem_load_l3_miss_retired.local_dram",
+        "mem_load_l3_miss_retired.remote_dram",
     ])
 
 

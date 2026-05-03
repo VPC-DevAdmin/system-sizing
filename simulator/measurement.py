@@ -217,8 +217,28 @@ async def run_measurement_step(
             pass
 
     duration = int(time.monotonic() - measurement_start_mono)
-    _, telemetry_rows = await telemetry.stop()
+    _, telemetry_rows, telemetry_agg = await telemetry.stop()
     db.insert_telemetry(telemetry_rows)
+    if telemetry_agg:
+        agg_row = {"measurement_id": measurement_id}
+        # Restrict to columns that exist in measurement_aggregate.
+        for k in (
+            "pmu_cycles", "pmu_instructions", "pmu_ipc",
+            "pmu_stalls_mem_any", "pmu_stalls_l3_miss", "pmu_stall_mem_ratio",
+            "pmu_amx_ops", "amx_perf_event_name",
+            "pmu_llc_reference", "pmu_llc_miss",
+            "mem_local_fraction", "mem_remote_fraction",
+            "memory_bw_read_gb_s_avg", "memory_bw_read_gb_s_peak",
+            "memory_bw_write_gb_s_avg", "memory_bw_write_gb_s_peak",
+            "bandwidth_status",
+            "power_w_avg", "power_w_peak", "power_status",
+            "effective_freq_ghz_mean", "effective_freq_ghz_stddev",
+            "effective_freq_ghz_min",
+        ):
+            if telemetry_agg.get(k) is not None:
+                agg_row[k] = telemetry_agg[k]
+        if len(agg_row) > 1:
+            db.upsert_aggregate(agg_row)
     phase_tracker.set(PHASE_IDLE)
 
     if not buffer:

@@ -45,57 +45,111 @@ def _read_run(path: Path) -> dict | None:
             (run["cohort_run_id"],),
         ).fetchall()
         run["measurements"] = [dict(m) for m in ms]
-        # Aggregate telemetry per measurement (averages we care about)
         for m in run["measurements"]:
+            # Per-second telemetry: averages of kv usage / cpu / engine RSS / freq.
             tele = conn.execute(
                 """SELECT AVG(kv_cache_used_pct) AS kv,
-                          AVG(memory_bw_read_gb_s) AS bw_r,
-                          AVG(memory_bw_write_gb_s) AS bw_w,
                           AVG(cpu_util_avg) AS cpu,
-                          AVG(CAST(pmu_stalls_mem_any AS REAL) /
-                              NULLIF(pmu_cycles, 0)) AS mem_stall_ratio
+                          AVG(engine_rss_gb) AS engine_rss_gb_avg,
+                          AVG(freq_mhz_mean) AS freq_mhz_avg
                    FROM measurement_telemetry
                    WHERE measurement_id = ?""",
                 (m["measurement_id"],),
             ).fetchone()
             m["telemetry"] = dict(tele) if tele else {}
+            # Window aggregates (PMU/BW/power/AMX/freq).
+            agg = conn.execute(
+                "SELECT * FROM measurement_aggregate WHERE measurement_id = ?",
+                (m["measurement_id"],),
+            ).fetchone()
+            m["aggregate"] = dict(agg) if agg else {}
         return run
     finally:
         conn.close()
 
 
-def _bottleneck(measurements: list[dict]) -> str:
+def _bottleneck(measurements: list[dict]) -> tuple[str, dict]:
     """Attribute the most likely bottleneck at the knee, best effort.
 
-    Heuristics, in order:
-      * If KV cache > 90% near knee -> "kv_cache"
-      * If memory stall ratio > 0.5 -> "memory_bandwidth"
-      * If TTFT-violation dominates TPOT-violation -> "prefill_throughput"
-      * Else -> "decode_throughput"
+    Returns (bottleneck_id, evidence_dict). The evidence carries the
+    actual numbers that drove the classification — for the buyer-page
+    consumer to display under the recommendation.
+
+    Heuristics evaluated in order; first match wins:
+      1. KV cache utilisation > 90%                  -> kv_cache
+      2. Measured BW > 75% of memory_theoretical    -> memory_bandwidth
+         (or the perf stall_mem_ratio exceeds 0.5 if BW unknown)
+      3. AMX dispatch fraction < 50% but matmul time > 0
+                                                     -> amx_underutilised
+      4. Effective freq < 90% of nominal             -> frequency_droop
+      5. TTFT violations dominate TPOT (1.5x)        -> prefill_throughput
+      6. Otherwise                                   -> decode_throughput
     """
     knee = next((m for m in measurements if m["capacity_status"] in ("fail", "marginal")), None)
     if knee is None and measurements:
         knee = measurements[-1]
     if knee is None:
-        return "unknown"
+        return "unknown", {}
     tele = knee.get("telemetry") or {}
+    agg = knee.get("aggregate") or {}
+    evidence: dict = {}
+
     kv = tele.get("kv")
-    if kv is not None and kv > 90.0:
-        return "kv_cache"
-    mem_stall = tele.get("mem_stall_ratio")
-    if mem_stall is not None and mem_stall > 0.5:
-        return "memory_bandwidth"
+    if kv is not None:
+        evidence["kv_cache_pct"] = kv
+        if kv > 90.0:
+            return "kv_cache", evidence
+
+    bw_read = agg.get("memory_bw_read_gb_s_avg")
+    bw_write = agg.get("memory_bw_write_gb_s_avg")
+    if bw_read is not None or bw_write is not None:
+        total_bw = (bw_read or 0.0) + (bw_write or 0.0)
+        evidence["memory_bw_total_gb_s"] = total_bw
+        # Heuristic threshold; tune from real runs. 100 GB/s is a
+        # sensible "sustained DDR5 saturation" floor on a single-socket
+        # 8-channel host. The real number is theoretical * efficiency.
+        if total_bw > 100.0:
+            return "memory_bandwidth", evidence
+    stall_ratio = agg.get("pmu_stall_mem_ratio")
+    if stall_ratio is not None:
+        evidence["pmu_stall_mem_ratio"] = stall_ratio
+        if stall_ratio > 0.5:
+            return "memory_bandwidth", evidence
+
+    onednn_frac = agg.get("onednn_amx_time_fraction")
+    if onednn_frac is not None:
+        evidence["onednn_amx_time_fraction"] = onednn_frac
+        if 0.0 < onednn_frac < 0.5:
+            return "amx_underutilised", evidence
+
+    freq_mean = agg.get("effective_freq_ghz_mean")
+    freq_min = agg.get("effective_freq_ghz_min")
+    if freq_mean is not None:
+        evidence["effective_freq_ghz_mean"] = freq_mean
+    if freq_min is not None:
+        evidence["effective_freq_ghz_min"] = freq_min
+        # Conservative droop floor: <2.5 GHz on a Xeon 6 nominal-3.0
+        # all-core turbo workload is real droop worth flagging.
+        if freq_min < 2.5:
+            return "frequency_droop", evidence
+
     ttft_v = knee["ttft_violation_rate"] or 0
     tpot_v = knee["tpot_violation_rate"] or 0
+    evidence["ttft_violation_rate"] = ttft_v
+    evidence["tpot_violation_rate"] = tpot_v
     if ttft_v > tpot_v * 1.5:
-        return "prefill_throughput"
-    return "decode_throughput"
+        return "prefill_throughput", evidence
+    return "decode_throughput", evidence
 
 
 def _hardware_recommendation(bottleneck: str) -> str:
     return {
         "kv_cache": "Increase KV cache space (VLLM_CPU_KVCACHE_SPACE) or add RAM.",
         "memory_bandwidth": "Memory-bandwidth bound: prefer faster DDR5 / more channels, or scale out.",
+        "amx_underutilised": "Matmul dispatch falling back to non-AMX kernels — check ONEDNN_VERBOSE log "
+                              "and verify weights are in a layout the AMX kernels accept (BF16 / W8A8).",
+        "frequency_droop": "Effective frequency is below nominal turbo — check thermals, power caps, and "
+                            "whether VLLM_CPU_OMP_THREADS_BIND oversubscribes physical cores.",
         "prefill_throughput": "Prefill bound: more cores / AMX-capable SKU, or shorter prompts.",
         "decode_throughput": "Decode bound: faster cores or smaller / quantised model.",
         "unknown": "Insufficient telemetry to attribute. Re-run with PMU enabled.",
@@ -129,7 +183,7 @@ def _summarise_cohort(run: dict) -> dict:
             knee_pool = m["target_pool_size"]
 
     cohort_def = json.loads(run["cohort_definition_json"])
-    bottleneck = _bottleneck(measurements)
+    bottleneck, evidence = _bottleneck(measurements)
     return {
         "id": run["cohort_id"],
         "name": cohort_def.get("name", run["cohort_id"]),
@@ -144,6 +198,7 @@ def _summarise_cohort(run: dict) -> dict:
         "knee_pool_size": knee_pool,
         "curve": curve,
         "bottleneck": bottleneck,
+        "bottleneck_evidence": evidence,
         "hardware_recommendation": _hardware_recommendation(bottleneck),
     }
 

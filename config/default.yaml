@@ -50,7 +50,9 @@ simulation:
 telemetry:
   enable_pmu: true
   enable_memory_bandwidth: true
+  enable_power: true
   enable_engine_metrics: true
+  enable_amx_utilization: true
   perf_events:
     - cycles
     - instructions
@@ -58,6 +60,12 @@ telemetry:
     - cycle_activity.stalls_l3_miss
     - cache-misses
     - cache-references
+    - longest_lat_cache.reference
+    - longest_lat_cache.miss
+    - offcore_requests.all_data_rd
+    - offcore_requests.demand_data_rd
+    - mem_load_l3_miss_retired.local_dram
+    - mem_load_l3_miss_retired.remote_dram
 
 output:
   db_directory: runs

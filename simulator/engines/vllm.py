@@ -28,6 +28,12 @@ class VLLMEngine(Engine):
         # Default tuning for Xeon 6761P (64-core Granite Rapids)
         defaults = {
             "VLLM_CPU_KVCACHE_SPACE": str(self.cfg.kv_cache_gb),
+            # ONEDNN verbose dispatch logging — read at end of run by
+            # ``amx_utilization.parse_amx_utilization`` to compute the
+            # AMX dispatch fraction. Cost on the engine is small (a line
+            # per matmul); the log can grow multi-GB on long runs but
+            # the parser uses a 256 MiB byte budget by default.
+            "ONEDNN_VERBOSE": "1",
         }
         # tcmalloc preload if available
         tcmalloc = "/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4"

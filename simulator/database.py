@@ -95,17 +95,47 @@ CREATE TABLE IF NOT EXISTS measurement_telemetry (
     queue_depth INTEGER,
     prefix_cache_hits INTEGER,
     prefix_cache_misses INTEGER,
-    pmu_cycles INTEGER,
-    pmu_instructions INTEGER,
-    pmu_stalls_mem_any INTEGER,
-    pmu_stalls_l3_miss INTEGER,
-    pmu_amx_ops INTEGER,
-    memory_bw_read_gb_s REAL,
-    memory_bw_write_gb_s REAL,
-    cpu_util_avg REAL
+    cpu_util_avg REAL,
+    memory_used_gb REAL,
+    engine_rss_gb REAL,
+    freq_mhz_mean REAL,
+    freq_mhz_stddev REAL,
+    freq_mhz_min REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_telemetry_measurement ON measurement_telemetry(measurement_id);
+
+-- Window-level telemetry aggregates: one row per measurement.
+-- Stores PMU totals, BW summaries, AMX, power, and effective frequency.
+CREATE TABLE IF NOT EXISTS measurement_aggregate (
+    measurement_id INTEGER PRIMARY KEY,
+    pmu_cycles REAL,
+    pmu_instructions REAL,
+    pmu_ipc REAL,
+    pmu_stalls_mem_any REAL,
+    pmu_stalls_l3_miss REAL,
+    pmu_stall_mem_ratio REAL,
+    pmu_amx_ops REAL,
+    amx_perf_event_name TEXT,
+    pmu_llc_reference REAL,
+    pmu_llc_miss REAL,
+    mem_local_fraction REAL,
+    mem_remote_fraction REAL,
+    memory_bw_read_gb_s_avg REAL,
+    memory_bw_read_gb_s_peak REAL,
+    memory_bw_write_gb_s_avg REAL,
+    memory_bw_write_gb_s_peak REAL,
+    bandwidth_status TEXT,
+    power_w_avg REAL,
+    power_w_peak REAL,
+    power_status TEXT,
+    effective_freq_ghz_mean REAL,
+    effective_freq_ghz_stddev REAL,
+    effective_freq_ghz_min REAL,
+    onednn_amx_time_fraction REAL,
+    onednn_matmul_dispatches_amx INTEGER,
+    onednn_matmul_dispatches_non_amx INTEGER
+);
 
 CREATE TABLE IF NOT EXISTS virtual_users (
     user_id TEXT PRIMARY KEY,
@@ -210,6 +240,17 @@ class Database:
         with self.cursor() as c:
             c.execute(
                 f"INSERT INTO simulation_snapshots ({','.join(cols)}) VALUES ({placeholders})",
+                [row[k] for k in cols],
+            )
+
+    def upsert_aggregate(self, row: dict) -> None:
+        cols = list(row.keys())
+        placeholders = ",".join("?" for _ in cols)
+        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "measurement_id")
+        with self.cursor() as c:
+            c.execute(
+                f"""INSERT INTO measurement_aggregate ({','.join(cols)}) VALUES ({placeholders})
+                ON CONFLICT(measurement_id) DO UPDATE SET {updates}""",
                 [row[k] for k in cols],
             )
 

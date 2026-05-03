@@ -20,9 +20,10 @@
 engine:
   type: sglang
   # HF id for log identification. Actual weights are read from
-  # model_local_path (the in-container path).
-  model_id: Qwen/Qwen3-30B-A3B-Instruct
-  model_local_path: /models/Qwen3-30B-A3B-Instruct
+  # model_local_path (the in-container path). The "-2507" suffix is
+  # part of the published HF repo name, not a separate version tag.
+  model_id: Qwen/Qwen3-30B-A3B-Instruct-2507
+  model_local_path: /models/Qwen3-30B-A3B-Instruct-2507
   served_model_name: qwen3_30b_a3b
   quantization_kind: null      # BF16
 

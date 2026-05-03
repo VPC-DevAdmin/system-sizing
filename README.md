@@ -98,9 +98,11 @@ sudo mkdir -p /data/ml/models /data/ml/huggingface
 sudo chown -R $USER:$USER /data/ml
 
 cd /data/ml/models
-hf download Qwen/Qwen3-30B-A3B-Instruct \
-    --local-dir Qwen3-30B-A3B-Instruct
+hf download Qwen/Qwen3-30B-A3B-Instruct-2507 \
+    --local-dir Qwen3-30B-A3B-Instruct-2507
 ```
+
+The `-2507` suffix is part of the actual published HF repo name, not a separate version tag.
 
 For long downloads, run inside `tmux` so an SSH disconnect doesn't kill the transfer. If only the safetensors finish but tokenizer files are missing, re-run the same command with `--include "tokenizer*" "*.json"`. Note: `protobuf` installs as `protobuf` but imports as `google.protobuf` — `import protobuf` will fail even though the install is fine.
 
@@ -108,7 +110,7 @@ For long downloads, run inside `tmux` so an SSH disconnect doesn't kill the tran
 
 ```bash
 make launch-engine ENGINE=sglang \
-                   MODEL=Qwen/Qwen3-30B-A3B-Instruct \
+                   MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507 \
                    CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml
 ```
 
@@ -116,8 +118,8 @@ The container streams its stdout/stderr to `runs/engine_sglang_*.log`. Wait for 
 
 | Variant | Resident | Cold load |
 |---|---|---|
-| BF16 (`Qwen3-30B-A3B-Instruct`) | ~58 GB | ~2-3 min |
-| FP8 (`Qwen3-30B-A3B-Instruct-FP8`) | ~32 GB | ~1-2 min |
+| BF16 (`Qwen3-30B-A3B-Instruct-2507`) | ~58 GB | ~2-3 min |
+| FP8 (`Qwen3-30B-A3B-Instruct-2507-FP8`) | ~32 GB | ~1-2 min |
 
 ### Known-good parallelism shapes
 

@@ -98,9 +98,15 @@ The `-2507` suffix is part of the actual published HF repo name, not a separate 
 ### Run
 
 ```bash
+# BF16 baseline
 make launch-engine ENGINE=sglang \
                    MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507 \
                    CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml
+
+# FP8 variant (sibling config)
+make launch-engine ENGINE=sglang \
+                   MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 \
+                   CONFIG=config/r7735_sglang_qwen3_30b_a3b_fp8.yaml
 ```
 
 The container streams its stdout/stderr to `runs/engine_sglang_*.log`. Wait for the simulator's `SGLang ready after Xs` message — this only fires once `/v1/models` returns 200, which means the model is fully loaded. Expected times:

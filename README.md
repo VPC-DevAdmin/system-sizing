@@ -5,29 +5,40 @@ Drives a single, long-running LLM inference engine (vLLM or SGLang) with realist
 ## Quick start
 
 ```bash
-make setup
-make run-cohort  ENGINE=vllm  MODEL=Qwen/Qwen2.5-7B-Instruct  COHORT=chat_heavy
-make dashboard                                      # in another terminal
-make run-sweep   ENGINE=vllm  MODEL=Qwen/Qwen2.5-7B-Instruct
-make export                                         # buyer_page_data.json
+# Two commands to first measurement.
+make ready CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml
+make run-cohort CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml \
+                COHORT=chat_heavy
+# In a second terminal:
+make dashboard
+
+# After the run finishes:
+make export
+make web                                            # http://localhost:8765
 ```
 
 ## Make targets
 
+The headline workflow is `ready` → `run-cohort` → `dashboard` → `export`. Everything else is either a downstream analysis step or a diagnostic.
+
 | Target | What it does |
 |---|---|
-| `make setup` | Install package + deps |
-| `make launch-engine` | Launch engine subprocess only (manual testing) |
-| `make run-cohort` | Run a single cohort end-to-end |
-| `make run-sweep` | Run all cohorts back-to-back against one engine |
-| `make dashboard` | Live `rich`-based progress view of the latest run |
-| `make export` | Build `buyer_page_data.json` from `runs/*.db` |
-| `make web` | Serve the reference buyer page on `http://localhost:8765` |
-| `make analyze-prefix-cache` | Prefix-cache hit-rate report on the latest `.db` |
-| `make test` | Run pytest |
-| `make clean` / `clean-runs` | Tidy caches / wipe run databases |
+| `make ready CONFIG=...` | Idempotent: pip install, build engine docker image (SGLang only) if missing, download model if missing, validate hardware. |
+| `make run-cohort CONFIG=... COHORT=...` | Run a single cohort end-to-end. |
+| `make run-sweep CONFIG=...` | Run all cohorts back-to-back against one engine. |
+| `make dashboard` | Live `rich`-based progress view of the latest run. |
+| `make export` | Build `buyer_page_data.json` from `runs/*.db`. |
+| `make web` | Serve the reference buyer page on `http://localhost:8765`. |
+| `make analyze-prefix-cache` | Prefix-cache hit-rate report on the latest `.db`. |
+| `make preflight CONFIG=...` | Hardware-only check (no install / build). |
+| `make launch-engine CONFIG=...` | Manually launch the engine without running a cohort (curl-poking). |
+| `make sglang-shell` | Interactive `bash` inside `sglang-cpu:xeon-fixed` with the model dir mounted. |
+| `make test` | Run pytest. |
+| `make clean` / `clean-runs` | Tidy. |
 
-Variables: `ENGINE` (vllm|sglang), `MODEL`, `COHORT`, `CONFIG`, `RUN_DIR`.
+Variables: `CONFIG` (path to yaml), `COHORT` (cohort id), `ENGINE`, `MODEL`, `RUN_DIR`.
+
+Power-user / debugging escape hatches: `make sglang-clone`, `make sglang-base`, `make sglang-fixed`, `make sglang-verify`, `make download-model MODEL=...`. These are what `make ready` invokes internally; call them by hand if the orchestration mis-detects state.
 
 ## Layout
 
@@ -73,27 +84,17 @@ SGLang's mainline pip wheel ships GPU-only `sgl_kernel` binaries — importing t
 
 There's no published Docker Hub tag for the CPU build; build from SGLang source.
 
-### One-shot setup (clone + build + download)
+### One-shot setup
 
 ```bash
-make sglang-setup MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507
+make ready CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml
 ```
 
-That runs four steps in order: `sglang-clone` (git clone the upstream repo), `sglang-base` (build `sglang-cpu:xeon`, ~15-20 min first run), `sglang-fixed` (layer the tokenizer-deps fix, ~1-2 min), and `download-model` (`hf download` to `/data/ml/models/<basename>` with `HF_HUB_ENABLE_HF_TRANSFER=1`). For an SSH-resilient run, wrap in `tmux`.
+That handles everything: pip install, clone SGLang source if missing, build `sglang-cpu:xeon` (~15-20 min first run only), build the layered `sglang-cpu:xeon-fixed`, download the model with `HF_HUB_ENABLE_HF_TRANSFER=1`, and run the hardware preflight. Re-running is idempotent — already-built images and already-downloaded models are detected and skipped.
 
-If you'd rather run the steps individually:
+For an SSH-resilient first run on a fresh box, wrap in `tmux`.
 
-```bash
-make sglang-clone        # update / clone /tmp/sglang
-make sglang-base         # build sglang-cpu:xeon
-make sglang-fixed        # build sglang-cpu:xeon-fixed
-make sglang-verify       # smoke-test imports inside the fixed image
-make download-model MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507
-```
-
-`make sglang-shell` drops you into an interactive bash inside the fixed image with `/data/ml/models` mounted — handy for debugging tokenizer issues.
-
-The `-2507` suffix is part of the actual published HF repo name, not a separate version tag. Two variants exist: `-Instruct-2507` (BF16) and `-Instruct-2507-FP8`. If `make download-model` reports missing tokenizer files, re-run with the includes filter — `hf download $MODEL --local-dir ... --include 'tokenizer*' '*.json'`. Note: `protobuf` installs as `protobuf` but imports as `google.protobuf` — `import protobuf` will fail even though the install is fine.
+The `-2507` suffix is part of the actual published HF repo name, not a separate version tag. Two variants exist: `-Instruct-2507` (BF16, portable) and `-Instruct-2507-FP8` (Intel-only — SGLang's CPU FP8 path requires AMX). If a download finishes with safetensors but missing tokenizer files, re-run `hf download $MODEL --local-dir ... --include 'tokenizer*' '*.json'`. Note: `protobuf` installs as `protobuf` but imports as `google.protobuf` — `import protobuf` will fail even though the install is fine.
 
 ### Run
 

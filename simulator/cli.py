@@ -84,6 +84,8 @@ def launch_engine(
     _setup_logging(verbose)
     cfg = load_config(config)
     apply_cli_overrides(cfg, engine=engine, model=model)
+    from .preflight import preflight_check
+    preflight_check(cfg.engine.hardware_requirements)
     eng = make_engine(cfg.engine.type, cfg.engine)
     eng.launch(log_dir=cfg.output.db_directory)
     typer.echo(f"Engine up at {eng.base_url}. Ctrl-C to stop.")
@@ -121,6 +123,44 @@ def list_cohorts():
     """List available cohorts."""
     for cid, cohort in COHORTS.items():
         typer.echo(f"  {cid}: {cohort.name} — {cohort.description}")
+
+
+@app.command("preflight")
+def preflight_cmd(
+    config: Path = typer.Option(..., "--config", "-c", help="Config file"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Validate the host satisfies a config's ``hardware_requirements``.
+
+    Run before launching the engine to catch hardware/config mismatches
+    without waiting for a long model load to fail. Exits non-zero on
+    requirements violation; zero on success or when detection isn't
+    available (non-Linux dev hosts soft-skip with a warning).
+    """
+    import sys
+    _setup_logging(verbose)
+    cfg = load_config(config)
+    from .preflight import detect_hardware, preflight_check, PreflightError
+    info = detect_hardware()
+    typer.echo(
+        f"Detected: vendor={info.vendor} model={info.cpu_model!r} "
+        f"physical_cores={info.physical_cores} sockets={info.sockets} "
+        f"status={info.detection_status}"
+    )
+    reqs = cfg.engine.hardware_requirements
+    if reqs.is_empty():
+        typer.echo("No hardware_requirements set in config — skipping check.")
+        return
+    typer.echo(
+        f"Required: vendor={reqs.cpu_vendor} features={reqs.cpu_features} "
+        f"min_cores={reqs.min_physical_cores} min_sockets={reqs.min_sockets}"
+    )
+    try:
+        preflight_check(reqs)
+    except PreflightError as e:
+        typer.echo(str(e), err=True)
+        sys.exit(2)
+    typer.echo("Preflight OK.")
 
 
 @app.command("analyze-prefix-cache")

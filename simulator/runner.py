@@ -18,6 +18,7 @@ from .config import Config
 from .cpu_binding import expand_thread_binding
 from .database import Database
 from .engines import Engine, make_engine
+from .preflight import preflight_check
 from .measurement import (
     PHASE_IDLE,
     PhaseTracker,
@@ -64,6 +65,9 @@ async def run_cohort(
     cohort = get_cohort(cohort_id)
     own_engine = engine is None
     if own_engine:
+        # Validate the host before any subprocess / docker / model load —
+        # SGLang FP8 on AMD wastes 10-20 minutes before the assertion.
+        preflight_check(cfg.engine.hardware_requirements)
         engine = make_engine(cfg.engine.type, cfg.engine)
         engine.launch(log_dir=cfg.output.db_directory)
 
@@ -256,6 +260,7 @@ def _flush_users(db: Database, cohort_run_id: str, buffer: list) -> None:
 
 async def run_sweep(cfg: Config, cohort_ids: list[str]) -> list[Path]:
     """Run multiple cohorts back-to-back against the same engine."""
+    preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
     engine.launch(log_dir=cfg.output.db_directory)
     paths: list[Path] = []

@@ -31,6 +31,7 @@ help:
 	@echo "Persona Capacity Simulator — targets:"
 	@echo ""
 	@echo "  make setup                   Install package and dependencies"
+	@echo "  make preflight               Validate host satisfies CONFIG's hardware_requirements"
 	@echo "  make launch-engine           Launch engine only (manual testing)"
 	@echo "  make run-cohort              Run a single cohort"
 	@echo "  make run-sweep               Run all cohorts back-to-back"
@@ -60,6 +61,10 @@ help:
 setup:
 	$(PY) -m pip install --upgrade pip
 	$(PY) -m pip install -e .
+
+.PHONY: preflight
+preflight:
+	$(PY) -m simulator.cli preflight --config $(CONFIG)
 
 .PHONY: launch-engine
 launch-engine:

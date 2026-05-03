@@ -41,6 +41,16 @@ engine:
   enable_metrics: true
   attention_backend: null      # AMD: torch_native via fallback
 
+  # Hardware preflight — fails fast on non-Intel hosts. SGLang's
+  # ``Fp8LinearMethod`` aborts deep in weight processing on AMD with
+  # "requires CPU AMX support"; surface the misconfig at startup.
+  hardware_requirements:
+    cpu_vendor: intel
+    cpu_features:
+      - amx_tile
+      - amx_bf16
+    notes: "SGLang CPU FP8 path needs Intel AMX (unavailable on EPYC)"
+
   port: 30000
   host: 127.0.0.1
   startup_timeout_s: 1200      # ~1-2 min for FP8 cold load; 20 min cap

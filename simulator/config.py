@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+from .preflight import HardwareRequirements
+
 
 @dataclass
 class EngineConfig:
@@ -74,6 +76,15 @@ class EngineConfig:
     # in place of ``model_id`` for the SGLang ``--model`` flag — useful
     # for pre-downloaded weights mounted into /models.
     model_local_path: str | None = None
+
+    # Hardware requirements that the host must satisfy. Validated by
+    # ``simulator.preflight.preflight_check`` before launch — fails fast
+    # so we don't waste minutes loading weights only to crash on, say,
+    # SGLang's ``Fp8LinearMethod requires CPU AMX support`` deep in
+    # weight processing on AMD.
+    hardware_requirements: HardwareRequirements = field(
+        default_factory=HardwareRequirements
+    )
 
     @property
     def base_url(self) -> str:

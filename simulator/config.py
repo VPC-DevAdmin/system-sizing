@@ -33,6 +33,42 @@ class EngineConfig:
     sglang_extra_flags: list[str] = field(default_factory=list)
     sglang_extra_env: dict[str, str] = field(default_factory=dict)
 
+    # ── Docker-specific config (SGLang only) ──────────────────────────
+    # SGLang's CPU support depends on a binary ``sgl_kernel`` that the
+    # mainline pip wheel only ships in CUDA variants. On CPU the working
+    # path is the upstream ``sglang-cpu`` Docker image, which we extend
+    # with a small ``-fixed`` layer adding sentencepiece/tiktoken/protobuf.
+    # See Dockerfile.xeon-fixed in the repo root.
+    docker_image: str = "sglang-cpu:xeon-fixed"
+    docker_shm_size: str = "32g"
+    # Each entry maps host_path -> container_path. Models and HF cache
+    # are the typical mounts.
+    docker_volumes: dict[str, str] = field(default_factory=lambda: {
+        "/data/ml/models": "/models",
+        "/data/ml/huggingface": "/root/.cache/huggingface",
+    })
+    docker_network: str = "host"
+    docker_extra_args: list[str] = field(default_factory=list)
+    docker_extra_env: dict[str, str] = field(default_factory=dict)
+
+    # ── SGLang launch flags (set sensible CPU defaults) ───────────────
+    # Per the GNR runbook: TP=1 baseline + TP=4 are the only known-good
+    # parallelism shapes on CPU. Anything else (DP/EP combos) is broken
+    # upstream as of late 2025.
+    served_model_name: str | None = None
+    quantization_kind: str | None = None  # e.g. "fp8"; passed via --quantization
+    # ``intel_amx`` on Xeon GNR/SPR/EMR; on AMD let SGLang fall back
+    # (set to None to omit the flag entirely — SGLang picks torch_native).
+    attention_backend: str | None = None
+    mem_fraction_static: float = 0.85
+    max_total_tokens: int = 16384
+    chunked_prefill_size: int = 4096
+    disable_overlap_schedule: bool = True
+    # Path INSIDE the container where the model lives. When set, used
+    # in place of ``model_id`` for the SGLang ``--model`` flag — useful
+    # for pre-downloaded weights mounted into /models.
+    model_local_path: str | None = None
+
     @property
     def base_url(self) -> str:
         if self.type == "vllm":

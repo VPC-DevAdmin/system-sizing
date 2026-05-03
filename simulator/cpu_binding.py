@@ -46,6 +46,67 @@ def flatten_for_taskset(bind_string: str | None) -> str | None:
     return ",".join(out)
 
 
+def derive_sglang_thread_binding(cpu_bind: str | None, tp: int) -> str:
+    """Return a value for ``SGLANG_CPU_OMP_THREADS_BIND`` aligned to ``tp``.
+
+    SGLang-CPU's scheduler asserts ``tp == len(env_var.split('|'))``;
+    a TP=4 launch with a 'wrong-shape' bind aborts during init with::
+
+        AssertionError: SGLANG_CPU_OMP_THREADS_BIND setting must be aligned
+        with TP size parameter (...). Please double check your settings.
+
+    Three input shapes are accepted:
+      1. ``cpu_bind`` already has exactly ``tp`` ``|``-separated groups —
+         use as-is. Caller is in control.
+      2. ``cpu_bind`` is a single contiguous range ("0-31") and ``tp``
+         divides the range cleanly — split evenly.
+      3. ``cpu_bind`` is empty/None and ``tp == 1`` — return empty (the
+         engine env var will be omitted).
+
+    Anything else raises so the misconfig surfaces at launch time, not
+    20 minutes into a model load.
+    """
+    if not cpu_bind:
+        if tp == 1:
+            return ""
+        raise ValueError(
+            f"cpu_bind is required for SGLang TP={tp} (need {tp} groups)"
+        )
+
+    groups = [g.strip() for g in cpu_bind.split("|") if g.strip()]
+    if len(groups) == tp:
+        return "|".join(groups)
+
+    # Single-group case: split into tp evenly.
+    if len(groups) == 1:
+        cpus = sorted(expand_thread_binding(groups[0]))
+        if not cpus:
+            raise ValueError(f"cpu_bind {cpu_bind!r} expanded to no CPUs")
+        # We require contiguity for an even split — if you have a sparse
+        # set, encode the |-grouping yourself in cpu_bind.
+        if cpus != list(range(cpus[0], cpus[-1] + 1)):
+            raise ValueError(
+                f"cpu_bind {cpu_bind!r} is non-contiguous; supply tp={tp} "
+                f"explicit groups instead"
+            )
+        total = len(cpus)
+        if total % tp != 0:
+            raise ValueError(
+                f"cpu_bind {cpu_bind!r} ({total} CPUs) not divisible by "
+                f"tp={tp}; pick a tp that divides evenly or pass an "
+                f"explicit |-grouped bind"
+            )
+        per = total // tp
+        return "|".join(
+            f"{cpus[i*per]}-{cpus[(i+1)*per - 1]}" for i in range(tp)
+        )
+
+    raise ValueError(
+        f"cpu_bind {cpu_bind!r} has {len(groups)} groups but tp={tp}; "
+        f"either supply tp groups or a single range divisible by tp"
+    )
+
+
 def expand_thread_binding(bind_string: str | None) -> set[int]:
     """Parse a vLLM-style thread-binding string to a set of CPU ids.
 

@@ -1,38 +1,65 @@
-# SGLang + Qwen3-30B-A3B on the R7735 (2-socket EPYC, 32 physical cores
-# per socket, 8 CCDs per socket of 4 cores each, SMT enabled).
+# SGLang + Qwen3-30B-A3B (FP8) on the R7735 (2-socket EPYC, 32 physical
+# cores per socket, 8 CCDs of 4 cores per socket, SMT enabled).
 #
-# Single-socket TP=1 baseline. Rationale:
-#   * Qwen3-30B-A3B is a Mixture-of-Experts model (30B params total,
-#     3B activated per token). Compute is comparable to a 3B dense model
-#     but the full 30B weights occupy memory.
-#   * SGLang CPU + MoE is genuinely new ground. TP=1 keeps the dispatch
-#     path simple and avoids cross-process expert routing on CPU. Bump
-#     TP to 2 / 4 once a TP=1 baseline is captured.
-#   * One socket = one NUMA node here, so memory locality is automatic
-#     when we taskset to physical cores 0-31.
+# Single-socket TP=1 baseline. Per the GNR runbook, TP=1 and TP=4 are
+# the ONLY known-good parallelism shapes on SGLang CPU; DP / EP combos
+# are upstream-broken at time of writing. Stick to these.
 #
-# Memory budget: ~60 GB BF16 weights + ~32 GB KV cache scratch =
-# leave at least 100 GB free on the node before starting the engine.
+# This configuration runs SGLang inside Docker (sglang-cpu:xeon-fixed)
+# because the mainline pip wheel ships GPU-only sgl_kernel binaries.
+# Build the image with:
+#
+#   docker pull lmsysorg/sglang:latest-cpu
+#   docker tag  lmsysorg/sglang:latest-cpu sglang-cpu:xeon
+#   docker build -f Dockerfile.xeon-fixed -t sglang-cpu:xeon-fixed .
+#
+# AMD-specific divergence from the GNR runbook:
+#   * attention_backend left null (no AMX on AMD; SGLang falls back to
+#     torch_native automatically and prints "current platform does not
+#     support Intel AMX, will fallback to torch_native backend").
+#   * The IPEX-based base image still works on AMD, though some Intel-
+#     only optimisations are silently skipped — that's fine for this
+#     baseline measurement.
 
 engine:
   type: sglang
-  model_id: Qwen/Qwen3-30B-A3B
-  quantization: null
-  max_model_len: 8192
-  tensor_parallel_size: 1
-  kv_cache_gb: 32
-  port: 30000               # SGLang default
-  host: 127.0.0.1
-  startup_timeout_s: 1200   # 30B MoE load is slow on cold start
+  # Local mounted path inside the container; weights live at
+  # /data/ml/models/Qwen3-30B-A3B-Instruct-FP8 on the host.
+  model_id: Qwen/Qwen3-30B-A3B-Instruct-FP8
+  model_local_path: /models/Qwen3-30B-A3B-Instruct-FP8
+  served_model_name: qwen3_30b_a3b_fp8
+  quantization_kind: fp8
 
-  # Engine-agnostic CPU pinning. The simulator:
-  #   * filters frequency aggregation to this set (so idle socket-1
-  #     cores don't drag the mean), and
-  #   * wraps the SGLang launch with ``taskset -c 0-31`` so OpenMP
-  #     threads stay on socket 0 / NUMA node 0.
+  tensor_parallel_size: 1
+  max_model_len: 8192
+  max_total_tokens: 16384
+  chunked_prefill_size: 4096
+  mem_fraction_static: 0.85
+  disable_overlap_schedule: true
+
+  port: 30000
+  host: 127.0.0.1
+  startup_timeout_s: 1800       # 30B FP8 cold load is ~10–20 minutes
+
+  # Engine-agnostic CPU pinning. Used for:
+  #   * frequency-collector filter
+  #   * docker --cpuset-cpus
+  #   * SGLANG_CPU_OMP_THREADS_BIND derivation (must align with TP)
   cpu_bind: '0-31'
 
-  sglang_extra_flags: []
+  # AMD-specific: leave attention backend at SGLang default (torch_native
+  # via fallback). On Intel Xeon you'd set this to 'intel_amx'.
+  attention_backend: null
+
+  # Docker layer-fixed image. Build per the comment block above.
+  docker_image: sglang-cpu:xeon-fixed
+  docker_shm_size: 32g
+  docker_network: host
+  docker_volumes:
+    /data/ml/models: /models
+    /data/ml/huggingface: /root/.cache/huggingface
+
+  # OpenMP placement defaults inside the container.
   sglang_extra_env:
     OMP_NUM_THREADS: '32'
     OMP_PROC_BIND: 'close'
@@ -54,13 +81,11 @@ simulation:
   request_timeout_s: 360
 
 telemetry:
-  # AMX collectors will return ``not_supported`` on AMD — leaving them
-  # enabled is harmless (they self-report) and keeps the config portable.
   enable_pmu: true
   enable_memory_bandwidth: true   # uncore_imc isn't on AMD; collector reports unavailable
   enable_power: true
   enable_engine_metrics: true
-  enable_amx_utilization: false   # no AMX on EPYC; skip oneDNN log parse
+  enable_amx_utilization: false   # no AMX on EPYC
   perf_events:
     - cycles
     - instructions

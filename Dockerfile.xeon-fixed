@@ -1,0 +1,27 @@
+# Layered on top of the upstream SGLang CPU image.
+#
+# Upstream (lmsysorg/sglang:latest-cpu or a self-built sglang-cpu:xeon)
+# ships the AMX-aware kernels and the binary sgl_kernel built for CPU,
+# but does NOT ship the tokenizer dependencies most modern HF models
+# need. Without these three, model load on Qwen3 / GLM / Mistral /
+# Llama 3 dies with cryptic ``ModuleNotFoundError: sentencepiece`` /
+# ``tiktoken`` errors well into a 60GB+ download.
+#
+# Build with one of:
+#
+#   docker pull lmsysorg/sglang:latest-cpu
+#   docker tag  lmsysorg/sglang:latest-cpu sglang-cpu:xeon
+#   docker build -f Dockerfile.xeon-fixed -t sglang-cpu:xeon-fixed .
+#
+# or build the upstream image from source first:
+#
+#   git clone https://github.com/sgl-project/sglang
+#   docker build -f sglang/docker/Dockerfile.xeon -t sglang-cpu:xeon ./sglang
+#   docker build -f Dockerfile.xeon-fixed -t sglang-cpu:xeon-fixed .
+
+FROM sglang-cpu:xeon
+
+RUN /opt/.venv/bin/pip install --no-cache-dir \
+    sentencepiece \
+    tiktoken \
+    protobuf

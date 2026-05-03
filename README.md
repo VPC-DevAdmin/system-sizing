@@ -66,3 +66,21 @@ Makefile
 ```
 
 Each cohort run produces one SQLite file in `runs/`.
+
+## SGLang on CPU (Docker required)
+
+SGLang's mainline pip wheel ships GPU-only `sgl_kernel` binaries; the working CPU path is the upstream `sglang-cpu` Docker image. Build the local layer once:
+
+```bash
+docker pull lmsysorg/sglang:latest-cpu
+docker tag  lmsysorg/sglang:latest-cpu sglang-cpu:xeon
+docker build -f Dockerfile.xeon-fixed -t sglang-cpu:xeon-fixed .
+```
+
+The `-fixed` layer adds `sentencepiece`, `tiktoken`, and `protobuf` — modern HF tokenizers (Qwen3, GLM, Mistral, Llama 3) won't load without them.
+
+Stage the model on the host at `/data/ml/models/<model-dir>` and reference it as `model_local_path: /models/<model-dir>` in the engine config. Hugging Face cache mounts at `/data/ml/huggingface`.
+
+Known-good parallelism shapes on SGLang CPU: **TP=1 baseline** and **TP=4**. Anything else (DP/EP combos) is upstream-broken at time of writing.
+
+The simulator derives `SGLANG_CPU_OMP_THREADS_BIND` from `engine.cpu_bind` and validates it aligns with `tensor_parallel_size`; misconfigurations surface at launch instead of 20 minutes into a model load.

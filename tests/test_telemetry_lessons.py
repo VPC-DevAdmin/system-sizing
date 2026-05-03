@@ -26,7 +26,11 @@ from simulator.bandwidth import (
     _discover_imc_events,
     bandwidth_summary,
 )
-from simulator.cpu_binding import expand_thread_binding, flatten_for_taskset
+from simulator.cpu_binding import (
+    derive_sglang_thread_binding,
+    expand_thread_binding,
+    flatten_for_taskset,
+)
 from simulator.frequency import FrequencyCollector
 from simulator.perf_collector import (
     AMX_CANDIDATE_EVENTS,
@@ -75,6 +79,58 @@ def test_flatten_for_taskset_returns_none_for_empty_input() -> None:
     """Caller treats None as 'don't wrap with taskset'."""
     assert flatten_for_taskset(None) is None
     assert flatten_for_taskset("") is None
+
+
+# ── SGLang TP-aligned thread binding ──────────────────────────────────
+
+
+def test_sglang_bind_passes_through_when_tp_matches_groups() -> None:
+    """An explicit TP-grouped string is honoured as-is."""
+    assert derive_sglang_thread_binding("0-15|16-31|32-47|48-63", 4) \
+           == "0-15|16-31|32-47|48-63"
+
+
+def test_sglang_bind_splits_single_range_when_divisible() -> None:
+    """A single contiguous range is split evenly into TP groups."""
+    assert derive_sglang_thread_binding("0-31", 4) == "0-7|8-15|16-23|24-31"
+    assert derive_sglang_thread_binding("0-63", 8) == \
+           "0-7|8-15|16-23|24-31|32-39|40-47|48-55|56-63"
+
+
+def test_sglang_bind_tp1_with_single_range_stays_single_range() -> None:
+    assert derive_sglang_thread_binding("0-31", 1) == "0-31"
+
+
+def test_sglang_bind_tp1_with_no_bind_returns_empty() -> None:
+    """TP=1 doesn't actually require the env var — the SGLang assert
+    only trips for TP>1."""
+    assert derive_sglang_thread_binding(None, 1) == ""
+    assert derive_sglang_thread_binding("", 1) == ""
+
+
+def test_sglang_bind_raises_when_groups_disagree_with_tp() -> None:
+    """SGLang's internal assert says TP must equal len(env.split('|')).
+    We surface the misconfig at launch time instead."""
+    with pytest.raises(ValueError, match="2 groups but tp=4"):
+        derive_sglang_thread_binding("0-15|16-31", 4)
+
+
+def test_sglang_bind_raises_when_range_not_divisible() -> None:
+    """30 cores can't split evenly across TP=4."""
+    with pytest.raises(ValueError, match="not divisible"):
+        derive_sglang_thread_binding("0-29", 4)
+
+
+def test_sglang_bind_raises_when_tp_gt_1_without_bind() -> None:
+    with pytest.raises(ValueError, match="cpu_bind is required"):
+        derive_sglang_thread_binding(None, 4)
+
+
+def test_sglang_bind_raises_for_non_contiguous_single_group() -> None:
+    """If you have a sparse CPU set, encode the |-grouping yourself —
+    the auto-split only handles contiguous ranges."""
+    with pytest.raises(ValueError, match="non-contiguous"):
+        derive_sglang_thread_binding("0,1,2,8,9,10", 2)
 
 
 # ── Bandwidth: per-IMC discovery on GNR ───────────────────────────────

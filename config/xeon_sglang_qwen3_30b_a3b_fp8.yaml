@@ -29,8 +29,11 @@ engine:
   max_model_len: 8192
   max_total_tokens: 16384
   context_length: null
-  chunked_prefill_size: null
-  mem_fraction_static: null
+  # The runbook explicitly sets these two; matches a confirmed-working
+  # GNR + TP=4 launch. Leaving them at SGLang defaults caused init
+  # to segfault during torch.distributed init on this host.
+  chunked_prefill_size: 4096
+  mem_fraction_static: 0.85
   disable_overlap_schedule: true
   enable_metrics: true
   attention_backend: intel_amx
@@ -54,9 +57,14 @@ engine:
     /data/ml/models: /models
     /data/ml/huggingface: /root/.cache/huggingface
 
-  sglang_extra_env:
-    OMP_PROC_BIND: 'close'
-    OMP_PLACES: 'cores'
+  # Intentionally NOT setting OMP_PROC_BIND / OMP_PLACES. SGLang's CPU
+  # backend uses ``SGLANG_CPU_OMP_THREADS_BIND`` to do its own per-rank
+  # thread placement; layering OMP_PROC_BIND=close + OMP_PLACES=cores on
+  # top causes the OpenMP runtime to override SGLang's bind and ask
+  # libnuma to bind to CPUs outside its (cgroup-limited) allowed set,
+  # producing ``libnuma: Warning: cpu argument N is out of range``
+  # followed by a segfault during torch.distributed init.
+  sglang_extra_env: {}
 
   # Hardware preflight — fails fast on non-Intel hosts. SGLang's
   # ``Fp8LinearMethod`` aborts deep in weight processing on AMD with

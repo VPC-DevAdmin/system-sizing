@@ -59,9 +59,10 @@ engine:
     /data/ml/huggingface: /root/.cache/huggingface
 
   # In-container OpenMP placement.
-  sglang_extra_env:
-    OMP_PROC_BIND: 'close'
-    OMP_PLACES: 'cores'
+  # Don't set OMP_PROC_BIND / OMP_PLACES — they conflict with
+  # SGLANG_CPU_OMP_THREADS_BIND and trigger libnuma "out of range"
+  # warnings + segfaults on some hosts during torch.distributed init.
+  sglang_extra_env: {}
 
 simulation:
   initial_pool_size: 2          # MoE is slower per-request than dense 7B

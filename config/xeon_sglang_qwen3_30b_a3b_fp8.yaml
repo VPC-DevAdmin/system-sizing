@@ -94,18 +94,27 @@ simulation:
   # the curve. Bump back up once the loop is proven.
   target_samples_per_step: 50
   measurement_timeout_s: 600
-  # ── warmup gates ──
-  # Measurement starts once both gates are met:
-  #   1. ≥ warmup_min_duration_s seconds elapsed since pool ramp
-  #   2. ≥ round(warmup_min_completions_per_user * pool_size) requests
-  #      completed (so every virtual user has cycled through at least
-  #      one full request and we're past their cold-start latency)
-  # If neither gate is met by warmup_max_duration_s, measurement runs
-  # anyway — better to have warmup-tail noise in the samples than to
-  # abort the step.
+  # ── soft-start ramp ──
+  # Spawn one virtual user per N seconds rather than all-at-once. With
+  # request_time≈30s and 8 users, a 2s spawn interval spreads the
+  # initial burst over ~14s — combined with each user's random initial
+  # phase offset (sleep for a fraction of one think-time before the
+  # first request), this dissolves the synchronised wave that
+  # instantaneous spawning produced.
+  ramp_spawn_interval_s: 2.0
+  initial_phase_offset_enabled: true
+
+  # ── convergence gates ──
+  # Measurement starts when completion rate over the most recent 60s
+  # window is within ±20% of the rate over the previous 60s window —
+  # the actual signal of "system has reached steady state". A 30s
+  # warmup floor protects against premature convergence on noise; 300s
+  # ceiling proceeds anyway if convergence isn't hit.
   warmup_min_duration_s: 30
-  warmup_max_duration_s: 240
-  warmup_min_completions_per_user: 1.0
+  warmup_max_duration_s: 300
+  convergence_window_s: 60
+  convergence_threshold: 0.20
+  convergence_min_completions_per_window: 5
   knee_slope_threshold: 0.005
   stop_violation_threshold: 0.5
   max_total_duration_minutes: 240

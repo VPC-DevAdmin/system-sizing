@@ -101,19 +101,43 @@ class SimulationConfig:
     max_pool_size: int = 1024
     target_samples_per_step: int = 500
     measurement_timeout_s: int = 300
-    # Warmup gates (replaces the older CV-of-in-flight stabilisation
-    # detection — that metric never converges for closed-loop persona
-    # workloads where in_flight oscillates with the request/think cycle
-    # period regardless of pool size).
-    #
-    # Measurement starts once BOTH:
-    #   * elapsed >= warmup_min_duration_s
-    #   * completions since pool ramp >= round(warmup_min_completions_per_user * pool_size)
-    # …or after warmup_max_duration_s has passed (in which case
-    # measurement runs anyway, just with a larger cold-start tail).
+    # ── Soft-start ramp ──
+    # Spawning N users in a tight loop produces a synchronised burst
+    # that takes minutes to dissolve into independent cycles (or never
+    # does, on tight engines). Pace new spawns instead — one virtual
+    # user per ``ramp_spawn_interval_s`` seconds — so users land in the
+    # request/think cycle staggered.
+    ramp_spawn_interval_s: float = 1.0
+
+    # ── Initial phase offset ──
+    # Each new virtual user sleeps for a random fraction of one
+    # think-time sample before issuing its first request. This phases
+    # users uniformly across their request/think cycle from spawn,
+    # eliminating the "all 8 users hit /chat at the same instant"
+    # problem even within a single ramp burst.
+    initial_phase_offset_enabled: bool = True
+
+    # ── Warmup floor ──
+    # Don't even consider convergence until at least this many seconds
+    # have passed (engine cold start, prefix cache warming, etc.).
     warmup_min_duration_s: int = 30
-    warmup_max_duration_s: int = 180
-    warmup_min_completions_per_user: float = 1.0
+    # Hard ceiling — after this much time we proceed to measurement
+    # whether convergence is detected or not. Better warmup-tail noise
+    # than no data.
+    warmup_max_duration_s: int = 300
+
+    # ── Throughput convergence ──
+    # Replaces the in-flight-CV detector. Compare completions/sec over
+    # two consecutive ``convergence_window_s``-second windows; declare
+    # converged when relative change drops below threshold. Throughput
+    # actually converges (unlike in_flight which oscillates with the
+    # closed-loop cycle period) so this is a meaningful signal.
+    convergence_window_s: int = 60
+    convergence_threshold: float = 0.20
+    # Skip comparison until each window has at least this many
+    # completions — avoids declaring "converged" on noise when the
+    # engine is so slow only a handful of requests have finished.
+    convergence_min_completions_per_window: int = 5
     knee_slope_threshold: float = 0.005
     stop_violation_threshold: float = 0.5
     max_total_duration_minutes: int = 180

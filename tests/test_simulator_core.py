@@ -14,15 +14,22 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import asyncio
+
 from simulator.adaptive import StepResult, choose_next_pool_size
 from simulator.distributions import Discrete, LogNormal, Constant
-from simulator.measurement import _percentile, _wilson_ci
+from simulator.measurement import (
+    _percentile,
+    _wait_for_throughput_convergence,
+    _wilson_ci,
+)
 from simulator.personas import COHORTS, PERSONAS, get_cohort
 from simulator.prefix_cache import (
     TurnRow,
     analyse_rows,
     analyse_sessions,
 )
+from simulator.virtual_user import SharedState
 
 
 # ── Distributions ──────────────────────────────────────────────────────
@@ -281,6 +288,94 @@ def test_prefix_cache_insufficient_data_when_too_few_sessions() -> None:
     rows = [_row("u1", "s1", 0, 1000.0), _row("u1", "s1", 1, 200.0)]
     rep = analyse_rows(rows)
     assert rep.verdict == "insufficient_data"
+
+
+# ── Throughput convergence detector ──────────────────────────────────
+
+
+def _drive_convergence(
+    *, completions_per_second_schedule, monkeypatch,
+    min_warmup_s=2, max_wait_s=30, window_s=3, threshold=0.20,
+    min_completions_per_window=2,
+):
+    """Run the convergence detector against a fake state whose
+    completion count advances on a schedule.
+
+    ``completions_per_second_schedule`` is a list of ints — the number
+    of completions to add at each 1s tick (after ``asyncio.sleep`` is
+    monkey-patched to a no-op so the test is fast).
+    """
+    state = SharedState()
+    schedule = iter(completions_per_second_schedule)
+
+    async def fake_sleep(_seconds):
+        try:
+            inc = next(schedule)
+        except StopIteration:
+            inc = 0
+        # Touch the protected counter directly — tests aren't in an
+        # event loop where state.complete() can be awaited cheaply.
+        state._completed += inc
+
+    # Patch asyncio.sleep AND time.monotonic so the loop's elapsed
+    # check advances without real wall-clock waiting.
+    fake_now = [0.0]
+
+    def fake_monotonic():
+        fake_now[0] += 1.0
+        return fake_now[0]
+
+    import simulator.measurement as m
+    monkeypatch.setattr(m.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(m.time, "monotonic", fake_monotonic)
+
+    return asyncio.run(_wait_for_throughput_convergence(
+        state,
+        min_warmup_s=min_warmup_s,
+        max_wait_s=max_wait_s,
+        window_s=window_s,
+        threshold=threshold,
+        min_completions_per_window=min_completions_per_window,
+    ))
+
+
+def test_convergence_steady_throughput_is_detected(monkeypatch) -> None:
+    """A flat completion stream (5/s every second) should converge once
+    we have two full windows of history."""
+    converged, reason = _drive_convergence(
+        completions_per_second_schedule=[5] * 30,
+        monkeypatch=monkeypatch,
+    )
+    assert converged is True
+    assert "converged" in reason
+
+
+def test_convergence_growing_throughput_is_not_detected(monkeypatch) -> None:
+    """If the completion rate is still climbing (warmup phase), the
+    detector should hold off until the rate flattens."""
+    # Each second, completions/sec doubles: 1, 2, 4, 8, 16... never flat.
+    # max_wait shorter than the schedule needs to flatten.
+    converged, reason = _drive_convergence(
+        completions_per_second_schedule=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512],
+        monkeypatch=monkeypatch,
+        max_wait_s=10,
+    )
+    assert converged is False
+    assert "timed out" in reason
+
+
+def test_convergence_low_throughput_skipped_until_min(monkeypatch) -> None:
+    """If neither window has min_completions_per_window completions,
+    the detector should NOT declare convergence — comparing 1/s vs 0/s
+    would be 100% relative diff but is meaningless."""
+    converged, reason = _drive_convergence(
+        completions_per_second_schedule=[0] * 50,  # nothing ever completes
+        monkeypatch=monkeypatch,
+        max_wait_s=20,
+        min_completions_per_window=2,
+    )
+    assert converged is False
+    assert "throughput too low" in reason or "timed out" in reason
 
 
 def test_prefix_cache_per_persona_breakdown() -> None:

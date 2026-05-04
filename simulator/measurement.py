@@ -83,51 +83,88 @@ def _wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
-async def _wait_for_warmup(
+async def _wait_for_throughput_convergence(
     state: SharedState,
-    pool_size: int,
     *,
-    min_duration_s: int,
-    min_completions_per_user: float,
+    min_warmup_s: int,
     max_wait_s: int,
+    window_s: int,
+    threshold: float,
+    min_completions_per_window: int,
     in_flight_history: list[int] | None = None,
-) -> bool:
-    """Wait until cold-start effects are gone before measurement.
+) -> tuple[bool, str]:
+    """Wait until completion-throughput has converged.
 
-    Two gates, both must be satisfied:
-      * elapsed wall-clock >= ``min_duration_s`` (engine has had time to
-        settle JIT, page cache, prefix cache, etc.)
-      * at least ``min_completions_per_user * pool_size`` requests have
-        completed since the warmup started (every virtual user has
-        cycled through at least N requests, so we're past their first-
-        request cold start)
+    Closed-loop persona workloads have intrinsically bursty in_flight
+    counts (each user oscillates between request and think states), so
+    ``CV(in_flight)`` never converges regardless of threshold or pool
+    size. Throughput (completions/sec) is the right signal: it
+    converges to the system's max sustainable rate as warmup completes.
 
-    The previous implementation watched ``CV(in_flight)`` and waited for
-    it to drop below a threshold. That metric is **fundamentally wrong**
-    for closed-loop persona workloads: each user does request → wait →
-    think → repeat, so ``in_flight`` follows a periodic wave between 0
-    and pool_size at the workload's natural cycle period. The CV never
-    converges, regardless of pool size or threshold. See run logs from
-    the R470 first-light Xeon FP8 attempt for the empirical confirmation.
+    We track per-second snapshots of ``state.completed`` and compare
+    the count of completions in the most-recent ``window_s`` seconds
+    against the count in the previous ``window_s`` seconds. Converged
+    when relative change drops below ``threshold``.
 
-    Returns True if both gates are satisfied within ``max_wait_s``,
-    False otherwise. Caller can choose to proceed anyway on False — the
-    measurement window will still capture useful samples, just with a
-    larger cold-start tail.
+    Both windows must have at least ``min_completions_per_window``
+    completions to be compared — protects against declaring "converged"
+    on noise when the engine is so slow only a handful of requests
+    have finished.
+
+    Returns ``(converged, reason)``. ``converged`` is True if the
+    threshold was crossed within ``max_wait_s``, False otherwise.
+    ``reason`` is a short human-readable explanation for the run log.
+    The caller proceeds to measurement either way — better warmup-tail
+    noise than no data.
     """
     start = time.monotonic()
-    completed_at_start = state.completed
-    target_completions = max(1, int(round(min_completions_per_user * pool_size)))
+    snapshots: deque[int] = deque()
+    snapshots.append(state.completed)
+    last_reason = "still warming up"
 
     while time.monotonic() - start < max_wait_s:
         if in_flight_history is not None:
             in_flight_history.append(state.in_flight)
-        elapsed = time.monotonic() - start
-        new_completions = state.completed - completed_at_start
-        if elapsed >= min_duration_s and new_completions >= target_completions:
-            return True
         await asyncio.sleep(1.0)
-    return False
+        elapsed = time.monotonic() - start
+        snapshots.append(state.completed)
+        # Keep ~2*window_s + 1 entries (one per second).
+        while len(snapshots) > 2 * window_s + 1:
+            snapshots.popleft()
+
+        if elapsed < min_warmup_s:
+            last_reason = f"warmup floor ({elapsed:.0f}s < {min_warmup_s}s)"
+            continue
+        if len(snapshots) < 2 * window_s + 1:
+            last_reason = (
+                f"need {2*window_s}s of history, have {len(snapshots)-1}s"
+            )
+            continue
+
+        # snapshots[0] == count 2*window_s ago; snapshots[-window_s-1] == window_s ago; snapshots[-1] == now.
+        now_completed = snapshots[-1]
+        window_ago = snapshots[-window_s - 1]
+        two_window_ago = snapshots[0]
+        recent = now_completed - window_ago
+        prior = window_ago - two_window_ago
+
+        if recent < min_completions_per_window or prior < min_completions_per_window:
+            last_reason = (
+                f"throughput too low to compare: prior={prior}, "
+                f"recent={recent}, need {min_completions_per_window}"
+            )
+            continue
+
+        rel_diff = abs(recent - prior) / max(recent, prior)
+        last_reason = (
+            f"prior={prior}/{window_s}s ({prior/window_s:.2f} req/s), "
+            f"recent={recent}/{window_s}s ({recent/window_s:.2f} req/s), "
+            f"rel_diff={rel_diff:.3f}"
+        )
+        if rel_diff < threshold:
+            return True, f"converged: {last_reason}"
+
+    return False, f"timed out at {max_wait_s}s: {last_reason}"
 
 
 async def run_measurement_step(
@@ -144,35 +181,42 @@ async def run_measurement_step(
     measurement_timeout_s: int,
     warmup_min_duration_s: int,
     warmup_max_duration_s: int,
-    warmup_min_completions_per_user: float,
+    convergence_window_s: int,
+    convergence_threshold: float,
+    convergence_min_completions_per_window: int,
 ) -> MeasurementResult:
-    """Ramp to target_pool_size, warm up, then measure."""
-    log.info("Step %d: ramping pool to %d", step_index, target_pool_size)
+    """Ramp to target_pool_size with soft-start, await throughput
+    convergence, then measure."""
+    log.info(
+        "Step %d: soft-ramping pool to %d (interval %.1fs)",
+        step_index, target_pool_size, getattr(pool, "_ramp_spawn_interval_s", 0.0),
+    )
     phase_tracker.set(PHASE_RAMPING)
     await pool.set_target_size(target_pool_size)
 
-    # Brief pause for first requests to start
-    await asyncio.sleep(2.0)
-
     phase_tracker.set(PHASE_STABILIZING)  # phase name kept for dashboard back-compat
-    target_completions = max(1, int(round(warmup_min_completions_per_user * target_pool_size)))
     log.info(
-        "Step %d: warming up (>=%ds elapsed, >=%d completions, max %ds)",
-        step_index, warmup_min_duration_s, target_completions, warmup_max_duration_s,
+        "Step %d: awaiting throughput convergence "
+        "(window=%ds, threshold=%.2f, min_warmup=%ds, max_wait=%ds)",
+        step_index, convergence_window_s, convergence_threshold,
+        warmup_min_duration_s, warmup_max_duration_s,
     )
     in_flight_track: list[int] = []
-    warmed = await _wait_for_warmup(
+    converged, reason = await _wait_for_throughput_convergence(
         state,
-        pool_size=target_pool_size,
-        min_duration_s=warmup_min_duration_s,
-        min_completions_per_user=warmup_min_completions_per_user,
+        min_warmup_s=warmup_min_duration_s,
         max_wait_s=warmup_max_duration_s,
+        window_s=convergence_window_s,
+        threshold=convergence_threshold,
+        min_completions_per_window=convergence_min_completions_per_window,
         in_flight_history=in_flight_track,
     )
-    if not warmed:
+    if converged:
+        log.info("Step %d: %s", step_index, reason)
+    else:
         log.warning(
-            "Step %d: warmup gates not met within %ds — measuring anyway",
-            step_index, warmup_max_duration_s,
+            "Step %d: throughput not converged — measuring anyway (%s)",
+            step_index, reason,
         )
 
     # Drain queue of pre-measurement events

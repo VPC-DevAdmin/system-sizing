@@ -43,6 +43,8 @@ class PoolManager:
         rng_seed: int = 0xC0FFEE,
         on_user_terminated=None,
         capture_token_timestamps: bool = False,
+        ramp_spawn_interval_s: float = 1.0,
+        initial_phase_offset_enabled: bool = True,
     ):
         self.cohort = cohort
         self.client = client
@@ -57,6 +59,8 @@ class PoolManager:
         self._stopped = False
         self._on_user_terminated = on_user_terminated
         self._capture_token_timestamps = capture_token_timestamps
+        self._ramp_spawn_interval_s = ramp_spawn_interval_s
+        self._initial_phase_offset_enabled = initial_phase_offset_enabled
 
     @property
     def target_size(self) -> int:
@@ -91,10 +95,26 @@ class PoolManager:
                 pass
 
     async def set_target_size(self, n: int) -> None:
+        """Ramp the pool to ``n`` users with a soft-start.
+
+        Spawns at most one user per ``ramp_spawn_interval_s``. This
+        avoids the synchronised burst that an instantaneous spawn
+        produces (all N users firing their first request on the same
+        event-loop tick). Combined with each user's random initial
+        phase offset, requests are staggered across the cycle from
+        the moment ramping completes.
+        """
         self._target_size = n
-        # Spawn up to target
+        spawned_this_ramp = 0
         while not self._stopped and len(self._users) < n:
             self._spawn_one(replaced_user_id=None)
+            spawned_this_ramp += 1
+            if len(self._users) >= n:
+                break
+            # Don't sleep on the very first spawn of a totally-empty pool —
+            # that's just dead time. Pace subsequent spawns.
+            if self._ramp_spawn_interval_s > 0:
+                await asyncio.sleep(self._ramp_spawn_interval_s)
         # If shrinking, cancel surplus (rare in adaptive ramping)
         if len(self._users) > n:
             surplus = len(self._users) - n
@@ -137,6 +157,7 @@ class PoolManager:
                 request_timeout_s=self.request_timeout_s,
                 cancel_event=cancel_event,
                 capture_token_timestamps=self._capture_token_timestamps,
+                initial_phase_offset_enabled=self._initial_phase_offset_enabled,
             ),
             name=f"vu:{persona_id}:{user_id[:8]}",
         )

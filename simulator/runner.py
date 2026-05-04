@@ -103,6 +103,8 @@ async def run_cohort(
         request_timeout_s=cfg.simulation.request_timeout_s,
         on_user_terminated=lambda s: user_termination_buffer.append(s),
         capture_token_timestamps=cfg.simulation.enable_token_timestamps,
+        ramp_spawn_interval_s=cfg.simulation.ramp_spawn_interval_s,
+        initial_phase_offset_enabled=cfg.simulation.initial_phase_offset_enabled,
     )
     pool.start()
 
@@ -170,7 +172,9 @@ async def run_cohort(
                 measurement_timeout_s=cfg.simulation.measurement_timeout_s,
                 warmup_min_duration_s=cfg.simulation.warmup_min_duration_s,
                 warmup_max_duration_s=cfg.simulation.warmup_max_duration_s,
-                warmup_min_completions_per_user=cfg.simulation.warmup_min_completions_per_user,
+                convergence_window_s=cfg.simulation.convergence_window_s,
+                convergence_threshold=cfg.simulation.convergence_threshold,
+                convergence_min_completions_per_window=cfg.simulation.convergence_min_completions_per_window,
             )
 
             # Persist any user terminations seen

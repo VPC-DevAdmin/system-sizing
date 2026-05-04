@@ -119,6 +119,7 @@ async def run_virtual_user(
     request_timeout_s: int,
     cancel_event: asyncio.Event,
     capture_token_timestamps: bool = False,
+    initial_phase_offset_enabled: bool = True,
 ) -> None:
     """Run one virtual user to completion (or until cancelled)."""
     sessions_target = stats.sessions_target
@@ -126,6 +127,23 @@ async def run_virtual_user(
     history_token_count = 0
 
     try:
+        # Random initial phase offset: sleep for a uniform-random
+        # fraction of one think-time sample before issuing the first
+        # request. Without this, all users spawned in the same ramp
+        # burst hit /chat on the same event-loop tick and stay
+        # synchronised for many cycles. With it, users land
+        # distributed across the request/think cycle from the moment
+        # they start.
+        if initial_phase_offset_enabled:
+            sample = persona.think_time_seconds.sample(rng)
+            offset = sample * rng.random()
+            if offset > 0:
+                try:
+                    await asyncio.wait_for(cancel_event.wait(), timeout=offset)
+                    return  # cancelled mid-offset
+                except asyncio.TimeoutError:
+                    pass
+
         for session_index in range(sessions_target):
             if cancel_event.is_set():
                 break

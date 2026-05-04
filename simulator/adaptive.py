@@ -54,36 +54,63 @@ def choose_next_pool_size(
     max_pool_size: int,
     knee_slope_threshold: float,
     stop_violation_threshold: float,
+    knee_zone_threshold: float = 0.20,
     min_bisect_gap: int = 8,
 ) -> int | None:
     """Pick the next pool size, or None to stop the ramp.
 
-    See module docstring for the two-phase strategy.
+    Two distinct thresholds gate behaviour:
+
+    * ``stop_violation_threshold`` — the upper bound. We never measure
+      above any pool size that produced a violation rate ≥ this value
+      (default 0.5).
+    * ``knee_zone_threshold`` — the bisection trigger. Once any
+      measurement crosses this (default 0.20, matching ``capacity_status
+      == 'fail'``), the stepper switches from coarse-ramp to bisection
+      mode. Without this, a measurement at 36% violation would not be
+      treated as a "fail" by the bisector — we'd fall through to the
+      coarse-ramp slope logic and could end up DOUBLING past the knee
+      because a subsequent (noisy) low-violation measurement made the
+      slope-based step think we were back in safe territory.
     """
     if not history:
         return initial_pool_size
 
     last = history[-1]
     measured: set[int] = {h.pool_size for h in history}
-    fails = sorted(h.pool_size for h in history if h.violation_rate >= stop_violation_threshold)
-    passes = sorted(h.pool_size for h in history if h.violation_rate < stop_violation_threshold)
+    # Hard fails (≥ stop_violation_threshold) — we won't measure higher.
+    hard_fails = sorted(
+        h.pool_size for h in history if h.violation_rate >= stop_violation_threshold
+    )
+    # Knee-zone brackets — anything past the knee_zone_threshold is in
+    # or near the knee. Bisection bounds the knee from above using these.
+    cliff_brackets = sorted(
+        h.pool_size for h in history if h.violation_rate >= knee_zone_threshold
+    )
+    safe = sorted(
+        h.pool_size for h in history if h.violation_rate < knee_zone_threshold
+    )
 
     # ── Bisection phase ──────────────────────────────────────────────
-    # Active once we have at least one fail measurement. Bisect between
-    # the largest known pass and the smallest known fail until the gap
-    # is below ``min_bisect_gap`` (or no unmeasured midpoint remains).
-    if fails:
-        smallest_fail = fails[0]
-        passes_below_fail = [p for p in passes if p < smallest_fail]
-        if passes_below_fail:
-            largest_pass = passes_below_fail[-1]
-            gap = smallest_fail - largest_pass
+    # Active once any measurement has crossed knee_zone_threshold.
+    # Bisect between the largest safe pool size and the smallest cliff
+    # bracket until the gap is below ``min_bisect_gap``.
+    if cliff_brackets:
+        # Don't propose pool sizes above hard_fails either — clamp.
+        bracket_upper = (
+            min(cliff_brackets[0], hard_fails[0])
+            if hard_fails else cliff_brackets[0]
+        )
+        safe_below = [p for p in safe if p < bracket_upper]
+        if safe_below:
+            largest_safe = safe_below[-1]
+            gap = bracket_upper - largest_safe
             if gap > min_bisect_gap:
-                mid = (largest_pass + smallest_fail) // 2
-                if mid not in measured and largest_pass < mid < smallest_fail:
+                mid = (largest_safe + bracket_upper) // 2
+                if mid not in measured and largest_safe < mid < bracket_upper:
                     return mid
-        # No pass below the smallest fail (initial step itself failed)
-        # — nothing to bisect against. Stop.
+        # No safe pool below the bracket (initial step itself was in the
+        # knee zone) or gap is below resolution floor — stop.
         return None
 
     # ── Coarse-ramp phase ────────────────────────────────────────────

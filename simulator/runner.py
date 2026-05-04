@@ -152,6 +152,7 @@ async def run_cohort(
             max_pool_size=cfg.simulation.max_pool_size,
             knee_slope_threshold=cfg.simulation.knee_slope_threshold,
             stop_violation_threshold=cfg.simulation.stop_violation_threshold,
+            knee_zone_threshold=cfg.simulation.knee_zone_threshold,
         )
         while next_size is not None:
             if time.monotonic() - run_started > max_total_s:
@@ -196,6 +197,7 @@ async def run_cohort(
                 max_pool_size=cfg.simulation.max_pool_size,
                 knee_slope_threshold=cfg.simulation.knee_slope_threshold,
                 stop_violation_threshold=cfg.simulation.stop_violation_threshold,
+                knee_zone_threshold=cfg.simulation.knee_zone_threshold,
             )
     except KeyboardInterrupt:
         final_status = "interrupted"

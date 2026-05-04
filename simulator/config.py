@@ -178,6 +178,13 @@ class SimulationConfig:
     convergence_min_completions_per_window: int = 5
     knee_slope_threshold: float = 0.005
     stop_violation_threshold: float = 0.5
+    # Above this violation rate, the adaptive stepper switches from
+    # coarse-ramp doubling to bisection. Distinct from
+    # stop_violation_threshold (the upper measurement bound) so that
+    # marginal-zone measurements (e.g. 36% violation) bracket the knee
+    # without halting further measurement. Default 0.20 matches the
+    # ``capacity_status='fail'`` boundary in measurement.py.
+    knee_zone_threshold: float = 0.20
     max_total_duration_minutes: int = 180
     enable_token_timestamps: bool = False
     snapshot_interval_s: int = 1

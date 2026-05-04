@@ -236,6 +236,40 @@ def test_adaptive_no_bisect_when_initial_step_fails() -> None:
     assert nxt is None
 
 
+def test_adaptive_doesnt_double_past_marginal_step() -> None:
+    """Regression: R470 first-light Xeon FP8 run produced this exact
+    trace and the stepper jumped to pool=110 from pool=55, completely
+    overshooting the knee that pool=64 had already revealed at 36%
+    violation. The bug: stop_violation_threshold=0.5 gates the
+    bisection state machine, so 36% (≥ 'fail' but < stop) didn't
+    bracket the knee. A subsequent noisy 2% pass at pool=55 then made
+    the slope-based logic 'double' to 110.
+
+    Fix: knee_zone_threshold (default 0.20) is a separate trigger.
+    Anything past it brackets the knee and the stepper bisects
+    instead of doubling, regardless of whether stop has been hit."""
+    hist = [
+        StepResult(pool_size=8, violation_rate=0.00),
+        StepResult(pool_size=16, violation_rate=0.00),
+        StepResult(pool_size=32, violation_rate=0.00),
+        StepResult(pool_size=64, violation_rate=0.36),  # cliff bracket (≥ 0.20)
+        StepResult(pool_size=48, violation_rate=0.06),
+        StepResult(pool_size=52, violation_rate=0.12),
+        StepResult(pool_size=55, violation_rate=0.02),  # noise rebound
+    ]
+    nxt = choose_next_pool_size(
+        hist, initial_pool_size=8, max_pool_size=256,
+        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+        knee_zone_threshold=0.20,
+    )
+    # smallest cliff bracket = 64; largest safe (viol < 0.20) below 64 = 55;
+    # gap = 9 > 8 → bisect to (55+64)//2 = 59. Definitely NOT 110.
+    assert nxt == 59, (
+        f"expected bisection to 59 (between safe 55 and cliff 64), "
+        f"got {nxt}"
+    )
+
+
 def test_adaptive_doesnt_repeat_already_measured_pool_size() -> None:
     """If bisection's chosen midpoint coincides with a pool size we've
     already measured (rare but possible), stop rather than measure it

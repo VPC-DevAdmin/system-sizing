@@ -26,7 +26,7 @@ The headline workflow is `ready` → `run-cohort` → `dashboard` → `export`. 
 | `make ready CONFIG=...` | Idempotent: pip install, build engine docker image (SGLang only) if missing, download model if missing, validate hardware. |
 | `make run-persona CONFIG=... PERSONA=...` | Run one **persona** (a single user archetype) end-to-end. |
 | `make run-cohort CONFIG=... COHORT=...` | Run one **cohort** (a team mix of personas) end-to-end. |
-| `make run-sweep CONFIG=... [SWEEP_TYPE=...]` | Sweep multiple workloads. `SWEEP_TYPE` accepts `all` (default — every persona + every cohort), `personas`, `cohorts`, or a comma-separated list of persona/cohort ids. |
+| `make run-sweep CONFIG=... [SWEEP_TYPE=...] [RESUME=1]` | Sweep multiple workloads. `SWEEP_TYPE` accepts `all` (default — every persona + every cohort), `personas`, `cohorts`, or a comma-separated list of persona/cohort ids. `RESUME=1` skips workloads that already have a completed run (`final_status='ok'`) for this engine + model combo — use it after an interrupted sweep. |
 | `make run-*-bg ...` | Background variants (`run-cohort-bg`, `run-persona-bg`, `run-sweep-bg`). Uses `nohup` and writes a dated `.log` under `runs/`; survives SSH disconnects. |
 | `make tail-log` | Tail the most-recent background-run log (auto-picks the latest). |
 | `make stop-bg` | Kill any running simulator background process and its engine containers. |

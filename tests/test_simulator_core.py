@@ -465,6 +465,83 @@ def test_resolve_workload_group_rejects_unknown_id() -> None:
         resolve_workload_group("quick_lookup,some_typo")
 
 
+def test_find_completed_runs_returns_only_ok_status(tmp_path) -> None:
+    """``find_completed_runs`` is the source of truth for resume:
+    workloads with ``final_status='ok'`` are skipped on a --resume
+    sweep, anything else is retried. Pin all four states (ok,
+    interrupted, no_samples, null/in-progress) and confirm only ok
+    counts as 'completed'."""
+    from simulator.database import Database
+    from simulator.runner import find_completed_runs
+
+    states = [
+        ("quick_lookup", "ok"),
+        ("conversational", "interrupted"),
+        ("drafter", "no_samples"),
+        ("document_qa", None),  # still in-progress, never finalised
+    ]
+    for cohort_id, status in states:
+        db_path = tmp_path / f"{cohort_id}.db"
+        db = Database(db_path)
+        db.insert_run(
+            cohort_run_id=cohort_id,
+            started_at="2026-01-01T00:00:00Z",
+            engine_type="vllm",
+            model_id="Qwen/Test",
+            cohort_id=cohort_id,
+            cohort_definition={},
+            config={},
+        )
+        if status is not None:
+            db.finalise_run(cohort_id, "2026-01-01T01:00:00Z", status)
+        db.close()
+
+    completed = find_completed_runs(tmp_path, "vllm", "Qwen/Test")
+    assert completed == {"quick_lookup"}, (
+        "only final_status='ok' should count as completed; "
+        f"got {completed}"
+    )
+
+
+def test_find_completed_runs_filters_by_engine_and_model(tmp_path) -> None:
+    """Resume must NOT skip a cohort because it was completed against
+    a different engine or model — those are different measurements."""
+    from simulator.database import Database
+    from simulator.runner import find_completed_runs
+
+    cases = [
+        ("vllm", "Qwen/A", "chat_heavy"),
+        ("vllm", "Qwen/B", "chat_heavy"),  # different model
+        ("sglang", "Qwen/A", "chat_heavy"),  # different engine
+    ]
+    for engine_type, model_id, cohort_id in cases:
+        db_path = tmp_path / f"{engine_type}_{model_id.replace('/', '_')}.db"
+        db = Database(db_path)
+        db.insert_run(
+            cohort_run_id=f"{engine_type}-{model_id}",
+            started_at="2026-01-01T00:00:00Z",
+            engine_type=engine_type,
+            model_id=model_id,
+            cohort_id=cohort_id,
+            cohort_definition={},
+            config={},
+        )
+        db.finalise_run(f"{engine_type}-{model_id}", "2026-01-01T01:00:00Z", "ok")
+        db.close()
+
+    # Only the (vllm, Qwen/A) run counts.
+    assert find_completed_runs(tmp_path, "vllm", "Qwen/A") == {"chat_heavy"}
+    assert find_completed_runs(tmp_path, "vllm", "Qwen/B") == {"chat_heavy"}
+    assert find_completed_runs(tmp_path, "sglang", "Qwen/A") == {"chat_heavy"}
+    # And not for other combos.
+    assert find_completed_runs(tmp_path, "sglang", "Qwen/B") == set()
+
+
+def test_find_completed_runs_handles_empty_dir(tmp_path) -> None:
+    from simulator.runner import find_completed_runs
+    assert find_completed_runs(tmp_path, "vllm", "Qwen/Test") == set()
+
+
 def test_resolve_workload_group_empty_arg_defaults_to_all() -> None:
     from simulator.personas import COHORTS, PERSONAS, resolve_workload_group
     p, c = resolve_workload_group("")

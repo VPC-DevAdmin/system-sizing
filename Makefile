@@ -124,6 +124,7 @@ run-sweep:
 	$(PY) -m simulator.cli sweep \
 		--config $(CONFIG) \
 		--type $(SWEEP_TYPE) \
+		$(if $(RESUME),--resume) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
 		$(if $(MODEL),--model $(MODEL))
 
@@ -174,6 +175,7 @@ run-sweep-bg:
 	nohup $(PY) -m simulator.cli sweep \
 		--config $(CONFIG) \
 		--type $(SWEEP_TYPE) \
+		$(if $(RESUME),--resume) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
 		$(if $(MODEL),--model $(MODEL)) \
 		>"$$LOG" 2>&1 & \

@@ -93,6 +93,15 @@ def sweep(
             "(``quick_lookup,chat_heavy``)."
         ),
     ),
+    resume: bool = typer.Option(
+        False, "--resume",
+        help=(
+            "Skip personas/cohorts that already have a completed run "
+            "(final_status='ok') for this engine + model in the run "
+            "dir. Use this to recover from an interrupted sweep "
+            "without re-running the parts that already succeeded."
+        ),
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Run multiple personas + cohorts back-to-back against one engine.
@@ -110,7 +119,9 @@ def sweep(
         raise typer.BadParameter(f"Nothing resolved from --type={type!r}")
 
     from .runner import run_sweep
-    paths = asyncio.run(run_sweep(cfg, persona_ids=persona_ids, cohort_ids=cohort_ids))
+    paths = asyncio.run(run_sweep(
+        cfg, persona_ids=persona_ids, cohort_ids=cohort_ids, resume=resume,
+    ))
     typer.echo(
         f"Sweep complete: {len(paths)} runs "
         f"({len(persona_ids)} personas + {len(cohort_ids)} cohorts)"

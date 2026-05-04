@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
@@ -303,22 +304,83 @@ def _flush_users(db: Database, cohort_run_id: str, buffer: list) -> None:
         })
 
 
+def find_completed_runs(
+    runs_dir: Path,
+    engine_type: str,
+    model_id: str,
+) -> set[str]:
+    """Return the set of cohort_ids that have a completed run for the
+    given (engine_type, model_id) combo in ``runs_dir``.
+
+    A run counts as completed iff ``cohort_run.final_status == 'ok'``.
+    Other statuses — ``interrupted`` (Ctrl-C / SSH disconnect),
+    ``time_limit`` (max duration hit), ``no_samples`` / ``unstable``
+    (didn't capture useful data) — are deliberately NOT skipped: those
+    are exactly the runs the user probably wants to retry. The cohort
+    DBs from interrupted runs aren't deleted; they're available for
+    inspection / export, just not counted as "done."
+    """
+    completed: set[str] = set()
+    for db_path in runs_dir.glob("*.db"):
+        try:
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                row = conn.execute(
+                    "SELECT cohort_id FROM cohort_run "
+                    "WHERE engine_type = ? AND model_id = ? "
+                    "AND final_status = 'ok'",
+                    (engine_type, model_id),
+                ).fetchone()
+                if row is not None:
+                    completed.add(row[0])
+        except sqlite3.Error:
+            continue
+    return completed
+
+
 async def run_sweep(
     cfg: Config,
     persona_ids: list[str] | None = None,
     cohort_ids: list[str] | None = None,
+    *,
+    resume: bool = False,
 ) -> list[Path]:
     """Run multiple personas + cohorts back-to-back against the same engine.
 
     Personas run first (each as an ephemeral one-persona Cohort), then
     cohorts. The engine is launched once and stays up across the sweep.
+
+    With ``resume=True``, skip personas/cohorts that already have a
+    completed run (``final_status='ok'``) for this engine_type +
+    model_id combo in ``cfg.output.db_directory``. Use this to recover
+    from an interrupted long sweep without re-running the parts that
+    already succeeded.
     """
     from .personas import cohort_from_persona
 
-    persona_ids = persona_ids or []
-    cohort_ids = cohort_ids or []
+    persona_ids = list(persona_ids or [])
+    cohort_ids = list(cohort_ids or [])
     if not persona_ids and not cohort_ids:
         raise ValueError("run_sweep requires at least one persona_id or cohort_id")
+
+    if resume:
+        completed = find_completed_runs(
+            Path(cfg.output.db_directory),
+            cfg.engine.type,
+            cfg.engine.model_id,
+        )
+        skipped_p = [p for p in persona_ids if p in completed]
+        skipped_c = [c for c in cohort_ids if c in completed]
+        persona_ids = [p for p in persona_ids if p not in completed]
+        cohort_ids = [c for c in cohort_ids if c not in completed]
+        if skipped_p or skipped_c:
+            log.info(
+                "Resume: skipping %d already-completed (%s)",
+                len(skipped_p) + len(skipped_c),
+                ", ".join(skipped_p + skipped_c),
+            )
+        if not persona_ids and not cohort_ids:
+            log.info("Resume: nothing to do — all workloads already completed")
+            return []
 
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)

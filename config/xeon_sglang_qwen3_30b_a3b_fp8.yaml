@@ -77,19 +77,38 @@ engine:
     notes: "SGLang CPU FP8 path needs Intel AMX (unavailable on EPYC)"
 
 simulation:
-  initial_pool_size: 2
+  # Sizing is tuned for slow CPU inference of a 30B MoE.
+  # ── initial_pool_size ──
+  # Closed-loop chat workloads have in-flight ≈ Binomial(pool, duty)
+  # where duty = request_time / (request_time + think_time). For this
+  # cohort + this engine that's ≈ 0.33 (10s req, 20s think). Pool=2
+  # gives mean in-flight 0.66, std 0.67 — CV ≈ 1.0 every measurement
+  # interval. Stabilisation is mathematically impossible at small pool
+  # sizes; start at 8 so the in-flight count is meaningfully > 0 most
+  # of the time and the variance is bounded.
+  initial_pool_size: 8
   max_pool_size: 256
-  target_samples_per_step: 300
-  measurement_timeout_s: 360
-  stabilization_cv_threshold: 0.15
-  stabilization_min_duration_s: 60
-  stabilization_max_duration_s: 300
+  # ── target_samples_per_step ──
+  # 300 samples × 30s/sample = 2.5 hours per measurement step at pool=8.
+  # For a first-light run, 50 samples (~25 min) gives a usable point on
+  # the curve. Bump back up once the loop is proven.
+  target_samples_per_step: 50
+  measurement_timeout_s: 600
+  # ── stabilisation thresholds ──
+  # The original 0.15 was tuned for Poisson high-concurrency GPU
+  # workloads. Closed-loop CPU workloads can't hit that — for CV<0.15
+  # at duty=0.33 you'd need pool≈50. Relax to 0.5 so steady-state at
+  # pool 8-16 is reachable; min-duration shortened from 60s to 30s
+  # since per-request time is already ~30s.
+  stabilization_cv_threshold: 0.5
+  stabilization_min_duration_s: 30
+  stabilization_max_duration_s: 180
   knee_slope_threshold: 0.005
   stop_violation_threshold: 0.5
   max_total_duration_minutes: 240
   enable_token_timestamps: false
   snapshot_interval_s: 1
-  request_timeout_s: 360
+  request_timeout_s: 600
 
 telemetry:
   enable_pmu: true

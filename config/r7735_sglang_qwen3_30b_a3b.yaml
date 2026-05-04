@@ -65,19 +65,23 @@ engine:
   sglang_extra_env: {}
 
 simulation:
-  initial_pool_size: 2          # MoE is slower per-request than dense 7B
+  # See xeon_sglang_qwen3_30b_a3b_fp8.yaml for the math behind these
+  # values — closed-loop chat workloads with long think-times can't
+  # reach CV<0.15 at small pool sizes, so we relax both the threshold
+  # and start with a meaningful pool.
+  initial_pool_size: 8
   max_pool_size: 256
-  target_samples_per_step: 300
-  measurement_timeout_s: 360
-  stabilization_cv_threshold: 0.15
-  stabilization_min_duration_s: 60
-  stabilization_max_duration_s: 300
+  target_samples_per_step: 50
+  measurement_timeout_s: 600
+  stabilization_cv_threshold: 0.5
+  stabilization_min_duration_s: 30
+  stabilization_max_duration_s: 180
   knee_slope_threshold: 0.005
   stop_violation_threshold: 0.5
   max_total_duration_minutes: 240
   enable_token_timestamps: false
   snapshot_interval_s: 1
-  request_timeout_s: 360
+  request_timeout_s: 600
 
 telemetry:
   enable_pmu: true

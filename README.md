@@ -99,7 +99,7 @@ runs/
 Every invocation writes into a numbered `run_NN/` subdirectory and
 all cohort/persona invocations against that run share a single
 `run.db` — the schema keys every row by `cohort_run_id` so cohorts
-don't interfere. Default behaviour is **resume**: the latest
+don't interfere. Schema reference: [docs/database_schema.md](docs/database_schema.md). Default behaviour is **resume**: the latest
 `run_NN/` is reused, and `make run-sweep` skips personas/cohorts that
 already have `final_status='ok'` inside it. Pass `RUN_NEW=true` to
 cut a fresh `run_NN+1/`. `make dashboard`, `make export`, and

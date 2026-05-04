@@ -156,6 +156,104 @@ def test_adaptive_returns_none_at_max_when_already_there() -> None:
     assert nxt is None
 
 
+def test_adaptive_bisects_after_first_cliff_crossing() -> None:
+    """Original bug: the run jumped 32 → 64 and pool=64 came in at
+    66% violation. The stepper returned None instead of bisecting,
+    leaving the knee unlocalised between 32 and 64. Fix: detect the
+    failing measurement and bisect to the midpoint."""
+    hist = [
+        StepResult(pool_size=8, violation_rate=0.0),
+        StepResult(pool_size=16, violation_rate=0.0),
+        StepResult(pool_size=32, violation_rate=0.0),
+        StepResult(pool_size=64, violation_rate=0.66),
+    ]
+    nxt = choose_next_pool_size(
+        hist, initial_pool_size=8, max_pool_size=256,
+        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+    )
+    assert nxt == 48, f"expected midpoint of 32 and 64, got {nxt}"
+
+
+def test_adaptive_iteratively_narrows_knee() -> None:
+    """Bisect down from a fail-bracket to localise the knee further.
+
+    32 passed, 64 failed → previous step bisected to 48. If 48 also
+    fails, knee is between 32 and 48 — bisect again to 40.
+    """
+    hist = [
+        StepResult(pool_size=32, violation_rate=0.0),
+        StepResult(pool_size=64, violation_rate=0.66),
+        StepResult(pool_size=48, violation_rate=0.55),
+    ]
+    nxt = choose_next_pool_size(
+        hist, initial_pool_size=8, max_pool_size=256,
+        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+    )
+    # smallest fail = 48; largest pass below = 32; gap = 16 > 8 → bisect to 40
+    assert nxt == 40
+
+
+def test_adaptive_bisects_upward_when_bisect_passed() -> None:
+    """If the bisect itself passed, the knee is between the bisect and
+    the original fail. Continue bisecting upward from there."""
+    hist = [
+        StepResult(pool_size=32, violation_rate=0.0),
+        StepResult(pool_size=64, violation_rate=0.66),
+        StepResult(pool_size=48, violation_rate=0.10),
+    ]
+    nxt = choose_next_pool_size(
+        hist, initial_pool_size=8, max_pool_size=256,
+        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+    )
+    # smallest fail = 64; largest pass below = 48; gap = 16 > 8 → bisect to 56
+    assert nxt == 56
+
+
+def test_adaptive_stops_when_bisect_gap_below_threshold() -> None:
+    """Resolution floor: don't bisect when the pass→fail gap is
+    already small enough that further refinement isn't useful."""
+    hist = [
+        StepResult(pool_size=32, violation_rate=0.0),
+        StepResult(pool_size=40, violation_rate=0.55),
+    ]
+    nxt = choose_next_pool_size(
+        hist, initial_pool_size=8, max_pool_size=256,
+        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+        min_bisect_gap=8,
+    )
+    # Gap is 8 — at the threshold (NOT > min_bisect_gap), stop.
+    assert nxt is None
+
+
+def test_adaptive_no_bisect_when_initial_step_fails() -> None:
+    """If even the very first step crosses the threshold there's no
+    pass to bisect against. Stop instead of looping."""
+    hist = [StepResult(pool_size=8, violation_rate=0.7)]
+    nxt = choose_next_pool_size(
+        hist, initial_pool_size=8, max_pool_size=256,
+        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+    )
+    assert nxt is None
+
+
+def test_adaptive_doesnt_repeat_already_measured_pool_size() -> None:
+    """If bisection's chosen midpoint coincides with a pool size we've
+    already measured (rare but possible), stop rather than measure it
+    again."""
+    hist = [
+        StepResult(pool_size=32, violation_rate=0.0),
+        StepResult(pool_size=48, violation_rate=0.10),
+        StepResult(pool_size=64, violation_rate=0.66),
+        StepResult(pool_size=56, violation_rate=0.55),
+    ]
+    nxt = choose_next_pool_size(
+        hist, initial_pool_size=8, max_pool_size=256,
+        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+    )
+    # smallest fail = 56; largest pass below = 48; gap = 8 → at threshold, stop
+    assert nxt is None
+
+
 # ── Statistics helpers ────────────────────────────────────────────────
 
 

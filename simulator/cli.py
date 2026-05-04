@@ -153,10 +153,12 @@ def ready_cmd(
     typer.echo(f"==> Preparing for {config}")
     typer.echo(f"    engine={cfg.engine.type} model={cfg.engine.model_id}")
 
-    # 1. Engine-specific image prep (SGLang only — vLLM uses pip-installed
-    #    runtime, no docker dance needed).
+    # 1. Engine-specific image prep.
     if cfg.engine.type == "sglang" and not skip_build:
         _ensure_sglang_image(cfg.engine.docker_image)
+    elif cfg.engine.type == "vllm_dual_socket" and not skip_build:
+        _ensure_pulled_image(cfg.engine.vllm_image)
+        _ensure_pulled_image(cfg.engine.litellm_image)
 
     # 2. Model staging (only when the config points at a local mount).
     if not skip_download:
@@ -171,6 +173,20 @@ def ready_cmd(
         sys.exit(2)
 
     typer.echo(f"==> Ready: {config}")
+
+
+def _ensure_pulled_image(image: str) -> None:
+    """For images that exist on a public registry (no local build needed),
+    just ``docker pull`` if absent."""
+    import subprocess
+    inspect = subprocess.run(
+        ["docker", "image", "inspect", image], capture_output=True,
+    )
+    if inspect.returncode == 0:
+        typer.echo(f"==> Docker image {image} present, skipping pull")
+        return
+    typer.echo(f"==> Pulling {image}")
+    subprocess.run(["docker", "pull", image], check=True)
 
 
 def _ensure_sglang_image(image: str) -> None:

@@ -91,7 +91,7 @@ async def run_cohort(
     state = SharedState()
     phase_tracker = PhaseTracker()
     corpus = TokenCorpus(cfg.engine.model_id)
-    client = AsyncOpenAI(base_url=engine.base_url, api_key="EMPTY")
+    client = AsyncOpenAI(base_url=engine.base_url, api_key=engine.api_key)
 
     user_termination_buffer: list = []
     pool = PoolManager(

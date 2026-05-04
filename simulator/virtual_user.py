@@ -181,6 +181,13 @@ async def run_virtual_user(
                             max_tokens=output_tokens_target,
                             stream=True,
                             temperature=0.7,
+                            # ``session_id`` is what LiteLLM hashes for
+                            # sticky routing across multiple backend
+                            # replicas — keeping a user's full
+                            # conversation history on one backend
+                            # preserves prefix-cache locality. Direct
+                            # vLLM / SGLang ignore the unknown field.
+                            extra_body={"session_id": stats.user_id},
                         ),
                         timeout=request_timeout_s,
                     )

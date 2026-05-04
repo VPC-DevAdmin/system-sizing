@@ -75,6 +75,101 @@ def test_flatten_for_taskset_keeps_disjoint_runs_separate() -> None:
     assert flatten_for_taskset("0-3|8-11") == "0-3,8-11"
 
 
+def test_vllm_dual_socket_config_loads_with_replicas() -> None:
+    """The R7735 dual-socket config has a replicas list — yaml gives us
+    list[dict], the loader must convert to ReplicaConfig instances or
+    the engine sees garbage."""
+    from simulator.config import load_config, ReplicaConfig
+    cfg = load_config("config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml")
+    assert cfg.engine.type == "vllm_dual_socket"
+    assert len(cfg.engine.replicas) == 2
+    assert all(isinstance(r, ReplicaConfig) for r in cfg.engine.replicas)
+    r0, r1 = cfg.engine.replicas
+    # Pinning must NOT include SMT siblings (cores 64-127 on this box).
+    assert r0.cpuset_cpus == "0-31"
+    assert r0.cpuset_mems == "0"
+    assert r1.cpuset_cpus == "32-63"
+    assert r1.cpuset_mems == "1"
+    # Per-replica OMP env must mirror the cpuset exactly (mismatch
+    # silently kills BF16 throughput).
+    assert r0.env["VLLM_CPU_OMP_THREADS_BIND"] == "0-31"
+    assert r1.env["VLLM_CPU_OMP_THREADS_BIND"] == "32-63"
+
+
+def test_vllm_dual_socket_engine_command_shape() -> None:
+    """Exercise the per-replica docker run command construction without
+    actually launching containers — pin the flags that the working
+    runbook proved out."""
+    from simulator.config import load_config
+    from simulator.engines.vllm_dual_socket import VllmDualSocketEngine
+
+    cfg = load_config("config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml")
+    eng = VllmDualSocketEngine(cfg.engine)
+    r0 = cfg.engine.replicas[0]
+    cmd = eng._build_replica_command(r0, "test-r0")
+
+    # Critical NUMA + security flags from the runbook
+    assert "--cpuset-cpus" in cmd
+    assert "0-31" in cmd
+    assert "--cpuset-mems" in cmd
+    assert "0" in cmd
+    assert "--security-opt" in cmd
+    assert "seccomp=unconfined" in cmd
+    assert "--cap-add" in cmd
+    assert "SYS_NICE" in cmd
+    # vLLM-specific env flow-through
+    assert any("VLLM_CPU_KVCACHE_SPACE=80" in s for s in cmd)
+    assert any("VLLM_CPU_OMP_THREADS_BIND=0-31" in s for s in cmd)
+    # vLLM serve flags
+    assert "--dtype" in cmd and "bfloat16" in cmd
+    assert "--max-model-len" in cmd and "8192" in cmd
+    assert "--port" in cmd and "8000" in cmd
+    assert "--served-model-name" in cmd and "qwen3_30b_a3b" in cmd
+
+
+def test_vllm_dual_socket_litellm_config_yaml() -> None:
+    """The generated LiteLLM config must register both replicas under
+    the same model_name (so it routes between them) with the right
+    api_base URLs."""
+    from simulator.config import load_config
+    from simulator.engines.vllm_dual_socket import VllmDualSocketEngine
+    import tempfile
+    from pathlib import Path
+    import yaml as _y
+
+    cfg = load_config("config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml")
+    eng = VllmDualSocketEngine(cfg.engine)
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w+", delete=False) as f:
+        path = Path(f.name)
+    eng._write_litellm_config(path)
+    doc = _y.safe_load(path.read_text())
+    path.unlink()
+
+    assert len(doc["model_list"]) == 2
+    names = {entry["model_name"] for entry in doc["model_list"]}
+    bases = {entry["litellm_params"]["api_base"] for entry in doc["model_list"]}
+    assert names == {"qwen3_30b_a3b"}, "both replicas must share served_model_name"
+    assert bases == {
+        "http://127.0.0.1:8000/v1", "http://127.0.0.1:8001/v1",
+    }
+    assert doc["router_settings"]["routing_strategy"] == "session-state-based"
+    assert doc["general_settings"]["master_key"] == "sk-local-dev-only"
+
+
+def test_vllm_dual_socket_engine_exposes_litellm_endpoint_and_api_key() -> None:
+    """The simulator's runner reads ``engine.base_url`` and
+    ``engine.api_key`` to build the AsyncOpenAI client. For the
+    dual-socket engine, base_url must point at the LiteLLM proxy and
+    api_key at the master key — direct vLLM ports must NOT be exposed."""
+    from simulator.config import load_config
+    from simulator.engines.vllm_dual_socket import VllmDualSocketEngine
+
+    cfg = load_config("config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml")
+    eng = VllmDualSocketEngine(cfg.engine)
+    assert eng.base_url == "http://127.0.0.1:4000/v1"
+    assert eng.api_key == "sk-local-dev-only"
+
+
 def test_flatten_for_taskset_returns_none_for_empty_input() -> None:
     """Caller treats None as 'don't wrap with taskset'."""
     assert flatten_for_taskset(None) is None

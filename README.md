@@ -78,7 +78,25 @@ Makefile
 
 Each cohort run produces one SQLite file in `runs/`.
 
-## SGLang on CPU (Docker required)
+## vLLM dual-socket (AMD EPYC)
+
+The `vllm_dual_socket` engine type runs two vLLM-CPU containers — one pinned to each NUMA node — fronted by a LiteLLM proxy that does session-based sticky routing. Scales nearly linearly across sockets (~2× single-socket) versus ~1.4× for TP=2 across sockets where Gloo all-reduce becomes the bottleneck.
+
+The simulator's virtual-user runtime sets `session_id = user_id` automatically, so each user's full multi-turn conversation routes to the same backend and prefix-cache locality is preserved.
+
+```bash
+make ready CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml
+make run-cohort CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml \
+                COHORT=chat_heavy
+```
+
+`make ready` will `docker pull` the upstream `vllm/vllm-openai-cpu:latest-x86_64` and `ghcr.io/berriai/litellm:main-latest` images automatically. Three containers come up per launch: `vllm-r0-*` (NUMA 0), `vllm-r1-*` (NUMA 1), `litellm-*` (proxy on port 4000). Shutdown order is reversed (LiteLLM first) so in-flight requests fail fast on shutdown rather than hang.
+
+**Image choice matters.** Use `vllm/vllm-openai-cpu`, not the SGLang `xeon-fixed` image — the latter's torch wheel lacks AVX-512 BF16 dispatch and runs at ~3% of theoretical compute on AMD. The SGLang Docker pipeline targets Intel only.
+
+**Pin to physical cores only.** The R7735 config's `cpuset_cpus: "0-31"` / `"32-63"` excludes SMT siblings (CPUs 64-127). Using SMT siblings hurts BF16 matmul because the AVX-512 SIMD unit is shared between siblings.
+
+## SGLang on CPU (Docker required, Intel only)
 
 SGLang's mainline pip wheel ships GPU-only `sgl_kernel` binaries — importing the package on a CPU-only host fails before the launcher sees its arguments. The working CPU path is the upstream `sglang-cpu` Docker image, layered with `sentencepiece` / `tiktoken` / `protobuf` so modern HF tokenizers (Qwen3, GLM, Mistral, Llama 3) load.
 

@@ -13,6 +13,21 @@ from .preflight import HardwareRequirements
 
 
 @dataclass
+class ReplicaConfig:
+    """One vLLM-CPU replica for multi-replica deployments.
+
+    Used by ``vllm_dual_socket`` engine type — pins one vLLM container
+    to a specific NUMA node via cpuset-cpus + cpuset-mems, exposes it
+    on a per-replica port, and registers it as a backend with LiteLLM.
+    """
+    name: str = ""
+    cpuset_cpus: str = ""
+    cpuset_mems: str = ""
+    port: int = 0
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class EngineConfig:
     type: str = "vllm"
     model_id: str = "Qwen/Qwen2.5-7B-Instruct"
@@ -86,13 +101,36 @@ class EngineConfig:
         default_factory=HardwareRequirements
     )
 
+    # ── vllm_dual_socket: per-replica + LiteLLM-proxy fields ──────────
+    # Used when ``type == "vllm_dual_socket"`` — two vLLM-CPU containers
+    # pinned to different NUMA nodes, fronted by a LiteLLM proxy that
+    # does session-based sticky routing. Image defaults match the
+    # working AMD R7735 runbook.
+    vllm_image: str = "vllm/vllm-openai-cpu:latest-x86_64"
+    litellm_image: str = "ghcr.io/berriai/litellm:main-latest"
+    litellm_master_key: str = "sk-local-dev-only"
+    litellm_port: int = 4000
+    replicas: list = field(default_factory=list)  # list[ReplicaConfig]
+    shutdown_grace_s: int = 30
+
     @property
     def base_url(self) -> str:
         if self.type == "vllm":
             return f"http://{self.host}:{self.port}/v1"
         if self.type == "sglang":
             return f"http://{self.host}:{self.port}/v1"
+        if self.type == "vllm_dual_socket":
+            return f"http://{self.host}:{self.litellm_port}/v1"
         raise ValueError(f"Unknown engine type {self.type!r}")
+
+    @property
+    def api_key(self) -> str:
+        """OpenAI-compatible API key. ``vllm_dual_socket`` requires the
+        LiteLLM master key in the Authorization header; direct vLLM /
+        SGLang accept any non-empty value."""
+        if self.type == "vllm_dual_socket":
+            return self.litellm_master_key
+        return "EMPTY"
 
 
 @dataclass
@@ -204,6 +242,11 @@ def load_config(path: str | Path | None) -> Config:
     with p.open() as f:
         raw = yaml.safe_load(f) or {}
     _merge_dataclass(cfg, raw)
+    # ``engine.replicas`` is a list[ReplicaConfig] — yaml gives us list[dict].
+    # The generic merger doesn't know to construct dataclasses from dicts
+    # inside a list; do it explicitly here.
+    if cfg.engine.replicas and isinstance(cfg.engine.replicas[0], dict):
+        cfg.engine.replicas = [ReplicaConfig(**r) for r in cfg.engine.replicas]
     return cfg
 
 

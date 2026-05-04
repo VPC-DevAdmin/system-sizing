@@ -175,13 +175,16 @@ def test_fp8_config_carries_intel_amx_requirement() -> None:
     assert "amx_bf16" in reqs.cpu_features
 
 
-def test_bf16_config_has_no_hardware_gate() -> None:
-    """The BF16 config is portable across Xeon and EPYC — must NOT
-    accidentally pick up a vendor lock that would block AMD."""
-    cfg = load_config("config/r7735_sglang_qwen3_30b_a3b.yaml")
-    assert cfg.engine.hardware_requirements.is_empty(), (
-        "BF16 config gained a hardware gate — that breaks portability"
-    )
+def test_amd_dual_socket_config_requires_amd_with_avx512() -> None:
+    """The R7735 dual-socket config bakes in 'this is AMD with AVX-512'.
+    If someone refactors the preflight to allow Intel here, the box
+    would silently drop into the wrong OMP-pinning shape."""
+    cfg = load_config("config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml")
+    reqs = cfg.engine.hardware_requirements
+    assert reqs.cpu_vendor == "amd"
+    assert "avx512f" in reqs.cpu_features
+    assert "avx512_bf16" in reqs.cpu_features
+    assert reqs.min_sockets == 2
 
 
 # ── preflight_check end-to-end ────────────────────────────────────────

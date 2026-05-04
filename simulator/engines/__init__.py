@@ -3,6 +3,7 @@
 from .base import Engine
 from .vllm import VLLMEngine
 from .sglang import SGLangEngine
+from .vllm_dual_socket import VllmDualSocketEngine
 
 
 def make_engine(engine_type: str, config) -> Engine:
@@ -10,7 +11,15 @@ def make_engine(engine_type: str, config) -> Engine:
         return VLLMEngine(config)
     if engine_type == "sglang":
         return SGLangEngine(config)
+    if engine_type == "vllm_dual_socket":
+        return VllmDualSocketEngine(config)
     raise ValueError(f"Unknown engine type: {engine_type}")
 
 
-__all__ = ["Engine", "VLLMEngine", "SGLangEngine", "make_engine"]
+__all__ = [
+    "Engine",
+    "VLLMEngine",
+    "SGLangEngine",
+    "VllmDualSocketEngine",
+    "make_engine",
+]

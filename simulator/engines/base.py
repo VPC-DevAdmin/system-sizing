@@ -49,6 +49,15 @@ class Engine:
         return self.cfg.base_url
 
     @property
+    def api_key(self) -> str:
+        """OpenAI-compatible API key the simulator uses to talk to this
+        engine. Direct vLLM / SGLang accept any non-empty value; the
+        ``vllm_dual_socket`` engine overrides to return the configured
+        LiteLLM master key. Default ``"EMPTY"`` works for engines with
+        no auth."""
+        return self.cfg.api_key if hasattr(self.cfg, "api_key") and self.cfg.api_key else "EMPTY"
+
+    @property
     def model_id(self) -> str:
         return self.cfg.model_id
 

@@ -72,7 +72,23 @@ class Engine:
 
     @property
     def model_id(self) -> str:
+        """Canonical HF model id. Used for the tokenizer corpus and run
+        metadata. NOT necessarily the name the engine serves under —
+        see ``api_model_name`` for that."""
         return self.cfg.model_id
+
+    @property
+    def api_model_name(self) -> str:
+        """Model name to send in OpenAI-compatible API requests.
+
+        When ``served_model_name`` is set in config (we pass it via
+        ``--served-model-name`` on the engine command line), the engine
+        registers the model under that name and rejects requests using
+        the canonical HF id. Vanilla vLLM / SGLang configs leave this
+        unset and serve under the HF id directly, so the fallback to
+        ``model_id`` is correct.
+        """
+        return getattr(self.cfg, "served_model_name", None) or self.cfg.model_id
 
     @property
     def pid(self) -> Optional[int]:

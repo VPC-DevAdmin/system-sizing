@@ -113,12 +113,14 @@ async def run_cohort(
         "Built %d client(s) for replica URLs: %s",
         len(clients), engine.replica_urls,
     )
+    log.info("API model name (sent in chat/completions body): %s",
+             engine.api_model_name)
 
     user_termination_buffer: list = []
     pool = PoolManager(
         cohort=cohort,
         clients=clients,
-        model_id=engine.model_id,
+        model_id=engine.api_model_name,
         corpus=corpus,
         state=state,
         request_timeout_s=cfg.simulation.request_timeout_s,

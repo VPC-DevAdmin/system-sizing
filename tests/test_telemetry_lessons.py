@@ -127,6 +127,49 @@ def test_vllm_dual_socket_engine_command_shape() -> None:
     assert "--served-model-name" in cmd and "qwen3_30b_a3b" in cmd
 
 
+def test_engine_api_model_name_uses_served_name_when_set() -> None:
+    """Real bug from the AMD R7735 dual_socket first-light run: the
+    simulator was sending ``Qwen/Qwen3-30B-A3B-Instruct-2507`` as the
+    OpenAI ``model`` field, but vLLM was launched with
+    ``--served-model-name qwen3_30b_a3b`` and only registered that
+    name. vLLM rejected every request with 404.
+
+    Fix: ``Engine.api_model_name`` returns ``served_model_name`` when
+    set, falling back to the HF id when absent. Vanilla single-engine
+    configs that don't set served_model_name keep working unchanged.
+    """
+    from simulator.config import load_config
+    from simulator.engines.vllm_dual_socket import VllmDualSocketEngine
+
+    cfg = load_config("config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml")
+    eng = VllmDualSocketEngine(cfg.engine)
+    # served_model_name is set in this config — that's the name vLLM
+    # registers under, and it's what the API call must use.
+    assert eng.api_model_name == "qwen3_30b_a3b"
+    # The HF id is preserved for tokenizer corpus / run metadata.
+    assert eng.model_id == "Qwen/Qwen3-30B-A3B-Instruct-2507"
+
+
+def test_engine_api_model_name_falls_back_to_hf_id_when_unset() -> None:
+    """For configs that don't set served_model_name (vanilla vLLM,
+    sglang without explicit naming), api_model_name == model_id."""
+    from simulator.config import Config
+    from simulator.engines.base import Engine
+
+    cfg = Config()
+    cfg.engine.type = "vllm"
+    cfg.engine.model_id = "Qwen/Qwen2.5-7B-Instruct"
+    cfg.engine.served_model_name = None
+    # Bare Engine() works for property checks without launching anything.
+    e = Engine.__new__(Engine)
+    e.cfg = cfg.engine
+    e._proc = None
+    e._log_file = None
+    e._log_path = None
+    assert e.api_model_name == "Qwen/Qwen2.5-7B-Instruct"
+    assert e.model_id == "Qwen/Qwen2.5-7B-Instruct"
+
+
 def test_vllm_dual_socket_exposes_per_replica_urls() -> None:
     """The simulator's runner reads ``engine.replica_urls`` and builds
     one AsyncOpenAI client per replica. For dual-socket NUMA-pinned

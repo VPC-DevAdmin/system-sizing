@@ -270,6 +270,56 @@ def test_adaptive_doesnt_double_past_marginal_step() -> None:
     )
 
 
+def test_adaptive_default_threshold_tolerates_low_pool_noise() -> None:
+    """At n=100, a true violation rate of 10-15% can spike up to ~25%
+    just from sampling noise. The default knee_zone_threshold of 0.30
+    leaves a buffer so this kind of noise doesn't latch the algorithm
+    into a terminal stop.
+
+    Concrete scenario: an early step at pool=16 measures 22%
+    violations (true rate maybe ~12%, n=100 noise spike). With a
+    0.20 threshold this entered bisection mode and stopped because
+    the gap from pool=8 was already at the resolution floor; the
+    algorithm produced a single fail point and quit. With 0.30,
+    the algorithm continues — either bisecting once for confirmation
+    (sub-cliff overshoot) or ramping further — but does NOT terminate.
+    """
+    hist = [
+        StepResult(pool_size=8, violation_rate=0.0),
+        StepResult(pool_size=16, violation_rate=0.22),  # noisy
+    ]
+    nxt = choose_next_pool_size(
+        hist, initial_pool_size=8, max_pool_size=512,
+        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+        # Default knee_zone_threshold (0.30) — explicitly omit the
+        # arg so this test breaks if someone accidentally lowers it.
+    )
+    # The algorithm must not stop here. It may pick:
+    #   * 12 (sub-cliff overshoot bisect — confirmation step)
+    #   * 17+ (slope-based fine step — continued ramp)
+    # Both are acceptable; the ESSENTIAL property is that we keep
+    # measuring and don't declare the run over on a single noisy step.
+    assert nxt is not None, (
+        "expected continued measurement after 22% noisy step, got None "
+        "(algorithm prematurely terminated)"
+    )
+
+
+def test_adaptive_default_threshold_still_catches_real_cliff() -> None:
+    """Confirm the noise-tolerant 0.30 default still triggers
+    bisection on a clear cliff crossing (35%+)."""
+    hist = [
+        StepResult(pool_size=32, violation_rate=0.0),
+        StepResult(pool_size=64, violation_rate=0.36),
+    ]
+    nxt = choose_next_pool_size(
+        hist, initial_pool_size=8, max_pool_size=256,
+        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+    )
+    # 36% > 30% threshold → bisection. mid = (32+64)/2 = 48.
+    assert nxt == 48
+
+
 def test_adaptive_doesnt_repeat_already_measured_pool_size() -> None:
     """If bisection's chosen midpoint coincides with a pool size we've
     already measured (rare but possible), stop rather than measure it

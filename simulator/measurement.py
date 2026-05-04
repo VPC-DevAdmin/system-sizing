@@ -329,9 +329,18 @@ async def run_measurement_step(
     avg_kv = _avg_field(telemetry_rows, "kv_cache_used_pct")
     est_prefix = _estimate_prefix_hit_rate(telemetry_rows)
 
+    # Status bands:
+    #   <  5%  pass      — clearly within SLA
+    #   < 30%  marginal  — wide noise-tolerant zone; at n=100 a true
+    #                       rate of 10-20% can occasionally measure as
+    #                       high as 25-28% from sampling noise alone,
+    #                       so we don't call it "fail" until 30%+
+    #   ≥ 30%  fail      — real cliff. Aligns with the algorithm's
+    #                       knee_zone_threshold so the visual status
+    #                       and the bisection trigger agree.
     if combined_rate < 0.05:
         capacity_status = "pass"
-    elif combined_rate < 0.20:
+    elif combined_rate < 0.30:
         capacity_status = "marginal"
     else:
         capacity_status = "fail"

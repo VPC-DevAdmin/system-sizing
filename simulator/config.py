@@ -178,10 +178,16 @@ class SimulationConfig:
     # Above this violation rate, the adaptive stepper switches from
     # coarse-ramp doubling to bisection. Distinct from
     # stop_violation_threshold (the upper measurement bound) so that
-    # marginal-zone measurements (e.g. 36% violation) bracket the knee
-    # without halting further measurement. Default 0.20 matches the
-    # ``capacity_status='fail'`` boundary in measurement.py.
-    knee_zone_threshold: float = 0.20
+    # genuine knee-zone measurements bracket the knee without halting
+    # further measurement.
+    #
+    # The default 0.30 leaves a noise buffer above the 0.20 ``fail``
+    # capacity_status boundary so that measurements which look like
+    # "fail" but are within 2σ noise of true rate ~0.10-0.15 don't
+    # latch the algorithm into bisection prematurely. At n=100 with
+    # p_true=0.10 the 2σ band reaches 16%; with p_true=0.20 it reaches
+    # 28%. Crossing 30% is a confident knee signal.
+    knee_zone_threshold: float = 0.30
     max_total_duration_minutes: int = 180
     enable_token_timestamps: bool = False
     snapshot_interval_s: int = 1

@@ -54,7 +54,7 @@ def choose_next_pool_size(
     max_pool_size: int,
     knee_slope_threshold: float,
     stop_violation_threshold: float,
-    knee_zone_threshold: float = 0.20,
+    knee_zone_threshold: float = 0.30,
     min_bisect_gap: int = 8,
 ) -> int | None:
     """Pick the next pool size, or None to stop the ramp.

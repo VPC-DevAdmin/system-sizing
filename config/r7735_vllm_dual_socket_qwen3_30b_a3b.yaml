@@ -85,7 +85,11 @@ simulation:
   initial_phase_offset_enabled: true
   initial_pool_size: 8
   max_pool_size: 256
-  target_samples_per_step: 50
+  # 100 samples per step trades wall time for noise: at p=0.10, the
+  # 2σ band shrinks from ±8pp (n=50) to ±6pp (n=100). Enough to
+  # separate genuine knee-crossings from noise wobbles like the
+  # 18%-then-8% non-monotonic pair we saw at n=50.
+  target_samples_per_step: 100
   measurement_timeout_s: 600
   warmup_min_duration_s: 30
   warmup_max_duration_s: 300

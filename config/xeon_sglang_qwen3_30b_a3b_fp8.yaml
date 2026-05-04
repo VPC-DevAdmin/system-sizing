@@ -105,10 +105,11 @@ simulation:
   initial_pool_size: 8
   max_pool_size: 256
   # ── target_samples_per_step ──
-  # 300 samples × 30s/sample = 2.5 hours per measurement step at pool=8.
-  # For a first-light run, 50 samples (~25 min) gives a usable point on
-  # the curve. Bump back up once the loop is proven.
-  target_samples_per_step: 50
+  # 100 samples is the time-vs-noise compromise: at p=0.10 the 2σ
+  # band shrinks from ±8pp (n=50) to ±6pp (n=100), enough to keep
+  # the violation curve monotonic, without paying for the ±3.5pp
+  # precision at n=300 that turns a 6-step ramp into a 3-hour run.
+  target_samples_per_step: 100
   measurement_timeout_s: 600
   # ── soft-start ramp ──
   # Spawn one virtual user per N seconds rather than all-at-once. With

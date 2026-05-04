@@ -50,6 +50,7 @@ def _cohort_to_dict(cohort: Cohort) -> dict:
         "id": cohort.id,
         "name": cohort.name,
         "description": cohort.description,
+        "category": cohort.category,
         "persona_weights": cohort.persona_weights,
     }
 

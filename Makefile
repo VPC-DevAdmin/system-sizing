@@ -14,6 +14,8 @@
 ENGINE  ?=
 MODEL   ?=
 COHORT  ?= chat_heavy
+# For run-sweep: 'all' | 'singles' | 'mixes' | a,b,c list of cohort ids.
+COHORTS ?= all
 CONFIG  ?= config/default.yaml
 RUN_DIR ?= runs
 
@@ -47,7 +49,8 @@ help:
 	@echo ""
 	@echo "Run:"
 	@echo "  make run-cohort CONFIG=... COHORT=...   Run a single cohort"
-	@echo "  make run-sweep  CONFIG=...              Run all cohorts back-to-back"
+	@echo "  make run-sweep  CONFIG=... [COHORTS=]   Sweep cohorts. COHORTS=all|singles|mixes|a,b,c"
+	@echo "  make list-cohorts                       List available cohorts grouped by category"
 	@echo "  make dashboard                          Live progress view of latest run"
 	@echo ""
 	@echo "After runs:"
@@ -106,12 +109,17 @@ run-cohort:
 run-sweep:
 	$(PY) -m simulator.cli sweep \
 		--config $(CONFIG) \
+		--cohorts $(COHORTS) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
 		$(if $(MODEL),--model $(MODEL))
 
 .PHONY: dashboard
 dashboard:
 	$(PY) -m simulator.cli dashboard --run-dir $(RUN_DIR)
+
+.PHONY: list-cohorts
+list-cohorts:
+	$(PY) -m simulator.cli list-cohorts
 
 # ── Output / analysis ─────────────────────────────────────────────────
 

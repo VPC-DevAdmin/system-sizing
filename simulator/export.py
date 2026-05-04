@@ -206,6 +206,7 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
         "id": run["cohort_id"],
         "name": cohort_def.get("name", run["cohort_id"]),
         "description": cohort_def.get("description", ""),
+        "category": cohort_def.get("category", "mix"),
         "persona_weights": cohort_def.get("persona_weights", {}),
         "engine": run["engine_type"],
         "model": run["model_id"],

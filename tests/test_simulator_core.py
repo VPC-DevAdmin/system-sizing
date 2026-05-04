@@ -348,6 +348,63 @@ def test_every_persona_has_sla_floors() -> None:
         assert p.tpot_floor_ms > 0
 
 
+# ── Cohort categorisation + resolver ──────────────────────────────────
+
+
+def test_every_persona_has_a_single_only_cohort() -> None:
+    """Single-persona cohorts let us characterise each persona's
+    individual capacity. Missing one means we can't decompose a mix
+    cohort's results."""
+    from simulator.personas import COHORTS, PERSONAS
+    expected = {f"{pid}_only" for pid in PERSONAS}
+    actual = {cid for cid, c in COHORTS.items() if c.category == "single"}
+    assert actual == expected, f"missing/extra single-only cohorts: {expected ^ actual}"
+
+
+def test_single_persona_cohort_weights_sum_to_one() -> None:
+    """Each ``<persona>_only`` cohort must have exactly that persona at
+    100%, nothing else."""
+    from simulator.personas import COHORTS, PERSONAS
+    for pid in PERSONAS:
+        c = COHORTS[f"{pid}_only"]
+        assert c.persona_weights == {pid: 1.0}
+
+
+def test_resolve_cohort_group_keywords() -> None:
+    """The sweep CLI accepts 'all' / 'singles' / 'mixes' shortcuts so
+    common batches don't need a hand-typed cohort list."""
+    from simulator.personas import COHORTS, resolve_cohort_group
+
+    all_ids = resolve_cohort_group("all")
+    assert set(all_ids) == set(COHORTS.keys())
+
+    singles = resolve_cohort_group("singles")
+    assert all(COHORTS[c].category == "single" for c in singles)
+    assert len(singles) == 6  # one per persona
+
+    mixes = resolve_cohort_group("mixes")
+    assert all(COHORTS[c].category == "mix" for c in mixes)
+    assert set(singles).isdisjoint(set(mixes))
+
+
+def test_resolve_cohort_group_explicit_list() -> None:
+    """An explicit comma-separated list bypasses the shortcuts."""
+    from simulator.personas import resolve_cohort_group
+    assert resolve_cohort_group("chat_heavy,quick_lookup_only") == [
+        "chat_heavy", "quick_lookup_only",
+    ]
+    assert resolve_cohort_group(" chat_heavy , code_assist_only ") == [
+        "chat_heavy", "code_assist_only",
+    ]
+
+
+def test_resolve_cohort_group_empty_arg_defaults_to_all() -> None:
+    """Empty / None argument shouldn't blow up the runner."""
+    from simulator.personas import COHORTS, resolve_cohort_group
+    assert set(resolve_cohort_group("")) == set(COHORTS)
+    assert set(resolve_cohort_group(None)) == set(COHORTS)
+
+
 # ── Prefix-cache analyser ─────────────────────────────────────────────
 
 

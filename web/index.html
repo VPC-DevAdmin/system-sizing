@@ -50,6 +50,17 @@
       grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
       gap: 18px;
     }
+    .section-header {
+      margin: 24px 0 8px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 6px;
+    }
+    .section-header:first-child { margin-top: 0; }
     .cohort {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -185,9 +196,29 @@
         return;
       }
 
-      const grid = el("div", { class: "grid" });
-      doc.cohorts.forEach((cohort, i) => grid.appendChild(buildCohortCard(cohort, i)));
-      main.appendChild(grid);
+      // Group cohorts by category so single-persona and mix sections
+      // render separately. Category labels match what list-cohorts
+      // shows on the CLI.
+      const groups = { single: [], mix: [], other: [] };
+      doc.cohorts.forEach((c, i) => {
+        const cat = c.category || "mix";
+        (groups[cat] || groups.other).push({ cohort: c, idx: i });
+      });
+
+      const labels = {
+        single: "Single-persona cohorts",
+        mix: "Multi-persona cohorts",
+        other: "Other",
+      };
+
+      ["single", "mix", "other"].forEach((cat) => {
+        if (!groups[cat].length) return;
+        main.appendChild(el("div", { class: "section-header" }, labels[cat]));
+        const grid = el("div", { class: "grid" });
+        groups[cat].forEach(({ cohort, idx }) =>
+          grid.appendChild(buildCohortCard(cohort, idx)));
+        main.appendChild(grid);
+      });
     }
 
     function buildCohortCard(cohort, idx) {

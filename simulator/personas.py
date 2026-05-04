@@ -33,6 +33,11 @@ class Cohort:
     name: str
     description: str
     persona_weights: dict  # {persona_id: weight}, must sum to 1.0
+    # ``"single"`` for cohorts that exercise one persona at 100%,
+    # ``"mix"`` for blended workloads. Lets the CLI sweep filter by
+    # group ("singles" / "mixes" / "all") and the buyer page group
+    # cards visually.
+    category: str = "mix"
 
     def validate(self) -> None:
         total = sum(self.persona_weights.values())
@@ -122,6 +127,60 @@ PERSONAS: dict[str, Persona] = {
 
 
 COHORTS: dict[str, Cohort] = {
+    # ── Single-persona cohorts ────────────────────────────────────────
+    # Each runs one persona at 100% weight. Used to characterise the
+    # individual capacity of each user archetype on a given engine, so
+    # multi-persona results can be decomposed: if engineering_heavy
+    # underperforms its components, you know the cohort mix is itself
+    # producing interference rather than any single persona dragging
+    # the rest down.
+    "quick_lookup_only": Cohort(
+        id="quick_lookup_only",
+        name="Quick lookup only",
+        description="100% frontline-support workload — short queries, fast SLAs",
+        persona_weights={"quick_lookup": 1.0},
+        category="single",
+    ),
+    "conversational_only": Cohort(
+        id="conversational_only",
+        name="Conversational only",
+        description="100% back-and-forth chat — multi-turn dominates",
+        persona_weights={"conversational": 1.0},
+        category="single",
+    ),
+    "drafter_only": Cohort(
+        id="drafter_only",
+        name="Drafter only",
+        description="100% short-form writing — moderate input, longer output",
+        persona_weights={"drafter": 1.0},
+        category="single",
+    ),
+    "document_qa_only": Cohort(
+        id="document_qa_only",
+        name="Document Q&A only",
+        description="100% long-context document Q&A — heavy prefill, moderate decode",
+        persona_weights={"document_qa": 1.0},
+        category="single",
+    ),
+    "code_assist_only": Cohort(
+        id="code_assist_only",
+        name="Code-assist only",
+        description="100% engineer pair-programming — long multi-turn sessions",
+        persona_weights={"code_assist": 1.0},
+        category="single",
+    ),
+    "summarizer_only": Cohort(
+        id="summarizer_only",
+        name="Summarizer only",
+        description="100% single-shot summarisation — heaviest prefill, light decode",
+        persona_weights={"summarizer": 1.0},
+        category="single",
+    ),
+
+    # ── Multi-persona cohorts ─────────────────────────────────────────
+    # Blended workloads representing realistic business types. The
+    # weight numbers came from the original spec; tune empirically
+    # against deployment telemetry if you have it.
     "chat_heavy": Cohort(
         id="chat_heavy",
         name="Customer support team",
@@ -131,6 +190,7 @@ COHORTS: dict[str, Cohort] = {
             "conversational": 0.3,
             "drafter": 0.1,
         },
+        category="mix",
     ),
     "document_heavy": Cohort(
         id="document_heavy",
@@ -141,6 +201,7 @@ COHORTS: dict[str, Cohort] = {
             "summarizer": 0.30,
             "drafter": 0.15,
         },
+        category="mix",
     ),
     "balanced_knowledge": Cohort(
         id="balanced_knowledge",
@@ -154,6 +215,7 @@ COHORTS: dict[str, Cohort] = {
             "code_assist": 0.15,
             "summarizer": 0.10,
         },
+        category="mix",
     ),
     "engineering_heavy": Cohort(
         id="engineering_heavy",
@@ -165,6 +227,7 @@ COHORTS: dict[str, Cohort] = {
             "conversational": 0.15,
             "summarizer": 0.05,
         },
+        category="mix",
     ),
     "drafter_dominant": Cohort(
         id="drafter_dominant",
@@ -175,8 +238,28 @@ COHORTS: dict[str, Cohort] = {
             "summarizer": 0.20,
             "conversational": 0.15,
         },
+        category="mix",
     ),
 }
+
+
+def resolve_cohort_group(arg: str) -> list[str]:
+    """Map a CLI argument to a list of cohort ids.
+
+    Accepts:
+      * ``"all"``      → every cohort
+      * ``"singles"``  → cohorts with ``category == "single"``
+      * ``"mixes"``    → cohorts with ``category == "mix"``
+      * any comma-separated list of cohort ids (``"chat_heavy,quick_lookup_only"``)
+    """
+    arg = (arg or "all").strip()
+    if arg == "all":
+        return list(COHORTS.keys())
+    if arg == "singles":
+        return [cid for cid, c in COHORTS.items() if c.category == "single"]
+    if arg == "mixes":
+        return [cid for cid, c in COHORTS.items() if c.category == "mix"]
+    return [c.strip() for c in arg.split(",") if c.strip()]
 
 
 def get_cohort(cohort_id: str) -> Cohort:

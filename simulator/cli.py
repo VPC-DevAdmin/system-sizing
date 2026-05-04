@@ -11,7 +11,7 @@ from rich.logging import RichHandler
 
 from .config import apply_cli_overrides, load_config
 from .engines import make_engine
-from .personas import COHORTS
+from .personas import COHORTS, resolve_cohort_group
 
 app = typer.Typer(add_completion=False, help="Persona Capacity Simulator")
 
@@ -53,8 +53,12 @@ def sweep(
     engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
     cohorts: str = typer.Option(
-        ",".join(COHORTS.keys()),
-        help="Comma-separated cohort IDs (default: all)",
+        "all",
+        help=(
+            "'all' | 'singles' | 'mixes' | comma-separated cohort IDs. "
+            "'singles' = single-persona cohorts (each persona alone at 100%); "
+            "'mixes' = blended-workload cohorts."
+        ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
@@ -62,7 +66,9 @@ def sweep(
     _setup_logging(verbose)
     cfg = load_config(config)
     apply_cli_overrides(cfg, engine=engine, model=model)
-    cohort_ids = [c.strip() for c in cohorts.split(",") if c.strip()]
+    cohort_ids = resolve_cohort_group(cohorts)
+    if not cohort_ids:
+        raise typer.BadParameter(f"No cohorts resolved from {cohorts!r}")
     for cid in cohort_ids:
         if cid not in COHORTS:
             raise typer.BadParameter(f"Unknown cohort '{cid}'")
@@ -121,9 +127,22 @@ def export_cmd(
 
 @app.command("list-cohorts")
 def list_cohorts():
-    """List available cohorts."""
+    """List available cohorts grouped by category."""
+    by_cat: dict[str, list] = {}
     for cid, cohort in COHORTS.items():
-        typer.echo(f"  {cid}: {cohort.name} — {cohort.description}")
+        by_cat.setdefault(cohort.category, []).append((cid, cohort))
+    for cat in ("single", "mix"):
+        if cat not in by_cat:
+            continue
+        typer.echo(f"\n[{cat}] cohorts:")
+        for cid, cohort in by_cat[cat]:
+            weights_str = ", ".join(
+                f"{p}:{w:.0%}" for p, w in cohort.persona_weights.items()
+            )
+            typer.echo(f"  {cid}")
+            typer.echo(f"    {cohort.name} — {cohort.description}")
+            typer.echo(f"    weights: {weights_str}")
+    typer.echo("\nGroup shortcuts: 'all', 'singles', 'mixes'")
 
 
 @app.command("ready")

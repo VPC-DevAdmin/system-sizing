@@ -88,7 +88,7 @@ Makefile
 ```
 runs/
   run_01/
-    20260504T231642Z_sglang_..._chat_heavy.db
+    run.db                              # one DB per run_NN
     engine_sglang_1714851402.log
     perf_m0_8.csv
     sweep_20260504T231642.log
@@ -96,14 +96,14 @@ runs/
     ...
 ```
 
-Every invocation writes into a numbered `run_NN/` subdirectory so all
-artifacts for one logical run (sweep log, engine log, per-cohort DBs,
-perf telemetry CSVs) stay grouped. Default behaviour is **resume**:
-the latest `run_NN/` is reused, and `make run-sweep` skips
-personas/cohorts that already have `final_status='ok'` inside it. Pass
-`RUN_NEW=true` to cut a fresh `run_NN+1/`. `make dashboard`, `make
-export`, and `make analyze-prefix-cache` all read from the latest
-`run_NN/`.
+Every invocation writes into a numbered `run_NN/` subdirectory and
+all cohort/persona invocations against that run share a single
+`run.db` — the schema keys every row by `cohort_run_id` so cohorts
+don't interfere. Default behaviour is **resume**: the latest
+`run_NN/` is reused, and `make run-sweep` skips personas/cohorts that
+already have `final_status='ok'` inside it. Pass `RUN_NEW=true` to
+cut a fresh `run_NN+1/`. `make dashboard`, `make export`, and
+`make analyze-prefix-cache` all read from the latest `run_NN/`.
 
 ## vLLM dual-socket (AMD EPYC)
 

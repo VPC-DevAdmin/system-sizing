@@ -542,6 +542,38 @@ def test_find_completed_runs_handles_empty_dir(tmp_path) -> None:
     assert find_completed_runs(tmp_path, "vllm", "Qwen/Test") == set()
 
 
+def test_find_completed_runs_one_db_many_cohorts(tmp_path) -> None:
+    """The new layout puts multiple cohort_runs into a single
+    ``run.db``. find_completed_runs has to enumerate every ok-status
+    row, not just the first one — otherwise resume would skip
+    cohorts that finished after the first one."""
+    from simulator.database import Database
+    from simulator.runner import find_completed_runs
+
+    db = Database(tmp_path / "run.db")
+    cohort_states = [
+        ("quick_lookup", "ok"),
+        ("conversational", "ok"),
+        ("drafter", "interrupted"),  # NOT completed — should be retried
+        ("document_qa", "ok"),
+    ]
+    for cohort_id, status in cohort_states:
+        db.insert_run(
+            cohort_run_id=f"crid-{cohort_id}",
+            started_at="2026-01-01T00:00:00Z",
+            engine_type="vllm",
+            model_id="Qwen/Test",
+            cohort_id=cohort_id,
+            cohort_definition={},
+            config={},
+        )
+        db.finalise_run(f"crid-{cohort_id}", "2026-01-01T01:00:00Z", status)
+    db.close()
+
+    completed = find_completed_runs(tmp_path, "vllm", "Qwen/Test")
+    assert completed == {"quick_lookup", "conversational", "document_qa"}
+
+
 # ── Run-directory layout (run_NN/) ────────────────────────────────────
 
 

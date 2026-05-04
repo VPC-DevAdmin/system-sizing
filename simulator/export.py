@@ -25,9 +25,11 @@ from .prefix_cache import (
 )
 
 
-def _read_prefix_cache_report(path: Path) -> dict | None:
+def _read_prefix_cache_report(
+    path: Path, cohort_run_id: str | None = None,
+) -> dict | None:
     try:
-        rows = read_turn_rows_with_step(path)
+        rows = read_turn_rows_with_step(path, cohort_run_id=cohort_run_id)
     except Exception:
         return None
     if not rows:
@@ -37,51 +39,58 @@ def _read_prefix_cache_report(path: Path) -> dict | None:
     return report.to_dict()
 
 
-def _read_run(path: Path) -> dict | None:
+def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
+    run = dict(run_row)
+    ms = conn.execute(
+        """SELECT step_index, target_pool_size, sample_size,
+                  ttft_violation_rate, tpot_violation_rate,
+                  combined_violation_rate,
+                  violation_rate_ci_lower, violation_rate_ci_upper,
+                  ttft_p50_ms, ttft_p95_ms, tpot_p50_ms, tpot_p95_ms,
+                  avg_kv_cache_pct, capacity_status, measurement_id
+           FROM cohort_measurements
+           WHERE cohort_run_id = ?
+           ORDER BY step_index ASC""",
+        (run["cohort_run_id"],),
+    ).fetchall()
+    run["measurements"] = [dict(m) for m in ms]
+    for m in run["measurements"]:
+        # Per-second telemetry: averages of kv usage / cpu / engine RSS / freq.
+        tele = conn.execute(
+            """SELECT AVG(kv_cache_used_pct) AS kv,
+                      AVG(cpu_util_avg) AS cpu,
+                      AVG(engine_rss_gb) AS engine_rss_gb_avg,
+                      AVG(freq_mhz_mean) AS freq_mhz_avg
+               FROM measurement_telemetry
+               WHERE measurement_id = ?""",
+            (m["measurement_id"],),
+        ).fetchone()
+        m["telemetry"] = dict(tele) if tele else {}
+        # Window aggregates (PMU/BW/power/AMX/freq).
+        agg = conn.execute(
+            "SELECT * FROM measurement_aggregate WHERE measurement_id = ?",
+            (m["measurement_id"],),
+        ).fetchone()
+        m["aggregate"] = dict(agg) if agg else {}
+    return run
+
+
+def _read_runs(path: Path) -> list[dict]:
+    """Read every cohort_run from a DB.
+
+    Pre-consolidation DBs hold a single cohort_run; the new run.db per
+    run_NN/ holds N (one per cohort/persona invocation in that run).
+    Same code path either way."""
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
     except Exception:
-        return None
+        return []
     try:
-        run = conn.execute(
-            "SELECT * FROM cohort_run ORDER BY started_at DESC LIMIT 1"
-        ).fetchone()
-        if run is None:
-            return None
-        run = dict(run)
-        ms = conn.execute(
-            """SELECT step_index, target_pool_size, sample_size,
-                      ttft_violation_rate, tpot_violation_rate,
-                      combined_violation_rate,
-                      violation_rate_ci_lower, violation_rate_ci_upper,
-                      ttft_p50_ms, ttft_p95_ms, tpot_p50_ms, tpot_p95_ms,
-                      avg_kv_cache_pct, capacity_status, measurement_id
-               FROM cohort_measurements
-               WHERE cohort_run_id = ?
-               ORDER BY step_index ASC""",
-            (run["cohort_run_id"],),
+        rows = conn.execute(
+            "SELECT * FROM cohort_run ORDER BY started_at ASC"
         ).fetchall()
-        run["measurements"] = [dict(m) for m in ms]
-        for m in run["measurements"]:
-            # Per-second telemetry: averages of kv usage / cpu / engine RSS / freq.
-            tele = conn.execute(
-                """SELECT AVG(kv_cache_used_pct) AS kv,
-                          AVG(cpu_util_avg) AS cpu,
-                          AVG(engine_rss_gb) AS engine_rss_gb_avg,
-                          AVG(freq_mhz_mean) AS freq_mhz_avg
-                   FROM measurement_telemetry
-                   WHERE measurement_id = ?""",
-                (m["measurement_id"],),
-            ).fetchone()
-            m["telemetry"] = dict(tele) if tele else {}
-            # Window aggregates (PMU/BW/power/AMX/freq).
-            agg = conn.execute(
-                "SELECT * FROM measurement_aggregate WHERE measurement_id = ?",
-                (m["measurement_id"],),
-            ).fetchone()
-            m["aggregate"] = dict(agg) if agg else {}
-        return run
+        return [_read_cohort_run(conn, r) for r in rows]
     finally:
         conn.close()
 
@@ -237,14 +246,16 @@ def export_dir(input_dir: str | Path, output_path: str | Path) -> dict:
     cohorts: list[dict] = []
     engine_seen: set[str] = set()
     model_seen: set[str] = set()
+    # One run.db per run_NN/ holds every cohort_run for that invocation;
+    # legacy flat layouts (one .db per cohort) iterate the same way.
     for db in sorted(db_source.glob("*.db")):
-        run = _read_run(db)
-        if run is None:
-            continue
-        engine_seen.add(run["engine_type"])
-        model_seen.add(run["model_id"])
-        prefix_cache = _read_prefix_cache_report(db)
-        cohorts.append(_summarise_cohort(run, prefix_cache))
+        for run in _read_runs(db):
+            engine_seen.add(run["engine_type"])
+            model_seen.add(run["model_id"])
+            prefix_cache = _read_prefix_cache_report(
+                db, cohort_run_id=run["cohort_run_id"],
+            )
+            cohorts.append(_summarise_cohort(run, prefix_cache))
 
     doc = {
         "meta": {

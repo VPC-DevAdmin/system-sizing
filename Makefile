@@ -310,9 +310,15 @@ clean-runs:
 list-runs:
 	@if [ ! -d "$(RUN_DIR)" ]; then echo "$(RUN_DIR) does not exist"; exit 0; fi ; \
 	for d in $$(ls -d $(RUN_DIR)/run_* 2>/dev/null | sort); do \
-		dbs=$$(ls "$$d"/*.db 2>/dev/null | wc -l | tr -d ' ') ; \
 		mtime=$$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$$d" 2>/dev/null || stat -c '%y' "$$d" | cut -d. -f1) ; \
-		printf "  %-12s  %s  (%s db%s)\n" "$$(basename $$d)" "$$mtime" "$$dbs" "$$([ $$dbs -eq 1 ] || echo s)" ; \
+		db="$$d/run.db" ; \
+		if [ -f "$$db" ]; then \
+			cohorts=$$(sqlite3 "$$db" "SELECT COUNT(*) FROM cohort_run" 2>/dev/null || echo "?") ; \
+			ok=$$(sqlite3 "$$db" "SELECT COUNT(*) FROM cohort_run WHERE final_status='ok'" 2>/dev/null || echo "?") ; \
+			printf "  %-12s  %s  (%s cohort_run rows, %s ok)\n" "$$(basename $$d)" "$$mtime" "$$cohorts" "$$ok" ; \
+		else \
+			printf "  %-12s  %s  (no run.db yet)\n" "$$(basename $$d)" "$$mtime" ; \
+		fi ; \
 	done
 
 # ── Hidden sub-targets ────────────────────────────────────────────────

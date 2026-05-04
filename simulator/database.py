@@ -1,7 +1,11 @@
 """SQLite schema and capture helpers.
 
-One database per cohort run. Designed for moderate write rates (a few hundred
-events per measurement window) — direct sqlite3 with WAL mode is sufficient.
+One ``run.db`` per ``runs/run_NN/`` directory; each cohort/persona
+invocation against that run dir appends a new ``cohort_run`` row (and
+its measurements / events / telemetry). Every row is keyed by
+``cohort_run_id``, so cohorts in the same DB don't interfere.
+Designed for moderate write rates (a few hundred events per
+measurement window) — direct sqlite3 with WAL mode is sufficient.
 """
 
 from __future__ import annotations

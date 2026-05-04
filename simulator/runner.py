@@ -35,11 +35,16 @@ from .virtual_user import SharedState, _now_ms
 log = logging.getLogger(__name__)
 
 
-def _run_db_path(cfg: Config, cohort_id: str, run_dir: Path) -> Path:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    short_model = cfg.engine.model_id.replace("/", "_")
+def _run_db_path(run_dir: Path) -> Path:
+    """The canonical DB path for a run dir.
+
+    One DB per ``run_NN/`` — every cohort/persona invocation against
+    the same run dir appends a new ``cohort_run`` row (and its
+    measurements / events / telemetry) to the same file. The schema
+    keys all rows by ``cohort_run_id`` so cohorts do not interfere.
+    """
     run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir / f"{ts}_{cfg.engine.type}_{short_model}_{cohort_id}.db"
+    return run_dir / "run.db"
 
 
 def _config_to_dict(cfg: Config) -> dict:
@@ -89,7 +94,7 @@ async def run_cohort(
         engine.launch(log_dir=run_dir)
 
     if db_path is None:
-        db_path = _run_db_path(cfg, cohort_id, run_dir)
+        db_path = _run_db_path(run_dir)
 
     cohort_run_id = uuid.uuid4().hex
     started_at = datetime.now(timezone.utc).isoformat()
@@ -317,17 +322,20 @@ def find_completed_runs(
     engine_type: str,
     model_id: str,
 ) -> set[str]:
-    """Return the set of cohort_ids that have a completed run for the
-    given (engine_type, model_id) combo in ``runs_dir`` (a single
-    ``run_NN`` directory).
+    """Return the set of cohort_ids that already have a completed
+    ``cohort_run`` row for the given (engine_type, model_id) inside
+    ``runs_dir/run.db``.
 
     A run counts as completed iff ``cohort_run.final_status == 'ok'``.
     Other statuses — ``interrupted`` (Ctrl-C / SSH disconnect),
     ``time_limit`` (max duration hit), ``no_samples`` / ``unstable``
     (didn't capture useful data) — are deliberately NOT skipped: those
-    are exactly the runs the user probably wants to retry. The cohort
-    DBs from interrupted runs aren't deleted; they're available for
-    inspection / export, just not counted as "done."
+    are exactly the runs the user probably wants to retry. Their
+    leftover rows aren't deleted; they're available for inspection
+    inside the same DB, just not counted as "done."
+
+    For backwards compatibility with the pre-consolidation flat layout,
+    this also scans any other ``*.db`` files in the directory.
     """
     completed: set[str] = set()
     runs_dir = Path(runs_dir)
@@ -336,14 +344,14 @@ def find_completed_runs(
     for db_path in runs_dir.glob("*.db"):
         try:
             with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
-                row = conn.execute(
+                rows = conn.execute(
                     "SELECT cohort_id FROM cohort_run "
                     "WHERE engine_type = ? AND model_id = ? "
                     "AND final_status = 'ok'",
                     (engine_type, model_id),
-                ).fetchone()
-                if row is not None:
-                    completed.add(row[0])
+                ).fetchall()
+                for r in rows:
+                    completed.add(r[0])
         except sqlite3.Error:
             continue
     return completed

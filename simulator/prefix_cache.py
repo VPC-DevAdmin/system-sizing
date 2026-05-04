@@ -266,18 +266,30 @@ def _read_turn_rows(db_path: Path) -> list[TurnRow]:
         conn.close()
 
 
-def read_turn_rows_with_step(db_path: Path) -> list[tuple[int, TurnRow]]:
-    """Return [(step_index, TurnRow), ...] joining turn_events ↔ measurements."""
+def read_turn_rows_with_step(
+    db_path: Path, cohort_run_id: str | None = None,
+) -> list[tuple[int, TurnRow]]:
+    """Return [(step_index, TurnRow), ...] joining turn_events ↔ measurements.
+
+    With one DB per run, multiple ``cohort_run`` rows can coexist in the
+    same file. Pass ``cohort_run_id`` to scope the rows to a single
+    cohort; omit it to aggregate across all cohort_runs in the DB
+    (the historical behaviour, kept for the standalone
+    ``analyze-prefix-cache`` CLI invocation).
+    """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        cur = conn.execute(
-            """SELECT m.step_index AS step_index,
-                      e.user_id, e.session_id, e.turn_index, e.ttft_ms,
-                      e.persona_id, e.input_tokens, e.history_tokens
-               FROM turn_events e
-               JOIN cohort_measurements m USING (measurement_id)"""
-        )
+        sql = """SELECT m.step_index AS step_index,
+                        e.user_id, e.session_id, e.turn_index, e.ttft_ms,
+                        e.persona_id, e.input_tokens, e.history_tokens
+                 FROM turn_events e
+                 JOIN cohort_measurements m USING (measurement_id)"""
+        params: tuple = ()
+        if cohort_run_id is not None:
+            sql += " WHERE m.cohort_run_id = ?"
+            params = (cohort_run_id,)
+        cur = conn.execute(sql, params)
         return [
             (
                 int(r["step_index"]),

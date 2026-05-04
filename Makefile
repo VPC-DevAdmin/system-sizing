@@ -19,6 +19,10 @@ PERSONA ?= quick_lookup
 SWEEP_TYPE ?= all
 CONFIG  ?= config/default.yaml
 RUN_DIR ?= runs
+# RUN_NEW=true cuts a fresh runs/run_NN+1/ instead of resuming the
+# latest run_NN. Resume-by-default lets ``make run-sweep`` pick up
+# where an interrupted earlier invocation left off.
+RUN_NEW ?=
 
 # Project-local venv. ``make ready`` creates it if missing; every other
 # target uses it via $(PY) when present, falling back to system python
@@ -53,11 +57,14 @@ help:
 	@echo "  make run-cohort  CONFIG=... COHORT=...  Run one cohort (a team mix of personas)"
 	@echo "  make run-sweep   CONFIG=... [SWEEP_TYPE=]  Sweep multiple workloads."
 	@echo "                                          SWEEP_TYPE=all|personas|cohorts|a,b,c"
+	@echo "                                          Resumes latest run_NN by default;"
+	@echo "                                          set RUN_NEW=true to cut a fresh run dir."
 	@echo "  make run-*-bg                           Same as above but nohup'd; survives SSH disconnects"
 	@echo "  make tail-log / make stop-bg            Tail latest -bg log / stop a backgrounded run + engine"
+	@echo "  make list-runs                          List run_NN/ directories under $(RUN_DIR)"
 	@echo "  make list-personas                      List available user archetypes"
 	@echo "  make list-cohorts                       List available team mixes"
-	@echo "  make dashboard                          Live progress view of latest run"
+	@echo "  make dashboard                          Live progress view of latest run_NN"
 	@echo ""
 	@echo "After runs:"
 	@echo "  make export                             Build buyer_page_data.json"
@@ -124,7 +131,7 @@ run-sweep:
 	$(PY) -m simulator.cli sweep \
 		--config $(CONFIG) \
 		--type $(SWEEP_TYPE) \
-		$(if $(RESUME),--resume) \
+		$(if $(RUN_NEW),--new-run) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
 		$(if $(MODEL),--model $(MODEL))
 
@@ -134,10 +141,15 @@ dashboard:
 
 # Long-running variants — nohup + dated log file. Survive SSH
 # disconnects; check status from another login via ``make dashboard``.
+# For -bg targets we resolve the current run_NN/ up front (creating it
+# if needed) and drop the log inside, so every artifact for a run lives
+# in one directory. RUN_NEW=true on run-sweep-bg cuts a fresh run_NN+1.
+RESOLVE_RUN_DIR = $(PY) -m simulator.cli current-run-dir --base $(RUN_DIR) $(if $(RUN_NEW),--new-run)
+
 .PHONY: run-cohort-bg
 run-cohort-bg:
-	@LOG="$(RUN_DIR)/cohort_$$(date +%Y%m%dT%H%M%S).log" ; \
-	mkdir -p "$(RUN_DIR)" ; \
+	@RD="$$($(RESOLVE_RUN_DIR))" ; \
+	LOG="$$RD/cohort_$$(date +%Y%m%dT%H%M%S).log" ; \
 	nohup $(PY) -m simulator.cli run \
 		--cohort $(COHORT) \
 		--config $(CONFIG) \
@@ -146,6 +158,7 @@ run-cohort-bg:
 		>"$$LOG" 2>&1 & \
 	PID=$$! ; \
 	echo "Cohort run started in background (PID $$PID)" ; \
+	echo "  run dir: $$RD" ; \
 	echo "  log: $$LOG" ; \
 	echo "  tail: tail -f $$LOG" ; \
 	echo "  dashboard: make dashboard" ; \
@@ -153,8 +166,8 @@ run-cohort-bg:
 
 .PHONY: run-persona-bg
 run-persona-bg:
-	@LOG="$(RUN_DIR)/persona_$(PERSONA)_$$(date +%Y%m%dT%H%M%S).log" ; \
-	mkdir -p "$(RUN_DIR)" ; \
+	@RD="$$($(RESOLVE_RUN_DIR))" ; \
+	LOG="$$RD/persona_$(PERSONA)_$$(date +%Y%m%dT%H%M%S).log" ; \
 	nohup $(PY) -m simulator.cli run-persona \
 		--persona $(PERSONA) \
 		--config $(CONFIG) \
@@ -163,6 +176,7 @@ run-persona-bg:
 		>"$$LOG" 2>&1 & \
 	PID=$$! ; \
 	echo "Persona run started in background (PID $$PID)" ; \
+	echo "  run dir: $$RD" ; \
 	echo "  log: $$LOG" ; \
 	echo "  tail: tail -f $$LOG" ; \
 	echo "  dashboard: make dashboard" ; \
@@ -170,28 +184,31 @@ run-persona-bg:
 
 .PHONY: run-sweep-bg
 run-sweep-bg:
-	@LOG="$(RUN_DIR)/sweep_$$(date +%Y%m%dT%H%M%S).log" ; \
-	mkdir -p "$(RUN_DIR)" ; \
+	@RD="$$($(RESOLVE_RUN_DIR))" ; \
+	LOG="$$RD/sweep_$$(date +%Y%m%dT%H%M%S).log" ; \
 	nohup $(PY) -m simulator.cli sweep \
 		--config $(CONFIG) \
 		--type $(SWEEP_TYPE) \
-		$(if $(RESUME),--resume) \
+		$(if $(RUN_NEW),--new-run) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
 		$(if $(MODEL),--model $(MODEL)) \
 		>"$$LOG" 2>&1 & \
 	PID=$$! ; \
-	echo "Sweep run started in background (PID $$PID)" ; \
+	echo "Sweep started in background (PID $$PID)" ; \
+	echo "  run dir: $$RD$(if $(RUN_NEW), (fresh — RUN_NEW=true))" ; \
 	echo "  log: $$LOG" ; \
 	echo "  tail: tail -f $$LOG" ; \
 	echo "  dashboard: make dashboard" ; \
 	echo "  stop: make stop-bg  (or: kill $$PID)"
 
-# Tail the most-recent background log file. Useful when reconnecting
-# to a host where you started a -bg run earlier.
+# Tail the most-recent background log file in the latest run_NN/.
+# Useful when reconnecting to a host where you started a -bg run earlier.
 .PHONY: tail-log
 tail-log:
-	@LOG=$$(ls -t $(RUN_DIR)/sweep_*.log $(RUN_DIR)/cohort_*.log $(RUN_DIR)/persona_*.log 2>/dev/null | head -n 1) ; \
-	if [ -z "$$LOG" ]; then echo "No background-run logs in $(RUN_DIR)"; exit 1; fi ; \
+	@RD=$$(ls -d $(RUN_DIR)/run_* 2>/dev/null | sort | tail -n 1) ; \
+	if [ -z "$$RD" ]; then echo "No run_NN/ dirs in $(RUN_DIR)"; exit 1; fi ; \
+	LOG=$$(ls -t "$$RD"/sweep_*.log "$$RD"/cohort_*.log "$$RD"/persona_*.log 2>/dev/null | head -n 1) ; \
+	if [ -z "$$LOG" ]; then echo "No background-run logs in $$RD"; exit 1; fi ; \
 	echo "Tailing $$LOG" ; \
 	tail -f "$$LOG"
 
@@ -244,8 +261,10 @@ web: export
 
 .PHONY: analyze-prefix-cache
 analyze-prefix-cache:
-	@DB=$$(ls -t $(RUN_DIR)/*.db 2>/dev/null | head -n 1); \
-	if [ -z "$$DB" ]; then echo "No .db in $(RUN_DIR)"; exit 1; fi; \
+	@RD=$$(ls -d $(RUN_DIR)/run_* 2>/dev/null | sort | tail -n 1) ; \
+	[ -n "$$RD" ] || RD="$(RUN_DIR)" ; \
+	DB=$$(ls -t "$$RD"/*.db 2>/dev/null | head -n 1); \
+	if [ -z "$$DB" ]; then echo "No .db in $$RD"; exit 1; fi; \
 	$(PY) -m simulator.cli analyze-prefix-cache "$$DB"
 
 # ── Diagnostics ───────────────────────────────────────────────────────
@@ -285,7 +304,16 @@ clean-venv:
 
 .PHONY: clean-runs
 clean-runs:
-	rm -rf $(RUN_DIR)/*.db $(RUN_DIR)/*.db-journal buyer_page_data.json
+	rm -rf $(RUN_DIR)/run_* $(RUN_DIR)/*.db $(RUN_DIR)/*.db-journal buyer_page_data.json
+
+.PHONY: list-runs
+list-runs:
+	@if [ ! -d "$(RUN_DIR)" ]; then echo "$(RUN_DIR) does not exist"; exit 0; fi ; \
+	for d in $$(ls -d $(RUN_DIR)/run_* 2>/dev/null | sort); do \
+		dbs=$$(ls "$$d"/*.db 2>/dev/null | wc -l | tr -d ' ') ; \
+		mtime=$$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$$d" 2>/dev/null || stat -c '%y' "$$d" | cut -d. -f1) ; \
+		printf "  %-12s  %s  (%s db%s)\n" "$$(basename $$d)" "$$mtime" "$$dbs" "$$([ $$dbs -eq 1 ] || echo s)" ; \
+	done
 
 # ── Hidden sub-targets ────────────────────────────────────────────────
 # These power the SGLang docker pipeline. ``make ready`` calls into the

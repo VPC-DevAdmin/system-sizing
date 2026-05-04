@@ -93,13 +93,14 @@ def sweep(
             "(``quick_lookup,chat_heavy``)."
         ),
     ),
-    resume: bool = typer.Option(
-        False, "--resume",
+    new_run: bool = typer.Option(
+        False, "--new-run",
         help=(
-            "Skip personas/cohorts that already have a completed run "
-            "(final_status='ok') for this engine + model in the run "
-            "dir. Use this to recover from an interrupted sweep "
-            "without re-running the parts that already succeeded."
+            "Start a fresh run_NN+1 directory. Default behavior is to "
+            "reuse the latest run_NN and resume — skipping personas/"
+            "cohorts that already have final_status='ok' inside it. "
+            "Use --new-run when you've changed config/hardware and the "
+            "previous run's data should NOT be merged with the new one."
         ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -107,7 +108,11 @@ def sweep(
     """Run multiple personas + cohorts back-to-back against one engine.
 
     Personas run first as ephemeral one-persona Cohorts, then cohorts.
-    The engine launches once and stays up for the whole sweep."""
+    The engine launches once and stays up for the whole sweep.
+
+    Resumes the latest ``runs/run_NN/`` by default — interrupted sweeps
+    pick up where they left off automatically. Pass ``--new-run`` to
+    cut a fresh ``run_NN+1`` directory."""
     _setup_logging(verbose)
     cfg = load_config(config)
     apply_cli_overrides(cfg, engine=engine, model=model)
@@ -120,7 +125,7 @@ def sweep(
 
     from .runner import run_sweep
     paths = asyncio.run(run_sweep(
-        cfg, persona_ids=persona_ids, cohort_ids=cohort_ids, resume=resume,
+        cfg, persona_ids=persona_ids, cohort_ids=cohort_ids, new_run=new_run,
     ))
     typer.echo(
         f"Sweep complete: {len(paths)} runs "
@@ -135,6 +140,10 @@ def launch_engine(
     config: Path = typer.Option(Path("config/default.yaml")),
     engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
+    new_run: bool = typer.Option(
+        False, "--new-run",
+        help="Write engine log into a fresh run_NN+1 directory.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Launch the engine without running simulations (manual testing)."""
@@ -142,9 +151,11 @@ def launch_engine(
     cfg = load_config(config)
     apply_cli_overrides(cfg, engine=engine, model=model)
     from .preflight import preflight_check
+    from .runs import resolve_run_dir
     preflight_check(cfg.engine.hardware_requirements)
+    run_dir = resolve_run_dir(cfg.output.db_directory, new=new_run)
     eng = make_engine(cfg.engine.type, cfg.engine)
-    eng.launch(log_dir=cfg.output.db_directory)
+    eng.launch(log_dir=run_dir)
     typer.echo(f"Engine up at {eng.base_url}. Ctrl-C to stop.")
     try:
         import time
@@ -412,6 +423,24 @@ def preflight_cmd(
         typer.echo(str(e), err=True)
         sys.exit(2)
     typer.echo("Preflight OK.")
+
+
+@app.command("current-run-dir")
+def current_run_dir_cmd(
+    base: Path = typer.Option(Path("runs"), "--base", help="Runs base directory"),
+    new_run: bool = typer.Option(
+        False, "--new-run", help="Create the next run_NN+1 instead of reusing the latest",
+    ),
+):
+    """Print the run_NN directory the next invocation would use.
+
+    Creates the directory as a side-effect (so the make-side bg targets
+    can ``mkdir -p`` then drop a log into it). With ``--new-run`` it
+    advances to ``run_NN+1``; otherwise it returns the latest existing
+    one (or creates ``run_01``).
+    """
+    from .runs import resolve_run_dir
+    typer.echo(str(resolve_run_dir(base, new=new_run)))
 
 
 @app.command("analyze-prefix-cache")

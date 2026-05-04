@@ -26,12 +26,13 @@ The headline workflow is `ready` → `run-cohort` → `dashboard` → `export`. 
 | `make ready CONFIG=...` | Idempotent: pip install, build engine docker image (SGLang only) if missing, download model if missing, validate hardware. |
 | `make run-persona CONFIG=... PERSONA=...` | Run one **persona** (a single user archetype) end-to-end. |
 | `make run-cohort CONFIG=... COHORT=...` | Run one **cohort** (a team mix of personas) end-to-end. |
-| `make run-sweep CONFIG=... [SWEEP_TYPE=...] [RESUME=1]` | Sweep multiple workloads. `SWEEP_TYPE` accepts `all` (default — every persona + every cohort), `personas`, `cohorts`, or a comma-separated list of persona/cohort ids. `RESUME=1` skips workloads that already have a completed run (`final_status='ok'`) for this engine + model combo — use it after an interrupted sweep. |
+| `make run-sweep CONFIG=... [SWEEP_TYPE=...] [RUN_NEW=true]` | Sweep multiple workloads. `SWEEP_TYPE` accepts `all` (default — every persona + every cohort), `personas`, `cohorts`, or a comma-separated list of persona/cohort ids. **Resumes the latest `runs/run_NN/` by default** — workloads with `final_status='ok'` are skipped, so an interrupted sweep auto-continues. Pass `RUN_NEW=true` to cut a fresh `run_NN+1` dir (use this when config or hardware has changed and the prior run's data should NOT be merged with the new one). |
 | `make run-*-bg ...` | Background variants (`run-cohort-bg`, `run-persona-bg`, `run-sweep-bg`). Uses `nohup` and writes a dated `.log` under `runs/`; survives SSH disconnects. |
 | `make tail-log` | Tail the most-recent background-run log (auto-picks the latest). |
 | `make stop-bg` | Kill any running simulator background process and its engine containers. |
 | `make list-personas` | Show available user archetypes (each with its SLA floors). |
 | `make list-cohorts` | Show available team mixes with persona weights. |
+| `make list-runs` | List `run_NN/` directories under `runs/` with their DB counts. |
 | `make dashboard` | Live `rich`-based progress view of the latest run. |
 | `make export` | Build `buyer_page_data.json` from `runs/*.db`. |
 | `make web` | Serve the reference buyer page on `http://localhost:8765`. |
@@ -82,7 +83,27 @@ config/default.yaml
 Makefile
 ```
 
-Each cohort run produces one SQLite file in `runs/`.
+### Run directory layout
+
+```
+runs/
+  run_01/
+    20260504T231642Z_sglang_..._chat_heavy.db
+    engine_sglang_1714851402.log
+    perf_m0_8.csv
+    sweep_20260504T231642.log
+  run_02/
+    ...
+```
+
+Every invocation writes into a numbered `run_NN/` subdirectory so all
+artifacts for one logical run (sweep log, engine log, per-cohort DBs,
+perf telemetry CSVs) stay grouped. Default behaviour is **resume**:
+the latest `run_NN/` is reused, and `make run-sweep` skips
+personas/cohorts that already have `final_status='ok'` inside it. Pass
+`RUN_NEW=true` to cut a fresh `run_NN+1/`. `make dashboard`, `make
+export`, and `make analyze-prefix-cache` all read from the latest
+`run_NN/`.
 
 ## vLLM dual-socket (AMD EPYC)
 

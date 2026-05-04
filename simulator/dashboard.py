@@ -20,9 +20,17 @@ from rich.text import Text
 
 
 def _latest_db(run_dir: Path) -> Path | None:
+    """Locate the most recently modified .db.
+
+    With the run_NN/ layout, ``run_dir`` is the base ``runs/`` dir; we
+    look in the latest ``run_NN``. Fall back to a flat-dir glob so old
+    layouts and ad-hoc paths still work.
+    """
+    from .runs import latest_run_dir
     if not run_dir.exists():
         return None
-    dbs = sorted(run_dir.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    target = latest_run_dir(run_dir) or run_dir
+    dbs = sorted(target.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
     return dbs[0] if dbs else None
 
 

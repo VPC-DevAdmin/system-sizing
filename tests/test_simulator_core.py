@@ -542,6 +542,57 @@ def test_find_completed_runs_handles_empty_dir(tmp_path) -> None:
     assert find_completed_runs(tmp_path, "vllm", "Qwen/Test") == set()
 
 
+# ── Run-directory layout (run_NN/) ────────────────────────────────────
+
+
+def test_resolve_run_dir_creates_run_01_when_empty(tmp_path) -> None:
+    """First invocation against a fresh runs/ creates run_01."""
+    from simulator.runs import resolve_run_dir
+    rd = resolve_run_dir(tmp_path)
+    assert rd == tmp_path / "run_01"
+    assert rd.is_dir()
+
+
+def test_resolve_run_dir_reuses_latest_by_default(tmp_path) -> None:
+    """Default behaviour is resume: latest run_NN is returned, not a new one."""
+    from simulator.runs import resolve_run_dir
+    (tmp_path / "run_01").mkdir()
+    (tmp_path / "run_02").mkdir()
+    (tmp_path / "run_03").mkdir()
+    rd = resolve_run_dir(tmp_path)
+    assert rd == tmp_path / "run_03"
+
+
+def test_resolve_run_dir_new_creates_next(tmp_path) -> None:
+    """new=True advances to run_NN+1 instead of reusing the latest."""
+    from simulator.runs import resolve_run_dir
+    (tmp_path / "run_01").mkdir()
+    (tmp_path / "run_02").mkdir()
+    rd = resolve_run_dir(tmp_path, new=True)
+    assert rd == tmp_path / "run_03"
+    assert rd.is_dir()
+
+
+def test_resolve_run_dir_ignores_non_run_subdirs(tmp_path) -> None:
+    """Non-``run_NN`` subdirectories must not influence numbering — a
+    user might leave notes/ or scratch/ alongside the run dirs."""
+    from simulator.runs import resolve_run_dir
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "run_01").mkdir()
+    (tmp_path / "scratch").mkdir()
+    rd = resolve_run_dir(tmp_path, new=True)
+    assert rd == tmp_path / "run_02"
+
+
+def test_resolve_run_dir_handles_double_digit_numbering(tmp_path) -> None:
+    """Sort by integer, not lexicographic — run_10 must come after run_9."""
+    from simulator.runs import resolve_run_dir, latest_run_dir
+    for i in (1, 2, 9, 10, 11):
+        (tmp_path / f"run_{i:02d}").mkdir()
+    assert latest_run_dir(tmp_path) == tmp_path / "run_11"
+    assert resolve_run_dir(tmp_path, new=True) == tmp_path / "run_12"
+
+
 def test_resolve_workload_group_empty_arg_defaults_to_all() -> None:
     from simulator.personas import COHORTS, PERSONAS, resolve_workload_group
     p, c = resolve_workload_group("")

@@ -27,6 +27,7 @@ from .measurement import (
 )
 from .personas import Cohort, get_cohort
 from .pool_manager import PoolManager
+from .runs import resolve_run_dir
 from .telemetry import MeasurementTelemetry, SnapshotRecorder
 from .tokenizer_corpus import TokenCorpus
 from .virtual_user import SharedState, _now_ms
@@ -34,12 +35,11 @@ from .virtual_user import SharedState, _now_ms
 log = logging.getLogger(__name__)
 
 
-def _run_db_path(cfg: Config, cohort_id: str) -> Path:
+def _run_db_path(cfg: Config, cohort_id: str, run_dir: Path) -> Path:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     short_model = cfg.engine.model_id.replace("/", "_")
-    db_dir = Path(cfg.output.db_directory)
-    db_dir.mkdir(parents=True, exist_ok=True)
-    return db_dir / f"{ts}_{cfg.engine.type}_{short_model}_{cohort_id}.db"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir / f"{ts}_{cfg.engine.type}_{short_model}_{cohort_id}.db"
 
 
 def _config_to_dict(cfg: Config) -> dict:
@@ -62,26 +62,34 @@ async def run_cohort(
     *,
     engine: Engine | None = None,
     db_path: Path | None = None,
+    run_dir: Path | None = None,
+    new_run: bool = False,
 ) -> Path:
     """Run a single cohort end-to-end. Returns the resulting db path.
 
     ``cohort`` accepts either a Cohort object (e.g. one built via
     ``cohort_from_persona`` for persona runs) or a cohort-id string
     looked up in COHORTS.
+
+    ``run_dir`` selects the ``run_NN/`` artifact directory; if omitted
+    the latest existing one is reused (or ``run_01`` is created).
+    Pass ``new_run=True`` to force a fresh ``run_NN+1``.
     """
     if isinstance(cohort, str):
         cohort = get_cohort(cohort)
     cohort_id = cohort.id
+    if run_dir is None:
+        run_dir = resolve_run_dir(cfg.output.db_directory, new=new_run)
     own_engine = engine is None
     if own_engine:
         # Validate the host before any subprocess / docker / model load —
         # SGLang FP8 on AMD wastes 10-20 minutes before the assertion.
         preflight_check(cfg.engine.hardware_requirements)
         engine = make_engine(cfg.engine.type, cfg.engine)
-        engine.launch(log_dir=cfg.output.db_directory)
+        engine.launch(log_dir=run_dir)
 
     if db_path is None:
-        db_path = _run_db_path(cfg, cohort_id)
+        db_path = _run_db_path(cfg, cohort_id, run_dir)
 
     cohort_run_id = uuid.uuid4().hex
     started_at = datetime.now(timezone.utc).isoformat()
@@ -160,7 +168,7 @@ async def run_cohort(
         engine,
         bound_cpus=bound_cpus,
         engine_pid=getattr(engine, "pid", None),
-        artifacts_dir=cfg.output.db_directory,
+        artifacts_dir=run_dir,
     )
 
     history: list[StepResult] = []
@@ -310,7 +318,8 @@ def find_completed_runs(
     model_id: str,
 ) -> set[str]:
     """Return the set of cohort_ids that have a completed run for the
-    given (engine_type, model_id) combo in ``runs_dir``.
+    given (engine_type, model_id) combo in ``runs_dir`` (a single
+    ``run_NN`` directory).
 
     A run counts as completed iff ``cohort_run.final_status == 'ok'``.
     Other statuses — ``interrupted`` (Ctrl-C / SSH disconnect),
@@ -321,6 +330,9 @@ def find_completed_runs(
     inspection / export, just not counted as "done."
     """
     completed: set[str] = set()
+    runs_dir = Path(runs_dir)
+    if not runs_dir.exists():
+        return completed
     for db_path in runs_dir.glob("*.db"):
         try:
             with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
@@ -342,18 +354,18 @@ async def run_sweep(
     persona_ids: list[str] | None = None,
     cohort_ids: list[str] | None = None,
     *,
-    resume: bool = False,
+    new_run: bool = False,
 ) -> list[Path]:
     """Run multiple personas + cohorts back-to-back against the same engine.
 
     Personas run first (each as an ephemeral one-persona Cohort), then
     cohorts. The engine is launched once and stays up across the sweep.
 
-    With ``resume=True``, skip personas/cohorts that already have a
-    completed run (``final_status='ok'``) for this engine_type +
-    model_id combo in ``cfg.output.db_directory``. Use this to recover
-    from an interrupted long sweep without re-running the parts that
-    already succeeded.
+    Resume is the default: artifacts land in the latest ``run_NN/``
+    subdirectory of ``cfg.output.db_directory``, and personas/cohorts
+    that already have ``final_status='ok'`` in that directory are
+    skipped. To start a fresh ``run_NN+1`` (no resume), pass
+    ``new_run=True``.
     """
     from .personas import cohort_from_persona
 
@@ -362,9 +374,12 @@ async def run_sweep(
     if not persona_ids and not cohort_ids:
         raise ValueError("run_sweep requires at least one persona_id or cohort_id")
 
-    if resume:
+    run_dir = resolve_run_dir(cfg.output.db_directory, new=new_run)
+    log.info("Sweep run dir: %s (new_run=%s)", run_dir, new_run)
+
+    if not new_run:
         completed = find_completed_runs(
-            Path(cfg.output.db_directory),
+            run_dir,
             cfg.engine.type,
             cfg.engine.model_id,
         )
@@ -384,16 +399,18 @@ async def run_sweep(
 
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
-    engine.launch(log_dir=cfg.output.db_directory)
+    engine.launch(log_dir=run_dir)
     paths: list[Path] = []
     try:
         for pid in persona_ids:
             log.info("=== Sweep: persona %s ===", pid)
-            path = await run_cohort(cfg, cohort_from_persona(pid), engine=engine)
+            path = await run_cohort(
+                cfg, cohort_from_persona(pid), engine=engine, run_dir=run_dir,
+            )
             paths.append(path)
         for cid in cohort_ids:
             log.info("=== Sweep: cohort %s ===", cid)
-            path = await run_cohort(cfg, cid, engine=engine)
+            path = await run_cohort(cfg, cid, engine=engine, run_dir=run_dir)
             paths.append(path)
     finally:
         engine.shutdown()

@@ -340,11 +340,17 @@ class VllmDualSocketEngine(Engine):
     def _launch_litellm(self, run_id: str) -> None:
         cfg = self.cfg
         name = f"litellm-{run_id}"
+        # Docker requires absolute paths for bind-mount sources; bare
+        # relative paths are interpreted as named-volume references and
+        # rejected with "includes invalid characters for a local volume
+        # name". The config file is written under ``log_dir`` which can
+        # be a relative path (default 'runs'); resolve to absolute.
+        config_abs = str(self._litellm_config_path.resolve())
         cmd = [
             "docker", "run", "-d", "--rm",
             "--name", name,
             "--network", "host",
-            "-v", f"{self._litellm_config_path}:/app/config.yaml:ro",
+            "-v", f"{config_abs}:/app/config.yaml:ro",
             cfg.litellm_image,
             "--config", "/app/config.yaml",
             "--port", str(cfg.litellm_port),

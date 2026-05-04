@@ -99,6 +99,28 @@ make run-cohort CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml \
 
 **Pin to physical cores only.** The R7735 config's `cpuset_cpus: "0-31"` / `"32-63"` excludes SMT siblings (CPUs 64-127). Using SMT siblings hurts BF16 matmul because the AVX-512 SIMD unit is shared between siblings.
 
+**Smoke-check the wheel before any cohort run.** The `vllm-openai-cpu` image's torch wheel needs the AVX-512 BF16 dispatch path. A single-trial matmul of `(2048×2048) × (2048×2048)` should hit **~7000+ GFLOPS** on 32 EPYC 9374F cores — but **only after warmup**. The first trial is consistently 50% of steady-state because Linux schedules threads onto cold cores and the AVX-512 BF16 vector unit takes a few iterations to stabilise. Run multiple trials and look at the median:
+
+```bash
+docker run --rm --cpuset-cpus 32-63 --cpuset-mems 1 \
+    -e OMP_NUM_THREADS=32 \
+    --entrypoint python vllm/vllm-openai-cpu:latest-x86_64 \
+    -c "
+import torch, time, statistics
+torch.set_num_threads(32)
+a = torch.randn(2048, 2048, dtype=torch.bfloat16)
+b = torch.randn(2048, 2048, dtype=torch.bfloat16)
+for _ in range(20): torch.matmul(a, b)        # warmup
+trials = []
+for _ in range(5):
+    s = time.time()
+    for _ in range(30): torch.matmul(a, b)
+    trials.append(30 * 2 * 2048**3 / (time.time() - s) / 1e9)
+print(f'Median: {statistics.median(trials):.1f} GFLOPS')"
+```
+
+The diagnostic value is the **median across trials**, not the first number. ~7900 is healthy. ~225 means the torch wheel is broken on this host — file a build issue and stop. ~4000 with a single trial usually means you didn't warm up; rerun with the loop above.
+
 ## SGLang on CPU (Docker required, Intel only)
 
 SGLang's mainline pip wheel ships GPU-only `sgl_kernel` binaries — importing the package on a CPU-only host fails before the launcher sees its arguments. The working CPU path is the upstream `sglang-cpu` Docker image, layered with `sentencepiece` / `tiktoken` / `protobuf` so modern HF tokenizers (Qwen3, GLM, Mistral, Llama 3) load.

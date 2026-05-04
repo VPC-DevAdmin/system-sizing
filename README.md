@@ -24,9 +24,11 @@ The headline workflow is `ready` → `run-cohort` → `dashboard` → `export`. 
 | Target | What it does |
 |---|---|
 | `make ready CONFIG=...` | Idempotent: pip install, build engine docker image (SGLang only) if missing, download model if missing, validate hardware. |
-| `make run-cohort CONFIG=... COHORT=...` | Run a single cohort end-to-end. |
-| `make run-sweep CONFIG=... [COHORTS=...]` | Run multiple cohorts back-to-back. `COHORTS` accepts `all` (default), `singles`, `mixes`, or a comma-separated id list. |
-| `make list-cohorts` | List available cohorts grouped by category, with persona weights. |
+| `make run-persona CONFIG=... PERSONA=...` | Run one **persona** (a single user archetype) end-to-end. |
+| `make run-cohort CONFIG=... COHORT=...` | Run one **cohort** (a team mix of personas) end-to-end. |
+| `make run-sweep CONFIG=... [SWEEP_TYPE=...]` | Sweep multiple workloads. `SWEEP_TYPE` accepts `all` (default — every persona + every cohort), `personas`, `cohorts`, or a comma-separated list of persona/cohort ids. |
+| `make list-personas` | Show available user archetypes (each with its SLA floors). |
+| `make list-cohorts` | Show available team mixes with persona weights. |
 | `make dashboard` | Live `rich`-based progress view of the latest run. |
 | `make export` | Build `buyer_page_data.json` from `runs/*.db`. |
 | `make web` | Serve the reference buyer page on `http://localhost:8765`. |

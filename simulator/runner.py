@@ -57,13 +57,20 @@ def _cohort_to_dict(cohort: Cohort) -> dict:
 
 async def run_cohort(
     cfg: Config,
-    cohort_id: str,
+    cohort: Cohort | str,
     *,
     engine: Engine | None = None,
     db_path: Path | None = None,
 ) -> Path:
-    """Run a single cohort end-to-end. Returns the resulting db path."""
-    cohort = get_cohort(cohort_id)
+    """Run a single cohort end-to-end. Returns the resulting db path.
+
+    ``cohort`` accepts either a Cohort object (e.g. one built via
+    ``cohort_from_persona`` for persona runs) or a cohort-id string
+    looked up in COHORTS.
+    """
+    if isinstance(cohort, str):
+        cohort = get_cohort(cohort)
+    cohort_id = cohort.id
     own_engine = engine is None
     if own_engine:
         # Validate the host before any subprocess / docker / model load —
@@ -262,13 +269,32 @@ def _flush_users(db: Database, cohort_run_id: str, buffer: list) -> None:
         })
 
 
-async def run_sweep(cfg: Config, cohort_ids: list[str]) -> list[Path]:
-    """Run multiple cohorts back-to-back against the same engine."""
+async def run_sweep(
+    cfg: Config,
+    persona_ids: list[str] | None = None,
+    cohort_ids: list[str] | None = None,
+) -> list[Path]:
+    """Run multiple personas + cohorts back-to-back against the same engine.
+
+    Personas run first (each as an ephemeral one-persona Cohort), then
+    cohorts. The engine is launched once and stays up across the sweep.
+    """
+    from .personas import cohort_from_persona
+
+    persona_ids = persona_ids or []
+    cohort_ids = cohort_ids or []
+    if not persona_ids and not cohort_ids:
+        raise ValueError("run_sweep requires at least one persona_id or cohort_id")
+
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
     engine.launch(log_dir=cfg.output.db_directory)
     paths: list[Path] = []
     try:
+        for pid in persona_ids:
+            log.info("=== Sweep: persona %s ===", pid)
+            path = await run_cohort(cfg, cohort_from_persona(pid), engine=engine)
+            paths.append(path)
         for cid in cohort_ids:
             log.info("=== Sweep: cohort %s ===", cid)
             path = await run_cohort(cfg, cid, engine=engine)

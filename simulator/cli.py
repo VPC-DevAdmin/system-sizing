@@ -11,7 +11,12 @@ from rich.logging import RichHandler
 
 from .config import apply_cli_overrides, load_config
 from .engines import make_engine
-from .personas import COHORTS, resolve_cohort_group
+from .personas import (
+    COHORTS,
+    PERSONAS,
+    cohort_from_persona,
+    resolve_workload_group,
+)
 
 app = typer.Typer(add_completion=False, help="Persona Capacity Simulator")
 
@@ -28,14 +33,13 @@ def _setup_logging(verbose: bool) -> None:
 
 @app.command()
 def run(
-    cohort: str = typer.Option(..., help="Cohort ID"),
+    cohort: str = typer.Option(..., help="Cohort (team mix) id"),
     config: Path = typer.Option(Path("config/default.yaml"), help="Config file"),
     engine: str = typer.Option(None, help="Override engine.type from CONFIG (vllm | sglang)"),
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
-    """Run a single cohort end-to-end. Engine + model come from CONFIG by default;
-    pass --engine / --model only to override what the YAML says."""
+    """Run a single cohort (team mix) end-to-end."""
     _setup_logging(verbose)
     cfg = load_config(config)
     apply_cli_overrides(cfg, engine=engine, model=model)
@@ -47,35 +51,70 @@ def run(
     typer.echo(f"Run complete -> {db_path}")
 
 
+@app.command("run-persona")
+def run_persona_cmd(
+    persona: str = typer.Option(..., help="Persona id (single user archetype)"),
+    config: Path = typer.Option(Path("config/default.yaml"), help="Config file"),
+    engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
+    model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Run a single persona end-to-end (one user archetype, no team mix).
+
+    Useful for measuring each archetype's individual capacity so multi-
+    persona cohort results can be decomposed: if engineering_heavy
+    underperforms, you can compare against the code_assist persona run
+    to see whether the mix itself is producing interference."""
+    _setup_logging(verbose)
+    cfg = load_config(config)
+    apply_cli_overrides(cfg, engine=engine, model=model)
+    if persona not in PERSONAS:
+        raise typer.BadParameter(
+            f"Unknown persona '{persona}'. Known: {sorted(PERSONAS)}"
+        )
+
+    from .runner import run_cohort
+    db_path = asyncio.run(run_cohort(cfg, cohort_from_persona(persona)))
+    typer.echo(f"Run complete -> {db_path}")
+
+
 @app.command()
 def sweep(
     config: Path = typer.Option(Path("config/default.yaml")),
     engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
-    cohorts: str = typer.Option(
+    type: str = typer.Option(
         "all",
+        "--type",
         help=(
-            "'all' | 'singles' | 'mixes' | comma-separated cohort IDs. "
-            "'singles' = single-persona cohorts (each persona alone at 100%); "
-            "'mixes' = blended-workload cohorts."
+            "What to sweep: 'all' (every persona + every cohort), "
+            "'personas' (each persona alone), 'cohorts' (every team mix), "
+            "or a comma-separated list of persona/cohort ids "
+            "(``quick_lookup,chat_heavy``)."
         ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
-    """Run multiple cohorts back-to-back against the same engine."""
+    """Run multiple personas + cohorts back-to-back against one engine.
+
+    Personas run first as ephemeral one-persona Cohorts, then cohorts.
+    The engine launches once and stays up for the whole sweep."""
     _setup_logging(verbose)
     cfg = load_config(config)
     apply_cli_overrides(cfg, engine=engine, model=model)
-    cohort_ids = resolve_cohort_group(cohorts)
-    if not cohort_ids:
-        raise typer.BadParameter(f"No cohorts resolved from {cohorts!r}")
-    for cid in cohort_ids:
-        if cid not in COHORTS:
-            raise typer.BadParameter(f"Unknown cohort '{cid}'")
+    try:
+        persona_ids, cohort_ids = resolve_workload_group(type)
+    except KeyError as e:
+        raise typer.BadParameter(str(e)) from e
+    if not persona_ids and not cohort_ids:
+        raise typer.BadParameter(f"Nothing resolved from --type={type!r}")
 
     from .runner import run_sweep
-    paths = asyncio.run(run_sweep(cfg, cohort_ids))
-    typer.echo(f"Sweep complete: {len(paths)} cohort runs")
+    paths = asyncio.run(run_sweep(cfg, persona_ids=persona_ids, cohort_ids=cohort_ids))
+    typer.echo(
+        f"Sweep complete: {len(paths)} runs "
+        f"({len(persona_ids)} personas + {len(cohort_ids)} cohorts)"
+    )
     for p in paths:
         typer.echo(f"  {p}")
 
@@ -127,22 +166,31 @@ def export_cmd(
 
 @app.command("list-cohorts")
 def list_cohorts():
-    """List available cohorts grouped by category."""
-    by_cat: dict[str, list] = {}
+    """List available team-mix cohorts."""
+    typer.echo("Cohorts (team mixes — pass to --cohort or sweep --type cohorts):\n")
     for cid, cohort in COHORTS.items():
-        by_cat.setdefault(cohort.category, []).append((cid, cohort))
-    for cat in ("single", "mix"):
-        if cat not in by_cat:
-            continue
-        typer.echo(f"\n[{cat}] cohorts:")
-        for cid, cohort in by_cat[cat]:
-            weights_str = ", ".join(
-                f"{p}:{w:.0%}" for p, w in cohort.persona_weights.items()
-            )
-            typer.echo(f"  {cid}")
-            typer.echo(f"    {cohort.name} — {cohort.description}")
-            typer.echo(f"    weights: {weights_str}")
-    typer.echo("\nGroup shortcuts: 'all', 'singles', 'mixes'")
+        weights_str = ", ".join(
+            f"{p}:{w:.0%}" for p, w in cohort.persona_weights.items()
+        )
+        typer.echo(f"  {cid}")
+        typer.echo(f"    {cohort.name} — {cohort.description}")
+        typer.echo(f"    weights: {weights_str}")
+
+
+@app.command("list-personas")
+def list_personas():
+    """List available user-archetype personas."""
+    typer.echo(
+        "Personas (single user archetypes — pass to --persona or "
+        "sweep --type personas):\n"
+    )
+    for pid, persona in PERSONAS.items():
+        typer.echo(f"  {pid}")
+        typer.echo(f"    {persona.description}")
+        typer.echo(
+            f"    SLA floors: TTFT≤{persona.ttft_floor_seconds:.0f}s, "
+            f"TPOT≤{persona.tpot_floor_ms:.0f}ms"
+        )
 
 
 @app.command("ready")

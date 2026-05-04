@@ -348,61 +348,79 @@ def test_every_persona_has_sla_floors() -> None:
         assert p.tpot_floor_ms > 0
 
 
-# ── Cohort categorisation + resolver ──────────────────────────────────
+# ── Personas vs cohorts: clean separation ────────────────────────────
 
 
-def test_every_persona_has_a_single_only_cohort() -> None:
-    """Single-persona cohorts let us characterise each persona's
-    individual capacity. Missing one means we can't decompose a mix
-    cohort's results."""
-    from simulator.personas import COHORTS, PERSONAS
-    expected = {f"{pid}_only" for pid in PERSONAS}
-    actual = {cid for cid, c in COHORTS.items() if c.category == "single"}
-    assert actual == expected, f"missing/extra single-only cohorts: {expected ^ actual}"
+def test_cohorts_dict_contains_no_single_persona_entries() -> None:
+    """Cohorts are *team mixes*. Single personas are accessed via the
+    PERSONAS dict and ``cohort_from_persona``, NOT as one-persona
+    cohorts in the COHORTS dict (which would conflate the two
+    user-facing concepts)."""
+    from simulator.personas import COHORTS
+    for cid, cohort in COHORTS.items():
+        assert len(cohort.persona_weights) > 1, (
+            f"{cid} has only one persona — should be accessed via "
+            f"run-persona, not registered as a cohort"
+        )
+        assert cohort.category == "cohort"
 
 
-def test_single_persona_cohort_weights_sum_to_one() -> None:
-    """Each ``<persona>_only`` cohort must have exactly that persona at
-    100%, nothing else."""
-    from simulator.personas import COHORTS, PERSONAS
+def test_cohort_from_persona_builds_ephemeral_one_persona_cohort() -> None:
+    """``run-persona`` plumbs through the same Cohort-based runner code
+    by wrapping a persona in an ephemeral one-persona Cohort. The
+    resulting Cohort must validate and carry category='persona' so
+    runs are filed under the right buyer-page section."""
+    from simulator.personas import PERSONAS, cohort_from_persona
     for pid in PERSONAS:
-        c = COHORTS[f"{pid}_only"]
+        c = cohort_from_persona(pid)
+        c.validate()
+        assert c.id == pid
         assert c.persona_weights == {pid: 1.0}
+        assert c.category == "persona"
 
 
-def test_resolve_cohort_group_keywords() -> None:
-    """The sweep CLI accepts 'all' / 'singles' / 'mixes' shortcuts so
-    common batches don't need a hand-typed cohort list."""
-    from simulator.personas import COHORTS, resolve_cohort_group
+def test_resolve_workload_group_keywords() -> None:
+    """``--type`` accepts 'all' / 'personas' / 'cohorts' so common
+    sweeps don't need a hand-typed id list."""
+    from simulator.personas import COHORTS, PERSONAS, resolve_workload_group
 
-    all_ids = resolve_cohort_group("all")
-    assert set(all_ids) == set(COHORTS.keys())
+    p_all, c_all = resolve_workload_group("all")
+    assert set(p_all) == set(PERSONAS.keys())
+    assert set(c_all) == set(COHORTS.keys())
 
-    singles = resolve_cohort_group("singles")
-    assert all(COHORTS[c].category == "single" for c in singles)
-    assert len(singles) == 6  # one per persona
+    p_only, c_only = resolve_workload_group("personas")
+    assert set(p_only) == set(PERSONAS.keys())
+    assert c_only == []
 
-    mixes = resolve_cohort_group("mixes")
-    assert all(COHORTS[c].category == "mix" for c in mixes)
-    assert set(singles).isdisjoint(set(mixes))
-
-
-def test_resolve_cohort_group_explicit_list() -> None:
-    """An explicit comma-separated list bypasses the shortcuts."""
-    from simulator.personas import resolve_cohort_group
-    assert resolve_cohort_group("chat_heavy,quick_lookup_only") == [
-        "chat_heavy", "quick_lookup_only",
-    ]
-    assert resolve_cohort_group(" chat_heavy , code_assist_only ") == [
-        "chat_heavy", "code_assist_only",
-    ]
+    p_none, c_only2 = resolve_workload_group("cohorts")
+    assert p_none == []
+    assert set(c_only2) == set(COHORTS.keys())
 
 
-def test_resolve_cohort_group_empty_arg_defaults_to_all() -> None:
-    """Empty / None argument shouldn't blow up the runner."""
-    from simulator.personas import COHORTS, resolve_cohort_group
-    assert set(resolve_cohort_group("")) == set(COHORTS)
-    assert set(resolve_cohort_group(None)) == set(COHORTS)
+def test_resolve_workload_group_explicit_list_disambiguates() -> None:
+    """A comma list mixes persona ids and cohort ids; the resolver
+    splits them by which dict each id is in."""
+    from simulator.personas import resolve_workload_group
+    p, c = resolve_workload_group("quick_lookup,chat_heavy,code_assist")
+    assert p == ["quick_lookup", "code_assist"]
+    assert c == ["chat_heavy"]
+
+
+def test_resolve_workload_group_rejects_unknown_id() -> None:
+    """Surfacing a typo at parse time beats running 5 hours of sweep
+    only to miss what you meant to measure."""
+    from simulator.personas import resolve_workload_group
+    import pytest as _pt
+    with _pt.raises(KeyError, match="some_typo"):
+        resolve_workload_group("quick_lookup,some_typo")
+
+
+def test_resolve_workload_group_empty_arg_defaults_to_all() -> None:
+    from simulator.personas import COHORTS, PERSONAS, resolve_workload_group
+    p, c = resolve_workload_group("")
+    assert set(p) == set(PERSONAS) and set(c) == set(COHORTS)
+    p, c = resolve_workload_group(None)
+    assert set(p) == set(PERSONAS) and set(c) == set(COHORTS)
 
 
 # ── Prefix-cache analyser ─────────────────────────────────────────────

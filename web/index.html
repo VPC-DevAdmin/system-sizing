@@ -196,22 +196,21 @@
         return;
       }
 
-      // Group cohorts by category so single-persona and mix sections
-      // render separately. Category labels match what list-cohorts
-      // shows on the CLI.
-      const groups = { single: [], mix: [], other: [] };
+      // Group runs by category — personas are single user archetypes,
+      // cohorts are team mixes. Render in distinct sections.
+      const groups = { persona: [], cohort: [], other: [] };
       doc.cohorts.forEach((c, i) => {
-        const cat = c.category || "mix";
+        const cat = c.category || "cohort";
         (groups[cat] || groups.other).push({ cohort: c, idx: i });
       });
 
       const labels = {
-        single: "Single-persona cohorts",
-        mix: "Multi-persona cohorts",
+        persona: "Personas (single user archetypes)",
+        cohort: "Cohorts (team mixes)",
         other: "Other",
       };
 
-      ["single", "mix", "other"].forEach((cat) => {
+      ["persona", "cohort", "other"].forEach((cat) => {
         if (!groups[cat].length) return;
         main.appendChild(el("div", { class: "section-header" }, labels[cat]));
         const grid = el("div", { class: "grid" });

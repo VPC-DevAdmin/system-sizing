@@ -14,8 +14,9 @@
 ENGINE  ?=
 MODEL   ?=
 COHORT  ?= chat_heavy
-# For run-sweep: 'all' | 'singles' | 'mixes' | a,b,c list of cohort ids.
-COHORTS ?= all
+PERSONA ?= quick_lookup
+# What to sweep: 'all' | 'personas' | 'cohorts' | a,b,c list of ids.
+SWEEP_TYPE ?= all
 CONFIG  ?= config/default.yaml
 RUN_DIR ?= runs
 
@@ -48,9 +49,12 @@ help:
 	@echo "  make ready CONFIG=...        Install deps, build engine image, download model, preflight"
 	@echo ""
 	@echo "Run:"
-	@echo "  make run-cohort CONFIG=... COHORT=...   Run a single cohort"
-	@echo "  make run-sweep  CONFIG=... [COHORTS=]   Sweep cohorts. COHORTS=all|singles|mixes|a,b,c"
-	@echo "  make list-cohorts                       List available cohorts grouped by category"
+	@echo "  make run-persona CONFIG=... PERSONA=... Run one persona (a single user archetype)"
+	@echo "  make run-cohort  CONFIG=... COHORT=...  Run one cohort (a team mix of personas)"
+	@echo "  make run-sweep   CONFIG=... [SWEEP_TYPE=]  Sweep multiple workloads."
+	@echo "                                          SWEEP_TYPE=all|personas|cohorts|a,b,c"
+	@echo "  make list-personas                      List available user archetypes"
+	@echo "  make list-cohorts                       List available team mixes"
 	@echo "  make dashboard                          Live progress view of latest run"
 	@echo ""
 	@echo "After runs:"
@@ -105,11 +109,19 @@ run-cohort:
 		$(if $(ENGINE),--engine $(ENGINE)) \
 		$(if $(MODEL),--model $(MODEL))
 
+.PHONY: run-persona
+run-persona:
+	$(PY) -m simulator.cli run-persona \
+		--persona $(PERSONA) \
+		--config $(CONFIG) \
+		$(if $(ENGINE),--engine $(ENGINE)) \
+		$(if $(MODEL),--model $(MODEL))
+
 .PHONY: run-sweep
 run-sweep:
 	$(PY) -m simulator.cli sweep \
 		--config $(CONFIG) \
-		--cohorts $(COHORTS) \
+		--type $(SWEEP_TYPE) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
 		$(if $(MODEL),--model $(MODEL))
 
@@ -120,6 +132,10 @@ dashboard:
 .PHONY: list-cohorts
 list-cohorts:
 	$(PY) -m simulator.cli list-cohorts
+
+.PHONY: list-personas
+list-personas:
+	$(PY) -m simulator.cli list-personas
 
 # ── Output / analysis ─────────────────────────────────────────────────
 

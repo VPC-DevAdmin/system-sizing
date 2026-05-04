@@ -13,7 +13,13 @@ MODEL   ?= Qwen/Qwen2.5-7B-Instruct
 COHORT  ?= chat_heavy
 CONFIG  ?= config/default.yaml
 RUN_DIR ?= runs
-PY      ?= python
+
+# Project-local venv. ``make ready`` creates it if missing; every other
+# target uses it via $(PY) when present, falling back to system python
+# otherwise. Override with ``PY=/path/to/python`` on the command line if
+# you'd rather use a venv elsewhere.
+VENV    ?= .venv
+PY      ?= $(if $(wildcard $(VENV)/bin/python),$(VENV)/bin/python,python3)
 
 # SGLang Docker pipeline knobs (used by the hidden sub-targets).
 SGLANG_REPO         ?= https://github.com/sgl-project/sglang.git
@@ -51,23 +57,33 @@ help:
 	@echo "  make launch-engine CONFIG=...           Manually launch the engine (no cohort)"
 	@echo "  make sglang-shell                       Interactive bash inside sglang-cpu:xeon-fixed"
 	@echo "  make test                               Run pytest"
-	@echo "  make clean / clean-runs                 Tidy"
+	@echo "  make clean / clean-runs / clean-venv    Tidy"
 	@echo ""
 	@echo "Variables: CONFIG=$(CONFIG)  COHORT=$(COHORT)  MODEL=$(MODEL)"
 
 # ── Headline target ───────────────────────────────────────────────────
-# `ready` is idempotent. First run: installs deps, builds the docker
-# image (SGLang only), downloads the model, validates hardware. Re-runs:
-# all of those skip steps that are already complete.
+# `ready` is idempotent. First run: creates a project-local venv if
+# missing, installs deps, builds the docker image (SGLang only),
+# downloads the model, validates hardware. Re-runs skip already-done
+# steps (the venv check, image inspect, and model dir check are all
+# no-ops when state is already good).
 .PHONY: ready
-ready:
-	$(PY) -m pip install --upgrade pip
-	$(PY) -m pip install -e .
+ready: $(VENV)/bin/python
+	$(VENV)/bin/python -m pip install --upgrade pip
+	$(VENV)/bin/python -m pip install -e .
 	@if [ -f "$(CONFIG)" ]; then \
-		$(PY) -m simulator.cli ready --config "$(CONFIG)"; \
+		$(VENV)/bin/python -m simulator.cli ready --config "$(CONFIG)"; \
 	else \
 		echo "WARN: $(CONFIG) not found; skipped engine/model prep"; \
 	fi
+	@echo ""
+	@echo "==> $(VENV) ready. To work interactively: source $(VENV)/bin/activate"
+
+# Create the venv if missing. Uses python3 (system) for the bootstrap;
+# every other invocation uses the venv's python via $(PY).
+$(VENV)/bin/python:
+	@echo "==> Creating venv at $(VENV)"
+	python3 -m venv "$(VENV)"
 
 # Back-compat alias.
 .PHONY: setup
@@ -144,6 +160,10 @@ clean:
 	rm -rf __pycache__ .pytest_cache .ruff_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name '*.pyc' -delete
+
+.PHONY: clean-venv
+clean-venv:
+	rm -rf $(VENV)
 
 .PHONY: clean-runs
 clean-runs:

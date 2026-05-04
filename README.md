@@ -104,10 +104,10 @@ make launch-engine ENGINE=sglang \
                    MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507 \
                    CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml
 
-# FP8 variant (sibling config)
+# FP8 on Intel Xeon (AMX) — preflight blocks AMD hosts
 make launch-engine ENGINE=sglang \
                    MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 \
-                   CONFIG=config/r7735_sglang_qwen3_30b_a3b_fp8.yaml
+                   CONFIG=config/xeon_sglang_qwen3_30b_a3b_fp8.yaml
 ```
 
 The container streams its stdout/stderr to `runs/engine_sglang_*.log`. Wait for the simulator's `SGLang ready after Xs` message — this only fires once `/v1/models` returns 200, which means the model is fully loaded. Expected times:

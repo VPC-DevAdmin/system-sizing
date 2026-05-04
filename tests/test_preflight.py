@@ -168,7 +168,7 @@ def test_skips_when_detection_unavailable() -> None:
 def test_fp8_config_carries_intel_amx_requirement() -> None:
     """The FP8 config MUST set the Intel-AMX gate — if someone removes
     this in a refactor, the preflight stops protecting AMD users."""
-    cfg = load_config("config/r7735_sglang_qwen3_30b_a3b_fp8.yaml")
+    cfg = load_config("config/xeon_sglang_qwen3_30b_a3b_fp8.yaml")
     reqs = cfg.engine.hardware_requirements
     assert reqs.cpu_vendor == "intel"
     assert "amx_tile" in reqs.cpu_features

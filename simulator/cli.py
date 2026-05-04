@@ -28,13 +28,14 @@ def _setup_logging(verbose: bool) -> None:
 
 @app.command()
 def run(
-    engine: str = typer.Option("vllm", help="Engine type: vllm | sglang"),
-    model: str = typer.Option(..., help="Model ID (HF repo or local path)"),
     cohort: str = typer.Option(..., help="Cohort ID"),
     config: Path = typer.Option(Path("config/default.yaml"), help="Config file"),
+    engine: str = typer.Option(None, help="Override engine.type from CONFIG (vllm | sglang)"),
+    model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
-    """Run a single cohort end-to-end."""
+    """Run a single cohort end-to-end. Engine + model come from CONFIG by default;
+    pass --engine / --model only to override what the YAML says."""
     _setup_logging(verbose)
     cfg = load_config(config)
     apply_cli_overrides(cfg, engine=engine, model=model)
@@ -48,9 +49,9 @@ def run(
 
 @app.command()
 def sweep(
-    engine: str = typer.Option("vllm"),
-    model: str = typer.Option(...),
     config: Path = typer.Option(Path("config/default.yaml")),
+    engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
+    model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
     cohorts: str = typer.Option(
         ",".join(COHORTS.keys()),
         help="Comma-separated cohort IDs (default: all)",
@@ -75,9 +76,9 @@ def sweep(
 
 @app.command("launch-engine")
 def launch_engine(
-    engine: str = typer.Option("vllm"),
-    model: str = typer.Option(...),
     config: Path = typer.Option(Path("config/default.yaml")),
+    engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
+    model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Launch the engine without running simulations (manual testing)."""
@@ -266,10 +267,19 @@ def _ensure_model(cfg) -> None:
     host_dir.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
-    subprocess.run(
-        ["hf", "download", cfg.engine.model_id, "--local-dir", str(host_dir)],
-        env=env, check=True,
-    )
+    # Use the venv's ``hf`` binary, not whatever's on PATH. The user
+    # may have a ``~/.local/bin/hf`` left over from a different Python
+    # which now ImportErrors on huggingface_hub.
+    import sys
+    hf_bin = Path(sys.executable).parent / "hf"
+    if not hf_bin.exists():
+        # Fall back to module invocation — same Python, no PATH ambiguity.
+        cmd = [sys.executable, "-m", "huggingface_hub.cli.hf", "download",
+               cfg.engine.model_id, "--local-dir", str(host_dir)]
+    else:
+        cmd = [str(hf_bin), "download", cfg.engine.model_id,
+               "--local-dir", str(host_dir)]
+    subprocess.run(cmd, env=env, check=True)
     typer.echo(f"==> Downloaded to {host_dir}")
 
 

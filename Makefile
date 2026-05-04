@@ -8,8 +8,11 @@
 #   make export
 #   make web
 
-ENGINE  ?= vllm
-MODEL   ?= Qwen/Qwen2.5-7B-Instruct
+# Engine + model are read from CONFIG by default. Set ENGINE=... or
+# MODEL=... on the command line ONLY when you want to override what the
+# YAML says (rare). The previous defaults silently overrode the YAML.
+ENGINE  ?=
+MODEL   ?=
 COHORT  ?= chat_heavy
 CONFIG  ?= config/default.yaml
 RUN_DIR ?= runs
@@ -94,17 +97,17 @@ setup: ready
 .PHONY: run-cohort
 run-cohort:
 	$(PY) -m simulator.cli run \
-		--engine $(ENGINE) \
-		--model $(MODEL) \
 		--cohort $(COHORT) \
-		--config $(CONFIG)
+		--config $(CONFIG) \
+		$(if $(ENGINE),--engine $(ENGINE)) \
+		$(if $(MODEL),--model $(MODEL))
 
 .PHONY: run-sweep
 run-sweep:
 	$(PY) -m simulator.cli sweep \
-		--engine $(ENGINE) \
-		--model $(MODEL) \
-		--config $(CONFIG)
+		--config $(CONFIG) \
+		$(if $(ENGINE),--engine $(ENGINE)) \
+		$(if $(MODEL),--model $(MODEL))
 
 .PHONY: dashboard
 dashboard:
@@ -139,9 +142,9 @@ preflight:
 .PHONY: launch-engine
 launch-engine:
 	$(PY) -m simulator.cli launch-engine \
-		--engine $(ENGINE) \
-		--model $(MODEL) \
-		--config $(CONFIG)
+		--config $(CONFIG) \
+		$(if $(ENGINE),--engine $(ENGINE)) \
+		$(if $(MODEL),--model $(MODEL))
 
 .PHONY: sglang-shell
 sglang-shell:

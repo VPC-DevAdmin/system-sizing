@@ -17,6 +17,11 @@ dependencies = [
     "tokenizers>=0.20",
     "numpy>=1.26",
     "psutil>=5.9",
+    # CLI + accelerated transfer for ``make ready`` model downloads.
+    # Without [cli] extras the venv has no ``hf`` binary; without
+    # hf_transfer the download falls back to plain HTTP and is much
+    # slower for multi-GB shards.
+    "huggingface_hub[cli,hf_transfer]>=0.24",
 ]
 
 [project.optional-dependencies]

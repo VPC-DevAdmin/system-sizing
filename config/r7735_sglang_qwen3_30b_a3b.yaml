@@ -73,9 +73,9 @@ simulation:
   max_pool_size: 256
   target_samples_per_step: 50
   measurement_timeout_s: 600
-  stabilization_cv_threshold: 0.5
-  stabilization_min_duration_s: 30
-  stabilization_max_duration_s: 180
+  warmup_min_duration_s: 30
+  warmup_max_duration_s: 240
+  warmup_min_completions_per_user: 1.0
   knee_slope_threshold: 0.005
   stop_violation_threshold: 0.5
   max_total_duration_minutes: 240

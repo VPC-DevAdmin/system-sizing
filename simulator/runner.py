@@ -168,17 +168,14 @@ async def run_cohort(
                 target_pool_size=next_size,
                 target_samples=cfg.simulation.target_samples_per_step,
                 measurement_timeout_s=cfg.simulation.measurement_timeout_s,
-                cv_threshold=cfg.simulation.stabilization_cv_threshold,
-                stab_min_s=cfg.simulation.stabilization_min_duration_s,
-                stab_max_s=cfg.simulation.stabilization_max_duration_s,
+                warmup_min_duration_s=cfg.simulation.warmup_min_duration_s,
+                warmup_max_duration_s=cfg.simulation.warmup_max_duration_s,
+                warmup_min_completions_per_user=cfg.simulation.warmup_min_completions_per_user,
             )
 
             # Persist any user terminations seen
             _flush_users(db, cohort_run_id, user_termination_buffer)
 
-            if result.status == "unstable":
-                final_status = "unstable"
-                break
             if result.status == "no_samples":
                 final_status = "no_samples"
                 break

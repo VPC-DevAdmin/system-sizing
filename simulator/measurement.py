@@ -83,38 +83,50 @@ def _wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
-async def _wait_for_stability(
+async def _wait_for_warmup(
     state: SharedState,
+    pool_size: int,
     *,
-    cv_threshold: float,
-    min_stable_duration_s: int,
+    min_duration_s: int,
+    min_completions_per_user: float,
     max_wait_s: int,
     in_flight_history: list[int] | None = None,
 ) -> bool:
-    """Watch in-flight count; return True if CV < threshold for the required window."""
-    window = deque(maxlen=30)  # 30s rolling
-    stable_streak = 0
+    """Wait until cold-start effects are gone before measurement.
+
+    Two gates, both must be satisfied:
+      * elapsed wall-clock >= ``min_duration_s`` (engine has had time to
+        settle JIT, page cache, prefix cache, etc.)
+      * at least ``min_completions_per_user * pool_size`` requests have
+        completed since the warmup started (every virtual user has
+        cycled through at least N requests, so we're past their first-
+        request cold start)
+
+    The previous implementation watched ``CV(in_flight)`` and waited for
+    it to drop below a threshold. That metric is **fundamentally wrong**
+    for closed-loop persona workloads: each user does request → wait →
+    think → repeat, so ``in_flight`` follows a periodic wave between 0
+    and pool_size at the workload's natural cycle period. The CV never
+    converges, regardless of pool size or threshold. See run logs from
+    the R470 first-light Xeon FP8 attempt for the empirical confirmation.
+
+    Returns True if both gates are satisfied within ``max_wait_s``,
+    False otherwise. Caller can choose to proceed anyway on False — the
+    measurement window will still capture useful samples, just with a
+    larger cold-start tail.
+    """
     start = time.monotonic()
+    completed_at_start = state.completed
+    target_completions = max(1, int(round(min_completions_per_user * pool_size)))
+
     while time.monotonic() - start < max_wait_s:
-        await asyncio.sleep(1.0)
-        v = state.in_flight
-        window.append(v)
         if in_flight_history is not None:
-            in_flight_history.append(v)
-        if len(window) < window.maxlen:
-            continue
-        mean = statistics.fmean(window)
-        if mean <= 0:
-            stable_streak = 0
-            continue
-        std = statistics.pstdev(window)
-        cv = std / mean
-        if cv < cv_threshold:
-            stable_streak += 1
-        else:
-            stable_streak = 0
-        if stable_streak >= min_stable_duration_s:
+            in_flight_history.append(state.in_flight)
+        elapsed = time.monotonic() - start
+        new_completions = state.completed - completed_at_start
+        if elapsed >= min_duration_s and new_completions >= target_completions:
             return True
+        await asyncio.sleep(1.0)
     return False
 
 
@@ -130,11 +142,11 @@ async def run_measurement_step(
     target_pool_size: int,
     target_samples: int,
     measurement_timeout_s: int,
-    cv_threshold: float,
-    stab_min_s: int,
-    stab_max_s: int,
+    warmup_min_duration_s: int,
+    warmup_max_duration_s: int,
+    warmup_min_completions_per_user: float,
 ) -> MeasurementResult:
-    """Ramp to target_pool_size, stabilise, then measure."""
+    """Ramp to target_pool_size, warm up, then measure."""
     log.info("Step %d: ramping pool to %d", step_index, target_pool_size)
     phase_tracker.set(PHASE_RAMPING)
     await pool.set_target_size(target_pool_size)
@@ -142,20 +154,26 @@ async def run_measurement_step(
     # Brief pause for first requests to start
     await asyncio.sleep(2.0)
 
-    phase_tracker.set(PHASE_STABILIZING)
-    log.info("Step %d: stabilising (cv<%.2f, %ds)", step_index, cv_threshold, stab_min_s)
+    phase_tracker.set(PHASE_STABILIZING)  # phase name kept for dashboard back-compat
+    target_completions = max(1, int(round(warmup_min_completions_per_user * target_pool_size)))
+    log.info(
+        "Step %d: warming up (>=%ds elapsed, >=%d completions, max %ds)",
+        step_index, warmup_min_duration_s, target_completions, warmup_max_duration_s,
+    )
     in_flight_track: list[int] = []
-    stable = await _wait_for_stability(
+    warmed = await _wait_for_warmup(
         state,
-        cv_threshold=cv_threshold,
-        min_stable_duration_s=stab_min_s,
-        max_wait_s=stab_max_s,
+        pool_size=target_pool_size,
+        min_duration_s=warmup_min_duration_s,
+        min_completions_per_user=warmup_min_completions_per_user,
+        max_wait_s=warmup_max_duration_s,
         in_flight_history=in_flight_track,
     )
-    if not stable:
-        log.warning("Step %d: did not stabilise", step_index)
-        phase_tracker.set(PHASE_IDLE)
-        return MeasurementResult(status="unstable", target_pool_size=target_pool_size)
+    if not warmed:
+        log.warning(
+            "Step %d: warmup gates not met within %ds — measuring anyway",
+            step_index, warmup_max_duration_s,
+        )
 
     # Drain queue of pre-measurement events
     while not state.events.empty():

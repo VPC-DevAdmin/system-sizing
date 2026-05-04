@@ -101,9 +101,19 @@ class SimulationConfig:
     max_pool_size: int = 1024
     target_samples_per_step: int = 500
     measurement_timeout_s: int = 300
-    stabilization_cv_threshold: float = 0.15
-    stabilization_min_duration_s: int = 60
-    stabilization_max_duration_s: int = 300
+    # Warmup gates (replaces the older CV-of-in-flight stabilisation
+    # detection — that metric never converges for closed-loop persona
+    # workloads where in_flight oscillates with the request/think cycle
+    # period regardless of pool size).
+    #
+    # Measurement starts once BOTH:
+    #   * elapsed >= warmup_min_duration_s
+    #   * completions since pool ramp >= round(warmup_min_completions_per_user * pool_size)
+    # …or after warmup_max_duration_s has passed (in which case
+    # measurement runs anyway, just with a larger cold-start tail).
+    warmup_min_duration_s: int = 30
+    warmup_max_duration_s: int = 180
+    warmup_min_completions_per_user: float = 1.0
     knee_slope_threshold: float = 0.005
     stop_violation_threshold: float = 0.5
     max_total_duration_minutes: int = 180

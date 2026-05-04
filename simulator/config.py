@@ -101,15 +101,12 @@ class EngineConfig:
         default_factory=HardwareRequirements
     )
 
-    # ── vllm_dual_socket: per-replica + LiteLLM-proxy fields ──────────
-    # Used when ``type == "vllm_dual_socket"`` — two vLLM-CPU containers
-    # pinned to different NUMA nodes, fronted by a LiteLLM proxy that
-    # does session-based sticky routing. Image defaults match the
-    # working AMD R7735 runbook.
+    # ── vllm_dual_socket: per-replica fields ──────────────────────────
+    # Used when ``type == "vllm_dual_socket"`` — N vLLM-CPU containers
+    # pinned to N different NUMA nodes. The simulator hash-routes
+    # virtual users across replicas to preserve prefix-cache locality
+    # (each user's multi-turn conversation lands on one replica).
     vllm_image: str = "vllm/vllm-openai-cpu:latest-x86_64"
-    litellm_image: str = "ghcr.io/berriai/litellm:main-latest"
-    litellm_master_key: str = "sk-local-dev-only"
-    litellm_port: int = 4000
     replicas: list = field(default_factory=list)  # list[ReplicaConfig]
     shutdown_grace_s: int = 30
 

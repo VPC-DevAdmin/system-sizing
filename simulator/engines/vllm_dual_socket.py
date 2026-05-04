@@ -1,33 +1,27 @@
-"""vLLM-CPU dual-replica + LiteLLM proxy engine for dual-socket NUMA boxes.
+"""vLLM-CPU dual-replica engine for dual-socket NUMA boxes.
 
 On dual-socket AMD EPYC, TP=2 across sockets is bottlenecked by Gloo
 all-reduce traffic over the inter-socket interconnect (~1.4× scaling).
-Two independent vLLM replicas, each pinned to a single NUMA node, scale
-nearly linearly (~2×) because there's zero cross-socket sync — the
-trade-off is that each replica has its own KV cache, so a user's
-multi-turn conversation must consistently route to the same replica or
-the prefix cache is missed.
+Two independent vLLM replicas, each pinned to one NUMA node, scale
+nearly linearly (~2×) because there's zero cross-socket sync. Trade-
+off: each replica has its own KV cache, so a user's multi-turn
+conversation must consistently route to the same replica or the
+prefix cache is missed on every turn.
 
-A LiteLLM proxy fronts both replicas at a single OpenAI-compatible
-endpoint and uses ``session_id``-based sticky routing to preserve
-prefix-cache locality. The simulator's virtual-user runtime sets
-``session_id = user_id`` so each user's full conversation history
-stays on one replica for the lifetime of that user.
+The simulator handles routing itself: ``Engine.replica_urls`` returns
+one URL per replica, the pool manager builds one ``AsyncOpenAI`` client
+per replica, and each virtual user is hashed to a stable replica via
+``hash(user_id) % len(replicas)``. Multi-turn conversations stay on
+one backend for free, with no proxy in the request path.
 
-Three Docker containers come up per launch:
-  * ``vllm-{name}-{uuid}`` — one per replica, NUMA-pinned via
-    ``--cpuset-cpus`` + ``--cpuset-mems``.
-  * ``litellm-{uuid}`` — proxy on ``litellm_port`` (default 4000).
+The original architecture used a LiteLLM proxy at port 4000 with
+``routing_strategy: "session-state-based"`` for sticky routing.
+Recent LiteLLM releases removed that strategy name, and pinning a
+specific tag for stability is fragile. Dropping LiteLLM removed an
+external dependency and a process boundary on the request hot path.
 
-Shutdown order: LiteLLM first, then replicas. This causes in-flight
-requests to fail fast with HTTP errors rather than hang indefinitely
-on backends that disappeared mid-flight.
-
-Architecture confirmed working on R7735 (2× EPYC 9374F, 64 phys cores
-across 2 NUMA nodes, ~386 GB DDR5) running Qwen3-30B-A3B-Instruct-2507
-in BF16. The vllm/vllm-openai-cpu image is required — the SGLang
-xeon-fixed image has a torch wheel that runs at ~3% of theoretical
-compute on AMD due to missing AVX-512 BF16 dispatch.
+Two Docker containers per launch — one ``vllm-{name}-{run_id}`` per
+replica, NUMA-pinned via ``--cpuset-cpus`` + ``--cpuset-mems``.
 """
 
 from __future__ import annotations
@@ -42,7 +36,6 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
-import yaml
 
 from .base import Engine
 
@@ -50,33 +43,41 @@ log = logging.getLogger(__name__)
 
 
 class VllmDualSocketEngine(Engine):
-    """Two NUMA-pinned vLLM replicas + LiteLLM session-routing proxy."""
+    """Two NUMA-pinned vLLM replicas, hash-routed by virtual user id."""
 
     def __init__(self, engine_config):
         super().__init__(engine_config)
         # (ReplicaConfig, container_id, log_streamer_proc) tuples
         self._replicas: list[tuple[object, str, Optional[subprocess.Popen]]] = []
-        self._litellm_container: Optional[str] = None
-        self._litellm_streamer: Optional[subprocess.Popen] = None
-        self._litellm_config_path: Optional[Path] = None
         self._log_dir: Optional[Path] = None
 
     # ── Public API ────────────────────────────────────────────────────
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.cfg.host}:{self.cfg.litellm_port}/v1"
+        # Health-check / single-endpoint default. The pool manager uses
+        # ``replica_urls`` for actual request routing.
+        if self._replicas:
+            replica = self._replicas[0][0]
+            return f"http://{self.cfg.host}:{replica.port}/v1"
+        if self.cfg.replicas:
+            return f"http://{self.cfg.host}:{self.cfg.replicas[0].port}/v1"
+        raise RuntimeError("No replicas configured for vllm_dual_socket")
 
     @property
-    def api_key(self) -> str:
-        return self.cfg.litellm_master_key
+    def replica_urls(self) -> list[str]:
+        """One URL per replica. The simulator hash-routes virtual users
+        across these to preserve prefix-cache locality per user."""
+        return [
+            f"http://{self.cfg.host}:{r.port}/v1" for r in self.cfg.replicas
+        ]
 
     def launch(self, log_dir: str | Path = "runs") -> None:
-        if self._replicas or self._litellm_container is not None:
+        if self._replicas:
             raise RuntimeError("Engine already launched")
         if shutil.which("docker") is None:
             raise RuntimeError(
-                "docker not found on PATH; vllm_dual_socket runs require Docker."
+                "docker not found on PATH; vllm_dual_socket requires Docker."
             )
         if not self.cfg.replicas:
             raise RuntimeError(
@@ -89,7 +90,6 @@ class VllmDualSocketEngine(Engine):
         self._log_path = self._log_dir / f"engine_vllm_dual_{run_id}.log"
 
         try:
-            # 1. Launch all replicas (parallel docker run -d returns fast).
             log.info(
                 "Starting %d vLLM replicas: %s",
                 len(self.cfg.replicas),
@@ -97,36 +97,17 @@ class VllmDualSocketEngine(Engine):
             )
             for replica in self.cfg.replicas:
                 self._launch_replica(replica, run_id)
-
-            # 2. Wait for each replica's /v1/models to return 200.
             for replica, cid, _ in self._replicas:
                 self._wait_for_replica_ready(replica, cid)
-
-            # 3. Generate LiteLLM config and start the proxy.
-            self._litellm_config_path = (
-                self._log_dir / f"litellm_{run_id}.yaml"
+            log.info(
+                "All replicas ready. Routing across: %s",
+                ", ".join(self.replica_urls),
             )
-            self._write_litellm_config(self._litellm_config_path)
-            log.info("LiteLLM config -> %s", self._litellm_config_path)
-            self._launch_litellm(run_id)
-
-            # 4. Wait for LiteLLM /v1/models.
-            self._wait_for_litellm_ready()
         except Exception:
             self.shutdown()
             raise
 
     def shutdown(self) -> None:
-        # LiteLLM first so in-flight requests fail-fast rather than hang.
-        if self._litellm_container is not None:
-            cid = self._litellm_container
-            self._litellm_container = None
-            log.info("Stopping LiteLLM container %s", cid[:12])
-            self._stop_container(cid)
-        if self._litellm_streamer is not None:
-            self._stop_streamer(self._litellm_streamer)
-            self._litellm_streamer = None
-
         for replica, cid, streamer in self._replicas:
             log.info("Stopping replica %s (%s)", replica.name, cid[:12])
             self._stop_container(cid)
@@ -136,11 +117,14 @@ class VllmDualSocketEngine(Engine):
 
     @property
     def pid(self) -> Optional[int]:
-        if self._litellm_container is None:
+        # No single PID — return the first replica's host PID for
+        # telemetry's RSS rollup; psutil can walk children from there.
+        if not self._replicas:
             return None
         try:
+            cid = self._replicas[0][1]
             r = subprocess.run(
-                ["docker", "inspect", "-f", "{{.State.Pid}}", self._litellm_container],
+                ["docker", "inspect", "-f", "{{.State.Pid}}", cid],
                 capture_output=True, text=True, timeout=5,
             )
             v = r.stdout.strip()
@@ -149,30 +133,26 @@ class VllmDualSocketEngine(Engine):
             return None
 
     def health_check(self) -> bool:
-        if self._litellm_container is None:
+        """Healthy when all replicas serve ``/v1/models``."""
+        if not self._replicas:
             return False
-        try:
-            url = (
-                f"http://{self.cfg.host}:{self.cfg.litellm_port}/v1/models"
-            )
-            r = httpx.get(
-                url,
-                headers={"Authorization": f"Bearer {self.cfg.litellm_master_key}"},
-                timeout=2.0,
-            )
-            return r.status_code == 200
-        except Exception:
-            return False
+        for replica, _, _ in self._replicas:
+            try:
+                url = f"http://{self.cfg.host}:{replica.port}/v1/models"
+                r = httpx.get(url, timeout=2.0)
+                if r.status_code != 200:
+                    return False
+            except Exception:
+                return False
+        return True
 
     def get_metrics(self) -> dict[str, float]:
-        """Aggregate metrics from BOTH vLLM replicas.
+        """Aggregate metrics across all replicas.
 
-        LiteLLM doesn't expose model-side metrics — they live on each
-        replica's ``/metrics`` endpoint. We sum/average sensibly:
-        running + waiting are summed across replicas; cache utilisation
-        is averaged.
+        Counters (running, queue depth, prefix-cache hits/queries) are
+        summed; gauges (KV usage %) are averaged. Hit rate is
+        recomputed from the aggregated counters.
         """
-        agg: dict[str, float] = {}
         per_replica = []
         for replica, _, _ in self._replicas:
             try:
@@ -185,28 +165,24 @@ class VllmDualSocketEngine(Engine):
                 continue
         if not per_replica:
             return {}
-        # Sum counters that should be additive
+        agg: dict[str, float] = {}
         for k in ("num_running", "queue_depth", "prefix_cache_hits",
                   "prefix_cache_queries"):
             vals = [m[k] for m in per_replica if k in m]
             if vals:
                 agg[k] = sum(vals)
-        # Average gauges that don't add cleanly
         for k in ("kv_cache_used_pct",):
             vals = [m[k] for m in per_replica if k in m]
             if vals:
                 agg[k] = sum(vals) / len(vals)
-        # Recompute hit rate from aggregated counters
         if agg.get("prefix_cache_queries"):
             agg["prefix_cache_hit_rate"] = (
                 agg.get("prefix_cache_hits", 0) / agg["prefix_cache_queries"]
             )
         return agg
 
-    # Required-by-base abstract API; not used directly because we
-    # override launch() entirely.
     def _build_command(self) -> list[str]:
-        return []
+        return []  # we override launch() entirely
 
     def _build_env(self) -> dict[str, str]:
         return dict(os.environ)
@@ -228,9 +204,6 @@ class VllmDualSocketEngine(Engine):
             ) from e
         cid = result.stdout.strip()
         log.info("replica %s container=%s", replica.name, cid[:12])
-
-        # Stream the replica's stdout/stderr to the shared engine log
-        # with a per-replica prefix so multi-replica logs are readable.
         streamer = self._spawn_log_streamer(cid, prefix=f"[{replica.name}] ")
         self._replicas.append((replica, cid, streamer))
 
@@ -241,9 +214,9 @@ class VllmDualSocketEngine(Engine):
             "--name", container_name,
             "--network", "host",
             "--shm-size", "4g",
-            # SYS_NICE + seccomp=unconfined are required by vLLM CPU's
-            # OpenMP runtime to apply thread priorities; without them
-            # OMP scheduling degrades quietly.
+            # SYS_NICE + seccomp=unconfined per vLLM CPU docs — without
+            # them the OMP runtime can't apply thread priorities and
+            # scheduling degrades silently.
             "--security-opt", "seccomp=unconfined",
             "--cap-add", "SYS_NICE",
         ]
@@ -251,18 +224,15 @@ class VllmDualSocketEngine(Engine):
             cmd += ["--cpuset-cpus", replica.cpuset_cpus]
         if replica.cpuset_mems:
             cmd += ["--cpuset-mems", replica.cpuset_mems]
-        # Volume mounts (model weights, HF cache).
         for host_path, container_path in (cfg.docker_volumes or {}).items():
             if not Path(host_path).exists():
                 continue
             cmd += ["-v", f"{host_path}:{container_path}"]
-        # Per-replica env (NUMA-specific OpenMP settings).
         for k, v in (replica.env or {}).items():
             cmd += ["-e", f"{k}={v}"]
         cmd += list(cfg.docker_extra_args or [])
         cmd.append(cfg.vllm_image)
 
-        # Inner: vLLM serve flags.
         model_arg = cfg.model_local_path or cfg.model_id
         served_name = cfg.served_model_name or cfg.model_id
         cmd += [
@@ -308,114 +278,15 @@ class VllmDualSocketEngine(Engine):
             f"{self.cfg.startup_timeout_s}s — see {self._log_path}"
         )
 
-    # ── LiteLLM lifecycle ─────────────────────────────────────────────
-
-    def _write_litellm_config(self, path: Path) -> None:
-        cfg = self.cfg
-        served_name = cfg.served_model_name or cfg.model_id
-        model_list = []
-        for replica in cfg.replicas:
-            model_list.append({
-                "model_name": served_name,
-                "litellm_params": {
-                    "model": f"openai/{served_name}",
-                    "api_base": f"http://127.0.0.1:{replica.port}/v1",
-                    "api_key": "dummy",
-                },
-            })
-        document = {
-            "model_list": model_list,
-            "router_settings": {
-                "routing_strategy": "session-state-based",
-                "num_retries": 1,
-                "timeout": 600,
-                "enable_pre_call_checks": True,
-            },
-            "general_settings": {
-                "master_key": cfg.litellm_master_key,
-            },
-        }
-        path.write_text(yaml.safe_dump(document, sort_keys=False))
-
-    def _launch_litellm(self, run_id: str) -> None:
-        cfg = self.cfg
-        name = f"litellm-{run_id}"
-        # Docker requires absolute paths for bind-mount sources; bare
-        # relative paths are interpreted as named-volume references and
-        # rejected with "includes invalid characters for a local volume
-        # name". The config file is written under ``log_dir`` which can
-        # be a relative path (default 'runs'); resolve to absolute.
-        config_abs = str(self._litellm_config_path.resolve())
-        cmd = [
-            "docker", "run", "-d", "--rm",
-            "--name", name,
-            "--network", "host",
-            "-v", f"{config_abs}:/app/config.yaml:ro",
-            cfg.litellm_image,
-            "--config", "/app/config.yaml",
-            "--port", str(cfg.litellm_port),
-        ]
-        log.info("docker run litellm: %s", " ".join(cmd))
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, check=True, timeout=60,
-            )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"LiteLLM docker run failed (rc={e.returncode}): {e.stderr.strip()}"
-            ) from e
-        self._litellm_container = result.stdout.strip()
-        log.info("litellm container=%s", self._litellm_container[:12])
-        self._litellm_streamer = self._spawn_log_streamer(
-            self._litellm_container, prefix="[litellm] ",
-        )
-
-    def _wait_for_litellm_ready(self) -> None:
-        log.info(
-            "Waiting for LiteLLM on port %d", self.cfg.litellm_port,
-        )
-        start = time.time()
-        timeout = min(120, self.cfg.startup_timeout_s)  # LiteLLM is fast
-        backoff = 1.0
-        while time.time() - start < timeout:
-            if not self._container_running(self._litellm_container):
-                raise RuntimeError(
-                    f"LiteLLM container exited during startup; see {self._log_path}"
-                )
-            try:
-                url = f"http://{self.cfg.host}:{self.cfg.litellm_port}/v1/models"
-                r = httpx.get(
-                    url,
-                    headers={"Authorization": f"Bearer {self.cfg.litellm_master_key}"},
-                    timeout=2.0,
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    models = [m.get("id") for m in data.get("data", [])]
-                    log.info(
-                        "LiteLLM ready after %.1fs; serving: %s",
-                        time.time() - start, models,
-                    )
-                    return
-            except Exception:
-                pass
-            time.sleep(backoff)
-            backoff = min(3.0, backoff * 1.2)
-        raise TimeoutError(
-            f"LiteLLM did not become ready within {timeout}s"
-        )
-
     # ── Helpers ───────────────────────────────────────────────────────
 
     def _spawn_log_streamer(self, container_id: str, *, prefix: str) -> Optional[subprocess.Popen]:
-        """Stream ``docker logs -f`` into the shared engine log, prefixing
-        each line so multi-replica output is greppable by container."""
+        """Stream ``docker logs -f`` into the engine log file with a
+        per-replica prefix so multi-replica output is greppable."""
         if self._log_path is None:
             return None
         try:
             log_file = open(self._log_path, "ab")
-            # ``stdbuf -oL`` on docker logs ensures line-buffered output;
-            # we then prefix via sed in a shell pipeline.
             shell_cmd = (
                 f"docker logs -f {container_id} 2>&1 | "
                 f"sed 's/^/{prefix}/'"

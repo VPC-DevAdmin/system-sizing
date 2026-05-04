@@ -1,10 +1,12 @@
-# vLLM-CPU dual-replica + LiteLLM on R7735 (2× AMD EPYC 9374F).
+# vLLM-CPU dual-replica on R7735 (2× AMD EPYC 9374F).
 #
 # 64 physical cores split across 2 NUMA nodes (32 cores per socket).
-# Two independent vLLM replicas, one per NUMA node, fronted by a
-# LiteLLM proxy that does session-based sticky routing. This scales
-# nearly linearly (~2×) on dual-socket vs the ~1.4× you'd get from
-# TP=2 across sockets (Gloo all-reduce becomes the bottleneck).
+# Two independent vLLM replicas, one per NUMA node. The simulator
+# hash-load-balances virtual users across replicas with sticky
+# assignment (each user always lands on the same replica) so multi-
+# turn conversations preserve prefix-cache locality. Scales nearly
+# linearly (~2×) on dual-socket vs the ~1.4× you'd get from TP=2
+# across sockets (Gloo all-reduce becomes the bottleneck).
 #
 # CRITICAL: this engine REQUIRES the upstream vllm/vllm-openai-cpu
 # image — its torch wheel has the AVX-512 BF16 dispatch that AMD
@@ -12,9 +14,9 @@
 # theoretical compute on EPYC and is not viable.
 #
 # Architecture:
-#   benchmark client → http://localhost:4000  (LiteLLM proxy)
-#                          ├── 127.0.0.1:8000  (vLLM r0, NUMA 0, cores 0-31)
-#                          └── 127.0.0.1:8001  (vLLM r1, NUMA 1, cores 32-63)
+#   benchmark client → 127.0.0.1:8000  (vLLM r0, NUMA 0, cores 0-31)
+#                   └→ 127.0.0.1:8001  (vLLM r1, NUMA 1, cores 32-63)
+#   The simulator's pool manager owns the per-user routing; no proxy.
 #
 # Verified working on this hardware (EPYC 9374F, 386 GB DDR5) with
 # Qwen3-30B-A3B-Instruct-2507 BF16, runbook dated 2026-05-03.
@@ -27,17 +29,12 @@ engine:
   quantization_kind: null              # BF16
 
   max_model_len: 8192
-  startup_timeout_s: 1800              # ~90-120s per replica + LiteLLM
+  startup_timeout_s: 1800              # ~90-120s per replica
 
   host: 127.0.0.1
 
-  # ── Container images ──
+  # ── Container image ──
   vllm_image: vllm/vllm-openai-cpu:latest-x86_64
-  litellm_image: ghcr.io/berriai/litellm:main-latest
-
-  # ── LiteLLM proxy ──
-  litellm_master_key: sk-local-dev-only
-  litellm_port: 4000
 
   # ── Replicas ──
   # Pin to physical cores only (skip SMT siblings 64-127 — using them

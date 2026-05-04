@@ -99,12 +99,25 @@ async def run_cohort(
     state = SharedState()
     phase_tracker = PhaseTracker()
     corpus = TokenCorpus(cfg.engine.model_id)
-    client = AsyncOpenAI(base_url=engine.base_url, api_key=engine.api_key)
+    # One AsyncOpenAI client per replica. Single-backend engines
+    # return ``[base_url]`` from replica_urls, so the typical case
+    # produces a one-element list. Multi-replica engines (dual-socket
+    # NUMA-pinned vLLM) produce N elements; the pool manager
+    # hash-routes each virtual user to a stable replica so multi-turn
+    # conversations preserve prefix-cache locality on one backend.
+    clients = [
+        AsyncOpenAI(base_url=url, api_key=engine.api_key)
+        for url in engine.replica_urls
+    ]
+    log.info(
+        "Built %d client(s) for replica URLs: %s",
+        len(clients), engine.replica_urls,
+    )
 
     user_termination_buffer: list = []
     pool = PoolManager(
         cohort=cohort,
-        client=client,
+        clients=clients,
         model_id=engine.model_id,
         corpus=corpus,
         state=state,
@@ -213,6 +226,25 @@ async def run_cohort(
     finally:
         phase_tracker.set(PHASE_IDLE)
         await snap.stop()
+        # Sticky-routing sanity check before tearing the pool down.
+        # Multi-replica engines should show ±1 user-assignment balance;
+        # heavy skew indicates a bug in _client_for_user.
+        if len(clients) > 1:
+            log.info("Replica routing balance: %s", pool.routing_summary())
+            try:
+                eng_metrics = engine.get_metrics()
+                hits = eng_metrics.get("prefix_cache_hits")
+                queries = eng_metrics.get("prefix_cache_queries")
+                hit_rate = eng_metrics.get("prefix_cache_hit_rate")
+                if hits is not None and queries is not None:
+                    log.info(
+                        "Prefix-cache (aggregated): hits=%s queries=%s "
+                        "hit_rate=%s",
+                        int(hits), int(queries),
+                        f"{hit_rate:.1%}" if hit_rate is not None else "—",
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.debug("end-of-run metrics scrape failed: %s", e)
         await pool.stop()
         _flush_users(db, cohort_run_id, user_termination_buffer)
 

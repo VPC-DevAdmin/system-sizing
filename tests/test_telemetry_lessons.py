@@ -127,47 +127,86 @@ def test_vllm_dual_socket_engine_command_shape() -> None:
     assert "--served-model-name" in cmd and "qwen3_30b_a3b" in cmd
 
 
-def test_vllm_dual_socket_litellm_config_yaml() -> None:
-    """The generated LiteLLM config must register both replicas under
-    the same model_name (so it routes between them) with the right
-    api_base URLs."""
-    from simulator.config import load_config
-    from simulator.engines.vllm_dual_socket import VllmDualSocketEngine
-    import tempfile
-    from pathlib import Path
-    import yaml as _y
-
-    cfg = load_config("config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml")
-    eng = VllmDualSocketEngine(cfg.engine)
-    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w+", delete=False) as f:
-        path = Path(f.name)
-    eng._write_litellm_config(path)
-    doc = _y.safe_load(path.read_text())
-    path.unlink()
-
-    assert len(doc["model_list"]) == 2
-    names = {entry["model_name"] for entry in doc["model_list"]}
-    bases = {entry["litellm_params"]["api_base"] for entry in doc["model_list"]}
-    assert names == {"qwen3_30b_a3b"}, "both replicas must share served_model_name"
-    assert bases == {
-        "http://127.0.0.1:8000/v1", "http://127.0.0.1:8001/v1",
-    }
-    assert doc["router_settings"]["routing_strategy"] == "session-state-based"
-    assert doc["general_settings"]["master_key"] == "sk-local-dev-only"
-
-
-def test_vllm_dual_socket_engine_exposes_litellm_endpoint_and_api_key() -> None:
-    """The simulator's runner reads ``engine.base_url`` and
-    ``engine.api_key`` to build the AsyncOpenAI client. For the
-    dual-socket engine, base_url must point at the LiteLLM proxy and
-    api_key at the master key — direct vLLM ports must NOT be exposed."""
+def test_vllm_dual_socket_exposes_per_replica_urls() -> None:
+    """The simulator's runner reads ``engine.replica_urls`` and builds
+    one AsyncOpenAI client per replica. For dual-socket NUMA-pinned
+    vLLM, that's two URLs at the per-replica ports — no proxy in
+    between."""
     from simulator.config import load_config
     from simulator.engines.vllm_dual_socket import VllmDualSocketEngine
 
     cfg = load_config("config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml")
     eng = VllmDualSocketEngine(cfg.engine)
-    assert eng.base_url == "http://127.0.0.1:4000/v1"
-    assert eng.api_key == "sk-local-dev-only"
+    assert eng.replica_urls == [
+        "http://127.0.0.1:8000/v1",
+        "http://127.0.0.1:8001/v1",
+    ]
+    # api_key is "EMPTY" by default — direct vLLM doesn't auth.
+    assert eng.api_key == "EMPTY"
+
+
+def test_pool_manager_load_balances_users_with_sticky_assignment() -> None:
+    """Per the runbook: load-balanced sticky assignment guarantees ±1
+    distribution across replicas. Verify both properties: balance and
+    stickiness (same user_id → same replica every time)."""
+    from openai import AsyncOpenAI
+    from simulator.personas import COHORTS
+    from simulator.pool_manager import PoolManager
+    from simulator.tokenizer_corpus import TokenCorpus
+    from simulator.virtual_user import SharedState
+
+    # Build a PoolManager with 2 stub clients (we only exercise the
+    # client-routing logic — never actually fire requests).
+    clients = [
+        AsyncOpenAI(base_url=f"http://127.0.0.1:{p}/v1", api_key="x")
+        for p in (8000, 8001)
+    ]
+    pool = PoolManager(
+        cohort=COHORTS["chat_heavy"],
+        clients=clients,
+        model_id="test",
+        corpus=TokenCorpus("test"),
+        state=SharedState(),
+        request_timeout_s=10,
+    )
+    # Assign 1000 unique user_ids; counts should differ by at most 1.
+    assignments: dict[str, object] = {}
+    for i in range(1000):
+        uid = f"user-{i}"
+        assignments[uid] = pool._client_for_user(uid)
+    # Stickiness: re-asking for the same user returns the same client.
+    for uid, expected in assignments.items():
+        assert pool._client_for_user(uid) is expected
+    # Balance: the explicit counter scheme guarantees ±1, not just
+    # statistical balance.
+    counts = pool._user_replica_counts
+    assert max(counts) - min(counts) <= 1, f"unbalanced: {counts}"
+    assert sum(counts) == 1000
+
+
+def test_pool_manager_single_replica_no_routing_overhead() -> None:
+    """For single-backend engines (vllm direct, sglang), the router
+    should short-circuit to the only client and never grow the
+    assignment map."""
+    from openai import AsyncOpenAI
+    from simulator.personas import COHORTS
+    from simulator.pool_manager import PoolManager
+    from simulator.tokenizer_corpus import TokenCorpus
+    from simulator.virtual_user import SharedState
+
+    only = AsyncOpenAI(base_url="http://127.0.0.1:30000/v1", api_key="x")
+    pool = PoolManager(
+        cohort=COHORTS["chat_heavy"],
+        clients=[only],
+        model_id="test",
+        corpus=TokenCorpus("test"),
+        state=SharedState(),
+        request_timeout_s=10,
+    )
+    for i in range(100):
+        assert pool._client_for_user(f"u-{i}") is only
+    # No need to track assignments for single-replica engines.
+    assert pool._user_replica_assignments == {}
 
 
 def test_flatten_for_taskset_returns_none_for_empty_input() -> None:

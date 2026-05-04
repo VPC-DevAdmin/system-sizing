@@ -35,7 +35,7 @@ class PoolManager:
     def __init__(
         self,
         cohort: Cohort,
-        client: AsyncOpenAI,
+        clients: list[AsyncOpenAI],
         model_id: str,
         corpus: TokenCorpus,
         state: SharedState,
@@ -46,8 +46,15 @@ class PoolManager:
         ramp_spawn_interval_s: float = 1.0,
         initial_phase_offset_enabled: bool = True,
     ):
+        if not clients:
+            raise ValueError("PoolManager requires at least one AsyncOpenAI client")
         self.cohort = cohort
-        self.client = client
+        self._clients = clients
+        # Sticky load-balanced replica assignment per virtual user — see
+        # ``_client_for_user``. Assignments persist for the run so a
+        # user's multi-turn conversation always hits the same backend.
+        self._user_replica_assignments: dict[str, int] = {}
+        self._user_replica_counts: list[int] = [0] * len(clients)
         self.model_id = model_id
         self.corpus = corpus
         self.state = state
@@ -129,6 +136,45 @@ class PoolManager:
         ids = [pid for pid, _ in items]
         return self._rng.choices(ids, weights=weights, k=1)[0]
 
+    def _client_for_user(self, user_id: str):
+        """Sticky load-balanced assignment of virtual users to replicas.
+
+        On first request from each user, assign to the replica with the
+        fewest already-assigned users. Once assigned, never reroute —
+        a user's full multi-turn conversation always lands on one
+        backend so prefix-cache locality is preserved.
+
+        Load balance via explicit counter (not hash) gives a guaranteed
+        ±1 distribution across replicas, matches the AMD R7735 runbook
+        exactly, and makes the assignment auditable from a single map
+        we can dump at run end.
+        """
+        if len(self._clients) == 1:
+            return self._clients[0]
+        idx = self._user_replica_assignments.get(user_id)
+        if idx is None:
+            idx = min(
+                range(len(self._clients)),
+                key=lambda i: self._user_replica_counts[i],
+            )
+            self._user_replica_assignments[user_id] = idx
+            self._user_replica_counts[idx] += 1
+        return self._clients[idx]
+
+    def routing_summary(self) -> str:
+        """Per-replica user-assignment counts. Used by the runner to log
+        a stickiness sanity-check at end of run; should always show
+        ±1 balance for healthy distribution."""
+        if len(self._clients) <= 1:
+            return f"single-replica ({len(self._user_replica_assignments)} users)"
+        parts = [
+            f"replica[{i}]={n}"
+            for i, n in enumerate(self._user_replica_counts)
+        ]
+        return ", ".join(parts) + (
+            f"  ({len(self._user_replica_assignments)} users total)"
+        )
+
     def _spawn_one(self, replaced_user_id: str | None) -> None:
         persona_id = self._pick_persona_id()
         persona = PERSONAS[persona_id]
@@ -145,11 +191,12 @@ class PoolManager:
         cancel_event = asyncio.Event()
         # Each user gets its own RNG stream, derived from the pool's RNG so runs are reproducible
         sub_rng = random.Random(self._rng.random())
+        client = self._client_for_user(user_id)
         task = asyncio.create_task(
             run_virtual_user(
                 persona=persona,
                 rng=sub_rng,
-                client=self.client,
+                client=client,
                 model_id=self.model_id,
                 corpus=self.corpus,
                 state=self.state,

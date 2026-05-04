@@ -49,6 +49,19 @@ class Engine:
         return self.cfg.base_url
 
     @property
+    def replica_urls(self) -> list[str]:
+        """Per-replica OpenAI-compatible base URLs.
+
+        Single-backend engines (vLLM direct, SGLang) return a one-element
+        list ``[self.base_url]``. Multi-backend engines (e.g. dual-socket
+        NUMA-pinned vLLM) override to return one URL per replica; the
+        simulator's pool manager hash-routes each virtual user to a
+        specific replica so multi-turn conversations preserve prefix-
+        cache locality on one backend.
+        """
+        return [self.base_url]
+
+    @property
     def api_key(self) -> str:
         """OpenAI-compatible API key the simulator uses to talk to this
         engine. Direct vLLM / SGLang accept any non-empty value; the

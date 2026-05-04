@@ -53,6 +53,8 @@ help:
 	@echo "  make run-cohort  CONFIG=... COHORT=...  Run one cohort (a team mix of personas)"
 	@echo "  make run-sweep   CONFIG=... [SWEEP_TYPE=]  Sweep multiple workloads."
 	@echo "                                          SWEEP_TYPE=all|personas|cohorts|a,b,c"
+	@echo "  make run-*-bg                           Same as above but nohup'd; survives SSH disconnects"
+	@echo "  make tail-log / make stop-bg            Tail latest -bg log / stop a backgrounded run + engine"
 	@echo "  make list-personas                      List available user archetypes"
 	@echo "  make list-cohorts                       List available team mixes"
 	@echo "  make dashboard                          Live progress view of latest run"
@@ -128,6 +130,93 @@ run-sweep:
 .PHONY: dashboard
 dashboard:
 	$(PY) -m simulator.cli dashboard --run-dir $(RUN_DIR)
+
+# Long-running variants — nohup + dated log file. Survive SSH
+# disconnects; check status from another login via ``make dashboard``.
+.PHONY: run-cohort-bg
+run-cohort-bg:
+	@LOG="$(RUN_DIR)/cohort_$$(date +%Y%m%dT%H%M%S).log" ; \
+	mkdir -p "$(RUN_DIR)" ; \
+	nohup $(PY) -m simulator.cli run \
+		--cohort $(COHORT) \
+		--config $(CONFIG) \
+		$(if $(ENGINE),--engine $(ENGINE)) \
+		$(if $(MODEL),--model $(MODEL)) \
+		>"$$LOG" 2>&1 & \
+	PID=$$! ; \
+	echo "Cohort run started in background (PID $$PID)" ; \
+	echo "  log: $$LOG" ; \
+	echo "  tail: tail -f $$LOG" ; \
+	echo "  dashboard: make dashboard" ; \
+	echo "  stop: make stop-bg  (or: kill $$PID)"
+
+.PHONY: run-persona-bg
+run-persona-bg:
+	@LOG="$(RUN_DIR)/persona_$(PERSONA)_$$(date +%Y%m%dT%H%M%S).log" ; \
+	mkdir -p "$(RUN_DIR)" ; \
+	nohup $(PY) -m simulator.cli run-persona \
+		--persona $(PERSONA) \
+		--config $(CONFIG) \
+		$(if $(ENGINE),--engine $(ENGINE)) \
+		$(if $(MODEL),--model $(MODEL)) \
+		>"$$LOG" 2>&1 & \
+	PID=$$! ; \
+	echo "Persona run started in background (PID $$PID)" ; \
+	echo "  log: $$LOG" ; \
+	echo "  tail: tail -f $$LOG" ; \
+	echo "  dashboard: make dashboard" ; \
+	echo "  stop: make stop-bg  (or: kill $$PID)"
+
+.PHONY: run-sweep-bg
+run-sweep-bg:
+	@LOG="$(RUN_DIR)/sweep_$$(date +%Y%m%dT%H%M%S).log" ; \
+	mkdir -p "$(RUN_DIR)" ; \
+	nohup $(PY) -m simulator.cli sweep \
+		--config $(CONFIG) \
+		--type $(SWEEP_TYPE) \
+		$(if $(ENGINE),--engine $(ENGINE)) \
+		$(if $(MODEL),--model $(MODEL)) \
+		>"$$LOG" 2>&1 & \
+	PID=$$! ; \
+	echo "Sweep run started in background (PID $$PID)" ; \
+	echo "  log: $$LOG" ; \
+	echo "  tail: tail -f $$LOG" ; \
+	echo "  dashboard: make dashboard" ; \
+	echo "  stop: make stop-bg  (or: kill $$PID)"
+
+# Tail the most-recent background log file. Useful when reconnecting
+# to a host where you started a -bg run earlier.
+.PHONY: tail-log
+tail-log:
+	@LOG=$$(ls -t $(RUN_DIR)/sweep_*.log $(RUN_DIR)/cohort_*.log $(RUN_DIR)/persona_*.log 2>/dev/null | head -n 1) ; \
+	if [ -z "$$LOG" ]; then echo "No background-run logs in $(RUN_DIR)"; exit 1; fi ; \
+	echo "Tailing $$LOG" ; \
+	tail -f "$$LOG"
+
+# Kill any running simulator background process and its engine
+# containers. Confirms the kill before doing anything destructive.
+.PHONY: stop-bg
+stop-bg:
+	@PIDS=$$(pgrep -f "simulator.cli (run|run-persona|sweep)" 2>/dev/null) ; \
+	if [ -n "$$PIDS" ]; then \
+		echo "Killing simulator processes: $$PIDS" ; \
+		kill $$PIDS 2>/dev/null || true ; \
+		sleep 2 ; \
+		PIDS=$$(pgrep -f "simulator.cli (run|run-persona|sweep)" 2>/dev/null) ; \
+		if [ -n "$$PIDS" ]; then \
+			echo "Forcing kill: $$PIDS" ; kill -9 $$PIDS 2>/dev/null || true ; \
+		fi ; \
+	else \
+		echo "No simulator processes running." ; \
+	fi
+	@CIDS=$$(docker ps -q --filter name=vllm-r --filter name=sglang- 2>/dev/null) ; \
+	if [ -n "$$CIDS" ]; then \
+		echo "Stopping engine containers..." ; \
+		docker stop -t 30 $$CIDS >/dev/null ; \
+		echo "Stopped: $$CIDS" ; \
+	else \
+		echo "No engine containers running." ; \
+	fi
 
 .PHONY: list-cohorts
 list-cohorts:

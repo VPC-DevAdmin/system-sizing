@@ -27,23 +27,29 @@ engine:
 
   tensor_parallel_size: 4
   max_model_len: 8192
-  # Project policy: software caps must not be the bottleneck. Let SGLang
-  # size the KV pool from ``mem_fraction_static * available_memory``. If
-  # this run saturates the pool, that's a *real* memory ceiling — useful
-  # data for "buy more RAM" / "add a node" recommendations. If we kept
-  # ``max_total_tokens: 16384`` the pool would fill long before physical
-  # memory was touched, and we couldn't separate "configured cap hit"
-  # from "out of RAM".
+  # Project policy: software caps must not be the bottleneck. The KV
+  # pool is sized as ``mem_fraction_static × available_memory`` per
+  # TP worker; we set the fraction so the only ceiling is physical RAM.
   max_total_tokens: null
   context_length: null
   # ``--chunked-prefill-size`` is kept from the GNR runbook — it
   # controls per-step prefill batch size (compute), not pool size.
   chunked_prefill_size: 4096
-  # 85% of free RAM goes to the KV pool. On this host (~940 GB free
-  # after weight load) that's ~800 GB / ~35 M KV tokens — effectively
-  # unlimited for any sane concurrency. Drop this only if you genuinely
-  # want a smaller pool.
-  mem_fraction_static: 0.85
+  # ── mem_fraction_static for TP>1 on a single NUMA node ──
+  # SGLang can't determine per-rank memory budget when TP > NUMA-node
+  # count. Each of the TP=4 worker processes sees the SAME available
+  # memory (~990 GB) and independently allocates fraction × that. So
+  # mem_fraction_static must be ≤ 1/TP minus headroom or the kernel
+  # OOM-kills a worker during init.
+  #
+  # 0.20 × 4 workers = 0.80 of memory used for KV pool across all
+  # ranks (~190 GB per worker, ~760 GB total). Leaves ~150 GB margin
+  # for OS, scratch, fragmentation, and weight residency that already
+  # consumed ~152 GB (38 GB × 4 ranks).
+  #
+  # If you change tensor_parallel_size, update this proportionally:
+  #   TP=1 → 0.85    TP=2 → 0.40    TP=4 → 0.20    TP=8 → 0.10
+  mem_fraction_static: 0.20
   disable_overlap_schedule: true
   enable_metrics: true
   attention_backend: intel_amx

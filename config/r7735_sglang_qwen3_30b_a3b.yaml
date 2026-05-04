@@ -29,10 +29,13 @@ engine:
 
   tensor_parallel_size: 1
   max_model_len: 8192
-  max_total_tokens: 16384      # KV pool cap from the runbook
+  # Project policy: software caps must not be the bottleneck — let
+  # SGLang size the KV pool from physical memory. See the xeon FP8
+  # config for the rationale.
+  max_total_tokens: null
   context_length: null         # let SGLang use the model default
   chunked_prefill_size: null   # SGLang default
-  mem_fraction_static: null    # SGLang default
+  mem_fraction_static: 0.85
   disable_overlap_schedule: true
   enable_metrics: true
   attention_backend: null      # AMD: torch_native via fallback

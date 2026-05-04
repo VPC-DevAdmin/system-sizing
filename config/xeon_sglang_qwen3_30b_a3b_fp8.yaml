@@ -27,12 +27,22 @@ engine:
 
   tensor_parallel_size: 4
   max_model_len: 8192
-  max_total_tokens: 16384
+  # Project policy: software caps must not be the bottleneck. Let SGLang
+  # size the KV pool from ``mem_fraction_static * available_memory``. If
+  # this run saturates the pool, that's a *real* memory ceiling — useful
+  # data for "buy more RAM" / "add a node" recommendations. If we kept
+  # ``max_total_tokens: 16384`` the pool would fill long before physical
+  # memory was touched, and we couldn't separate "configured cap hit"
+  # from "out of RAM".
+  max_total_tokens: null
   context_length: null
-  # The runbook explicitly sets these two; matches a confirmed-working
-  # GNR + TP=4 launch. Leaving them at SGLang defaults caused init
-  # to segfault during torch.distributed init on this host.
+  # ``--chunked-prefill-size`` is kept from the GNR runbook — it
+  # controls per-step prefill batch size (compute), not pool size.
   chunked_prefill_size: 4096
+  # 85% of free RAM goes to the KV pool. On this host (~940 GB free
+  # after weight load) that's ~800 GB / ~35 M KV tokens — effectively
+  # unlimited for any sane concurrency. Drop this only if you genuinely
+  # want a smaller pool.
   mem_fraction_static: 0.85
   disable_overlap_schedule: true
   enable_metrics: true

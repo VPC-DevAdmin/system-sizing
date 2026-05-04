@@ -41,21 +41,18 @@ def _read_prefix_cache_report(
 
 def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
     run = dict(run_row)
+    # Window aggregates (PMU / BW / power / AMX / freq) live as columns
+    # on cohort_measurements directly — no JOIN needed.
     ms = conn.execute(
-        """SELECT step_index, target_pool_size, sample_size,
-                  ttft_violation_rate, tpot_violation_rate,
-                  combined_violation_rate,
-                  violation_rate_ci_lower, violation_rate_ci_upper,
-                  ttft_p50_ms, ttft_p95_ms, tpot_p50_ms, tpot_p95_ms,
-                  avg_kv_cache_pct, capacity_status, measurement_id
-           FROM cohort_measurements
+        """SELECT * FROM cohort_measurements
            WHERE cohort_run_id = ?
            ORDER BY step_index ASC""",
         (run["cohort_run_id"],),
     ).fetchall()
     run["measurements"] = [dict(m) for m in ms]
     for m in run["measurements"]:
-        # Per-second telemetry: averages of kv usage / cpu / engine RSS / freq.
+        # Per-second telemetry rollup: averages of kv usage / cpu /
+        # engine RSS / freq across the window.
         tele = conn.execute(
             """SELECT AVG(kv_cache_used_pct) AS kv,
                       AVG(cpu_util_avg) AS cpu,
@@ -66,12 +63,6 @@ def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
             (m["measurement_id"],),
         ).fetchone()
         m["telemetry"] = dict(tele) if tele else {}
-        # Window aggregates (PMU/BW/power/AMX/freq).
-        agg = conn.execute(
-            "SELECT * FROM measurement_aggregate WHERE measurement_id = ?",
-            (m["measurement_id"],),
-        ).fetchone()
-        m["aggregate"] = dict(agg) if agg else {}
     return run
 
 
@@ -118,7 +109,8 @@ def _bottleneck(measurements: list[dict]) -> tuple[str, dict]:
     if knee is None:
         return "unknown", {}
     tele = knee.get("telemetry") or {}
-    agg = knee.get("aggregate") or {}
+    # Aggregate columns live directly on the measurement row now.
+    agg = knee
     evidence: dict = {}
 
     kv = tele.get("kv")

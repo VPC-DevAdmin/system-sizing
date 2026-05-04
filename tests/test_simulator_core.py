@@ -542,6 +542,127 @@ def test_find_completed_runs_handles_empty_dir(tmp_path) -> None:
     assert find_completed_runs(tmp_path, "vllm", "Qwen/Test") == set()
 
 
+def test_legacy_measurement_aggregate_migrates_to_columns(tmp_path) -> None:
+    """A DB written before the aggregate-table collapse should silently
+    lift its measurement_aggregate rows onto cohort_measurements when
+    opened. Otherwise old runs go dark on the next ``make export``."""
+    import sqlite3
+    from simulator.database import Database
+
+    db_path = tmp_path / "legacy.db"
+    # Hand-build a legacy-shaped DB with the old separate
+    # measurement_aggregate table.
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE cohort_run (
+                cohort_run_id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                engine_type TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                cohort_id TEXT NOT NULL,
+                cohort_definition_json TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                final_status TEXT
+            );
+            CREATE TABLE cohort_measurements (
+                measurement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cohort_run_id TEXT NOT NULL,
+                step_index INTEGER NOT NULL,
+                target_pool_size INTEGER NOT NULL,
+                measured_avg_pool_size REAL NOT NULL,
+                measured_avg_in_flight REAL NOT NULL,
+                measurement_started_at TEXT NOT NULL,
+                measurement_duration_s INTEGER NOT NULL,
+                sample_size INTEGER NOT NULL,
+                ttft_violation_rate REAL NOT NULL,
+                tpot_violation_rate REAL NOT NULL,
+                combined_violation_rate REAL NOT NULL,
+                violation_rate_ci_lower REAL NOT NULL,
+                violation_rate_ci_upper REAL NOT NULL,
+                ttft_p50_ms REAL, ttft_p75_ms REAL, ttft_p95_ms REAL,
+                tpot_p50_ms REAL, tpot_p75_ms REAL, tpot_p95_ms REAL,
+                avg_kv_cache_pct REAL,
+                estimated_prefix_hit_rate REAL,
+                capacity_status TEXT NOT NULL
+            );
+            CREATE TABLE measurement_aggregate (
+                measurement_id INTEGER PRIMARY KEY,
+                pmu_ipc REAL,
+                memory_bw_read_gb_s_avg REAL,
+                onednn_amx_time_fraction REAL
+            );
+            """
+        )
+        conn.execute(
+            """INSERT INTO cohort_measurements
+               (cohort_run_id, step_index, target_pool_size,
+                measured_avg_pool_size, measured_avg_in_flight,
+                measurement_started_at, measurement_duration_s,
+                sample_size, ttft_violation_rate, tpot_violation_rate,
+                combined_violation_rate, violation_rate_ci_lower,
+                violation_rate_ci_upper, capacity_status)
+               VALUES ('crid', 0, 8, 8.0, 7.5, '2026-01-01T00:00:00Z',
+                       60, 100, 0.0, 0.0, 0.0, 0.0, 0.0, 'pass')"""
+        )
+        conn.execute(
+            "INSERT INTO measurement_aggregate "
+            "(measurement_id, pmu_ipc, memory_bw_read_gb_s_avg, onednn_amx_time_fraction) "
+            "VALUES (1, 1.42, 87.3, 0.71)"
+        )
+
+    # Opening through Database should run the migration silently.
+    db = Database(db_path)
+    row = db.fetchone(
+        "SELECT pmu_ipc, memory_bw_read_gb_s_avg, onednn_amx_time_fraction "
+        "FROM cohort_measurements WHERE measurement_id = 1"
+    )
+    assert row["pmu_ipc"] == 1.42
+    assert row["memory_bw_read_gb_s_avg"] == 87.3
+    assert row["onednn_amx_time_fraction"] == 0.71
+
+    # Legacy table is gone.
+    leftover = db.fetchone(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='measurement_aggregate'"
+    )
+    assert leftover is None
+    db.close()
+
+
+def test_update_measurement_patches_subset(tmp_path) -> None:
+    """``update_measurement`` is the single way callers patch a row —
+    used for both the post-window percentile/violation update AND the
+    aggregate rollup. Verify partial updates don't clobber siblings."""
+    from simulator.database import Database
+
+    db = Database(tmp_path / "u.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="chat_heavy",
+        cohort_definition={}, config={},
+    )
+    mid = db.insert_measurement({
+        "cohort_run_id": "crid", "step_index": 0, "target_pool_size": 8,
+        "measured_avg_pool_size": 8.0, "measured_avg_in_flight": 0.0,
+        "measurement_started_at": "2026-01-01T00:00:00Z",
+        "measurement_duration_s": 0, "sample_size": 0,
+        "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+        "combined_violation_rate": 0.0, "violation_rate_ci_lower": 0.0,
+        "violation_rate_ci_upper": 0.0, "capacity_status": "pending",
+    })
+    # Two partial updates: window finalisation, then aggregate rollup.
+    db.update_measurement(mid, {"sample_size": 100, "capacity_status": "pass"})
+    db.update_measurement(mid, {"pmu_ipc": 1.42, "memory_bw_read_gb_s_avg": 87.3})
+
+    row = db.fetchone("SELECT * FROM cohort_measurements WHERE measurement_id = ?", (mid,))
+    assert row["sample_size"] == 100
+    assert row["capacity_status"] == "pass"
+    assert row["pmu_ipc"] == 1.42
+    assert row["memory_bw_read_gb_s_avg"] == 87.3
+    db.close()
+
+
 def test_find_completed_runs_one_db_many_cohorts(tmp_path) -> None:
     """The new layout puts multiple cohort_runs into a single
     ``run.db``. find_completed_runs has to enumerate every ok-status

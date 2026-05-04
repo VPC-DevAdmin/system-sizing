@@ -30,6 +30,12 @@ CREATE TABLE IF NOT EXISTS cohort_run (
     final_status TEXT
 );
 
+-- One row per ramp step. Measurement-window aggregates (PMU, IMC
+-- bandwidth, RAPL, oneDNN AMX, effective frequency rollups) live as
+-- nullable columns on this row — there used to be a separate
+-- ``measurement_aggregate`` table but it was strictly 1:1 with this
+-- one, so we collapsed it. Legacy DBs are migrated transparently in
+-- ``Database._migrate_legacy_aggregate``.
 CREATE TABLE IF NOT EXISTS cohort_measurements (
     measurement_id INTEGER PRIMARY KEY AUTOINCREMENT,
     cohort_run_id TEXT NOT NULL,
@@ -49,7 +55,34 @@ CREATE TABLE IF NOT EXISTS cohort_measurements (
     tpot_p50_ms REAL, tpot_p75_ms REAL, tpot_p95_ms REAL,
     avg_kv_cache_pct REAL,
     estimated_prefix_hit_rate REAL,
-    capacity_status TEXT NOT NULL
+    capacity_status TEXT NOT NULL,
+    -- Window-level aggregates (collapsed from measurement_aggregate).
+    pmu_cycles REAL,
+    pmu_instructions REAL,
+    pmu_ipc REAL,
+    pmu_stalls_mem_any REAL,
+    pmu_stalls_l3_miss REAL,
+    pmu_stall_mem_ratio REAL,
+    pmu_amx_ops REAL,
+    amx_perf_event_name TEXT,
+    pmu_llc_reference REAL,
+    pmu_llc_miss REAL,
+    mem_local_fraction REAL,
+    mem_remote_fraction REAL,
+    memory_bw_read_gb_s_avg REAL,
+    memory_bw_read_gb_s_peak REAL,
+    memory_bw_write_gb_s_avg REAL,
+    memory_bw_write_gb_s_peak REAL,
+    bandwidth_status TEXT,
+    power_w_avg REAL,
+    power_w_peak REAL,
+    power_status TEXT,
+    effective_freq_ghz_mean REAL,
+    effective_freq_ghz_stddev REAL,
+    effective_freq_ghz_min REAL,
+    onednn_amx_time_fraction REAL,
+    onednn_matmul_dispatches_amx INTEGER,
+    onednn_matmul_dispatches_non_amx INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_measurements_run ON cohort_measurements(cohort_run_id);
@@ -112,38 +145,6 @@ CREATE TABLE IF NOT EXISTS measurement_telemetry (
 
 CREATE INDEX IF NOT EXISTS idx_telemetry_measurement ON measurement_telemetry(measurement_id);
 
--- Window-level telemetry aggregates: one row per measurement.
--- Stores PMU totals, BW summaries, AMX, power, and effective frequency.
-CREATE TABLE IF NOT EXISTS measurement_aggregate (
-    measurement_id INTEGER PRIMARY KEY,
-    pmu_cycles REAL,
-    pmu_instructions REAL,
-    pmu_ipc REAL,
-    pmu_stalls_mem_any REAL,
-    pmu_stalls_l3_miss REAL,
-    pmu_stall_mem_ratio REAL,
-    pmu_amx_ops REAL,
-    amx_perf_event_name TEXT,
-    pmu_llc_reference REAL,
-    pmu_llc_miss REAL,
-    mem_local_fraction REAL,
-    mem_remote_fraction REAL,
-    memory_bw_read_gb_s_avg REAL,
-    memory_bw_read_gb_s_peak REAL,
-    memory_bw_write_gb_s_avg REAL,
-    memory_bw_write_gb_s_peak REAL,
-    bandwidth_status TEXT,
-    power_w_avg REAL,
-    power_w_peak REAL,
-    power_status TEXT,
-    effective_freq_ghz_mean REAL,
-    effective_freq_ghz_stddev REAL,
-    effective_freq_ghz_min REAL,
-    onednn_amx_time_fraction REAL,
-    onednn_matmul_dispatches_amx INTEGER,
-    onednn_matmul_dispatches_non_amx INTEGER
-);
-
 CREATE TABLE IF NOT EXISTS virtual_users (
     user_id TEXT PRIMARY KEY,
     cohort_run_id TEXT NOT NULL,
@@ -157,6 +158,40 @@ CREATE TABLE IF NOT EXISTS virtual_users (
     replaced_user_id TEXT
 );
 """
+
+
+# Aggregate columns inlined into ``cohort_measurements``. Kept as a
+# typed list (not just a string) so the legacy-DB migration can
+# ALTER TABLE ADD COLUMN any of these that an older schema is missing.
+_AGGREGATE_COLUMNS: list[tuple[str, str]] = [
+    ("pmu_cycles", "REAL"),
+    ("pmu_instructions", "REAL"),
+    ("pmu_ipc", "REAL"),
+    ("pmu_stalls_mem_any", "REAL"),
+    ("pmu_stalls_l3_miss", "REAL"),
+    ("pmu_stall_mem_ratio", "REAL"),
+    ("pmu_amx_ops", "REAL"),
+    ("amx_perf_event_name", "TEXT"),
+    ("pmu_llc_reference", "REAL"),
+    ("pmu_llc_miss", "REAL"),
+    ("mem_local_fraction", "REAL"),
+    ("mem_remote_fraction", "REAL"),
+    ("memory_bw_read_gb_s_avg", "REAL"),
+    ("memory_bw_read_gb_s_peak", "REAL"),
+    ("memory_bw_write_gb_s_avg", "REAL"),
+    ("memory_bw_write_gb_s_peak", "REAL"),
+    ("bandwidth_status", "TEXT"),
+    ("power_w_avg", "REAL"),
+    ("power_w_peak", "REAL"),
+    ("power_status", "TEXT"),
+    ("effective_freq_ghz_mean", "REAL"),
+    ("effective_freq_ghz_stddev", "REAL"),
+    ("effective_freq_ghz_min", "REAL"),
+    ("onednn_amx_time_fraction", "REAL"),
+    ("onednn_matmul_dispatches_amx", "INTEGER"),
+    ("onednn_matmul_dispatches_non_amx", "INTEGER"),
+]
+AGGREGATE_COLUMN_NAMES: frozenset[str] = frozenset(c for c, _ in _AGGREGATE_COLUMNS)
 
 
 class Database:
@@ -174,6 +209,56 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._ensure_aggregate_columns()
+            self._migrate_legacy_aggregate()
+
+    def _ensure_aggregate_columns(self) -> None:
+        """Add any aggregate column missing from cohort_measurements.
+
+        New DBs already have them via SCHEMA; legacy DBs (created
+        before measurement_aggregate was collapsed) need ALTER TABLE.
+        ALTER TABLE ADD COLUMN is idempotent only if we check first.
+        """
+        existing = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(cohort_measurements)")
+        }
+        for col, col_type in _AGGREGATE_COLUMNS:
+            if col not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE cohort_measurements ADD COLUMN {col} {col_type}"
+                )
+
+    def _migrate_legacy_aggregate(self) -> None:
+        """Copy legacy ``measurement_aggregate`` rows onto
+        ``cohort_measurements`` and drop the table.
+
+        No-op when the legacy table doesn't exist (any DB created after
+        the collapse). Ordered after ``_ensure_aggregate_columns`` so
+        the destination columns definitely exist.
+        """
+        has_legacy = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='measurement_aggregate'"
+        ).fetchone() is not None
+        if not has_legacy:
+            return
+        legacy_cols = [
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(measurement_aggregate)")
+            if r["name"] != "measurement_id"
+        ]
+        if legacy_cols:
+            set_clause = ", ".join(
+                f"{c} = (SELECT a.{c} FROM measurement_aggregate a "
+                f"WHERE a.measurement_id = cohort_measurements.measurement_id)"
+                for c in legacy_cols
+            )
+            self._conn.execute(
+                f"UPDATE cohort_measurements SET {set_clause} "
+                f"WHERE measurement_id IN "
+                f"(SELECT measurement_id FROM measurement_aggregate)"
+            )
+        self._conn.execute("DROP TABLE measurement_aggregate")
 
     def close(self) -> None:
         with self._lock:
@@ -250,15 +335,22 @@ class Database:
                 [row[k] for k in cols],
             )
 
-    def upsert_aggregate(self, row: dict) -> None:
+    def update_measurement(self, measurement_id: int, row: dict) -> None:
+        """Patch any subset of ``cohort_measurements`` columns by id.
+
+        Used for two distinct things — the post-window UPDATE that fills
+        in percentiles + violation rates, and the per-window aggregate
+        rollup (PMU / BW / power / freq / oneDNN). Both used to be
+        separate code paths against separate tables; they're the same
+        operation now."""
+        if not row:
+            return
         cols = list(row.keys())
-        placeholders = ",".join("?" for _ in cols)
-        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "measurement_id")
+        set_clause = ",".join(f"{c}=?" for c in cols)
         with self.cursor() as c:
             c.execute(
-                f"""INSERT INTO measurement_aggregate ({','.join(cols)}) VALUES ({placeholders})
-                ON CONFLICT(measurement_id) DO UPDATE SET {updates}""",
-                [row[k] for k in cols],
+                f"UPDATE cohort_measurements SET {set_clause} WHERE measurement_id = ?",
+                [row[k] for k in cols] + [measurement_id],
             )
 
     def insert_telemetry(self, rows: Iterable[dict]) -> None:

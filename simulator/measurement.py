@@ -282,25 +282,16 @@ async def run_measurement_step(
     _, telemetry_rows, telemetry_agg = await telemetry.stop()
     db.insert_telemetry(telemetry_rows)
     if telemetry_agg:
-        agg_row = {"measurement_id": measurement_id}
-        # Restrict to columns that exist in measurement_aggregate.
-        for k in (
-            "pmu_cycles", "pmu_instructions", "pmu_ipc",
-            "pmu_stalls_mem_any", "pmu_stalls_l3_miss", "pmu_stall_mem_ratio",
-            "pmu_amx_ops", "amx_perf_event_name",
-            "pmu_llc_reference", "pmu_llc_miss",
-            "mem_local_fraction", "mem_remote_fraction",
-            "memory_bw_read_gb_s_avg", "memory_bw_read_gb_s_peak",
-            "memory_bw_write_gb_s_avg", "memory_bw_write_gb_s_peak",
-            "bandwidth_status",
-            "power_w_avg", "power_w_peak", "power_status",
-            "effective_freq_ghz_mean", "effective_freq_ghz_stddev",
-            "effective_freq_ghz_min",
-        ):
-            if telemetry_agg.get(k) is not None:
-                agg_row[k] = telemetry_agg[k]
-        if len(agg_row) > 1:
-            db.upsert_aggregate(agg_row)
+        # Restrict to known aggregate columns; the telemetry collector
+        # may emit extras (intermediate fields, debug counters) that
+        # don't exist on cohort_measurements.
+        from .database import AGGREGATE_COLUMN_NAMES
+        agg_row = {
+            k: v for k, v in telemetry_agg.items()
+            if k in AGGREGATE_COLUMN_NAMES and v is not None
+        }
+        if agg_row:
+            db.update_measurement(measurement_id, agg_row)
     phase_tracker.set(PHASE_IDLE)
 
     if not buffer:
@@ -365,12 +356,7 @@ async def run_measurement_step(
         "estimated_prefix_hit_rate": est_prefix,
         "capacity_status": capacity_status,
     }
-    cols = ",".join(f"{k}=?" for k in final_row)
-    with db.cursor() as c:
-        c.execute(
-            f"UPDATE cohort_measurements SET {cols} WHERE measurement_id = ?",
-            list(final_row.values()) + [measurement_id],
-        )
+    db.update_measurement(measurement_id, final_row)
 
     # Persist events
     event_rows = [_event_to_row(e, measurement_id) for e in buffer]

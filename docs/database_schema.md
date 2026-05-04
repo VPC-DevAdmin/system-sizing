@@ -16,12 +16,12 @@ share one connection.
 cohort_run                          (one row per `run_cohort` invocation)
    │  cohort_run_id (PK)
    │
-   ├──< cohort_measurements          (one row per ramp step)
-   │     │  measurement_id (PK, AUTOINCREMENT)
+   ├──< cohort_measurements          (one row per ramp step; window-level
+   │     │  measurement_id (PK)       PMU/BW/power/AMX/freq totals are
+   │     │                            inlined as nullable columns)
    │     │
    │     ├──< turn_events              (one row per LLM turn captured in window)
-   │     ├──< measurement_telemetry    (per-second samples within window)
-   │     └──── measurement_aggregate   (1:1, window-level totals)
+   │     └──< measurement_telemetry    (per-second samples within window)
    │
    ├──< simulation_snapshots         (per-second pool/in-flight tick)
    └──< virtual_users                (one row per simulated user lifecycle)
@@ -71,8 +71,37 @@ once the ramp step finishes.
 | `avg_kv_cache_pct`           | REAL | Mean of `measurement_telemetry.kv_cache_used_pct` for this window. |
 | `estimated_prefix_hit_rate`  | REAL | Best-effort delta of engine-reported `prefix_cache_hits` across the window. NULL when the engine doesn't expose the counter. |
 | `capacity_status`            | TEXT NOT NULL | `pass` (`combined<5%`) / `marginal` (`5–30%`) / `fail` (`≥30%`) / `pending` (pre-update) / `unstable` / `no_samples`. The 30% boundary aligns with `knee_zone_threshold` so visual status and bisection trigger agree. |
+| `pmu_cycles` / `pmu_instructions` / `pmu_ipc` | REAL | `perf stat` totals over the window. |
+| `pmu_stalls_mem_any` / `pmu_stalls_l3_miss` / `pmu_stall_mem_ratio` | REAL | Memory-stall fractions for the bottleneck heuristic. |
+| `pmu_amx_ops`                | REAL | Raw AMX event counter when the kernel exposes it. |
+| `amx_perf_event_name`        | TEXT | Which raw event the collector fell back to (Intel GNR-specific). |
+| `pmu_llc_reference` / `pmu_llc_miss` | REAL | LLC pressure indicators. |
+| `mem_local_fraction` / `mem_remote_fraction` | REAL | NUMA-local vs remote DRAM access shares from `mem_load_l3_miss_retired.*_dram`. |
+| `memory_bw_read_gb_s_avg` / `_peak` | REAL | IMC uncore counters (per-controller summed). |
+| `memory_bw_write_gb_s_avg` / `_peak` | REAL | Same. |
+| `bandwidth_status`           | TEXT | `ok` / `degraded` / `unsupported` — collector self-report. |
+| `power_w_avg` / `power_w_peak` / `power_status` | REAL/TEXT | RAPL package energy delta / window seconds. |
+| `effective_freq_ghz_mean` / `_stddev` / `_min` | REAL | Window-level rollups of the per-second `measurement_telemetry.freq_*` samples. |
+| `onednn_amx_time_fraction`   | REAL | Parsed from `ONEDNN_VERBOSE` in the engine log post-run; `amx_time / total_matmul_time`. Run-level signal — attached to the **last** measurement so the bottleneck attributor sees it. |
+| `onednn_matmul_dispatches_amx` / `_non_amx` | INTEGER | Dispatch counts from the same log parse. |
 
 Index: `idx_measurements_run` on `cohort_run_id`.
+
+Aggregate columns are populated via two write paths, both calling
+`Database.update_measurement(measurement_id, row)`:
+
+1. The post-window UPDATE that fills percentiles, violation rates, and
+   `capacity_status` (driven by [measurement.run_measurement_step](../simulator/measurement.py)).
+2. The per-window aggregate rollup (PMU / BW / power / freq) at end of
+   the same step, plus a post-run oneDNN-AMX attach against the last
+   measurement (in [runner.run_cohort](../simulator/runner.py)).
+
+Earlier schema kept these aggregate columns in a separate
+`measurement_aggregate` table (1:1 with `cohort_measurements`); they
+were collapsed in. Legacy DBs are migrated transparently on first open
+by `Database._migrate_legacy_aggregate` — `ALTER TABLE ADD COLUMN` for
+any missing destination, copy values via subquery `UPDATE`, then
+`DROP TABLE measurement_aggregate`.
 
 ## `turn_events` — one row per LLM turn captured in a measurement window
 
@@ -146,30 +175,6 @@ export's per-step "telemetry" section.
 | `freq_mhz_min`       | REAL | Worst-core frequency — surfaces droop the mean would hide. |
 
 Index: `idx_telemetry_measurement` on `measurement_id`.
-
-## `measurement_aggregate` — one row per measurement window
-
-Window-level totals that don't make sense per second (PMU, IMC bandwidth,
-RAPL power, oneDNN). `upsert_aggregate` (`ON CONFLICT(measurement_id) DO
-UPDATE`) so downstream parsers (e.g. AMX util at run end) can attach
-post-hoc to the last measurement.
-
-| column                                | source |
-|---|---|
-| `measurement_id`                      | PK; → `cohort_measurements`. |
-| `pmu_cycles` / `pmu_instructions` / `pmu_ipc` | `perf stat` totals over the window. |
-| `pmu_stalls_mem_any` / `pmu_stalls_l3_miss` / `pmu_stall_mem_ratio` | Memory-stall fractions for the bottleneck heuristic. |
-| `pmu_amx_ops`                         | Raw AMX event counter when the kernel exposes it. |
-| `amx_perf_event_name`                 | Which raw event the collector fell back to (Intel GNR-specific). |
-| `pmu_llc_reference` / `pmu_llc_miss`  | LLC pressure indicators. |
-| `mem_local_fraction` / `mem_remote_fraction` | NUMA-local vs remote DRAM access shares from `mem_load_l3_miss_retired.*_dram`. |
-| `memory_bw_read_gb_s_avg` / `_peak`   | IMC uncore counters (per-controller summed, then divided by elapsed seconds). |
-| `memory_bw_write_gb_s_avg` / `_peak`  | Same. |
-| `bandwidth_status`                    | `ok` / `degraded` / `unsupported` — collector self-report. |
-| `power_w_avg` / `power_w_peak` / `power_status` | RAPL package energy delta / window seconds. |
-| `effective_freq_ghz_mean` / `_stddev` / `_min` | Window-level rollups of the `measurement_telemetry.freq_*` samples. |
-| `onednn_amx_time_fraction`            | From parsing `ONEDNN_VERBOSE` in the engine log; `amx_time / total_matmul_time`. Run-level signal — attached to the last measurement so the bottleneck attributor sees it. |
-| `onednn_matmul_dispatches_amx` / `_non_amx` | Dispatch counts from the same log parse. |
 
 ## `virtual_users` — one row per simulated user lifecycle
 

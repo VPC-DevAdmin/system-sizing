@@ -279,8 +279,7 @@ async def run_cohort(
                         (cohort_run_id,),
                     )
                     if last_mid is not None:
-                        db.upsert_aggregate({
-                            "measurement_id": last_mid["measurement_id"],
+                        db.update_measurement(last_mid["measurement_id"], {
                             "onednn_amx_time_fraction": amx.onednn_amx_time_fraction,
                             "onednn_matmul_dispatches_amx": amx.onednn_matmul_dispatches_amx,
                             "onednn_matmul_dispatches_non_amx": amx.onednn_matmul_dispatches_non_amx,

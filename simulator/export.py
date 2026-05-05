@@ -259,7 +259,32 @@ def _bottleneck(measurements: list[dict]) -> tuple[str, dict]:
       5. TTFT violations dominate TPOT (1.5x)        -> prefill_throughput
       6. Otherwise                                   -> decode_throughput
     """
-    knee = next((m for m in measurements if m["capacity_status"] in ("fail", "marginal")), None)
+    return _attribute_bottleneck(
+        measurements,
+        status_field="capacity_status",
+        ttft_rate_field="ttft_violation_rate",
+        tpot_rate_field="tpot_violation_rate",
+    )
+
+
+def _attribute_bottleneck(
+    measurements: list[dict],
+    *,
+    status_field: str,
+    ttft_rate_field: str,
+    tpot_rate_field: str,
+) -> tuple[str, dict]:
+    """Generic bottleneck attributor — pick the knee per the given
+    status field, read evidence, classify. Called twice from the
+    export path: once for the failure-bound knee (capacity_status +
+    violation rates) and once for the target-bound knee (target_status
+    + target_miss rates). The two attributions can differ; if they
+    do, the buyer page can show "first thing to bend = X, hard
+    ceiling reason = Y" — sharper diagnostic than a single label."""
+    knee = next(
+        (m for m in measurements if m.get(status_field) in ("fail", "marginal")),
+        None,
+    )
     if knee is None and measurements:
         knee = measurements[-1]
     if knee is None:
@@ -322,10 +347,10 @@ def _bottleneck(measurements: list[dict]) -> tuple[str, dict]:
     if freq_mean is not None and freq_mean < 2.5:
         return "frequency_droop", evidence
 
-    ttft_v = knee["ttft_violation_rate"] or 0
-    tpot_v = knee["tpot_violation_rate"] or 0
-    evidence["ttft_violation_rate"] = ttft_v
-    evidence["tpot_violation_rate"] = tpot_v
+    ttft_v = knee.get(ttft_rate_field) or 0
+    tpot_v = knee.get(tpot_rate_field) or 0
+    evidence[ttft_rate_field] = ttft_v
+    evidence[tpot_rate_field] = tpot_v
     if ttft_v > tpot_v * 1.5:
         return "prefill_throughput", evidence
     return "decode_throughput", evidence
@@ -345,8 +370,17 @@ def _hardware_recommendation(bottleneck: str) -> str:
     }.get(bottleneck, "")
 
 
-def _capacity_and_knee(measurements: list[dict]) -> tuple[int | None, int | None]:
-    """Pick (capacity_pool_size, knee_pool_size) from a measurement list.
+def _capacity_and_knee(
+    measurements: list[dict],
+    status_field: str = "capacity_status",
+) -> tuple[int | None, int | None]:
+    """Pick (capacity_pool_size, knee_pool_size) from a measurement
+    list, gating on ``status_field``.
+
+    Use ``status_field="capacity_status"`` for the failure-bound
+    capacity (hard SLA — the headline buyer-page number) and
+    ``status_field="target_status"`` for the target-bound capacity
+    (premium-quality bar — the higher-quality number).
 
     Adaptive bisection produces non-monotonic curves — a measurement
     can flip 'pass' → 'marginal' → 'pass' again as the stepper
@@ -362,21 +396,29 @@ def _capacity_and_knee(measurements: list[dict]) -> tuple[int | None, int | None
       * capacity = largest pool_size with status='pass' that is
         strictly below the knee. Always ≤ knee.
 
-    Returns (None, None) when no measurements exist.
+    Returns (None, None) when no measurements exist or the status
+    field isn't populated (e.g. legacy DB without target_status).
     """
     if not measurements:
         return None, None
-    sorted_m = sorted(measurements, key=lambda m: m["target_pool_size"])
+    # Drop measurements missing the requested status field — happens
+    # for legacy (pre-target-status) data when querying target_status.
+    typed = [m for m in measurements if m.get(status_field)]
+    if not typed:
+        return None, None
+    sorted_m = sorted(typed, key=lambda m: m["target_pool_size"])
     knee_pool: int | None = None
     for i, m in enumerate(sorted_m):
-        if m["capacity_status"] == "pass":
+        if m[status_field] == "pass":
             continue
         # Non-pass: only counts as the knee if no pool above also passes.
-        if any(later["capacity_status"] == "pass" for later in sorted_m[i + 1:]):
+        if any(later[status_field] == "pass" for later in sorted_m[i + 1:]):
             continue
         knee_pool = m["target_pool_size"]
         break
-    pass_pools = [m["target_pool_size"] for m in sorted_m if m["capacity_status"] == "pass"]
+    pass_pools = [
+        m["target_pool_size"] for m in sorted_m if m[status_field] == "pass"
+    ]
     if knee_pool is not None:
         pass_pools = [p for p in pass_pools if p < knee_pool]
     capacity_pool = max(pass_pools) if pass_pools else None
@@ -394,6 +436,12 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
             "violation_rate": m["combined_violation_rate"],
             "ttft_violation_rate": m["ttft_violation_rate"],
             "tpot_violation_rate": m["tpot_violation_rate"],
+            # Target-miss rates: same axis but against the looser
+            # target threshold. Surfaced per-step so the website
+            # can plot both curves together.
+            "target_miss_rate": m.get("combined_target_miss_rate"),
+            "ttft_target_miss_rate": m.get("ttft_target_miss_rate"),
+            "tpot_target_miss_rate": m.get("tpot_target_miss_rate"),
             "ci_lower": m["violation_rate_ci_lower"],
             "ci_upper": m["violation_rate_ci_upper"],
             "ttft_p50_ms": m["ttft_p50_ms"],
@@ -401,7 +449,8 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
             "tpot_p50_ms": m["tpot_p50_ms"],
             "tpot_p95_ms": m["tpot_p95_ms"],
             "kv_cache_pct": m["avg_kv_cache_pct"],
-            "status": m["capacity_status"],
+            "status": m["capacity_status"],          # failure-bound
+            "target_status": m.get("target_status"), # target-bound
             "measurement_started_at": m.get("measurement_started_at"),
             "measurement_duration_s": m.get("measurement_duration_s"),
             # Per-step time-series; lists may be empty (e.g. a 'pending'
@@ -409,10 +458,25 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
             "telemetry_samples": m.get("telemetry_samples", []),
             "turns": m.get("turns", []),
         })
-    capacity_pool, knee_pool = _capacity_and_knee(measurements)
+    # Two parallel capacity readings — failure-bound (hard SLA, the
+    # buyer-page headline) and target-bound (premium quality bar).
+    capacity_pool, knee_pool = _capacity_and_knee(measurements, "capacity_status")
+    target_capacity_pool, target_knee_pool = _capacity_and_knee(
+        measurements, "target_status",
+    )
 
     cohort_def = json.loads(run["cohort_definition_json"])
+    # Two parallel bottleneck attributions — what limits SLA capacity
+    # vs what limits premium-quality capacity. They can differ; if
+    # they do, the buyer page can show "first thing to bend = X,
+    # hard ceiling reason = Y" — sharper diagnostic than one label.
     bottleneck, evidence = _bottleneck(measurements)
+    target_bottleneck, target_evidence = _attribute_bottleneck(
+        measurements,
+        status_field="target_status",
+        ttft_rate_field="ttft_target_miss_rate",
+        tpot_rate_field="tpot_target_miss_rate",
+    )
     return {
         "id": run["cohort_id"],
         "cohort_run_id": run["cohort_run_id"],
@@ -425,12 +489,16 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
         "started_at": run["started_at"],
         "completed_at": run["completed_at"],
         "final_status": run["final_status"],
-        "capacity_pool_size": capacity_pool,
+        "capacity_pool_size": capacity_pool,           # failure-bound (SLA)
         "knee_pool_size": knee_pool,
+        "target_capacity_pool_size": target_capacity_pool,  # target-bound (quality)
+        "target_knee_pool_size": target_knee_pool,
         "curve": curve,
         "snapshots": run.get("snapshots", []),
-        "bottleneck": bottleneck,
+        "bottleneck": bottleneck,                      # what limits SLA capacity
         "bottleneck_evidence": evidence,
+        "target_bottleneck": target_bottleneck,        # what limits quality capacity
+        "target_bottleneck_evidence": target_evidence,
         "hardware_recommendation": _hardware_recommendation(bottleneck),
         "prefix_cache": prefix_cache,
     }

@@ -48,24 +48,32 @@ class TurnEvent:
     token_timestamps: list = field(default_factory=list, repr=False)
 
     def ttft_violation(self) -> bool:
-        # A failed request (timeout, HTTP error, empty stream) is
-        # always an SLA violation — the user waited and didn't get
-        # a useful response. We don't compare timing for these
-        # because for fast-failing HTTP errors the timing alone
-        # would falsely "pass" (e.g. a 500 in 100ms is still a
-        # bad user experience even though 100ms < ttft_floor).
+        """Hard SLA violation — past the FAILURE threshold. This is
+        what gates ``capacity_status`` (the buyer-page capacity
+        number). A failed request (timeout, HTTP error, empty stream)
+        is always a violation regardless of timing — the user waited
+        and didn't get a useful response."""
         if self.error is not None:
             return True
-        return self.ttft_ms / 1000.0 > self.persona.ttft_floor_seconds
+        return self.ttft_ms / 1000.0 > self.persona.ttft_failure_seconds
 
     def tpot_violation(self) -> bool:
-        # Same reasoning as ttft_violation: any failure mode where
-        # the user didn't get tokens is also a TPOT violation by
-        # construction (no tokens were emitted in any time, let
-        # alone the SLA-floor time per token).
         if self.error is not None:
             return True
-        return self.tpot_ms > self.persona.tpot_floor_ms
+        return self.tpot_ms > self.persona.tpot_failure_ms
+
+    def ttft_target_miss(self) -> bool:
+        """Soft target miss — past the TARGET threshold (looser than
+        failure). Informational quality signal, not a capacity gate.
+        Errors count as target misses too."""
+        if self.error is not None:
+            return True
+        return self.ttft_ms / 1000.0 > self.persona.ttft_target_seconds
+
+    def tpot_target_miss(self) -> bool:
+        if self.error is not None:
+            return True
+        return self.tpot_ms > self.persona.tpot_target_ms
 
 
 @dataclass
@@ -157,7 +165,10 @@ async def run_virtual_user(
         # distributed across the request/think cycle from the moment
         # they start.
         if initial_phase_offset_enabled:
-            sample = persona.think_time_seconds.sample(rng)
+            sample = (
+                persona.read_time_seconds.sample(rng)
+                + persona.active_think_seconds.sample(rng)
+            )
             offset = sample * rng.random()
             if offset > 0:
                 try:
@@ -300,9 +311,18 @@ async def run_virtual_user(
                 stats.turns_total += 1
 
                 if turn < n_turns - 1:
-                    think = persona.think_time_seconds.sample(rng)
+                    # Post-response delay = residual reading time
+                    # (what the user hasn't caught up to when the
+                    # stream ended) + active deliberation. Sampled
+                    # independently and summed; both are LogNormal
+                    # so the sum is a heavy-tail bimodal-ish
+                    # distribution with the right central tendency.
+                    delay = (
+                        persona.read_time_seconds.sample(rng)
+                        + persona.active_think_seconds.sample(rng)
+                    )
                     try:
-                        await asyncio.wait_for(cancel_event.wait(), timeout=think)
+                        await asyncio.wait_for(cancel_event.wait(), timeout=delay)
                         return  # cancel fired
                     except asyncio.TimeoutError:
                         pass

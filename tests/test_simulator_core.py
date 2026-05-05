@@ -390,12 +390,31 @@ def test_every_cohort_validates() -> None:
         get_cohort(cid)
 
 
-def test_every_persona_has_sla_floors() -> None:
-    """The aggregator reads SLA floors per-event; missing fields would
-    silently classify every request as a violation."""
+def test_every_persona_has_target_and_failure_thresholds() -> None:
+    """The aggregator reads target + failure thresholds per-event;
+    missing fields would silently classify every request as a
+    violation. Both target and failure must be set, and target
+    must be tighter than failure on each axis."""
     for p in PERSONAS.values():
-        assert p.ttft_floor_seconds > 0
-        assert p.tpot_floor_ms > 0
+        assert p.ttft_target_seconds > 0
+        assert p.ttft_failure_seconds > 0
+        assert p.ttft_failure_seconds > p.ttft_target_seconds, (
+            f"{p.id}: failure must be looser than target on TTFT"
+        )
+        assert p.tpot_target_ms > 0
+        assert p.tpot_failure_ms > 0
+        assert p.tpot_failure_ms > p.tpot_target_ms, (
+            f"{p.id}: failure must be looser than target on TPOT"
+        )
+
+
+def test_every_persona_has_read_and_active_think() -> None:
+    """Both read_time and active_think distributions must be set
+    so virtual_user.run_virtual_user can sample post-response delay
+    from their sum."""
+    for p in PERSONAS.values():
+        assert p.read_time_seconds is not None
+        assert p.active_think_seconds is not None
 
 
 # ── Personas vs cohorts: clean separation ────────────────────────────
@@ -686,33 +705,38 @@ async def _coroutine_returning(value):
     return value
 
 
-def test_persona_timeout_properties_scale_with_floors() -> None:
-    """Persona timeout properties should derive from the SLA floors,
-    so tightening the floor automatically tightens the abort policy."""
+def test_persona_timeout_properties_scale_with_failure_thresholds() -> None:
+    """Tier-abort timeouts derive from the FAILURE thresholds (so
+    a request stays alive long enough to actually exhaust its
+    failure budget before getting killed). Target thresholds are
+    the SLA bar; tier aborts are the "this is broken" signal."""
     from simulator.personas import PERSONAS
 
-    p = PERSONAS["quick_lookup"]  # ttft_floor=2.0, tpot_floor=200ms
-    assert p.pre_ttft_timeout_s == 2.0 * 5.0
-    assert abs(p.inter_token_timeout_s - (200 / 1000.0) * 20.0) < 1e-6
+    p = PERSONAS["quick_lookup"]  # ttft_failure=15.0, tpot_failure=225ms
+    assert p.pre_ttft_timeout_s == p.ttft_failure_seconds * 5.0
+    assert abs(
+        p.inter_token_timeout_s - (p.tpot_failure_ms / 1000.0) * 20.0
+    ) < 1e-6
 
-    # summarizer has the loosest floors, should have the most
-    # generous timeouts.
-    s = PERSONAS["summarizer"]  # ttft_floor=10.0, tpot_floor=220ms
-    assert s.pre_ttft_timeout_s == 10.0 * 5.0
+    # summarizer has the loosest failure thresholds → most generous
+    # tier-abort timeouts.
+    s = PERSONAS["summarizer"]
+    assert s.pre_ttft_timeout_s == s.ttft_failure_seconds * 5.0
     assert s.pre_ttft_timeout_s > p.pre_ttft_timeout_s
 
 
-def test_failed_turn_event_counts_as_sla_violation() -> None:
-    """A timed-out / errored request must register as both a TTFT
-    and TPOT violation regardless of the timing values, otherwise
-    fast-failing HTTP errors would fall under the SLA floor and
-    silently 'pass'."""
+def test_failed_turn_event_counts_as_sla_violation_and_target_miss() -> None:
+    """A timed-out / errored request registers as BOTH a violation
+    (failure threshold) AND a target miss (target threshold).
+    Without this, fast-failing HTTP errors would fall under the
+    failure threshold and silently 'pass'."""
     from simulator.virtual_user import TurnEvent
     from simulator.personas import PERSONAS
 
-    persona = PERSONAS["quick_lookup"]  # ttft_floor=2.0s, tpot_floor=200ms
+    persona = PERSONAS["quick_lookup"]
+    # quick_lookup: ttft target 5s / failure 15s, tpot 150/225ms
 
-    # Slow timeout — would already violate via timing alone.
+    # Slow timeout — well past the failure threshold.
     e_timeout = TurnEvent(
         user_id="u1", persona_id=persona.id, session_id="s",
         turn_index=0, submitted_at_ms=0, completed_at_ms=300_000,
@@ -720,12 +744,11 @@ def test_failed_turn_event_counts_as_sla_violation() -> None:
         input_tokens=350, history_tokens=0, output_tokens=0,
         in_flight_at_submit=1, persona=persona, error="timeout",
     )
-    assert e_timeout.ttft_violation()
-    assert e_timeout.tpot_violation()
+    assert e_timeout.ttft_violation() and e_timeout.tpot_violation()
+    assert e_timeout.ttft_target_miss() and e_timeout.tpot_target_miss()
 
-    # Fast HTTP 500 — timing alone WOULDN'T violate (100ms < 2000ms
-    # floor), but the error flag must force the violation since the
-    # user got nothing.
+    # Fast HTTP 500 — timing alone (100ms) is way under both
+    # thresholds, but error flag forces both checks to fire.
     e_500 = TurnEvent(
         user_id="u2", persona_id=persona.id, session_id="s",
         turn_index=0, submitted_at_ms=0, completed_at_ms=100,
@@ -734,13 +757,10 @@ def test_failed_turn_event_counts_as_sla_violation() -> None:
         in_flight_at_submit=1, persona=persona,
         error="ConnectionError",
     )
-    assert e_500.ttft_violation(), (
-        "fast-failing error must still violate ttft, otherwise "
-        "errors under the floor count as 'pass'"
-    )
-    assert e_500.tpot_violation()
+    assert e_500.ttft_violation() and e_500.ttft_target_miss()
+    assert e_500.tpot_violation() and e_500.tpot_target_miss()
 
-    # Healthy fast turn — neither violation should fire.
+    # Healthy fast turn — neither violation NOR target miss.
     e_ok = TurnEvent(
         user_id="u3", persona_id=persona.id, session_id="s",
         turn_index=0, submitted_at_ms=0, completed_at_ms=500,
@@ -748,8 +768,32 @@ def test_failed_turn_event_counts_as_sla_violation() -> None:
         input_tokens=350, history_tokens=0, output_tokens=10,
         in_flight_at_submit=1, persona=persona,
     )
-    assert not e_ok.ttft_violation()
-    assert not e_ok.tpot_violation()
+    assert not e_ok.ttft_violation() and not e_ok.tpot_violation()
+    assert not e_ok.ttft_target_miss() and not e_ok.tpot_target_miss()
+
+
+def test_target_miss_without_violation() -> None:
+    """The new band: a turn that exceeds TARGET but stays within
+    FAILURE registers as target_miss=True, violation=False. This
+    is the quality signal the buyer page surfaces alongside
+    capacity. quick_lookup target=5s, failure=15s → 8s ttft is
+    in this band."""
+    from simulator.virtual_user import TurnEvent
+    from simulator.personas import PERSONAS
+
+    persona = PERSONAS["quick_lookup"]
+    # 8000ms: between 5s (target) and 15s (failure)
+    e_marginal = TurnEvent(
+        user_id="u4", persona_id=persona.id, session_id="s",
+        turn_index=0, submitted_at_ms=0, completed_at_ms=8000,
+        ttft_ms=8000, tpot_ms=120.0, end_to_end_ms=8000,
+        input_tokens=350, history_tokens=0, output_tokens=10,
+        in_flight_at_submit=1, persona=persona,
+    )
+    assert not e_marginal.ttft_violation(), "8s < 15s failure → no violation"
+    assert e_marginal.ttft_target_miss(), "8s > 5s target → target miss"
+    assert not e_marginal.tpot_violation()
+    assert not e_marginal.tpot_target_miss()  # 120ms < 150ms target
 
 
 def test_legacy_turn_events_gets_error_column(tmp_path) -> None:

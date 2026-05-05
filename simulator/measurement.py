@@ -32,9 +32,12 @@ class MeasurementResult:
     measured_avg_pool_size: float = 0.0
     measured_avg_in_flight: float = 0.0
     measurement_duration_s: int = 0
-    ttft_violation_rate: float = 0.0
+    ttft_violation_rate: float = 0.0       # past failure threshold
     tpot_violation_rate: float = 0.0
-    combined_violation_rate: float = 0.0
+    combined_violation_rate: float = 0.0   # gates capacity_status
+    ttft_target_miss_rate: float = 0.0     # past target threshold (looser)
+    tpot_target_miss_rate: float = 0.0
+    combined_target_miss_rate: float = 0.0 # gates target_status (informational)
     violation_rate_ci_lower: float = 0.0
     violation_rate_ci_upper: float = 0.0
     ttft_p50_ms: float = 0.0
@@ -45,7 +48,8 @@ class MeasurementResult:
     tpot_p95_ms: float = 0.0
     avg_kv_cache_pct: Optional[float] = None
     estimated_prefix_hit_rate: Optional[float] = None
-    capacity_status: str = "pass"
+    capacity_status: str = "pass"          # failure-bound (hard SLA)
+    target_status: str = "pass"            # target-bound (quality)
     events: list[TurnEvent] = field(default_factory=list)
 
 
@@ -245,6 +249,9 @@ async def run_measurement_step(
         "ttft_violation_rate": 0.0,
         "tpot_violation_rate": 0.0,
         "combined_violation_rate": 0.0,
+        "ttft_target_miss_rate": 0.0,
+        "tpot_target_miss_rate": 0.0,
+        "combined_target_miss_rate": 0.0,
         "violation_rate_ci_lower": 0.0,
         "violation_rate_ci_upper": 0.0,
         "ttft_p50_ms": 0.0, "ttft_p75_ms": 0.0, "ttft_p95_ms": 0.0,
@@ -252,6 +259,7 @@ async def run_measurement_step(
         "avg_kv_cache_pct": None,
         "estimated_prefix_hit_rate": None,
         "capacity_status": "pending",
+        "target_status": "pending",
     }
     measurement_id = db.insert_measurement(pre_row)
 
@@ -314,36 +322,50 @@ async def run_measurement_step(
     # Aggregate
     ttft_values = [e.ttft_ms for e in buffer]
     tpot_values = [e.tpot_ms for e in buffer]
+    # FAILURE rates — capacity_status / hard SLA gate.
     ttft_violations = sum(1 for e in buffer if e.ttft_violation())
     tpot_violations = sum(1 for e in buffer if e.tpot_violation())
     combined_violations = sum(
         1 for e in buffer if e.ttft_violation() or e.tpot_violation()
     )
+    # TARGET-miss rates — informational quality signal. A turn that
+    # exceeded the (looser) target but stayed below failure misses
+    # target without violating SLA.
+    ttft_target_misses = sum(1 for e in buffer if e.ttft_target_miss())
+    tpot_target_misses = sum(1 for e in buffer if e.tpot_target_miss())
+    combined_target_misses = sum(
+        1 for e in buffer if e.ttft_target_miss() or e.tpot_target_miss()
+    )
     n = len(buffer)
     ttft_rate = ttft_violations / n
     tpot_rate = tpot_violations / n
     combined_rate = combined_violations / n
+    ttft_target_miss_rate = ttft_target_misses / n
+    tpot_target_miss_rate = tpot_target_misses / n
+    combined_target_miss_rate = combined_target_misses / n
     ci_lo, ci_hi = _wilson_ci(combined_violations, n)
 
     avg_in_flight = statistics.fmean(in_flight_during) if in_flight_during else 0.0
     avg_kv = _avg_field(telemetry_rows, "kv_cache_used_pct")
     est_prefix = _estimate_prefix_hit_rate(telemetry_rows)
 
-    # Status bands:
-    #   <  5%  pass      — clearly within SLA
+    # Status bands (5-30% bands apply to BOTH the failure-bound
+    # capacity_status and the target-bound target_status):
+    #   <  5%  pass      — clearly within budget
     #   < 30%  marginal  — wide noise-tolerant zone; at n=100 a true
     #                       rate of 10-20% can occasionally measure as
     #                       high as 25-28% from sampling noise alone,
     #                       so we don't call it "fail" until 30%+
-    #   ≥ 30%  fail      — real cliff. Aligns with the algorithm's
-    #                       knee_zone_threshold so the visual status
-    #                       and the bisection trigger agree.
-    if combined_rate < 0.05:
-        capacity_status = "pass"
-    elif combined_rate < 0.30:
-        capacity_status = "marginal"
-    else:
-        capacity_status = "fail"
+    #   ≥ 30%  fail      — real cliff
+    def _status(rate: float) -> str:
+        if rate < 0.05:
+            return "pass"
+        if rate < 0.30:
+            return "marginal"
+        return "fail"
+
+    capacity_status = _status(combined_rate)
+    target_status = _status(combined_target_miss_rate)
 
     final_row = {
         "measured_avg_pool_size": float(target_pool_size),
@@ -353,6 +375,9 @@ async def run_measurement_step(
         "ttft_violation_rate": ttft_rate,
         "tpot_violation_rate": tpot_rate,
         "combined_violation_rate": combined_rate,
+        "ttft_target_miss_rate": ttft_target_miss_rate,
+        "tpot_target_miss_rate": tpot_target_miss_rate,
+        "combined_target_miss_rate": combined_target_miss_rate,
         "violation_rate_ci_lower": ci_lo,
         "violation_rate_ci_upper": ci_hi,
         "ttft_p50_ms": _percentile(ttft_values, 0.5),
@@ -364,6 +389,7 @@ async def run_measurement_step(
         "avg_kv_cache_pct": avg_kv,
         "estimated_prefix_hit_rate": est_prefix,
         "capacity_status": capacity_status,
+        "target_status": target_status,
     }
     db.update_measurement(measurement_id, final_row)
 
@@ -372,9 +398,13 @@ async def run_measurement_step(
     db.insert_events(event_rows)
 
     log.info(
-        "Step %d done: pool=%d samples=%d violation=%.1f%% (ttft=%.1f%%, tpot=%.1f%%) status=%s",
-        step_index, target_pool_size, n, combined_rate * 100,
-        ttft_rate * 100, tpot_rate * 100, capacity_status,
+        "Step %d done: pool=%d samples=%d "
+        "fail=%.1f%% (ttft=%.1f%%, tpot=%.1f%%) → %s    "
+        "target_miss=%.1f%% → %s",
+        step_index, target_pool_size, n,
+        combined_rate * 100, ttft_rate * 100, tpot_rate * 100,
+        capacity_status,
+        combined_target_miss_rate * 100, target_status,
     )
 
     return MeasurementResult(
@@ -388,6 +418,9 @@ async def run_measurement_step(
         ttft_violation_rate=ttft_rate,
         tpot_violation_rate=tpot_rate,
         combined_violation_rate=combined_rate,
+        ttft_target_miss_rate=ttft_target_miss_rate,
+        tpot_target_miss_rate=tpot_target_miss_rate,
+        combined_target_miss_rate=combined_target_miss_rate,
         violation_rate_ci_lower=ci_lo,
         violation_rate_ci_upper=ci_hi,
         ttft_p50_ms=final_row["ttft_p50_ms"],
@@ -399,6 +432,7 @@ async def run_measurement_step(
         avg_kv_cache_pct=avg_kv,
         estimated_prefix_hit_rate=est_prefix,
         capacity_status=capacity_status,
+        target_status=target_status,
         events=buffer,
     )
 
@@ -433,6 +467,12 @@ def _event_to_row(e: TurnEvent, measurement_id: int) -> dict:
         "in_flight_peak_during": e.in_flight_peak_during,
         "sla_ttft_violation": int(e.ttft_violation()),
         "sla_tpot_violation": int(e.tpot_violation()),
+        # Soft target-miss flags (looser bar than violation). Lets
+        # post-hoc analysis stratify "user got an OK response that
+        # exceeded our 'good' bar but stayed within SLA" — the
+        # quality metric the buyer page surfaces alongside capacity.
+        "ttft_target_miss": int(e.ttft_target_miss()),
+        "tpot_target_miss": int(e.tpot_target_miss()),
         "token_timestamps_json": (
             _json.dumps(e.token_timestamps) if e.token_timestamps else None
         ),

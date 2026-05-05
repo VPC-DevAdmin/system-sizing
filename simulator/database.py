@@ -56,6 +56,13 @@ CREATE TABLE IF NOT EXISTS cohort_measurements (
     ttft_violation_rate REAL NOT NULL,
     tpot_violation_rate REAL NOT NULL,
     combined_violation_rate REAL NOT NULL,
+    -- Target-miss rates: same axis but against the (looser) target
+    -- threshold rather than the failure threshold. Drives
+    -- ``target_status`` — informational quality signal that the
+    -- buyer page surfaces alongside the SLA-bound capacity_status.
+    ttft_target_miss_rate REAL,
+    tpot_target_miss_rate REAL,
+    combined_target_miss_rate REAL,
     violation_rate_ci_lower REAL NOT NULL,
     violation_rate_ci_upper REAL NOT NULL,
     ttft_p50_ms REAL, ttft_p75_ms REAL, ttft_p95_ms REAL,
@@ -63,6 +70,11 @@ CREATE TABLE IF NOT EXISTS cohort_measurements (
     avg_kv_cache_pct REAL,
     estimated_prefix_hit_rate REAL,
     capacity_status TEXT NOT NULL,
+    -- Parallel quality status using target_miss_rate. ``pass`` /
+    -- ``marginal`` / ``fail`` bands are the same 5%/30% as
+    -- capacity_status — just a tighter bar (target rather than
+    -- failure threshold).
+    target_status TEXT,
     -- Window-level aggregates (collapsed from measurement_aggregate).
     pmu_cycles REAL,
     pmu_instructions REAL,
@@ -114,6 +126,12 @@ CREATE TABLE IF NOT EXISTS turn_events (
     in_flight_peak_during INTEGER,
     sla_ttft_violation INTEGER NOT NULL,
     sla_tpot_violation INTEGER NOT NULL,
+    -- Soft target-miss flags: 1 when ttft / tpot exceeded the
+    -- (looser) target threshold but stayed within the failure
+    -- threshold. A turn with target_miss=1 and violation=0 is
+    -- "user noticed it was slow but didn't abandon."
+    ttft_target_miss INTEGER,
+    tpot_target_miss INTEGER,
     -- Tier-3 opt-in: JSON array of [elapsed_ms_from_submit, cumulative_token_count]
     -- pairs, one per emitted streaming chunk. NULL when tier-3 capture is off.
     token_timestamps_json TEXT,
@@ -242,6 +260,19 @@ class Database:
                  ("prefix_cache_engine_hit_rate", "REAL")],
             )
             self._ensure_columns("turn_events", [("error", "TEXT")])
+            # Target-miss tracking (target/failure SLA split).
+            self._ensure_columns(
+                "cohort_measurements",
+                [("ttft_target_miss_rate", "REAL"),
+                 ("tpot_target_miss_rate", "REAL"),
+                 ("combined_target_miss_rate", "REAL"),
+                 ("target_status", "TEXT")],
+            )
+            self._ensure_columns(
+                "turn_events",
+                [("ttft_target_miss", "INTEGER"),
+                 ("tpot_target_miss", "INTEGER")],
+            )
 
     def _ensure_columns(
         self, table: str, columns: list[tuple[str, str]],

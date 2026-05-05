@@ -211,6 +211,7 @@ def list_cohorts():
 @app.command("list-personas")
 def list_personas():
     """List available user-archetype personas."""
+    import math
     typer.echo(
         "Personas (single user archetypes — pass to --persona or "
         "sweep --type personas):\n"
@@ -219,8 +220,19 @@ def list_personas():
         typer.echo(f"  {pid}")
         typer.echo(f"    {persona.description}")
         typer.echo(
-            f"    SLA floors: TTFT≤{persona.ttft_floor_seconds:.0f}s, "
-            f"TPOT≤{persona.tpot_floor_ms:.0f}ms"
+            f"    SLA TTFT:  target ≤{persona.ttft_target_seconds:.0f}s, "
+            f"failure ≤{persona.ttft_failure_seconds:.0f}s"
+        )
+        typer.echo(
+            f"    SLA TPOT:  target ≤{persona.tpot_target_ms:.0f}ms, "
+            f"failure ≤{persona.tpot_failure_ms:.0f}ms"
+        )
+        # Median post-response delay = read residual + active think.
+        read_med = math.exp(persona.read_time_seconds.mu)
+        think_med = math.exp(persona.active_think_seconds.mu)
+        typer.echo(
+            f"    Post-response: ~{read_med:.0f}s reading + "
+            f"~{think_med:.0f}s deliberation = ~{read_med+think_med:.0f}s"
         )
 
 

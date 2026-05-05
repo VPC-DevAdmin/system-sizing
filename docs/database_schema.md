@@ -73,7 +73,11 @@ once the ramp step finishes.
 | `tpot_p50_ms` / `tpot_p75_ms` / `tpot_p95_ms` | REAL | Same. |
 | `avg_kv_cache_pct`           | REAL | Mean of `measurement_telemetry.kv_cache_used_pct` for this window. |
 | `estimated_prefix_hit_rate`  | REAL | Best-effort delta of engine-reported `prefix_cache_hits` across the window. NULL when the engine doesn't expose the counter. |
-| `capacity_status`            | TEXT NOT NULL | `pass` (`combined<5%`) / `marginal` (`5–30%`) / `fail` (`≥30%`) / `pending` (pre-update) / `unstable` / `no_samples`. The 30% boundary aligns with `knee_zone_threshold` so visual status and bisection trigger agree. |
+| `capacity_status`            | TEXT NOT NULL | Failure-bound status: `pass` (`combined_violation_rate<5%`) / `marginal` (`5–30%`) / `fail` (`≥30%`) / `pending` (pre-update) / `unstable` / `no_samples`. The 30% boundary aligns with `knee_zone_threshold` so visual status and bisection trigger agree. |
+| `ttft_target_miss_rate`      | REAL | Fraction of turns whose TTFT exceeded the persona's `ttft_target_seconds` (looser bar than failure). Errors and aborts count as misses. |
+| `tpot_target_miss_rate`      | REAL | Same axis for TPOT against `tpot_target_ms`. |
+| `combined_target_miss_rate`  | REAL | Fraction of turns missing either target — gates `target_status`. |
+| `target_status`              | TEXT | Target-bound status using the same 5%/30% bands as `capacity_status` but against the (looser) target threshold. Informational quality signal — drives the buyer page's `target_capacity_pool_size` alongside the SLA-bound `capacity_pool_size`. |
 | `pmu_cycles` / `pmu_instructions` / `pmu_ipc` | REAL | `perf stat` totals over the window. |
 | `pmu_stalls_mem_any` / `pmu_stalls_l3_miss` / `pmu_stall_mem_ratio` | REAL | Memory-stall fractions for the bottleneck heuristic. |
 | `pmu_amx_ops`                | REAL | Raw AMX event counter when the kernel exposes it. |
@@ -130,8 +134,10 @@ above. `_event_to_row` in [measurement.py](../simulator/measurement.py).
 | `in_flight_at_submit`  | INTEGER NOT NULL | `state.in_flight` snapshot when the turn was issued. |
 | `in_flight_avg_during` | REAL | Mean during the turn's lifetime. NULL if not captured. |
 | `in_flight_peak_during`| INTEGER | Peak during the turn's lifetime. |
-| `sla_ttft_violation`   | INTEGER NOT NULL | 0/1 — `e.ttft_violation()`. |
-| `sla_tpot_violation`   | INTEGER NOT NULL | 0/1 — `e.tpot_violation()`. |
+| `sla_ttft_violation`   | INTEGER NOT NULL | 0/1 — TTFT exceeded the persona's `ttft_failure_seconds`, OR the request errored. |
+| `sla_tpot_violation`   | INTEGER NOT NULL | 0/1 — TPOT exceeded the persona's `tpot_failure_ms`, or errored. |
+| `ttft_target_miss`     | INTEGER | 0/1 — TTFT exceeded the persona's (looser) `ttft_target_seconds`. A turn with `ttft_target_miss=1` and `sla_ttft_violation=0` is "noticed it was slow but didn't abandon." |
+| `tpot_target_miss`     | INTEGER | Same axis for TPOT against `tpot_target_ms`. |
 | `token_timestamps_json`| TEXT | Tier-3 opt-in: JSON `[[elapsed_ms, cum_tokens], …]`, one entry per streamed chunk. NULL when `enable_token_timestamps=False`. |
 | `error`                | TEXT | NULL on successful turns. On synthetic failure events (timeout / HTTP error / no_tokens), one of `"timeout"`, `"no_tokens"`, or an exception class name. When set, both `sla_ttft_violation` and `sla_tpot_violation` are 1 by construction — a request that didn't deliver a useful response is an SLA violation regardless of the timing values. |
 

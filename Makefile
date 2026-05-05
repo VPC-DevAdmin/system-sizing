@@ -73,6 +73,10 @@ help:
 	@echo "  make web                                Static-serve the buyer page (http://localhost:8765)"
 	@echo "  make analyze-prefix-cache               Prefix-cache hit-rate report"
 	@echo ""
+	@echo "Tuning:"
+	@echo "  make optimize-engine [ONLY=...]         A/B vLLM launch shapes, pick the best for this host."
+	@echo "                                          (Iterates docker launch + ttft/tpot bench per config.)"
+	@echo ""
 	@echo "Diagnostics:"
 	@echo "  make preflight CONFIG=...               Hardware-only check (no install / build)"
 	@echo "  make launch-engine CONFIG=...           Manually launch the engine (no cohort)"
@@ -310,6 +314,20 @@ sglang-shell:
 .PHONY: test
 test:
 	$(PY) -m pytest tests/ -q
+
+# Engine A/B harness: iterates docker launch shapes against the
+# vllm-openai-cpu image, measures TTFT/TPOT/throughput per config,
+# writes runs/engine_optimizer_<ts>.json. Pass ONLY=baseline,kv_xl
+# to run a subset (or LIST=1 to print the registered configs).
+.PHONY: optimize-engine
+optimize-engine:
+	@if [ -n "$(LIST)" ]; then \
+		$(PY) scripts/engine_optimizer.py --list ; \
+	elif [ -n "$(ONLY)" ]; then \
+		$(PY) scripts/engine_optimizer.py --only $$(echo $(ONLY) | tr ',' ' ') ; \
+	else \
+		$(PY) scripts/engine_optimizer.py ; \
+	fi
 
 .PHONY: clean
 clean:

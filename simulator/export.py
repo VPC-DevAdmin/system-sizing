@@ -254,7 +254,8 @@ def _bottleneck(measurements: list[dict]) -> tuple[str, dict]:
          (or the perf stall_mem_ratio exceeds 0.5 if BW unknown)
       3. AMX dispatch fraction < 50% but matmul time > 0
                                                      -> amx_underutilised
-      4. Effective freq < 90% of nominal             -> frequency_droop
+      4. Effective freq MEAN < 2.5 GHz across bound CPUs -> frequency_droop
+         (mean, not min — see the inline comment for why min is misleading)
       5. TTFT violations dominate TPOT (1.5x)        -> prefill_throughput
       6. Otherwise                                   -> decode_throughput
     """
@@ -302,10 +303,24 @@ def _bottleneck(measurements: list[dict]) -> tuple[str, dict]:
         evidence["effective_freq_ghz_mean"] = freq_mean
     if freq_min is not None:
         evidence["effective_freq_ghz_min"] = freq_min
-        # Conservative droop floor: <2.5 GHz on a Xeon 6 nominal-3.0
-        # all-core turbo workload is real droop worth flagging.
-        if freq_min < 2.5:
-            return "frequency_droop", evidence
+    # Use the MEAN frequency, not the min, to detect droop.
+    #
+    # The frequency collector samples every CPU in ``bound_cpus`` —
+    # but a workload (single-worker TP=1 with chunked prefill, say)
+    # may not keep all cores busy at every sample tick, and Linux
+    # parks idle cores into deep C-states at ~0.5 GHz. So
+    # ``freq_min`` of 0.5 GHz commonly reflects parked-not-throttled
+    # cores, not actual frequency throttling, and a min-based
+    # heuristic over-attributes ``frequency_droop`` to cohorts
+    # whose real bottleneck is decode or prefill compute.
+    #
+    # ``freq_mean`` averaged across the bound set is the honest
+    # "is the active work happening below base clock?" signal.
+    # Threshold of 2.5 GHz works for both Xeon 6761P (base 2.5,
+    # all-core turbo ~3.0) and EPYC 9374F (base 3.85) — a mean
+    # below 2.5 GHz on either CPU is unambiguously degraded.
+    if freq_mean is not None and freq_mean < 2.5:
+        return "frequency_droop", evidence
 
     ttft_v = knee["ttft_violation_rate"] or 0
     tpot_v = knee["tpot_violation_rate"] or 0

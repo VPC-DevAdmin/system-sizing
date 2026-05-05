@@ -1083,6 +1083,57 @@ def test_dashboard_state_in_progress(tmp_path) -> None:
     assert "0/1 complete" in out
 
 
+def test_bottleneck_freq_droop_uses_mean_not_min() -> None:
+    """``frequency_droop`` attribution must trigger on the all-core
+    MEAN frequency dropping below base clock, not on the per-core
+    MIN. The min commonly hits 0.5 GHz from Linux parking idle
+    cores in deep C-states — this is normal, not a bottleneck. A
+    min-based heuristic over-attributes droop to cohorts whose
+    real bottleneck is decode or prefill compute (verified on the
+    Intel sweep run_06 — 9 of 11 cohorts mis-attributed)."""
+    from simulator.export import _bottleneck
+
+    # Healthy mean (3.4 GHz) but parked-core min (0.5 GHz). The
+    # workload isn't actually frequency-limited; we should NOT
+    # attribute frequency_droop here.
+    measurements_parked_min = [{
+        "capacity_status": "marginal",
+        "ttft_violation_rate": 0.0,
+        "tpot_violation_rate": 0.5,
+        "telemetry": {"kv": 10.0},
+        "memory_bw_read_gb_s_avg": 30.0,
+        "memory_bw_write_gb_s_avg": 5.0,
+        "pmu_stall_mem_ratio": 0.2,
+        "onednn_amx_time_fraction": None,
+        "effective_freq_ghz_mean": 3.43,   # healthy
+        "effective_freq_ghz_min": 0.50,    # parked core
+    }]
+    bottleneck, evidence = _bottleneck(measurements_parked_min)
+    assert bottleneck != "frequency_droop", (
+        "must not attribute frequency_droop on parked-core min when "
+        f"mean is healthy; got {bottleneck} with evidence {evidence}"
+    )
+    # We expect decode_throughput here since TPOT violations dominate.
+    assert bottleneck == "decode_throughput"
+
+    # Genuine droop: mean is below base clock. SHOULD trigger.
+    measurements_real_droop = [{
+        "capacity_status": "fail",
+        "ttft_violation_rate": 0.0,
+        "tpot_violation_rate": 0.5,
+        "telemetry": {"kv": 5.0},
+        "memory_bw_read_gb_s_avg": 20.0,
+        "memory_bw_write_gb_s_avg": 4.0,
+        "pmu_stall_mem_ratio": 0.2,
+        "onednn_amx_time_fraction": None,
+        "effective_freq_ghz_mean": 2.26,   # below 2.5 GHz threshold
+        "effective_freq_ghz_min": 0.50,
+    }]
+    bottleneck, evidence = _bottleneck(measurements_real_droop)
+    assert bottleneck == "frequency_droop"
+    assert evidence["effective_freq_ghz_mean"] == 2.26
+
+
 def test_capacity_and_knee_handles_non_monotonic_curve() -> None:
     """The adaptive bisection produces non-monotonic curves: a noise
     'marginal' at pool 32 followed by a 'pass' at 36 isn't a real

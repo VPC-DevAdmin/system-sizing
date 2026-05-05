@@ -34,7 +34,7 @@ The headline workflow is `ready` → `run-cohort` → `dashboard` → `export`. 
 | `make list-cohorts` | Show available team mixes with persona weights. |
 | `make list-runs` | List `run_NN/` directories under `runs/` with their DB counts. |
 | `make dashboard` | Live `rich`-based progress view of the latest run. |
-| `make export` | Build `buyer_page_data.json` from `runs/*.db`. |
+| `make export` | Build `buyer_page_data.json` from `runs/run_NN/run.db`. Includes per-step rollups (`curve[]`), per-step time series (`curve[i].telemetry_samples`, `curve[i].turns`), and the 1 Hz whole-run heartbeat (`cohort.snapshots`) so a downstream website can drill from the knee chart into the underlying turn-by-turn data without a second round-trip. |
 | `make web` | Serve the reference buyer page on `http://localhost:8765`. |
 | `make analyze-prefix-cache` | Prefix-cache hit-rate report on the latest `.db`. |
 | `make preflight CONFIG=...` | Hardware-only check (no install / build). |

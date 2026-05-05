@@ -749,6 +749,103 @@ def test_find_completed_runs_one_db_many_cohorts(tmp_path) -> None:
 # ── Run-directory layout (run_NN/) ────────────────────────────────────
 
 
+def test_export_includes_per_step_time_series(tmp_path) -> None:
+    """make export must surface ``telemetry_samples`` + ``turns`` per
+    curve step and ``snapshots`` per cohort. The downstream website
+    reads the JSON directly; the time-series is the difference between
+    a static knee chart and a "drill into a specific step" view."""
+    import json
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="chat_heavy",
+        cohort_definition={"name": "Customer support team",
+                           "persona_weights": {"quick_lookup": 1.0}},
+        config={},
+    )
+    mid = db.insert_measurement({
+        "cohort_run_id": "crid", "step_index": 0, "target_pool_size": 8,
+        "measured_avg_pool_size": 8.0, "measured_avg_in_flight": 6.5,
+        "measurement_started_at": "2026-01-01T00:00:30Z",
+        "measurement_duration_s": 60, "sample_size": 3,
+        "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+        "combined_violation_rate": 0.0, "violation_rate_ci_lower": 0.0,
+        "violation_rate_ci_upper": 0.0, "capacity_status": "pass",
+    })
+    db.insert_telemetry([
+        {"measurement_id": mid, "sampled_at_ms": 1_000,
+         "kv_cache_used_pct": 41.2, "queue_depth": 2,
+         "prefix_cache_hits": 100, "prefix_cache_misses": 0,
+         "cpu_util_avg": 78.3, "memory_used_gb": 60.1,
+         "engine_rss_gb": 38.0, "freq_mhz_mean": 3000.0,
+         "freq_mhz_stddev": 12.0, "freq_mhz_min": 2950.0},
+        {"measurement_id": mid, "sampled_at_ms": 2_000,
+         "kv_cache_used_pct": 43.0, "queue_depth": 3,
+         "prefix_cache_hits": 130, "prefix_cache_misses": 0,
+         "cpu_util_avg": 80.1, "memory_used_gb": 60.2,
+         "engine_rss_gb": 38.0, "freq_mhz_mean": 2998.0,
+         "freq_mhz_stddev": 11.0, "freq_mhz_min": 2940.0},
+    ])
+    db.insert_events([
+        {"measurement_id": mid, "persona_id": "quick_lookup",
+         "user_id": "u1", "session_id": "s1", "turn_index": 0,
+         "submitted_at_ms": 1_500, "ttft_ms": 1697.0,
+         "completed_at_ms": 5_500, "input_tokens": 350,
+         "history_tokens": 0, "output_tokens": 60, "tpot_ms": 62.0,
+         "end_to_end_ms": 4000.0, "in_flight_at_submit": 4,
+         "in_flight_avg_during": 4.5, "in_flight_peak_during": 6,
+         "sla_ttft_violation": 0, "sla_tpot_violation": 0,
+         "token_timestamps_json": None},
+    ])
+    db.insert_snapshot({
+        "cohort_run_id": "crid", "snapshot_at_ms": 500,
+        "phase": "warmup", "pool_size": 8, "in_flight": 4,
+        "requests_completed": 0, "errors": 0,
+        "step_samples": 0, "step_target_samples": 0,
+    })
+    db.insert_snapshot({
+        "cohort_run_id": "crid", "snapshot_at_ms": 1500,
+        "phase": "measuring", "pool_size": 8, "in_flight": 5,
+        "requests_completed": 1, "errors": 0,
+        "step_samples": 1, "step_target_samples": 100,
+    })
+    db.finalise_run("crid", "2026-01-01T00:01:30Z", "ok")
+    db.close()
+
+    out = tmp_path / "buyer_page_data.json"
+    export_dir(tmp_path, out)
+    doc = json.loads(out.read_text())
+    assert doc["meta"]["cohort_count"] == 1
+    cohort = doc["cohorts"][0]
+    assert cohort["id"] == "chat_heavy"
+
+    # Curve carries per-step time-series.
+    assert len(cohort["curve"]) == 1
+    step = cohort["curve"][0]
+    assert step["step_index"] == 0
+    assert len(step["telemetry_samples"]) == 2
+    sample = step["telemetry_samples"][0]
+    assert sample["sampled_at_ms"] == 1_000
+    assert sample["kv_cache_used_pct"] == 41.2
+    assert "freq_mhz_min" in sample
+    assert len(step["turns"]) == 1
+    turn = step["turns"][0]
+    assert turn["persona_id"] == "quick_lookup"
+    assert turn["ttft_ms"] == 1697.0
+    # token_timestamps_json is intentionally excluded — too large.
+    assert "token_timestamps_json" not in turn
+
+    # Whole-run heartbeat lives at the cohort level.
+    assert len(cohort["snapshots"]) == 2
+    assert cohort["snapshots"][0]["phase"] == "warmup"
+    assert cohort["snapshots"][1]["step_target_samples"] == 100
+
+
 def test_resolve_run_dir_creates_run_01_when_empty(tmp_path) -> None:
     """First invocation against a fresh runs/ creates run_01."""
     from simulator.runs import resolve_run_dir

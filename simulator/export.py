@@ -1,14 +1,56 @@
-"""Export simplified JSON for the buyer-facing capacity-planning page.
+"""Export the buyer-facing JSON document.
 
-Walks all .db files in a directory and emits one JSON document with:
-  * meta — engine, model, generation timestamp
-  * cohorts — array of cohort summaries, each with:
-      * id, name, description
-      * curve — list of {pool_size, violation_rate, ci_lower, ci_upper,
-                          ttft_p95_ms, tpot_p95_ms, status}
-      * capacity_pool_size — last 'pass' point before knee
-      * knee_pool_size — first 'fail' point (or last marginal if no fail)
-      * bottleneck — best-effort attribution string
+One ``buyer_page_data.json`` per call, structured for direct consumption
+by [web/index.html](../web/index.html) (or any downstream parser):
+
+    {
+      "meta": {generated_at, engines, models, source_dir, cohort_count},
+      "cohorts": [
+        {
+          id, name, description, category, persona_weights,
+          engine, model, started_at, completed_at, final_status,
+          capacity_pool_size,    // last 'pass' before the knee
+          knee_pool_size,        // first 'fail'/'marginal' step
+          bottleneck,            // attributed at the knee
+          bottleneck_evidence,
+          hardware_recommendation,
+          prefix_cache,          // analysis from turn_events
+
+          curve: [               // per-step rollup (one entry per ramp step)
+            {
+              pool_size, sample_size, violation_rate, ttft_p95_ms, ...,
+              telemetry_samples: [               // per-second within-window
+                {sampled_at_ms, kv_cache_used_pct, queue_depth,
+                 prefix_cache_hits, cpu_util_avg, engine_rss_gb,
+                 freq_mhz_mean, freq_mhz_min, ...},
+                ...
+              ],
+              turns: [                           // per-turn events in window
+                {persona_id, session_id, turn_index, submitted_at_ms,
+                 ttft_ms, tpot_ms, end_to_end_ms, input_tokens,
+                 history_tokens, output_tokens, in_flight_at_submit,
+                 sla_ttft_violation, sla_tpot_violation, ...},
+                ...
+              ]
+            },
+            ...
+          ],
+
+          snapshots: [           // 1 Hz pool/in-flight heartbeat for
+                                 // the whole cohort run
+            {snapshot_at_ms, phase, pool_size, in_flight,
+             requests_completed, errors,
+             step_samples, step_target_samples},
+            ...
+          ]
+        },
+        ...
+      ]
+    }
+
+The website iterates ``cohorts``, then ``curve`` for the rollup chart,
+then drills into ``curve[i].turns`` / ``curve[i].telemetry_samples``
+for per-step detail, or ``snapshots`` for whole-run timeline plots.
 """
 
 from __future__ import annotations
@@ -39,6 +81,60 @@ def _read_prefix_cache_report(
     return report.to_dict()
 
 
+# Columns surfaced in the per-step ``telemetry_samples`` array. Kept
+# explicit so downstream consumers see a stable schema even if new
+# columns are added to ``measurement_telemetry`` later.
+_TELEMETRY_SAMPLE_COLUMNS = (
+    "sampled_at_ms",
+    "kv_cache_used_pct",
+    "queue_depth",
+    "prefix_cache_hits",
+    "prefix_cache_misses",
+    "cpu_util_avg",
+    "memory_used_gb",
+    "engine_rss_gb",
+    "freq_mhz_mean",
+    "freq_mhz_stddev",
+    "freq_mhz_min",
+)
+
+# Columns surfaced in the per-step ``turns`` array. ``token_timestamps_json``
+# is intentionally excluded — it can be very large (one entry per emitted
+# token) and is opt-in tier-3 capture; consumers that want it should
+# query the DB directly.
+_TURN_EVENT_COLUMNS = (
+    "persona_id",
+    "user_id",
+    "session_id",
+    "turn_index",
+    "submitted_at_ms",
+    "ttft_ms",
+    "completed_at_ms",
+    "input_tokens",
+    "history_tokens",
+    "output_tokens",
+    "tpot_ms",
+    "end_to_end_ms",
+    "in_flight_at_submit",
+    "in_flight_avg_during",
+    "in_flight_peak_during",
+    "sla_ttft_violation",
+    "sla_tpot_violation",
+)
+
+# Columns surfaced in the per-cohort ``snapshots`` array.
+_SNAPSHOT_COLUMNS = (
+    "snapshot_at_ms",
+    "phase",
+    "pool_size",
+    "in_flight",
+    "requests_completed",
+    "errors",
+    "step_samples",
+    "step_target_samples",
+)
+
+
 def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
     run = dict(run_row)
     # Window aggregates (PMU / BW / power / AMX / freq) live as columns
@@ -63,6 +159,37 @@ def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
             (m["measurement_id"],),
         ).fetchone()
         m["telemetry"] = dict(tele) if tele else {}
+        # Raw per-second telemetry samples (drives in-window time-series
+        # charts on the website).
+        tele_cols = ", ".join(_TELEMETRY_SAMPLE_COLUMNS)
+        m["telemetry_samples"] = [
+            {k: r[k] for k in _TELEMETRY_SAMPLE_COLUMNS}
+            for r in conn.execute(
+                f"SELECT {tele_cols} FROM measurement_telemetry "
+                f"WHERE measurement_id = ? ORDER BY sampled_at_ms",
+                (m["measurement_id"],),
+            )
+        ]
+        # Per-turn events captured during the window.
+        turn_cols = ", ".join(_TURN_EVENT_COLUMNS)
+        m["turns"] = [
+            {k: r[k] for k in _TURN_EVENT_COLUMNS}
+            for r in conn.execute(
+                f"SELECT {turn_cols} FROM turn_events "
+                f"WHERE measurement_id = ? ORDER BY submitted_at_ms",
+                (m["measurement_id"],),
+            )
+        ]
+    # Whole-run heartbeat (1 Hz pool/in-flight ticks).
+    snap_cols = ", ".join(_SNAPSHOT_COLUMNS)
+    run["snapshots"] = [
+        {k: r[k] for k in _SNAPSHOT_COLUMNS}
+        for r in conn.execute(
+            f"SELECT {snap_cols} FROM simulation_snapshots "
+            f"WHERE cohort_run_id = ? ORDER BY snapshot_at_ms",
+            (run["cohort_run_id"],),
+        )
+    ]
     return run
 
 
@@ -182,6 +309,7 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
     knee_pool = None
     for m in measurements:
         curve.append({
+            "step_index": m["step_index"],
             "pool_size": m["target_pool_size"],
             "sample_size": m["sample_size"],
             "violation_rate": m["combined_violation_rate"],
@@ -195,6 +323,12 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
             "tpot_p95_ms": m["tpot_p95_ms"],
             "kv_cache_pct": m["avg_kv_cache_pct"],
             "status": m["capacity_status"],
+            "measurement_started_at": m.get("measurement_started_at"),
+            "measurement_duration_s": m.get("measurement_duration_s"),
+            # Per-step time-series; lists may be empty (e.g. a 'pending'
+            # row for an in-progress step had no events captured).
+            "telemetry_samples": m.get("telemetry_samples", []),
+            "turns": m.get("turns", []),
         })
         if m["capacity_status"] == "pass":
             capacity_pool = m["target_pool_size"]
@@ -205,6 +339,7 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
     bottleneck, evidence = _bottleneck(measurements)
     return {
         "id": run["cohort_id"],
+        "cohort_run_id": run["cohort_run_id"],
         "name": cohort_def.get("name", run["cohort_id"]),
         "description": cohort_def.get("description", ""),
         "category": cohort_def.get("category", "mix"),
@@ -217,6 +352,7 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
         "capacity_pool_size": capacity_pool,
         "knee_pool_size": knee_pool,
         "curve": curve,
+        "snapshots": run.get("snapshots", []),
         "bottleneck": bottleneck,
         "bottleneck_evidence": evidence,
         "hardware_recommendation": _hardware_recommendation(bottleneck),

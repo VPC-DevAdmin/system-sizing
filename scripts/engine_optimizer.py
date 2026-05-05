@@ -269,6 +269,54 @@ CONFIGS: list[EngineConfig] = [
         ),
     ),
     EngineConfig(
+        name="chunked_prefill_block_32",
+        description="Dual-replica + chunked prefill + KV block size 32 (stacked).",
+        replicas=_dual_replica_pair(),
+        replica_args=[
+            "--enable-chunked-prefill",
+            "--max-num-batched-tokens", "4096",
+            "--max-num-seqs", "64",
+            "--block-size", "32",
+        ],
+        expected_outcome=(
+            "Hypothesis from the first AMD optimizer pass: block_32 wins "
+            "broadly (c=1 ttft -21%, short_throughput -72%, long_output "
+            "-36%) and chunked_prefill eliminates the c=16 stuck-tail. "
+            "Stacking the two should give both effects. If confirmed, "
+            "this is the production AMD config."
+        ),
+    ),
+    EngineConfig(
+        name="kv_xl_120",
+        description="Dual-replica with 120GB KV per replica (1.5× baseline).",
+        replicas=[
+            ReplicaSpec(
+                name="vllm-r0", port=8000, cpuset_cpus="0-31", cpuset_mems="0",
+                env={
+                    "VLLM_CPU_KVCACHE_SPACE": "120",
+                    "VLLM_CPU_OMP_THREADS_BIND": "0-31",
+                    "OMP_NUM_THREADS": "32",
+                },
+            ),
+            ReplicaSpec(
+                name="vllm-r1", port=8001, cpuset_cpus="32-63", cpuset_mems="1",
+                env={
+                    "VLLM_CPU_KVCACHE_SPACE": "120",
+                    "VLLM_CPU_OMP_THREADS_BIND": "32-63",
+                    "OMP_NUM_THREADS": "32",
+                },
+            ),
+        ],
+        expected_outcome=(
+            "kv_xl (160GB×2 = 320GB) failed health check on a 386GB host — "
+            "weight residency + scratch leaves too little margin. 120GB×2 "
+            "= 240GB is comfortable. Tests whether KV pool size still "
+            "matters once chunked_prefill / block_32 have eliminated the "
+            "c=16 scheduler tail. Hypothesis: it doesn't — 80GB was "
+            "already enough; the prior pain was scheduling, not KV size."
+        ),
+    ),
+    EngineConfig(
         name="single_replica_64core",
         description="One container, all 64 cores, both NUMA. AMD analog of ctx_kv_xl.",
         replicas=[

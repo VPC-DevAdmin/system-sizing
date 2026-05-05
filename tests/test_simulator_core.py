@@ -749,6 +749,90 @@ def test_find_completed_runs_one_db_many_cohorts(tmp_path) -> None:
 # ── Run-directory layout (run_NN/) ────────────────────────────────────
 
 
+def test_dashboard_state_reflects_terminal_status(tmp_path) -> None:
+    """When a cohort_run has ``final_status='ok'`` set, the dashboard
+    body should treat that as authoritative and render "completed",
+    not the stale ``measuring`` phase from the last snapshot before
+    SnapshotRecorder shut down."""
+    from simulator.database import Database
+    from simulator.dashboard import _read_state, _render
+
+    db_path = tmp_path / "run.db"
+    db = Database(db_path)
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="chat_heavy",
+        cohort_definition={"name": "x"}, config={},
+    )
+    # Stale "measuring" snapshot (the bug condition).
+    db.insert_snapshot({
+        "cohort_run_id": "crid", "snapshot_at_ms": 1000,
+        "phase": "measuring", "pool_size": 32, "in_flight": 18,
+        "requests_completed": 412, "errors": 0,
+        "step_samples": 87, "step_target_samples": 100,
+    })
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    state = _read_state(db_path)
+    assert state["ok"] is True
+    assert state["run"]["final_status"] == "ok"
+    assert state["sweep"]["total"] == 1
+    assert state["sweep"]["ok"] == 1
+    assert state["sweep"]["in_progress"] == 0
+
+    # Render and inspect the body: the cohort is terminal, so the
+    # phase row should read "completed" (mapped from final_status='ok')
+    # rather than the stale "measuring" snapshot phase. Use Console's
+    # capture API rather than poking at Layout internals.
+    from rich.console import Console
+    cap = Console(width=140, record=True)
+    cap.print(_render(state))
+    out = cap.export_text()
+    assert "completed" in out
+    assert "1/1 complete" in out
+
+
+def test_dashboard_state_in_progress(tmp_path) -> None:
+    """Mid-sweep (final_status NULL) must still render the live phase
+    + step-samples ratio normally."""
+    from simulator.database import Database
+    from simulator.dashboard import _read_state, _render
+
+    db_path = tmp_path / "run.db"
+    db = Database(db_path)
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="chat_heavy",
+        cohort_definition={"name": "x"}, config={},
+    )
+    db.insert_snapshot({
+        "cohort_run_id": "crid", "snapshot_at_ms": 1000,
+        "phase": "measuring", "pool_size": 32, "in_flight": 18,
+        "requests_completed": 412, "errors": 0,
+        "step_samples": 87, "step_target_samples": 100,
+    })
+    db.close()
+
+    state = _read_state(db_path)
+    assert state["run"]["final_status"] is None
+    assert state["sweep"] == {
+        "total": 1, "ok": 0, "other_terminal": 0, "in_progress": 1,
+    }
+
+    # Smoke-render to confirm no crash and the live phase / sample
+    # ratio land in the body (the "Sweep progress" formatting is
+    # tested via state['sweep'] above; rich line-wrap makes the
+    # rendered string brittle).
+    from rich.console import Console
+    cap = Console(width=140, record=True)
+    cap.print(_render(state))
+    out = cap.export_text()
+    assert "measuring" in out
+    assert "87 / 100" in out
+    assert "0/1 complete" in out
+
+
 def test_export_includes_per_step_time_series(tmp_path) -> None:
     """make export must surface ``telemetry_samples`` + ``turns`` per
     curve step and ``snapshots`` per cohort. The downstream website

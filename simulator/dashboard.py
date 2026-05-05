@@ -69,10 +69,42 @@ def _read_state(path: Path) -> dict:
             (run["cohort_run_id"],),
         ).fetchall()
         out["measurements"] = [dict(m) for m in measurements]
+
+        # Sweep-level tally so the dashboard can say "11/11 complete"
+        # when the whole run is done, not just the latest cohort.
+        sweep = conn.execute(
+            """SELECT
+                 COUNT(*) AS total,
+                 SUM(CASE WHEN final_status = 'ok' THEN 1 ELSE 0 END) AS ok,
+                 SUM(CASE WHEN final_status IS NOT NULL
+                          AND final_status != 'ok' THEN 1 ELSE 0 END) AS other_terminal,
+                 SUM(CASE WHEN final_status IS NULL THEN 1 ELSE 0 END) AS in_progress
+               FROM cohort_run"""
+        ).fetchone()
+        out["sweep"] = dict(sweep) if sweep else None
         out["ok"] = True
     finally:
         conn.close()
     return out
+
+
+# Mapping from cohort_run.final_status values to a single-word
+# phase label the dashboard renders when a cohort is terminal.
+_FINAL_STATUS_DISPLAY = {
+    "ok": "completed",
+    "interrupted": "interrupted",
+    "time_limit": "time-limit",
+    "no_samples": "no samples",
+    "unstable": "unstable",
+}
+
+
+def _status_style(status: str | None) -> str:
+    if status in (None, "ok"):
+        return "green"
+    if status in ("interrupted", "time_limit"):
+        return "yellow"
+    return "red"
 
 
 def _render(state: dict) -> Layout:
@@ -94,6 +126,9 @@ def _render(state: dict) -> Layout:
     run = state["run"]
     snap = state.get("snapshot") or {}
     measurements = state.get("measurements") or []
+    sweep = state.get("sweep") or {}
+    final_status = run.get("final_status")
+    is_terminal = final_status is not None
 
     header_text = Text()
     header_text.append("Cohort: ", style="bold")
@@ -103,28 +138,56 @@ def _render(state: dict) -> Layout:
     header_text.append("Model: ", style="bold")
     header_text.append(f"{run['model_id']}    ")
     header_text.append("Status: ", style="bold")
-    header_text.append(str(run.get("final_status") or "running"),
-                       style="green" if run.get("final_status") in (None, "ok") else "yellow")
+    header_text.append(str(final_status or "running"), style=_status_style(final_status))
     layout["header"].update(Panel(header_text, border_style="cyan"))
 
     # Live table of state
     state_tbl = Table(title="Live state", show_header=False, expand=True)
     state_tbl.add_column("k", style="bold")
     state_tbl.add_column("v")
-    state_tbl.add_row("Phase", str(snap.get("phase", "—")))
+    # Phase: when the cohort is terminal, ``final_status`` is the
+    # source of truth — the latest snapshot's ``phase`` column may
+    # be a stale "measuring" from before the SnapshotRecorder shut
+    # down. Show the final status mapped to a phase-style label.
+    if is_terminal:
+        phase_label = _FINAL_STATUS_DISPLAY.get(final_status, final_status)
+        state_tbl.add_row(
+            "Phase",
+            Text(str(phase_label), style=_status_style(final_status)),
+        )
+    else:
+        state_tbl.add_row("Phase", str(snap.get("phase", "—")))
     state_tbl.add_row("Pool size (target)", str(snap.get("pool_size", "—")))
-    state_tbl.add_row("In-flight", str(snap.get("in_flight", "—")))
+    state_tbl.add_row("In-flight", "—" if is_terminal else str(snap.get("in_flight", "—")))
     # Step samples shows progress into the current measurement window
     # (the per-step sample buffer). Target=0 means we're not in a
     # measuring phase right now (warmup / ramp / idle), so render "—".
-    step_n = snap.get("step_samples")
-    step_target = snap.get("step_target_samples")
-    if step_target:
-        state_tbl.add_row("Step samples", f"{step_n or 0} / {step_target}")
-    else:
+    if is_terminal:
         state_tbl.add_row("Step samples", "—")
+    else:
+        step_n = snap.get("step_samples")
+        step_target = snap.get("step_target_samples")
+        if step_target:
+            state_tbl.add_row("Step samples", f"{step_n or 0} / {step_target}")
+        else:
+            state_tbl.add_row("Step samples", "—")
     state_tbl.add_row("Completed (all-time)", str(snap.get("requests_completed", "—")))
     state_tbl.add_row("Errors", str(snap.get("errors", "—")))
+    # Sweep progress across all cohort_runs in this run.db.
+    if sweep and sweep.get("total"):
+        ok = sweep.get("ok") or 0
+        other = sweep.get("other_terminal") or 0
+        in_progress = sweep.get("in_progress") or 0
+        total = sweep["total"]
+        if in_progress == 0:
+            sweep_label = f"{ok}/{total} complete"
+            if other:
+                sweep_label += f" ({other} non-ok)"
+            sweep_style = _status_style(None if other == 0 else "interrupted")
+        else:
+            sweep_label = f"{ok}/{total} complete  ·  {in_progress} running"
+            sweep_style = ""
+        state_tbl.add_row("Sweep progress", Text(sweep_label, style=sweep_style))
 
     # Measurements table
     m_tbl = Table(title="Measurement points", expand=True)

@@ -101,6 +101,25 @@ class SnapshotRecorder:
                 await self._task
             except (asyncio.CancelledError, Exception):
                 pass
+        # Snapshot the terminal state. Without this the dashboard's
+        # "latest snapshot" lookup returns whatever phase the loop was
+        # in last (typically ``measuring`` since cancellation usually
+        # interrupts the per-second sleep), so the dashboard reads as
+        # "still measuring" forever after a cohort finishes.
+        try:
+            self.db.insert_snapshot({
+                "cohort_run_id": self.cohort_run_id,
+                "snapshot_at_ms": _now_ms(),
+                "phase": self.get_phase(),
+                "pool_size": self.pool.target_size,
+                "in_flight": self.state.in_flight,
+                "requests_completed": self.state.completed,
+                "errors": self.state.errors,
+                "step_samples": self.state.step_samples,
+                "step_target_samples": self.state.step_target_samples,
+            })
+        except Exception:
+            pass
 
     async def _loop(self) -> None:
         try:

@@ -229,18 +229,70 @@ def _render(state: dict) -> Layout:
     return layout
 
 
+def _render_waiting(run_dir: Path, elapsed_s: float) -> Layout:
+    """Pre-DB render: a friendly waiting screen while we poll for the
+    run.db to appear. Used during engine boot (loads can take 1-3 min
+    on a cold cache) and between cohorts in a sweep."""
+    layout = Layout()
+    layout.split_column(
+        Layout(name="header", size=3),
+        Layout(name="body"),
+        Layout(name="footer", size=3),
+    )
+    layout["header"].update(Panel(
+        Text("Persona Capacity Simulator — Dashboard", style="bold cyan"),
+        border_style="cyan",
+    ))
+    body = Text()
+    body.append("\n  Waiting for ", style="yellow")
+    body.append(f"{run_dir}/run_NN/run.db", style="bold yellow")
+    body.append(" to appear...\n\n", style="yellow")
+    body.append(
+        f"  This is normal during engine boot (~1-3 min cold load) "
+        f"or between cohort transitions.\n", style="dim",
+    )
+    body.append(f"  Polling every 2s. Ctrl-C to exit.\n\n", style="dim")
+    body.append(f"  Elapsed: {int(elapsed_s)}s\n", style="bold")
+    layout["body"].update(Panel(body, title="Waiting for engine"))
+    layout["footer"].update(Panel(
+        Text(f"  {time.strftime('%H:%M:%S')}", style="dim"),
+    ))
+    return layout
+
+
 def watch(run_dir: str | Path = "runs", refresh_s: float = 2.0) -> None:
+    """Live dashboard with auto-wait: polls until a run.db materialises,
+    then renders the running cohort's progress. Survives the entire
+    "make run-sweep" lifecycle — boot wait → measurement → between-
+    cohort transitions → sweep complete — without the user needing
+    to restart.
+    """
     run_dir = Path(run_dir)
     console = Console()
-    db_path = _latest_db(run_dir)
-    if db_path is None:
-        console.print(f"[yellow]No .db files in {run_dir}. Start a run first.[/yellow]")
-        return
+    waiting_since = time.monotonic()
+    db_path: Path | None = _latest_db(run_dir)
 
-    with Live(_render(_read_state(db_path)), refresh_per_second=1, console=console, screen=True) as live:
+    # Initial render: waiting screen if no DB yet, else the dashboard.
+    initial = (
+        _render(_read_state(db_path)) if db_path is not None
+        else _render_waiting(run_dir, 0.0)
+    )
+
+    with Live(
+        initial, refresh_per_second=1, console=console, screen=True,
+    ) as live:
         while True:
             try:
-                # Re-detect latest db each refresh in case a sweep starts a new file
+                if db_path is None:
+                    # Pre-DB phase: keep polling, update elapsed time.
+                    db_path = _latest_db(run_dir)
+                    if db_path is None:
+                        elapsed = time.monotonic() - waiting_since
+                        live.update(_render_waiting(run_dir, elapsed))
+                        time.sleep(refresh_s)
+                        continue
+                # Have a DB — render dashboard. Re-detect each tick
+                # in case a new sweep starts a new run_NN/run.db.
                 latest = _latest_db(run_dir) or db_path
                 state = _read_state(latest)
                 live.update(_render(state))

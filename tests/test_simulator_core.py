@@ -1087,6 +1087,22 @@ def test_dashboard_state_reflects_terminal_status(tmp_path) -> None:
     assert "1/1 complete" in out
 
 
+def test_dashboard_waiting_render_does_not_crash(tmp_path) -> None:
+    """The waiting-for-DB screen must render without erroring even
+    when the run_dir doesn't exist yet (engine boot hasn't created
+    the run_NN/ directory)."""
+    from simulator.dashboard import _render_waiting
+
+    # No run_dir exists yet — should still render
+    layout = _render_waiting(tmp_path / "nonexistent_runs", 5.0)
+    from rich.console import Console
+    cap = Console(width=120, record=True)
+    cap.print(layout)
+    out = cap.export_text()
+    assert "Waiting for" in out
+    assert "Elapsed" in out
+
+
 def test_dashboard_state_in_progress(tmp_path) -> None:
     """Mid-sweep (final_status NULL) must still render the live phase
     + step-samples ratio normally."""

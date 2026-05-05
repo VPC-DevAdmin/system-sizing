@@ -132,6 +132,18 @@ class TestCell:
     input_tokens: int
     output_tokens: int
     concurrency: int
+    # Per-request hard cap. When a request exceeds this, abort it and
+    # count as a ``timeouts`` increment (separate from ``errors``,
+    # separate from ``samples``). Excluded from p50/p95 so the
+    # latency stats only describe requests that actually completed.
+    # The aggregate throughput field DOES include timed-out requests'
+    # zero contribution, so it correctly drops on configs with a tail.
+    #
+    # Sized as a small multiple of the expected wall-clock time per
+    # cell — generous enough that a healthy config never hits it,
+    # tight enough that a stuck-tail pathology (e.g. baseline pain16's
+    # ~900 s tail) gets killed in seconds rather than minutes.
+    timeout_s: float = 60.0
 
 
 @dataclass
@@ -145,6 +157,9 @@ class CellResult:
     tpot_p95_ms: Optional[float]
     throughput_out_tok_s: Optional[float]
     error_summary: str = ""
+    # Number of requests killed by the per-cell ``timeout_s`` cap.
+    # Default 0 so old JSON without this field deserialises cleanly.
+    timeouts: int = 0
 
 
 @dataclass
@@ -324,7 +339,14 @@ CONFIGS: list[EngineConfig] = [
                 name="vllm-single", port=8000,
                 cpuset_cpus="0-63", cpuset_mems=None,
                 env={
-                    "VLLM_CPU_KVCACHE_SPACE": "160",
+                    # Original 160GB request failed: vLLM CPU's KV
+                    # allocator checks against ONE NUMA node's free
+                    # memory (not the cross-NUMA total), even when
+                    # cpuset_mems is unset. Observed on R7735:
+                    # node 0 had 126.38/188.52 GiB free at the
+                    # moment of the check. 100GB stays comfortably
+                    # under that with margin for scratch + weights.
+                    "VLLM_CPU_KVCACHE_SPACE": "100",
                     "VLLM_CPU_OMP_THREADS_BIND": "0-63",
                     "OMP_NUM_THREADS": "64",
                 },
@@ -408,15 +430,19 @@ CONFIGS: list[EngineConfig] = [
 # ``ONLY=...`` to subset if you want a faster pass.
 
 TEST_CELLS: list[TestCell] = [
-    TestCell("single_stream_short",  input_tokens=128,  output_tokens=128,  concurrency=1),
-    TestCell("chat_concurrent",      input_tokens=512,  output_tokens=256,  concurrency=4),
-    TestCell("short_throughput",     input_tokens=128,  output_tokens=128,  concurrency=8),
+    # ``timeout_s`` is the per-request cap; tuned ~5× the worst-case
+    # healthy completion time so noise doesn't trip it but the
+    # 900-second-tail pathologies do. See _AMD_REFERENCE_TIMINGS in
+    # the docstring above for the math.
+    TestCell("single_stream_short", input_tokens=128,  output_tokens=128,  concurrency=1,  timeout_s=30),
+    TestCell("chat_concurrent",     input_tokens=512,  output_tokens=256,  concurrency=4,  timeout_s=60),
+    TestCell("short_throughput",    input_tokens=128,  output_tokens=128,  concurrency=8,  timeout_s=60),
     # Pain point: long input + moderate output, two concurrency levels.
-    TestCell("long_pain_8",          input_tokens=4096, output_tokens=512,  concurrency=8),
-    TestCell("long_pain_16",         input_tokens=4096, output_tokens=512,  concurrency=16),
+    TestCell("long_pain_8",         input_tokens=4096, output_tokens=512,  concurrency=8,  timeout_s=180),
+    TestCell("long_pain_16",        input_tokens=4096, output_tokens=512,  concurrency=16, timeout_s=300),
     # Flipped: short input, long output. Decode-dominated; tests
     # whether AMD's memory-bandwidth advantage actually translates.
-    TestCell("long_output",          input_tokens=512,  output_tokens=4096, concurrency=4),
+    TestCell("long_output",         input_tokens=512,  output_tokens=4096, concurrency=4,  timeout_s=360),
 ]
 
 
@@ -433,10 +459,16 @@ def run(cmd: list[str], check: bool = False, capture: bool = False, timeout: int
 
 
 def cleanup_containers(state: "OptimizerState") -> None:
-    """Stop any container whose name starts with ``vllm-`` so we don't
-    leave a pinned replica from an earlier config eating cores."""
+    """Stop AND remove any container whose name starts with ``vllm-``.
+
+    The remove step matters because docker_launch no longer uses
+    ``--rm`` — we keep failed containers around between exit and the
+    next config so ``docker logs`` can still scrape the failure
+    reason. cleanup is the place we actually delete them.
+    """
     state.set_phase("cleanup")
     state.append_log("== cleanup ==")
+    # Running containers — stop them.
     res = subprocess.run(
         ["docker", "ps", "-q", "--filter", "name=vllm-"],
         capture_output=True, text=True,
@@ -445,6 +477,16 @@ def cleanup_containers(state: "OptimizerState") -> None:
     if cids:
         state.append_log(f"stopping {len(cids)} container(s): {' '.join(cids)}")
         subprocess.run(["docker", "stop", "-t", "10", *cids], capture_output=True)
+    # Now also remove any vllm-* container including exited ones (no
+    # --filter status= so we catch both running and stopped).
+    res = subprocess.run(
+        ["docker", "ps", "-aq", "--filter", "name=vllm-"],
+        capture_output=True, text=True,
+    )
+    cids = res.stdout.split()
+    if cids:
+        state.append_log(f"removing {len(cids)} container(s)")
+        subprocess.run(["docker", "rm", "-f", *cids], capture_output=True)
     # Ports take a moment to release.
     time.sleep(2)
 
@@ -452,8 +494,11 @@ def cleanup_containers(state: "OptimizerState") -> None:
 def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
     """Build and run the docker command for one replica. Returns the
     container ID."""
+    # NOT using --rm — we want failed containers to stick around so
+    # ``docker logs`` can scrape the failure reason post-mortem.
+    # cleanup_containers() does the docker rm -f at the end.
     args = [
-        "docker", "run", "-d", "--rm",
+        "docker", "run", "-d",
         "--network", "host",
         "--shm-size", cfg.shm_size,
         "--cpuset-cpus", replica.cpuset_cpus,
@@ -581,49 +626,87 @@ def make_prompts(cells: list[TestCell]) -> dict[str, list[str]]:
     }
 
 
-async def measure_one_request(
+@dataclass(frozen=True)
+class _ReqResult:
+    ttft_ms: Optional[float] = None
+    total_ms: Optional[float] = None
+    output_tokens: Optional[int] = None
+    error: Optional[str] = None
+    timed_out: bool = False
+
+
+async def _do_stream(
     client: AsyncOpenAI, prompt: str, output_tokens: int,
-) -> tuple[Optional[float], Optional[float], Optional[int], Optional[str]]:
-    """Returns (ttft_ms, total_ms, observed_output_tokens, error)."""
+) -> _ReqResult:
+    """Issue one streaming request, return latency / token-count
+    measurements. Caller is responsible for the asyncio.wait_for
+    wrapper that enforces the per-cell timeout."""
     t_start = time.monotonic()
     t_first: Optional[float] = None
     n_tokens = 0
-    try:
-        stream = await client.chat.completions.create(
-            model=SERVED_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=output_tokens,
-            stream=True,
-            extra_body={"ignore_eos": True},
-            timeout=REQUEST_TIMEOUT_S,
-        )
-        async for chunk in stream:
-            if t_first is None:
-                t_first = time.monotonic()
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if delta and getattr(delta, "content", None):
-                # Roughly 1 chunk per token for vLLM's stream; count chunks.
-                n_tokens += 1
+    stream = await client.chat.completions.create(
+        model=SERVED_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=output_tokens,
+        stream=True,
+        extra_body={"ignore_eos": True},
+        timeout=REQUEST_TIMEOUT_S,
+    )
+    async for chunk in stream:
         if t_first is None:
-            return None, None, 0, "no tokens emitted"
-        t_end = time.monotonic()
-        return (t_first - t_start) * 1000.0, (t_end - t_start) * 1000.0, n_tokens, None
+            t_first = time.monotonic()
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta and getattr(delta, "content", None):
+            # Roughly 1 chunk per token for vLLM's stream; count chunks.
+            n_tokens += 1
+    if t_first is None:
+        return _ReqResult(error="no tokens emitted")
+    t_end = time.monotonic()
+    return _ReqResult(
+        ttft_ms=(t_first - t_start) * 1000.0,
+        total_ms=(t_end - t_start) * 1000.0,
+        output_tokens=n_tokens,
+    )
+
+
+async def measure_one_request(
+    client: AsyncOpenAI, prompt: str, output_tokens: int, timeout_s: float,
+) -> _ReqResult:
+    """Wrap _do_stream in asyncio.wait_for so a stuck request gets
+    killed at ``timeout_s`` and classified as a timeout. The openai
+    SDK's own ``timeout`` parameter only governs per-chunk reads, so
+    a stream that emits tokens slowly enough to take 15 minutes
+    won't trip it — we need our own outer wall-clock cap.
+    """
+    try:
+        return await asyncio.wait_for(
+            _do_stream(client, prompt, output_tokens),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        return _ReqResult(timed_out=True, error="timeout")
     except Exception as e:  # noqa: BLE001
-        return None, None, None, str(e)[:200]
+        return _ReqResult(error=str(e)[:200])
 
 
 async def measure_cell(
     cfg: EngineConfig, cell: TestCell, prompts: list[str],
     state: "OptimizerState",
 ) -> CellResult:
-    state.set_phase(f"cell {cell.name} (in={cell.input_tokens} out={cell.output_tokens} c={cell.concurrency})")
+    state.set_phase(
+        f"cell {cell.name} (in={cell.input_tokens} out={cell.output_tokens} "
+        f"c={cell.concurrency} timeout={cell.timeout_s:.0f}s)"
+    )
     # Round-robin requests across replicas.
     clients = [
         AsyncOpenAI(base_url=f"http://{HOST}:{r.port}/v1", api_key="EMPTY")
         for r in cfg.replicas
     ]
     tasks = [
-        measure_one_request(clients[i % len(clients)], prompts[i], cell.output_tokens)
+        measure_one_request(
+            clients[i % len(clients)], prompts[i], cell.output_tokens,
+            cell.timeout_s,
+        )
         for i in range(cell.concurrency)
     ]
     t0 = time.monotonic()
@@ -632,24 +715,29 @@ async def measure_cell(
     ttfts, tpots = [], []
     out_tok_total = 0
     errors = 0
+    timeouts = 0
     error_msgs: list[str] = []
-    for ttft, total, n_out, err in results:
-        if err is not None:
-            errors += 1
-            error_msgs.append(err)
+    for r in results:
+        if r.timed_out:
+            timeouts += 1
             continue
-        if ttft is None or total is None or n_out is None:
+        if r.error is not None:
+            errors += 1
+            error_msgs.append(r.error)
+            continue
+        if r.ttft_ms is None or r.total_ms is None or r.output_tokens is None:
             errors += 1
             continue
-        ttfts.append(ttft)
-        if n_out > 0 and total > ttft:
-            tpots.append((total - ttft) / max(1, n_out))
-        out_tok_total += n_out
+        ttfts.append(r.ttft_ms)
+        if r.output_tokens > 0 and r.total_ms > r.ttft_ms:
+            tpots.append((r.total_ms - r.ttft_ms) / max(1, r.output_tokens))
+        out_tok_total += r.output_tokens
     samples = len(ttfts)
     return CellResult(
         cell_name=cell.name,
         samples=samples,
         errors=errors,
+        timeouts=timeouts,
         ttft_p50_ms=_pct(ttfts, 0.5),
         ttft_p95_ms=_pct(ttfts, 0.95),
         tpot_p50_ms=_pct(tpots, 0.5),
@@ -781,12 +869,15 @@ def render(state: OptimizerState) -> Layout:
     cur_cells_tbl.add_column("cell")
     cur_cells_tbl.add_column("n", justify="right")
     cur_cells_tbl.add_column("err", justify="right")
+    cur_cells_tbl.add_column("t/o", justify="right")
     cur_cells_tbl.add_column("ttft p95", justify="right")
     cur_cells_tbl.add_column("tpot p95", justify="right")
     cur_cells_tbl.add_column("tok/s", justify="right")
     for r in state.current_cells:
+        timeouts = getattr(r, "timeouts", 0) or 0
         cur_cells_tbl.add_row(
             r.cell_name, str(r.samples), str(r.errors),
+            Text(str(timeouts), style="yellow") if timeouts else "0",
             f"{r.ttft_p95_ms:.0f}" if r.ttft_p95_ms else "—",
             f"{r.tpot_p95_ms:.0f}" if r.tpot_p95_ms else "—",
             f"{r.throughput_out_tok_s:.1f}" if r.throughput_out_tok_s else "—",
@@ -802,7 +893,12 @@ def render(state: OptimizerState) -> Layout:
     # best-case latency (sanity), pain TTFT at two concurrencies (does
     # it work? does it scale?), pain throughput, and decode-regime
     # throughput. Full per-cell data is always in the JSON.
-    summary_tbl = Table(title="Configs (so far)", expand=True)
+    #
+    # TTFT cells annotate with timeout count when nonzero —
+    # "12087 *2" means 14 of 16 requests completed at 12 s p95, but
+    # 2 were killed at the per-cell timeout. Distinguishes a real win
+    # from "fast on the few that didn't get stuck."
+    summary_tbl = Table(title="Configs (so far)  (* = killed by per-cell timeout)", expand=True)
     summary_tbl.add_column("config")
     summary_tbl.add_column("status")
     summary_tbl.add_column("launch s", justify="right")
@@ -821,14 +917,29 @@ def render(state: OptimizerState) -> Layout:
             cr.name,
             Text(cr.status, style=style),
             f"{cr.launch_seconds:.0f}" if cr.launch_seconds else "—",
-            f"{c1.ttft_p95_ms:.0f}" if c1 and c1.ttft_p95_ms else "—",
-            f"{p8.ttft_p95_ms:.0f}" if p8 and p8.ttft_p95_ms else "—",
-            f"{p16.ttft_p95_ms:.0f}" if p16 and p16.ttft_p95_ms else "—",
+            _fmt_ttft_with_timeouts(c1),
+            _fmt_ttft_with_timeouts(p8),
+            _fmt_ttft_with_timeouts(p16),
             f"{p8.throughput_out_tok_s:.1f}" if p8 and p8.throughput_out_tok_s else "—",
             f"{lo.throughput_out_tok_s:.1f}" if lo and lo.throughput_out_tok_s else "—",
         )
     layout["footer"].update(summary_tbl)
     return layout
+
+
+def _fmt_ttft_with_timeouts(c: CellResult | None) -> str:
+    """Render p95 TTFT, suffixed with ``*N`` when N requests were
+    killed by the per-cell timeout. ``*`` reads as "warning" — the
+    p95 is from the surviving requests only, so a "fast" number with
+    a high ``*`` count means the config has a tail problem masked by
+    the dashboard summary."""
+    if c is None or c.ttft_p95_ms is None:
+        return "—"
+    timeouts = getattr(c, "timeouts", 0) or 0
+    base = f"{c.ttft_p95_ms:.0f}"
+    if timeouts:
+        return f"{base} *{timeouts}"
+    return base
 
 
 # ── Main loop ───────────────────────────────────────────────────────────
@@ -896,7 +1007,8 @@ async def run_config(
     warmup_prompt = build_prompt(64)
     for i in range(WARMUP_REQUESTS):
         await measure_one_request(
-            warmup_clients[i % len(warmup_clients)], warmup_prompt, output_tokens=32,
+            warmup_clients[i % len(warmup_clients)], warmup_prompt,
+            output_tokens=32, timeout_s=60.0,
         )
     state.append_log("warmup done")
     cell_results: list[CellResult] = []
@@ -906,8 +1018,10 @@ async def run_config(
         state.push_cell_result(cr)
         state.append_log(
             f"{cell.name}: n={cr.samples} err={cr.errors} "
+            f"timeouts={cr.timeouts} "
             f"ttft_p95={cr.ttft_p95_ms or 0:.0f}ms "
-            f"tpot_p95={cr.tpot_p95_ms or 0:.0f}ms"
+            f"tpot_p95={cr.tpot_p95_ms or 0:.0f}ms "
+            f"tok/s={cr.throughput_out_tok_s or 0:.1f}"
         )
         # Persist after every cell — losing one cell on crash is
         # tolerable; losing N is not.
@@ -956,14 +1070,27 @@ def _completed_names(doc: dict | None) -> set[str]:
 def _prior_results(doc: dict | None) -> list[ConfigResult]:
     """Reconstruct ConfigResult dataclasses from JSON for state
     pre-population (so the dashboard / final summary include
-    previously-completed configs even on a resume)."""
+    previously-completed configs even on a resume).
+
+    Tolerant of schema drift — both directions:
+    * Old JSON missing newly-added fields (e.g. ``timeouts``):
+      dataclass defaults fill in.
+    * Old JSON with fields that no longer exist on the dataclass:
+      filtered out before construction so we don't TypeError.
+    """
     if not doc:
         return []
+    cell_fields = {f.name for f in dataclasses.fields(CellResult)}
+    cfg_fields = {f.name for f in dataclasses.fields(ConfigResult)}
     out: list[ConfigResult] = []
     for c in doc.get("configs", []):
         cell_dicts = c.get("cells", []) or []
-        cells = [CellResult(**cd) for cd in cell_dicts]
-        merged = {**c, "cells": cells}
+        cells = [
+            CellResult(**{k: v for k, v in cd.items() if k in cell_fields})
+            for cd in cell_dicts
+        ]
+        merged = {k: v for k, v in c.items() if k in cfg_fields}
+        merged["cells"] = cells
         out.append(ConfigResult(**merged))
     return out
 
@@ -1104,8 +1231,10 @@ def _print_summary(state: OptimizerState) -> None:
             continue
         print(f"[ok           ] {cr.name}  (launched in {cr.launch_seconds:.0f}s)")
         for c in cr.cells:
+            timeouts = getattr(c, "timeouts", 0) or 0
+            t_flag = f"  t/o={timeouts}" if timeouts else ""
             print(
-                f"    {c.cell_name:24}  n={c.samples:2}  err={c.errors}  "
+                f"    {c.cell_name:24}  n={c.samples:2}  err={c.errors}{t_flag}  "
                 f"ttft p50={c.ttft_p50_ms or 0:6.0f}ms  p95={c.ttft_p95_ms or 0:6.0f}ms  "
                 f"tpot p95={c.tpot_p95_ms or 0:5.0f}ms  "
                 f"out_tok/s={c.throughput_out_tok_s or 0:6.1f}"

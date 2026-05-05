@@ -6,16 +6,21 @@
 # hardware; the hardware_requirements block below catches that before
 # launch via the preflight check.
 #
-# Per the GNR runbook (sibling project, confirmed working):
-#   * TP=1 baseline + TP=4 are the only known-good parallelism shapes
-#     on SGLang CPU. DP/EP combos are upstream-broken at time of writing.
-#   * TP=4 with 16 cores per worker on a single 64-core socket is the
-#     reference layout. SGLANG_CPU_OMP_THREADS_BIND is auto-derived
-#     from cpu_bind and validated against tensor_parallel_size at
-#     launch (mismatches surface immediately).
-#   * --attention-backend intel_amx is the AMX-aware kernel; without it
-#     SGLang falls back to torch_native and AMX never engages, so this
-#     is what makes Xeon decode fast vs the AMD fallback path.
+# Engine knobs match the ``ctx_kv_xl`` winner from the sibling
+# benchmarking project's sglang_qwen3_30b_production sweep on
+# dellr470 (Xeon 6761P, 64 physical cores, single NUMA node):
+#
+#   ctx_kv_xl       TP=1, KV pool 131072, mem_fraction 0.85   283.87 peak / 98.69 mean tok/s   ← we want this
+#   ctx_baseline    TP=1, KV pool  16384, mem_fraction 0.85   253.58       / 87.32
+#   ctx_tp4         TP=4, KV pool  16384, mem_fraction 0.85   210.01       / 66.54
+#
+# TP=4 was the WORST arm — inter-worker comm cost on a single
+# socket dominates any per-worker memory benefit. The throughput
+# win comes from a larger KV pool at TP=1, not from sharding.
+#
+# --attention-backend intel_amx is the AMX-aware kernel; without it
+# SGLang falls back to torch_native and AMX never engages, so this
+# is what makes Xeon decode fast vs the AMD fallback path.
 
 engine:
   type: sglang
@@ -25,31 +30,22 @@ engine:
   served_model_name: qwen3_30b_a3b_fp8
   quantization_kind: fp8
 
-  tensor_parallel_size: 4
+  tensor_parallel_size: 1
   max_model_len: 8192
-  # Project policy: software caps must not be the bottleneck. The KV
-  # pool is sized as ``mem_fraction_static × available_memory`` per
-  # TP worker; we set the fraction so the only ceiling is physical RAM.
-  max_total_tokens: null
+  # KV pool 8× the SGLang default — what makes ctx_kv_xl beat
+  # ctx_baseline by ~12% peak / ~13% mean throughput. At
+  # in_4096_out_1024 × c=16 a single stream needs ~5120 KV tokens;
+  # c=16 = 81920, well past the 16384 default. The larger pool
+  # eliminates eviction/queueing pressure at higher concurrencies.
+  max_total_tokens: 131072
   context_length: null
-  # ``--chunked-prefill-size`` is kept from the GNR runbook — it
-  # controls per-step prefill batch size (compute), not pool size.
+  # ``--chunked-prefill-size`` controls per-step prefill batch size
+  # (compute), not pool size. 4096 matches the benchmark winner.
   chunked_prefill_size: 4096
-  # ── mem_fraction_static for TP>1 on a single NUMA node ──
-  # SGLang can't determine per-rank memory budget when TP > NUMA-node
-  # count. Each of the TP=4 worker processes sees the SAME available
-  # memory (~990 GB) and independently allocates fraction × that. So
-  # mem_fraction_static must be ≤ 1/TP minus headroom or the kernel
-  # OOM-kills a worker during init.
-  #
-  # 0.20 × 4 workers = 0.80 of memory used for KV pool across all
-  # ranks (~190 GB per worker, ~760 GB total). Leaves ~150 GB margin
-  # for OS, scratch, fragmentation, and weight residency that already
-  # consumed ~152 GB (38 GB × 4 ranks).
-  #
-  # If you change tensor_parallel_size, update this proportionally:
-  #   TP=1 → 0.85    TP=2 → 0.40    TP=4 → 0.20    TP=8 → 0.10
-  mem_fraction_static: 0.20
+  # Single TP worker → one process owns the full memory budget. 0.85
+  # is the bench-validated fraction; pushing higher risks OOM from
+  # weight residency (~38 GB) plus runtime scratch.
+  mem_fraction_static: 0.85
   disable_overlap_schedule: true
   enable_metrics: true
   attention_backend: intel_amx
@@ -58,13 +54,17 @@ engine:
   host: 127.0.0.1
   startup_timeout_s: 1200       # ~1-2 min for FP8 cold load on Xeon
 
-  # 4 groups × 16 cores = 64 cores on socket 0. Drives:
+  # All 64 physical cores on socket 0 owned by the single TP=1 worker.
+  # Drives:
   #   * frequency-collector filter
   #   * docker --cpuset-cpus
   #   * SGLANG_CPU_OMP_THREADS_BIND derivation (validated TP-aligned)
   #
-  # For TP=1 baseline: change to cpu_bind: '0-63' and tensor_parallel_size: 1.
-  cpu_bind: '0-15|16-31|32-47|48-63'
+  # If you ever need to A/B against TP=4 again, set
+  #   tensor_parallel_size: 4
+  #   cpu_bind: '0-15|16-31|32-47|48-63'
+  #   mem_fraction_static: 0.20
+  cpu_bind: '0-63'
 
   docker_image: sglang-cpu:xeon-fixed
   docker_shm_size: 32g

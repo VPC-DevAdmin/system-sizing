@@ -76,7 +76,11 @@ SERVED_NAME = os.environ.get("OPTIMIZER_SERVED_NAME", "qwen3_30b_a3b")
 HOST = "127.0.0.1"
 LAUNCH_TIMEOUT_S = int(os.environ.get("OPTIMIZER_LAUNCH_TIMEOUT_S", "1800"))
 WARMUP_REQUESTS = 3
-REQUEST_TIMEOUT_S = 600
+# The long-context pain cells (4k input × 16 concurrent) can push a
+# single request close to 5-8 minutes on a struggling config. Cap at
+# 15 min so an actually-broken config gets a timeout error instead of
+# stalling the whole optimizer indefinitely.
+REQUEST_TIMEOUT_S = int(os.environ.get("OPTIMIZER_REQUEST_TIMEOUT_S", "900"))
 
 
 # ── Replica + config dataclasses ────────────────────────────────────────
@@ -331,15 +335,27 @@ CONFIGS: list[EngineConfig] = [
 
 # ── Test cells ──────────────────────────────────────────────────────────
 #
-# 4 cells span: short single-stream, typical chat at moderate concurrency,
-# long-context moderate, and short-prompt at higher concurrency for
-# throughput. Light enough to keep one config under ~3 min total.
+# Six cells, covering: best-case single-stream latency, typical chat
+# under load, short-prompt throughput, the LONG-CONTEXT PAIN POINT
+# (4k input × 512 out at c=8 and c=16 — where the AMD baseline today
+# falls over), and a low-in / long-out flip that's decode-bound.
+#
+# Runtime warning: long_pain_16 is intentionally brutal — 16 streams
+# each prefill 4096 tokens. Per-request TTFT at AMD baseline rates is
+# 30-60 s with queueing, so a single config spends 5-10 minutes on
+# this cell alone. Total runtime across 9 configs ≈ 60-90 min. Use
+# ``ONLY=...`` to subset if you want a faster pass.
 
 TEST_CELLS: list[TestCell] = [
-    TestCell("single_stream_short",  input_tokens=128, output_tokens=128, concurrency=1),
-    TestCell("chat_concurrent",      input_tokens=512, output_tokens=256, concurrency=4),
-    TestCell("long_ctx_moderate",    input_tokens=2048, output_tokens=256, concurrency=2),
-    TestCell("short_throughput",     input_tokens=128, output_tokens=128, concurrency=8),
+    TestCell("single_stream_short",  input_tokens=128,  output_tokens=128,  concurrency=1),
+    TestCell("chat_concurrent",      input_tokens=512,  output_tokens=256,  concurrency=4),
+    TestCell("short_throughput",     input_tokens=128,  output_tokens=128,  concurrency=8),
+    # Pain point: long input + moderate output, two concurrency levels.
+    TestCell("long_pain_8",          input_tokens=4096, output_tokens=512,  concurrency=8),
+    TestCell("long_pain_16",         input_tokens=4096, output_tokens=512,  concurrency=16),
+    # Flipped: short input, long output. Decode-dominated; tests
+    # whether AMD's memory-bandwidth advantage actually translates.
+    TestCell("long_output",          input_tokens=512,  output_tokens=4096, concurrency=4),
 ]
 
 
@@ -687,27 +703,34 @@ def render(state: OptimizerState) -> Layout:
         log_text.append(line + "\n")
     layout["logs"].update(Panel(log_text, title="Launch / health log"))
 
+    # Cross-config comparison columns chosen for the AMD pain point:
+    # best-case latency (sanity), pain TTFT at two concurrencies (does
+    # it work? does it scale?), pain throughput, and decode-regime
+    # throughput. Full per-cell data is always in the JSON.
     summary_tbl = Table(title="Configs (so far)", expand=True)
     summary_tbl.add_column("config")
     summary_tbl.add_column("status")
     summary_tbl.add_column("launch s", justify="right")
     summary_tbl.add_column("c=1 ttft", justify="right")
-    summary_tbl.add_column("c=4 ttft", justify="right")
-    summary_tbl.add_column("c=1 tok/s", justify="right")
-    summary_tbl.add_column("c=8 tok/s", justify="right")
+    summary_tbl.add_column("pain8 ttft", justify="right")
+    summary_tbl.add_column("pain16 ttft", justify="right")
+    summary_tbl.add_column("pain8 tok/s", justify="right")
+    summary_tbl.add_column("longout tok/s", justify="right")
     for cr in state.results:
         c1 = next((c for c in cr.cells if c.cell_name == "single_stream_short"), None)
-        c4 = next((c for c in cr.cells if c.cell_name == "chat_concurrent"), None)
-        c8 = next((c for c in cr.cells if c.cell_name == "short_throughput"), None)
+        p8 = next((c for c in cr.cells if c.cell_name == "long_pain_8"), None)
+        p16 = next((c for c in cr.cells if c.cell_name == "long_pain_16"), None)
+        lo = next((c for c in cr.cells if c.cell_name == "long_output"), None)
         style = {"ok": "green", "launch_failed": "red", "skipped": "yellow"}.get(cr.status, "")
         summary_tbl.add_row(
             cr.name,
             Text(cr.status, style=style),
             f"{cr.launch_seconds:.0f}" if cr.launch_seconds else "—",
             f"{c1.ttft_p95_ms:.0f}" if c1 and c1.ttft_p95_ms else "—",
-            f"{c4.ttft_p95_ms:.0f}" if c4 and c4.ttft_p95_ms else "—",
-            f"{c1.throughput_out_tok_s:.1f}" if c1 and c1.throughput_out_tok_s else "—",
-            f"{c8.throughput_out_tok_s:.1f}" if c8 and c8.throughput_out_tok_s else "—",
+            f"{p8.ttft_p95_ms:.0f}" if p8 and p8.ttft_p95_ms else "—",
+            f"{p16.ttft_p95_ms:.0f}" if p16 and p16.ttft_p95_ms else "—",
+            f"{p8.throughput_out_tok_s:.1f}" if p8 and p8.throughput_out_tok_s else "—",
+            f"{lo.throughput_out_tok_s:.1f}" if lo and lo.throughput_out_tok_s else "—",
         )
     layout["footer"].update(summary_tbl)
     return layout

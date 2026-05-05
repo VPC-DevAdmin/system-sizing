@@ -247,20 +247,42 @@ async def run_cohort(
         # heavy skew indicates a bug in _client_for_user.
         if len(clients) > 1:
             log.info("Replica routing balance: %s", pool.routing_summary())
-            try:
-                eng_metrics = engine.get_metrics()
-                hits = eng_metrics.get("prefix_cache_hits")
-                queries = eng_metrics.get("prefix_cache_queries")
-                hit_rate = eng_metrics.get("prefix_cache_hit_rate")
-                if hits is not None and queries is not None:
-                    log.info(
-                        "Prefix-cache (aggregated): hits=%s queries=%s "
-                        "hit_rate=%s",
-                        int(hits), int(queries),
-                        f"{hit_rate:.1%}" if hit_rate is not None else "—",
-                    )
-            except Exception as e:  # noqa: BLE001
-                log.debug("end-of-run metrics scrape failed: %s", e)
+        # End-of-run engine metrics scrape — captures the cumulative
+        # prefix-cache counters so the export can show "engine-reported
+        # X% hit rate" alongside the per-session TTFT analysis. Runs
+        # for ALL engine types (vllm, sglang, vllm_dual_socket); the
+        # dual_socket case sums across replicas.
+        try:
+            eng_metrics = engine.get_metrics()
+            hits = eng_metrics.get("prefix_cache_hits")
+            queries = eng_metrics.get("prefix_cache_queries")
+            hit_rate = eng_metrics.get("prefix_cache_hit_rate")
+            if hits is not None and queries is not None:
+                log.info(
+                    "Prefix-cache (engine, aggregated): hits=%s queries=%s "
+                    "hit_rate=%s",
+                    int(hits), int(queries),
+                    f"{hit_rate:.1%}" if hit_rate is not None else "—",
+                )
+            elif hit_rate is not None:
+                log.info(
+                    "Prefix-cache (engine, aggregated): hit_rate=%.1f%%",
+                    hit_rate * 100.0,
+                )
+            if hits is not None or hit_rate is not None:
+                db.update_cohort_run(cohort_run_id, {
+                    "prefix_cache_engine_hits": (
+                        int(hits) if hits is not None else None
+                    ),
+                    "prefix_cache_engine_queries": (
+                        int(queries) if queries is not None else None
+                    ),
+                    "prefix_cache_engine_hit_rate": (
+                        float(hit_rate) if hit_rate is not None else None
+                    ),
+                })
+        except Exception as e:  # noqa: BLE001
+            log.debug("end-of-run metrics scrape failed: %s", e)
         await pool.stop()
         _flush_users(db, cohort_run_id, user_termination_buffer)
 

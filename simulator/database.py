@@ -27,7 +27,14 @@ CREATE TABLE IF NOT EXISTS cohort_run (
     cohort_id TEXT NOT NULL,
     cohort_definition_json TEXT NOT NULL,
     config_json TEXT NOT NULL,
-    final_status TEXT
+    final_status TEXT,
+    -- End-of-run scrape of the engine's cumulative prefix-cache
+    -- counters (sums across replicas for vllm_dual_socket). Surfaced
+    -- in the export so the buyer page can show the engine-reported
+    -- token-level hit rate alongside the per-session TTFT analysis.
+    prefix_cache_engine_hits INTEGER,
+    prefix_cache_engine_queries INTEGER,
+    prefix_cache_engine_hit_rate REAL
 );
 
 -- One row per ramp step. Measurement-window aggregates (PMU, IMC
@@ -221,6 +228,12 @@ class Database:
                 [("step_samples", "INTEGER"),
                  ("step_target_samples", "INTEGER")],
             )
+            self._ensure_columns(
+                "cohort_run",
+                [("prefix_cache_engine_hits", "INTEGER"),
+                 ("prefix_cache_engine_queries", "INTEGER"),
+                 ("prefix_cache_engine_hit_rate", "REAL")],
+            )
 
     def _ensure_columns(
         self, table: str, columns: list[tuple[str, str]],
@@ -316,6 +329,22 @@ class Database:
             c.execute(
                 "UPDATE cohort_run SET completed_at = ?, final_status = ? WHERE cohort_run_id = ?",
                 (completed_at, status, cohort_run_id),
+            )
+
+    def update_cohort_run(self, cohort_run_id: str, row: dict) -> None:
+        """Patch arbitrary cohort_run columns by id.
+
+        Used for late-binding fields like the end-of-run engine
+        prefix-cache scrape (counters that aren't known when the
+        cohort_run row is inserted)."""
+        if not row:
+            return
+        cols = list(row.keys())
+        set_clause = ", ".join(f"{c} = ?" for c in cols)
+        with self.cursor() as c:
+            c.execute(
+                f"UPDATE cohort_run SET {set_clause} WHERE cohort_run_id = ?",
+                [row[k] for k in cols] + [cohort_run_id],
             )
 
     def insert_measurement(self, row: dict) -> int:

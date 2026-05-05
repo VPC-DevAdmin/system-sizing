@@ -833,6 +833,132 @@ def test_dashboard_state_in_progress(tmp_path) -> None:
     assert "0/1 complete" in out
 
 
+def test_capacity_and_knee_handles_non_monotonic_curve() -> None:
+    """The adaptive bisection produces non-monotonic curves: a noise
+    'marginal' at pool 32 followed by a 'pass' at 36 isn't a real
+    knee. Sustained-non-pass logic finds the true knee (where no
+    higher pool ever recovers to pass) and keeps capacity ≤ knee."""
+    from simulator.export import _capacity_and_knee
+
+    # Drafter-like curve: noise marginals between sustained passes;
+    # real knee much later. Mixed step order so the function must sort.
+    curve = [
+        {"target_pool_size": 8,   "capacity_status": "pass"},
+        {"target_pool_size": 16,  "capacity_status": "pass"},
+        {"target_pool_size": 32,  "capacity_status": "marginal"},
+        {"target_pool_size": 36,  "capacity_status": "pass"},     # recovery
+        {"target_pool_size": 72,  "capacity_status": "marginal"},
+        {"target_pool_size": 81,  "capacity_status": "marginal"},
+        {"target_pool_size": 85,  "capacity_status": "pass"},     # recovery
+        {"target_pool_size": 127, "capacity_status": "marginal"}, # sustained
+        {"target_pool_size": 148, "capacity_status": "marginal"},
+        {"target_pool_size": 170, "capacity_status": "fail"},
+    ]
+    capacity, knee = _capacity_and_knee(curve)
+    assert knee == 127, f"first sustained non-pass is 127, got {knee}"
+    assert capacity == 85, f"largest pass below 127 is 85, got {capacity}"
+    assert capacity < knee
+
+
+def test_capacity_and_knee_inversion_is_impossible() -> None:
+    """Reproduces the buyer-page bug: capacity > knee. Must NOT happen
+    after the fix — capacity is always strictly below knee."""
+    from simulator.export import _capacity_and_knee
+
+    # chat_heavy-like: pool 32 marginal, pool 40 pass, pool 113 fail
+    curve = [
+        {"target_pool_size": 8,   "capacity_status": "pass"},
+        {"target_pool_size": 32,  "capacity_status": "marginal"},
+        {"target_pool_size": 40,  "capacity_status": "pass"},
+        {"target_pool_size": 80,  "capacity_status": "marginal"},
+        {"target_pool_size": 113, "capacity_status": "fail"},
+    ]
+    capacity, knee = _capacity_and_knee(curve)
+    # First sustained non-pass at 80 (marginal, no pass after).
+    assert knee == 80
+    # Largest pass below 80.
+    assert capacity == 40
+    assert capacity < knee
+
+
+def test_capacity_and_knee_no_passes() -> None:
+    """When the cohort failed at the initial pool size and never
+    recovered, capacity is None (not 0) — distinct from "we measured
+    capacity=0", which we don't claim."""
+    from simulator.export import _capacity_and_knee
+
+    curve = [{"target_pool_size": 8, "capacity_status": "fail"}]
+    capacity, knee = _capacity_and_knee(curve)
+    assert capacity is None
+    assert knee == 8
+
+
+def test_capacity_and_knee_all_passes() -> None:
+    """Sweep ran the full ramp without ever degrading. Capacity is
+    the largest pool sampled, knee is None."""
+    from simulator.export import _capacity_and_knee
+
+    curve = [
+        {"target_pool_size": 8,  "capacity_status": "pass"},
+        {"target_pool_size": 16, "capacity_status": "pass"},
+        {"target_pool_size": 32, "capacity_status": "pass"},
+    ]
+    capacity, knee = _capacity_and_knee(curve)
+    assert knee is None
+    assert capacity == 32
+
+
+def test_parse_prometheus_handles_kv_metric_renames() -> None:
+    """vLLM has shipped the KV-cache-utilisation metric under at
+    least three names across releases of vllm-openai-cpu. Verify
+    the parser picks up each."""
+    from simulator.engines.base import Engine
+
+    for name in ("vllm:gpu_cache_usage_perc",
+                 "vllm:cpu_cache_usage_perc",
+                 "vllm:kv_cache_usage_perc",
+                 "vllm:gpu_kv_cache_usage_perc"):
+        text = f"# HELP test\n{name}{{model=\"x\"}} 0.42\n"
+        out = Engine._parse_prometheus(text)
+        assert out.get("kv_cache_used_pct") == 42.0, (
+            f"didn't pick up {name}: got {out}"
+        )
+
+
+def test_engine_prefix_cache_hit_rate_surfaces_in_export(tmp_path) -> None:
+    """End-of-run engine.get_metrics() result is persisted on
+    cohort_run and exposed in the export under
+    cohort.prefix_cache.engine_hit_rate."""
+    import json
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm_dual_socket", model_id="Qwen/Test",
+        cohort_id="chat_heavy",
+        cohort_definition={"name": "x"}, config={},
+    )
+    # The runner's end-of-cohort scrape would call this:
+    db.update_cohort_run("crid", {
+        "prefix_cache_engine_hits": 4_701_696,
+        "prefix_cache_engine_queries": 8_314_059,
+        "prefix_cache_engine_hit_rate": 0.566,
+    })
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    doc, _ = export_dir(tmp_path)
+    cohort = doc["cohorts"][0]
+    pc = cohort["prefix_cache"]
+    assert pc["engine_hits"] == 4_701_696
+    assert pc["engine_queries"] == 8_314_059
+    assert pc["engine_hit_rate"] == 0.566
+
+
 def test_export_default_output_lands_in_run_dir(tmp_path) -> None:
     """``make export`` must default to writing the JSON inside the
     run_NN/ directory the data came from — keeps every artifact for

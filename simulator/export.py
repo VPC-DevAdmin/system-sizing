@@ -81,6 +81,34 @@ def _read_prefix_cache_report(
     return report.to_dict()
 
 
+def _attach_engine_hit_rate(prefix_cache: dict | None, run: dict) -> dict | None:
+    """Fold the engine-reported (token-level) prefix-cache hit rate
+    into the per-session analysis dict.
+
+    The two numbers measure different things and should be read
+    together — the per-session ``overall_hit_rate`` asks "did
+    multi-turn sessions get a TTFT speedup?" (a stricter buyer-
+    facing question), while ``engine_hit_rate`` asks "did any KV
+    block get reused?" (the engine's own counter, including
+    chat-template prefixes shared across users). On AMD without AMX,
+    engine reuse can be high (~50%+) yet the TTFT speedup may not
+    cross the analysis threshold — surfacing both keeps the
+    downstream story honest.
+    """
+    eng_hits = run.get("prefix_cache_engine_hits")
+    eng_queries = run.get("prefix_cache_engine_queries")
+    eng_rate = run.get("prefix_cache_engine_hit_rate")
+    if eng_hits is None and eng_queries is None and eng_rate is None:
+        return prefix_cache
+    out = dict(prefix_cache or {})
+    out["engine_hits"] = int(eng_hits) if eng_hits is not None else None
+    out["engine_queries"] = int(eng_queries) if eng_queries is not None else None
+    out["engine_hit_rate"] = (
+        float(eng_rate) if eng_rate is not None else None
+    )
+    return out
+
+
 # Columns surfaced in the per-step ``telemetry_samples`` array. Kept
 # explicit so downstream consumers see a stable schema even if new
 # columns are added to ``measurement_telemetry`` later.
@@ -302,11 +330,47 @@ def _hardware_recommendation(bottleneck: str) -> str:
     }.get(bottleneck, "")
 
 
+def _capacity_and_knee(measurements: list[dict]) -> tuple[int | None, int | None]:
+    """Pick (capacity_pool_size, knee_pool_size) from a measurement list.
+
+    Adaptive bisection produces non-monotonic curves — a measurement
+    can flip 'pass' → 'marginal' → 'pass' again as the stepper
+    re-samples around a noisy boundary. The previous "first non-pass"
+    rule reported a low knee even when the cohort genuinely passed at
+    higher pools, and "last pass observed" reported a capacity
+    *greater* than the knee. Sort by pool_size and use the *sustained*
+    non-pass (no later pool passes) as the knee:
+
+      * knee = smallest pool_size where status is non-pass AND no
+        higher pool size has status='pass'. Tolerates noise marginals
+        the bisection later disproved.
+      * capacity = largest pool_size with status='pass' that is
+        strictly below the knee. Always ≤ knee.
+
+    Returns (None, None) when no measurements exist.
+    """
+    if not measurements:
+        return None, None
+    sorted_m = sorted(measurements, key=lambda m: m["target_pool_size"])
+    knee_pool: int | None = None
+    for i, m in enumerate(sorted_m):
+        if m["capacity_status"] == "pass":
+            continue
+        # Non-pass: only counts as the knee if no pool above also passes.
+        if any(later["capacity_status"] == "pass" for later in sorted_m[i + 1:]):
+            continue
+        knee_pool = m["target_pool_size"]
+        break
+    pass_pools = [m["target_pool_size"] for m in sorted_m if m["capacity_status"] == "pass"]
+    if knee_pool is not None:
+        pass_pools = [p for p in pass_pools if p < knee_pool]
+    capacity_pool = max(pass_pools) if pass_pools else None
+    return capacity_pool, knee_pool
+
+
 def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
     measurements = run.get("measurements", [])
     curve = []
-    capacity_pool = None
-    knee_pool = None
     for m in measurements:
         curve.append({
             "step_index": m["step_index"],
@@ -330,10 +394,7 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
             "telemetry_samples": m.get("telemetry_samples", []),
             "turns": m.get("turns", []),
         })
-        if m["capacity_status"] == "pass":
-            capacity_pool = m["target_pool_size"]
-        if m["capacity_status"] in ("fail", "marginal") and knee_pool is None:
-            knee_pool = m["target_pool_size"]
+    capacity_pool, knee_pool = _capacity_and_knee(measurements)
 
     cohort_def = json.loads(run["cohort_definition_json"])
     bottleneck, evidence = _bottleneck(measurements)
@@ -393,6 +454,7 @@ def export_dir(
             prefix_cache = _read_prefix_cache_report(
                 db, cohort_run_id=run["cohort_run_id"],
             )
+            prefix_cache = _attach_engine_hit_rate(prefix_cache, run)
             cohorts.append(_summarise_cohort(run, prefix_cache))
 
     doc = {

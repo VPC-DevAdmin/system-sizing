@@ -183,17 +183,34 @@ class Engine:
             backoff = min(5.0, backoff * 1.2)
         raise TimeoutError(f"Engine did not become healthy within {timeout_s}s")
 
+    # Prometheus metric-name patterns that mean "fraction of KV cache
+    # in use." vLLM has shipped this metric under at least three names
+    # across recent CPU image versions:
+    #   * ``vllm:gpu_cache_usage_perc``  (legacy, kept on CPU images for
+    #     compatibility — depending on version may or may not emit)
+    #   * ``vllm:cpu_cache_usage_perc``  (some intermediate releases)
+    #   * ``vllm:kv_cache_usage_perc``   (newer / unified naming)
+    # Match on substring so any of these (and any future variant
+    # following the same convention) is caught.
+    _KV_USAGE_PATTERNS = (
+        "_cache_usage_perc",
+        "kv_cache_usage",
+    )
+
     @staticmethod
     def _parse_prometheus(text: str) -> dict[str, float]:
         """Extract a small set of metric values from Prometheus exposition.
 
-        Looks for vLLM and SGLang names; returns a normalised dict using
-        canonical keys: kv_cache_used_pct, queue_depth, prefix_cache_hits,
-        prefix_cache_misses, num_running, num_waiting.
+        Returns a normalised dict using canonical keys:
+        kv_cache_used_pct, queue_depth, prefix_cache_hits,
+        prefix_cache_queries, prefix_cache_hit_rate, num_running.
+
+        Any unknown ``vllm:`` metric whose name suggests KV cache usage
+        is also captured under ``kv_cache_used_pct`` — defensive against
+        upstream renames in the vllm-openai-cpu image.
         """
+        import re
         wanted = {
-            "vllm:gpu_cache_usage_perc": "kv_cache_used_pct",
-            "vllm:cpu_cache_usage_perc": "kv_cache_used_pct",
             "vllm:num_requests_running": "num_running",
             "vllm:num_requests_waiting": "queue_depth",
             "vllm:prefix_cache_hits_total": "prefix_cache_hits",
@@ -212,10 +229,23 @@ class Engine:
             try:
                 name_part, _, value_str = line.rpartition(" ")
                 name = name_part.split("{", 1)[0].strip()
-                if name in wanted:
-                    out[wanted[name]] = float(value_str)
             except Exception:
                 continue
+            if name in wanted:
+                try:
+                    out[wanted[name]] = float(value_str)
+                except ValueError:
+                    pass
+                continue
+            # Fallback: any vllm: metric whose name implies KV cache
+            # utilisation. Don't overwrite an explicit hit, but pick up
+            # variants the upstream image may have introduced.
+            if name.startswith("vllm:") and "kv_cache_used_pct" not in out:
+                if any(p in name for p in Engine._KV_USAGE_PATTERNS):
+                    try:
+                        out["kv_cache_used_pct"] = float(value_str)
+                    except ValueError:
+                        pass
         # Compute hit rate if components present
         if "prefix_cache_hits" in out and "prefix_cache_queries" in out:
             q = out["prefix_cache_queries"]

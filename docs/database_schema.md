@@ -40,6 +40,9 @@ cohort_run                          (one row per `run_cohort` invocation)
 | `cohort_definition_json`  | TEXT NOT NULL | JSON of `{id, name, description, category, persona_weights}`. |
 | `config_json`             | TEXT NOT NULL | Full `Config` dataclass as JSON — engine + simulation + telemetry + output sections. Captures the YAML knobs that produced this measurement. |
 | `final_status`            | TEXT | One of: `ok`, `interrupted`, `time_limit`, `no_samples`, NULL (in progress). Resume only skips `'ok'`. |
+| `prefix_cache_engine_hits` | INTEGER | Cumulative engine-reported prefix-cache hits at end-of-run (sum across replicas for `vllm_dual_socket`). |
+| `prefix_cache_engine_queries` | INTEGER | Cumulative engine-reported prefix-cache queries — denominator for the engine hit rate. |
+| `prefix_cache_engine_hit_rate` | REAL | Convenience: `hits / queries` (or whatever the engine returns directly when it exposes a hit-rate gauge). Surfaced in export under `cohort.prefix_cache.engine_hit_rate`. |
 
 Resume is gated entirely by `final_status='ok'` — see
 [`runner.find_completed_runs`](../simulator/runner.py).

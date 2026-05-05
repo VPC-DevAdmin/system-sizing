@@ -148,6 +148,8 @@ so the dashboard has something to render between measurement-window updates.
 | `in_flight`           | INTEGER NOT NULL | `state.in_flight`. |
 | `requests_completed`  | INTEGER NOT NULL | `state.completed` (cumulative). |
 | `errors`              | INTEGER NOT NULL | `state.errors` (cumulative). |
+| `step_samples`        | INTEGER | Live count of turn events landed in the in-flight measurement buffer. 0 outside a measurement window. |
+| `step_target_samples` | INTEGER | Target the buffer is filling toward (`SimulationConfig.target_samples_per_step`). 0 outside a measurement window — dashboard renders "—". |
 
 Index: `idx_snapshots_run_time` on `(cohort_run_id, snapshot_at_ms)`.
 

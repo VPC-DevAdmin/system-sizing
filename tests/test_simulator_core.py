@@ -542,6 +542,57 @@ def test_find_completed_runs_handles_empty_dir(tmp_path) -> None:
     assert find_completed_runs(tmp_path, "vllm", "Qwen/Test") == set()
 
 
+def test_shared_state_initialises_step_progress() -> None:
+    """``SharedState`` is the live channel between the measurement
+    loop and the snapshot recorder for per-step sample progress.
+    Defaults must be 0 / 0 so the dashboard renders "—" before the
+    first step starts."""
+    from simulator.virtual_user import SharedState
+    s = SharedState()
+    assert s.step_samples == 0
+    assert s.step_target_samples == 0
+
+
+def test_legacy_simulation_snapshots_gets_step_columns(tmp_path) -> None:
+    """Legacy DBs (no step_samples columns yet) must get them lifted
+    on open; otherwise the SnapshotRecorder INSERT crashes."""
+    import sqlite3
+    from simulator.database import Database
+
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE simulation_snapshots (
+                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cohort_run_id TEXT NOT NULL,
+                snapshot_at_ms INTEGER NOT NULL,
+                phase TEXT NOT NULL,
+                pool_size INTEGER NOT NULL,
+                in_flight INTEGER NOT NULL,
+                requests_completed INTEGER NOT NULL,
+                errors INTEGER NOT NULL
+            );
+            """
+        )
+    db = Database(db_path)
+    cols = {r["name"] for r in db.fetchall("PRAGMA table_info(simulation_snapshots)")}
+    assert "step_samples" in cols
+    assert "step_target_samples" in cols
+    # Insert with the new columns to confirm they're writable.
+    db.insert_snapshot({
+        "cohort_run_id": "c", "snapshot_at_ms": 1, "phase": "measuring",
+        "pool_size": 8, "in_flight": 4, "requests_completed": 12, "errors": 0,
+        "step_samples": 29, "step_target_samples": 100,
+    })
+    row = db.fetchone(
+        "SELECT step_samples, step_target_samples FROM simulation_snapshots"
+    )
+    assert row["step_samples"] == 29
+    assert row["step_target_samples"] == 100
+    db.close()
+
+
 def test_legacy_measurement_aggregate_migrates_to_columns(tmp_path) -> None:
     """A DB written before the aggregate-table collapse should silently
     lift its measurement_aggregate rows onto cohort_measurements when

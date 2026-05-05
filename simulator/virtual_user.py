@@ -75,6 +75,13 @@ class SharedState:
         self._completed = 0
         self._errors = 0
         self.events: asyncio.Queue[TurnEvent] = asyncio.Queue()
+        # Live progress for the in-flight measurement step. Both
+        # written from the single ``run_measurement_step`` task — no
+        # lock needed; the snapshot recorder reads them directly.
+        # ``step_target_samples`` is 0 outside of a measurement window
+        # (warmup, ramp, idle) so the dashboard can render "—".
+        self.step_samples: int = 0
+        self.step_target_samples: int = 0
 
     @property
     def in_flight(self) -> int:

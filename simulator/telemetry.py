@@ -113,6 +113,8 @@ class SnapshotRecorder:
                     "in_flight": self.state.in_flight,
                     "requests_completed": self.state.completed,
                     "errors": self.state.errors,
+                    "step_samples": self.state.step_samples,
+                    "step_target_samples": self.state.step_target_samples,
                 })
                 await asyncio.sleep(self.interval_s)
         except asyncio.CancelledError:

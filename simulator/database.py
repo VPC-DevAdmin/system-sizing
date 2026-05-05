@@ -122,7 +122,12 @@ CREATE TABLE IF NOT EXISTS simulation_snapshots (
     pool_size INTEGER NOT NULL,
     in_flight INTEGER NOT NULL,
     requests_completed INTEGER NOT NULL,
-    errors INTEGER NOT NULL
+    errors INTEGER NOT NULL,
+    -- Live progress through the current measurement window. Both 0
+    -- when a step isn't running (warmup / ramp / idle) so the
+    -- dashboard renders "—" rather than a stale ratio.
+    step_samples INTEGER,
+    step_target_samples INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_run_time ON simulation_snapshots(cohort_run_id, snapshot_at_ms);
@@ -211,23 +216,32 @@ class Database:
             self._conn.executescript(SCHEMA)
             self._ensure_aggregate_columns()
             self._migrate_legacy_aggregate()
+            self._ensure_columns(
+                "simulation_snapshots",
+                [("step_samples", "INTEGER"),
+                 ("step_target_samples", "INTEGER")],
+            )
 
-    def _ensure_aggregate_columns(self) -> None:
-        """Add any aggregate column missing from cohort_measurements.
-
-        New DBs already have them via SCHEMA; legacy DBs (created
-        before measurement_aggregate was collapsed) need ALTER TABLE.
-        ALTER TABLE ADD COLUMN is idempotent only if we check first.
+    def _ensure_columns(
+        self, table: str, columns: list[tuple[str, str]],
+    ) -> None:
+        """Idempotent ALTER TABLE ADD COLUMN: add any of ``columns``
+        that isn't already on ``table``. New DBs come out of SCHEMA
+        with everything; legacy DBs need this lift on first open.
         """
         existing = {
             r["name"]
-            for r in self._conn.execute("PRAGMA table_info(cohort_measurements)")
+            for r in self._conn.execute(f"PRAGMA table_info({table})")
         }
-        for col, col_type in _AGGREGATE_COLUMNS:
+        for col, col_type in columns:
             if col not in existing:
                 self._conn.execute(
-                    f"ALTER TABLE cohort_measurements ADD COLUMN {col} {col_type}"
+                    f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
                 )
+
+    def _ensure_aggregate_columns(self) -> None:
+        """Lift any new aggregate columns onto cohort_measurements."""
+        self._ensure_columns("cohort_measurements", _AGGREGATE_COLUMNS)
 
     def _migrate_legacy_aggregate(self) -> None:
         """Copy legacy ``measurement_aggregate`` rows onto

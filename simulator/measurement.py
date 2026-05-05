@@ -261,6 +261,12 @@ async def run_measurement_step(
 
     buffer: list[TurnEvent] = []
     deadline = measurement_start_mono + measurement_timeout_s
+    # Publish the live sample count so the snapshot recorder (and the
+    # dashboard reading from the DB) can render "step_samples /
+    # target". Reset to 0 in the ``finally`` regardless of how the
+    # window ended so non-measuring phases show the empty state.
+    state.step_samples = 0
+    state.step_target_samples = target_samples
     try:
         while len(buffer) < target_samples:
             timeout = deadline - time.monotonic()
@@ -271,12 +277,15 @@ async def run_measurement_step(
             except asyncio.TimeoutError:
                 break
             buffer.append(event)
+            state.step_samples = len(buffer)
     finally:
         sampler_task.cancel()
         try:
             await sampler_task
         except (asyncio.CancelledError, Exception):
             pass
+        state.step_samples = 0
+        state.step_target_samples = 0
 
     duration = int(time.monotonic() - measurement_start_mono)
     _, telemetry_rows, telemetry_agg = await telemetry.stop()

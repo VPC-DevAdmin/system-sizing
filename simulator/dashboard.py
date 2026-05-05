@@ -114,7 +114,16 @@ def _render(state: dict) -> Layout:
     state_tbl.add_row("Phase", str(snap.get("phase", "—")))
     state_tbl.add_row("Pool size (target)", str(snap.get("pool_size", "—")))
     state_tbl.add_row("In-flight", str(snap.get("in_flight", "—")))
-    state_tbl.add_row("Completed", str(snap.get("requests_completed", "—")))
+    # Step samples shows progress into the current measurement window
+    # (the per-step sample buffer). Target=0 means we're not in a
+    # measuring phase right now (warmup / ramp / idle), so render "—".
+    step_n = snap.get("step_samples")
+    step_target = snap.get("step_target_samples")
+    if step_target:
+        state_tbl.add_row("Step samples", f"{step_n or 0} / {step_target}")
+    else:
+        state_tbl.add_row("Step samples", "—")
+    state_tbl.add_row("Completed (all-time)", str(snap.get("requests_completed", "—")))
     state_tbl.add_row("Errors", str(snap.get("errors", "—")))
 
     # Measurements table

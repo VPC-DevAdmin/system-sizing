@@ -17,19 +17,31 @@ Per config, the flow is:
     warmup (3 small requests)
     for cell in TEST_CELLS:
         measure (TTFT/TPOT/throughput)
+        save JSON  ← incremental
     cleanup_containers
+    save JSON
 
 If a launch fails (container exits during init, /v1/models never
 responds), the failure is recorded with the last 50 lines of docker
 logs and the optimiser moves to the next config.
 
-Output: a JSON artifact at ``runs/engine_optimizer_<ts>.json`` plus a
-ranked summary printed to stdout. Live progress is shown via a rich-
-based dashboard: current config, phase, log tail, and the
-results-so-far table.
+Disconnect-resilience and resume:
 
-Tweak the CONFIGS list at the top to add or remove launch shapes —
-the dataclass is intentionally flat so a new entry is a few lines."""
+* JSON output at a stable path (``runs/engine_optimizer/run.json`` by
+  default) is updated after every cell — interrupting mid-config
+  loses at most one cell, not the whole config's data.
+* On launch, an existing JSON is loaded; configs with a terminal
+  status (``ok`` or ``launch_failed``) are skipped, so re-running
+  after a crash / disconnect picks up where we left off. Pass
+  ``--new-run`` to wipe and start fresh.
+* Best paired with the ``make optimize-engine`` target which nohups
+  the script and auto-tails the log so an SSH disconnect can't kill
+  a multi-hour optimisation run.
+
+Output: ``runs/engine_optimizer/run.json`` (stable) + a ranked summary
+printed to stdout. When stdout is a TTY a rich dashboard is shown;
+otherwise plain timestamped progress lines are printed (so the
+backgrounded log file is greppable)."""
 
 from __future__ import annotations
 
@@ -40,12 +52,13 @@ import json
 import os
 import statistics
 import subprocess
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 try:
     from openai import AsyncOpenAI
@@ -615,7 +628,7 @@ def _pct(xs: list[float], q: float) -> Optional[float]:
 
 
 class OptimizerState:
-    def __init__(self, total_configs: int):
+    def __init__(self, total_configs: int, print_to_stdout: bool = False):
         self.total_configs = total_configs
         self.config_index = 0
         self.config_name = ""
@@ -625,6 +638,11 @@ class OptimizerState:
         self.log_lines: deque[str] = deque(maxlen=20)
         self.results: list[ConfigResult] = []
         self.current_cells: list[CellResult] = []
+        # When True, every ``append_log`` line is also printed to
+        # stdout with a timestamp prefix — used for the
+        # backgrounded / nohup'd run where there's no live dashboard
+        # and the log file is the user's only window into progress.
+        self.print_to_stdout = print_to_stdout
 
     def begin_config(self, idx: int, name: str) -> None:
         self.config_index = idx
@@ -633,17 +651,46 @@ class OptimizerState:
         self.config_started_at = time.monotonic()
         self.current_cells = []
         self.log_lines.clear()
+        if self.print_to_stdout:
+            print(
+                f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                f"=== Config {idx + 1}/{self.total_configs}: {name} ===",
+                flush=True,
+            )
 
     def set_phase(self, phase: str) -> None:
         self.phase = phase
+        if self.print_to_stdout:
+            print(
+                f"[{datetime.now().strftime('%H:%M:%S')}] phase: {phase}",
+                flush=True,
+            )
 
     def append_log(self, msg: str) -> None:
         for line in msg.splitlines():
-            if line.strip():
-                self.log_lines.append(line.rstrip())
+            if not line.strip():
+                continue
+            line = line.rstrip()
+            self.log_lines.append(line)
+            if self.print_to_stdout:
+                print(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] {line}",
+                    flush=True,
+                )
 
     def push_cell_result(self, r: CellResult) -> None:
         self.current_cells.append(r)
+
+    def upsert_result(self, r: ConfigResult) -> None:
+        """Replace any prior entry for this config name (in place,
+        preserving order) or append. Resume marks a config
+        ``in_progress`` at start and overwrites with the final
+        ``ok`` / ``launch_failed`` later."""
+        for i, x in enumerate(self.results):
+            if x.name == r.name:
+                self.results[i] = r
+                return
+        self.results.append(r)
 
 
 def _fmt_seconds(s: float) -> str:
@@ -741,9 +788,23 @@ def render(state: OptimizerState) -> Layout:
 
 async def run_config(
     cfg: EngineConfig, state: OptimizerState, prompts: dict[str, list[str]],
+    save: Callable[[], None],
 ) -> ConfigResult:
+    """Run one config end-to-end. ``save`` is invoked after every
+    cell so a mid-config crash leaves up-to-date partial data on
+    disk and the resume path can pick up at the next config."""
     state.append_log(f"== {cfg.name} ==")
     state.append_log(cfg.description)
+
+    # Persist an in-progress marker BEFORE we start touching docker.
+    # If the host crashes during launch, the resume logic will see
+    # ``in_progress`` (non-terminal) and re-attempt this config from
+    # scratch on next invocation.
+    state.upsert_result(ConfigResult(
+        name=cfg.name, description=cfg.description, status="in_progress",
+    ))
+    save()
+
     cleanup_containers(state)
     state.set_phase("launching")
     launch_t0 = time.monotonic()
@@ -754,10 +815,13 @@ async def run_config(
     except Exception as e:  # noqa: BLE001
         state.append_log(f"!! launch failed: {e}")
         cleanup_containers(state)
-        return ConfigResult(
+        result = ConfigResult(
             name=cfg.name, description=cfg.description,
             status="launch_failed", failure_reason=str(e)[:500],
         )
+        state.upsert_result(result)
+        save()
+        return result
     healthy = await wait_for_health(cfg, state)
     launch_seconds = time.monotonic() - launch_t0
     if not healthy:
@@ -766,12 +830,15 @@ async def run_config(
             state.append_log(f"-- {r.name} tail --")
             state.append_log(docker_logs_tail(r.name, 50))
         cleanup_containers(state)
-        return ConfigResult(
+        result = ConfigResult(
             name=cfg.name, description=cfg.description,
             status="launch_failed",
             launch_seconds=launch_seconds,
             failure_reason="health check timeout",
         )
+        state.upsert_result(result)
+        save()
+        return result
     state.set_phase("warmup")
     state.append_log(f"warmup ({WARMUP_REQUESTS} reqs)")
     warmup_clients = [
@@ -794,44 +861,155 @@ async def run_config(
             f"ttft_p95={cr.ttft_p95_ms or 0:.0f}ms "
             f"tpot_p95={cr.tpot_p95_ms or 0:.0f}ms"
         )
+        # Persist after every cell — losing one cell on crash is
+        # tolerable; losing N is not.
+        state.upsert_result(ConfigResult(
+            name=cfg.name, description=cfg.description,
+            status="in_progress", launch_seconds=launch_seconds,
+            cells=list(cell_results),
+        ))
+        save()
     cleanup_containers(state)
-    return ConfigResult(
+    final = ConfigResult(
         name=cfg.name, description=cfg.description, status="ok",
         launch_seconds=launch_seconds, cells=cell_results,
     )
+    state.upsert_result(final)
+    save()
+    return final
 
 
-async def main_async(out_path: Path, only: list[str] | None) -> None:
+def _load_existing(path: Path) -> dict | None:
+    """Read prior results from the output JSON, if any. Returns None
+    on missing file or unparseable content (treat as no prior data)."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _completed_names(doc: dict | None) -> set[str]:
+    """Configs whose status is terminal — skip on resume.
+
+    ``in_progress`` is intentionally NOT terminal: an interrupted
+    config is re-run from scratch. ``launch_failed`` IS terminal:
+    that config has been determined not to work on this host, no
+    point retrying."""
+    if not doc:
+        return set()
+    return {
+        c["name"] for c in doc.get("configs", [])
+        if c.get("status") in ("ok", "launch_failed")
+    }
+
+
+def _prior_results(doc: dict | None) -> list[ConfigResult]:
+    """Reconstruct ConfigResult dataclasses from JSON for state
+    pre-population (so the dashboard / final summary include
+    previously-completed configs even on a resume)."""
+    if not doc:
+        return []
+    out: list[ConfigResult] = []
+    for c in doc.get("configs", []):
+        cell_dicts = c.get("cells", []) or []
+        cells = [CellResult(**cd) for cd in cell_dicts]
+        merged = {**c, "cells": cells}
+        out.append(ConfigResult(**merged))
+    return out
+
+
+async def _iterate_configs(
+    state: OptimizerState,
+    selected: list[EngineConfig],
+    completed: set[str],
+    prompts: dict[str, list[str]],
+    save: Callable[[], None],
+) -> None:
+    """Shared driver used by both the dashboard and the non-tty
+    paths. Skips configs whose name is in ``completed``."""
+    for i, cfg in enumerate(selected):
+        if cfg.name in completed:
+            continue
+        state.begin_config(i, cfg.name)
+        await run_config(cfg, state, prompts, save)
+
+
+async def main_async(
+    out_path: Path,
+    only: list[str] | None,
+    new_run: bool,
+) -> None:
     selected = [c for c in CONFIGS if (not only or c.name in only)]
     if only:
         unknown = set(only) - {c.name for c in CONFIGS}
         if unknown:
             raise SystemExit(f"unknown configs: {sorted(unknown)}")
-    state = OptimizerState(total_configs=len(selected))
+
+    if new_run and out_path.exists():
+        out_path.unlink()
+        print(f"--new-run: removed prior {out_path}")
+
+    existing = _load_existing(out_path)
+    completed = _completed_names(existing)
+    use_dashboard = sys.stdout.isatty()
+
+    state = OptimizerState(
+        total_configs=len(selected), print_to_stdout=not use_dashboard,
+    )
+    # Pre-populate state with prior results so the dashboard /
+    # summary reflect the full run, not just what we re-attempted.
+    # Restrict to the selected set so a stale entry from an earlier
+    # --only invocation doesn't pollute this run.
+    selected_names = {c.name for c in selected}
+    state.results = [
+        r for r in _prior_results(existing) if r.name in selected_names
+    ]
+
+    if completed:
+        skipped = sorted(completed & selected_names)
+        todo = [c.name for c in selected if c.name not in completed]
+        msg = (
+            f"Resume: {len(skipped)}/{len(selected)} configs already complete "
+            f"({', '.join(skipped)}); todo: {todo or 'none'}"
+        )
+        print(msg)
+        if not todo:
+            _print_summary(state)
+            _save_json(out_path, state)
+            return
+
     prompts = make_prompts(TEST_CELLS)
+    save = lambda: _save_json(out_path, state)
 
-    console = Console()
-    with Live(render(state), console=console, refresh_per_second=2, screen=True) as live:
-        # Spawn a background renderer task so the dashboard stays fresh
-        # while async docker/health calls block.
-        stop_render = asyncio.Event()
+    if use_dashboard:
+        console = Console()
+        with Live(
+            render(state), console=console, refresh_per_second=2, screen=True,
+        ) as live:
+            stop_render = asyncio.Event()
 
-        async def render_loop() -> None:
-            while not stop_render.is_set():
-                live.update(render(state))
-                await asyncio.sleep(0.5)
+            async def render_loop() -> None:
+                while not stop_render.is_set():
+                    live.update(render(state))
+                    await asyncio.sleep(0.5)
 
-        rt = asyncio.create_task(render_loop())
-        try:
-            for i, cfg in enumerate(selected):
-                state.begin_config(i, cfg.name)
-                result = await run_config(cfg, state, prompts)
-                state.results.append(result)
-                # Persist incrementally so a crash mid-run doesn't lose data.
-                _save_json(out_path, state)
-        finally:
-            stop_render.set()
-            await rt
+            rt = asyncio.create_task(render_loop())
+            try:
+                await _iterate_configs(state, selected, completed, prompts, save)
+            finally:
+                stop_render.set()
+                await rt
+    else:
+        # Backgrounded / nohup'd run: no dashboard, just timestamped
+        # progress lines via state.print_to_stdout=True.
+        print(
+            f"[{datetime.now().strftime('%H:%M:%S')}] "
+            f"Engine optimizer starting: {len(selected)} configs, "
+            f"output -> {out_path}"
+        )
+        await _iterate_configs(state, selected, completed, prompts, save)
 
     _print_summary(state)
     _save_json(out_path, state)
@@ -868,6 +1046,9 @@ def _print_summary(state: OptimizerState) -> None:
             )
 
 
+DEFAULT_OUT = Path("runs/engine_optimizer/run.json")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Iterate engine configs, measure TTFT/TPOT, pick the best."
@@ -875,12 +1056,30 @@ def main() -> None:
     p.add_argument(
         "--out",
         type=Path,
-        default=Path(f"runs/engine_optimizer_{datetime.now().strftime('%Y%m%dT%H%M%S')}.json"),
-        help="Where to write the JSON artifact (default: runs/engine_optimizer_<ts>.json)",
+        default=DEFAULT_OUT,
+        help=(
+            "Where to write the JSON artifact. Default is a stable path "
+            f"({DEFAULT_OUT}) so re-running picks up from where the previous "
+            "invocation stopped. Override with --out path/to/other.json for "
+            "ad-hoc one-offs."
+        ),
     )
     p.add_argument(
         "--only", nargs="+",
-        help="Run only these config names (default: all). Useful for incremental work.",
+        help=(
+            "Run only these config names (default: all). Combines with "
+            "resume: configs not in the list are ignored; configs in the "
+            "list with terminal status in the existing JSON are still "
+            "skipped (use --new-run to force re-run)."
+        ),
+    )
+    p.add_argument(
+        "--new-run", action="store_true",
+        help=(
+            "Wipe the existing JSON at --out and start fresh. Default is "
+            "to resume — configs already marked 'ok' or 'launch_failed' "
+            "are skipped, in_progress / missing configs are re-run."
+        ),
     )
     p.add_argument(
         "--list", action="store_true",
@@ -895,7 +1094,7 @@ def main() -> None:
                 print(f"    expect: {c.expected_outcome}")
         return
 
-    asyncio.run(main_async(args.out, args.only))
+    asyncio.run(main_async(args.out, args.only, args.new_run))
 
 
 if __name__ == "__main__":

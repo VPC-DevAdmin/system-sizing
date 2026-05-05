@@ -74,8 +74,10 @@ help:
 	@echo "  make analyze-prefix-cache               Prefix-cache hit-rate report"
 	@echo ""
 	@echo "Tuning:"
-	@echo "  make optimize-engine [ONLY=...]         A/B vLLM launch shapes, pick the best for this host."
-	@echo "                                          (Iterates docker launch + ttft/tpot bench per config.)"
+	@echo "  make optimize-engine [ONLY=...] [RUN_NEW=true]"
+	@echo "                                          A/B vLLM launch shapes, pick the best for this host."
+	@echo "                                          Always nohup'd + auto-tailed; resumes existing"
+	@echo "                                          runs/engine_optimizer/run.json by default."
 	@echo ""
 	@echo "Diagnostics:"
 	@echo "  make preflight CONFIG=...               Hardware-only check (no install / build)"
@@ -317,17 +319,53 @@ test:
 
 # Engine A/B harness: iterates docker launch shapes against the
 # vllm-openai-cpu image, measures TTFT/TPOT/throughput per config,
-# writes runs/engine_optimizer_<ts>.json. Pass ONLY=baseline,kv_xl
-# to run a subset (or LIST=1 to print the registered configs).
+# writes runs/engine_optimizer/run.json. Always nohup'd + auto-tailed
+# (60-90 min total runtime; SSH disconnect must not kill it). Resumes
+# the existing JSON by default — to start fresh, RUN_NEW=true.
+#
+# Knobs:
+#   ONLY=baseline,kv_xl   restrict to a subset of configs
+#   RUN_NEW=true          wipe runs/engine_optimizer/run.json first
+#   LIST=1                print the registered configs and exit
+#
+# Same Ctrl-C semantics as run-sweep: tail exits, optimizer keeps
+# running. Reattach with ``tail -f runs/engine_optimizer/optimizer_*.log``.
 .PHONY: optimize-engine
 optimize-engine:
 	@if [ -n "$(LIST)" ]; then \
 		$(PY) scripts/engine_optimizer.py --list ; \
-	elif [ -n "$(ONLY)" ]; then \
-		$(PY) scripts/engine_optimizer.py --only $$(echo $(ONLY) | tr ',' ' ') ; \
-	else \
-		$(PY) scripts/engine_optimizer.py ; \
-	fi
+		exit 0 ; \
+	fi ; \
+	OUT_DIR="runs/engine_optimizer" ; \
+	OUT="$$OUT_DIR/run.json" ; \
+	LOG="$$OUT_DIR/optimizer_$$(date +%Y%m%dT%H%M%S).log" ; \
+	mkdir -p "$$OUT_DIR" ; \
+	nohup $(PY) scripts/engine_optimizer.py \
+		--out "$$OUT" \
+		$(if $(RUN_NEW),--new-run) \
+		$(if $(ONLY),--only $$(echo $(ONLY) | tr ',' ' ')) \
+		>"$$LOG" 2>&1 </dev/null & \
+	PID=$$! ; \
+	echo "" ; \
+	echo "Engine optimizer started in background (PID $$PID) — survives SSH disconnect" ; \
+	echo "  json:    $$OUT$(if $(RUN_NEW), (fresh — RUN_NEW=true))" ; \
+	echo "  log:     $$LOG" ; \
+	echo "" ; \
+	echo "Following live (Ctrl-C exits the tail; the optimizer keeps running)." ; \
+	echo "  reattach later: tail -f $$LOG" ; \
+	echo "  stop optimizer: pkill -f scripts/engine_optimizer.py" ; \
+	echo "" ; \
+	for i in 1 2 3 4 5 ; do [ -f "$$LOG" ] && break ; sleep 0.2 ; done ; \
+	tail -f "$$LOG" & \
+	TAIL=$$! ; \
+	trap 'kill $$TAIL 2>/dev/null ; exit 0' INT TERM ; \
+	while kill -0 $$PID 2>/dev/null ; do sleep 2 ; done ; \
+	wait $$PID 2>/dev/null ; OPT_EXIT=$$? ; \
+	sleep 1 ; \
+	kill $$TAIL 2>/dev/null ; \
+	echo "" ; \
+	echo "=== Optimizer finished (PID $$PID, exit $$OPT_EXIT) — see $$OUT ===" ; \
+	exit $$OPT_EXIT
 
 .PHONY: clean
 clean:

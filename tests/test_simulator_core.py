@@ -833,6 +833,33 @@ def test_dashboard_state_in_progress(tmp_path) -> None:
     assert "0/1 complete" in out
 
 
+def test_export_default_output_lands_in_run_dir(tmp_path) -> None:
+    """``make export`` must default to writing the JSON inside the
+    run_NN/ directory the data came from — keeps every artifact for
+    one logical run grouped (run.db, engine logs, perf CSVs, and now
+    buyer_page_data.json) in the same directory."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_07"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="chat_heavy",
+        cohort_definition={}, config={},
+    )
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    # No --output → resolves to <latest_run_dir>/buyer_page_data.json
+    doc, out_path = export_dir(tmp_path)
+    assert out_path == run_dir / "buyer_page_data.json"
+    assert out_path.is_file()
+    # Sibling to the run.db it summarises
+    assert out_path.parent == (run_dir / "run.db").parent
+
+
 def test_export_includes_per_step_time_series(tmp_path) -> None:
     """make export must surface ``telemetry_samples`` + ``turns`` per
     curve step and ``snapshots`` per cohort. The downstream website
@@ -902,8 +929,10 @@ def test_export_includes_per_step_time_series(tmp_path) -> None:
     db.close()
 
     out = tmp_path / "buyer_page_data.json"
-    export_dir(tmp_path, out)
+    doc_returned, out_returned = export_dir(tmp_path, out)
+    assert out_returned == out
     doc = json.loads(out.read_text())
+    assert doc == doc_returned
     assert doc["meta"]["cohort_count"] == 1
     cohort = doc["cohorts"][0]
     assert cohort["id"] == "chat_heavy"

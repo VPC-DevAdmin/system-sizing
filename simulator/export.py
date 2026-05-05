@@ -360,17 +360,27 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
     }
 
 
-def export_dir(input_dir: str | Path, output_path: str | Path) -> dict:
-    """Build the buyer-page JSON.
+def export_dir(
+    input_dir: str | Path,
+    output_path: str | Path | None = None,
+) -> tuple[dict, Path]:
+    """Build the buyer-page JSON. Returns ``(doc, output_path)``.
 
     With the ``runs/run_NN/`` layout, ``input_dir`` is the base ``runs``
     directory; we read DBs from the latest ``run_NN``. Flat-directory
     layouts still work as a fallback when no ``run_NN`` exists.
+
+    When ``output_path`` is None, the JSON lands at
+    ``<source_dir>/buyer_page_data.json`` — same directory as the
+    ``run.db`` it came from, so per-run artifacts stay grouped.
     """
     from .runs import latest_run_dir
     input_dir = Path(input_dir)
-    output_path = Path(output_path)
     db_source = latest_run_dir(input_dir) or input_dir
+    if output_path is None:
+        output_path = db_source / "buyer_page_data.json"
+    else:
+        output_path = Path(output_path)
     cohorts: list[dict] = []
     engine_seen: set[str] = set()
     model_seen: set[str] = set()
@@ -395,5 +405,6 @@ def export_dir(input_dir: str | Path, output_path: str | Path) -> dict:
         },
         "cohorts": cohorts,
     }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(doc, indent=2))
-    return doc
+    return doc, output_path

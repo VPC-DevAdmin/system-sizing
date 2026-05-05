@@ -266,14 +266,16 @@ list-personas:
 
 .PHONY: export
 export:
-	$(PY) -m simulator.cli export \
-		--input-dir $(RUN_DIR) \
-		--output buyer_page_data.json
+	$(PY) -m simulator.cli export --input-dir $(RUN_DIR)
 
 .PHONY: web
 web: export
-	@cp -f buyer_page_data.json web/buyer_page_data.json
-	@echo "Reference buyer page at http://localhost:8765/"
+	@RD=$$(ls -d $(RUN_DIR)/run_* 2>/dev/null | sort | tail -n 1) ; \
+	[ -n "$$RD" ] || RD="$(RUN_DIR)" ; \
+	JSON="$$RD/buyer_page_data.json" ; \
+	if [ ! -f "$$JSON" ]; then echo "No $$JSON yet — did make export succeed?" ; exit 1 ; fi ; \
+	cp -f "$$JSON" web/buyer_page_data.json ; \
+	echo "Reference buyer page at http://localhost:8765/  (source: $$JSON)"
 	@cd web && $(PY) -m http.server 8765
 
 .PHONY: analyze-prefix-cache

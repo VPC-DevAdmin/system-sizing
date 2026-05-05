@@ -178,12 +178,21 @@ def dashboard(
 @app.command("export")
 def export_cmd(
     input_dir: Path = typer.Option(Path("runs"), "--input-dir"),
-    output: Path = typer.Option(Path("buyer_page_data.json"), "--output"),
+    output: Path = typer.Option(
+        None, "--output",
+        help=(
+            "Override output path. Default: <input_dir>/run_NN/"
+            "buyer_page_data.json — lands the JSON alongside the run.db "
+            "it was built from so per-run artifacts stay grouped."
+        ),
+    ),
 ):
     """Export simplified JSON for the buyer-facing webpage."""
     from .export import export_dir
-    doc = export_dir(input_dir, output)
-    typer.echo(f"Exported {doc['meta']['cohort_count']} cohorts -> {output}")
+    doc, out_path = export_dir(input_dir, output)
+    typer.echo(
+        f"Exported {doc['meta']['cohort_count']} cohorts -> {out_path}"
+    )
 
 
 @app.command("list-cohorts")

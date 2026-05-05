@@ -542,6 +542,96 @@ def test_find_completed_runs_handles_empty_dir(tmp_path) -> None:
     assert find_completed_runs(tmp_path, "vllm", "Qwen/Test") == set()
 
 
+def test_failed_turn_event_counts_as_sla_violation() -> None:
+    """A timed-out / errored request must register as both a TTFT
+    and TPOT violation regardless of the timing values, otherwise
+    fast-failing HTTP errors would fall under the SLA floor and
+    silently 'pass'."""
+    from simulator.virtual_user import TurnEvent
+    from simulator.personas import PERSONAS
+
+    persona = PERSONAS["quick_lookup"]  # ttft_floor=2.0s, tpot_floor=200ms
+
+    # Slow timeout — would already violate via timing alone.
+    e_timeout = TurnEvent(
+        user_id="u1", persona_id=persona.id, session_id="s",
+        turn_index=0, submitted_at_ms=0, completed_at_ms=300_000,
+        ttft_ms=300_000, tpot_ms=0.0, end_to_end_ms=300_000,
+        input_tokens=350, history_tokens=0, output_tokens=0,
+        in_flight_at_submit=1, persona=persona, error="timeout",
+    )
+    assert e_timeout.ttft_violation()
+    assert e_timeout.tpot_violation()
+
+    # Fast HTTP 500 — timing alone WOULDN'T violate (100ms < 2000ms
+    # floor), but the error flag must force the violation since the
+    # user got nothing.
+    e_500 = TurnEvent(
+        user_id="u2", persona_id=persona.id, session_id="s",
+        turn_index=0, submitted_at_ms=0, completed_at_ms=100,
+        ttft_ms=100, tpot_ms=0.0, end_to_end_ms=100,
+        input_tokens=350, history_tokens=0, output_tokens=0,
+        in_flight_at_submit=1, persona=persona,
+        error="ConnectionError",
+    )
+    assert e_500.ttft_violation(), (
+        "fast-failing error must still violate ttft, otherwise "
+        "errors under the floor count as 'pass'"
+    )
+    assert e_500.tpot_violation()
+
+    # Healthy fast turn — neither violation should fire.
+    e_ok = TurnEvent(
+        user_id="u3", persona_id=persona.id, session_id="s",
+        turn_index=0, submitted_at_ms=0, completed_at_ms=500,
+        ttft_ms=400, tpot_ms=80.0, end_to_end_ms=500,
+        input_tokens=350, history_tokens=0, output_tokens=10,
+        in_flight_at_submit=1, persona=persona,
+    )
+    assert not e_ok.ttft_violation()
+    assert not e_ok.tpot_violation()
+
+
+def test_legacy_turn_events_gets_error_column(tmp_path) -> None:
+    """Legacy DBs (pre-error-column) must get the column lifted on
+    open so the persistence path doesn't crash."""
+    import sqlite3
+    from simulator.database import Database
+
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE turn_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                measurement_id INTEGER NOT NULL,
+                persona_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                turn_index INTEGER NOT NULL,
+                submitted_at_ms INTEGER NOT NULL,
+                ttft_ms REAL NOT NULL,
+                completed_at_ms INTEGER NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                history_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                tpot_ms REAL NOT NULL,
+                end_to_end_ms REAL NOT NULL,
+                in_flight_at_submit INTEGER NOT NULL,
+                in_flight_avg_during REAL,
+                in_flight_peak_during INTEGER,
+                sla_ttft_violation INTEGER NOT NULL,
+                sla_tpot_violation INTEGER NOT NULL,
+                token_timestamps_json TEXT
+            );
+            """
+        )
+    db = Database(db_path)
+    cols = {r["name"] for r in db.fetchall("PRAGMA table_info(turn_events)")}
+    assert "error" in cols
+    db.close()
+
+
 def test_shared_state_initialises_step_progress() -> None:
     """``SharedState`` is the live channel between the measurement
     loop and the snapshot recorder for per-step sample progress.

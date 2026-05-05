@@ -133,6 +133,7 @@ above. `_event_to_row` in [measurement.py](../simulator/measurement.py).
 | `sla_ttft_violation`   | INTEGER NOT NULL | 0/1 — `e.ttft_violation()`. |
 | `sla_tpot_violation`   | INTEGER NOT NULL | 0/1 — `e.tpot_violation()`. |
 | `token_timestamps_json`| TEXT | Tier-3 opt-in: JSON `[[elapsed_ms, cum_tokens], …]`, one entry per streamed chunk. NULL when `enable_token_timestamps=False`. |
+| `error`                | TEXT | NULL on successful turns. On synthetic failure events (timeout / HTTP error / no_tokens), one of `"timeout"`, `"no_tokens"`, or an exception class name. When set, both `sla_ttft_violation` and `sla_tpot_violation` are 1 by construction — a request that didn't deliver a useful response is an SLA violation regardless of the timing values. |
 
 Index: `idx_events_measurement` on `measurement_id`.
 

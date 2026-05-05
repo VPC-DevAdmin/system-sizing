@@ -47,9 +47,23 @@ class TurnEvent:
     token_timestamps: list = field(default_factory=list, repr=False)
 
     def ttft_violation(self) -> bool:
+        # A failed request (timeout, HTTP error, empty stream) is
+        # always an SLA violation — the user waited and didn't get
+        # a useful response. We don't compare timing for these
+        # because for fast-failing HTTP errors the timing alone
+        # would falsely "pass" (e.g. a 500 in 100ms is still a
+        # bad user experience even though 100ms < ttft_floor).
+        if self.error is not None:
+            return True
         return self.ttft_ms / 1000.0 > self.persona.ttft_floor_seconds
 
     def tpot_violation(self) -> bool:
+        # Same reasoning as ttft_violation: any failure mode where
+        # the user didn't get tokens is also a TPOT violation by
+        # construction (no tokens were emitted in any time, let
+        # alone the SLA-floor time per token).
+        if self.error is not None:
+            return True
         return self.tpot_ms > self.persona.tpot_floor_ms
 
 
@@ -219,6 +233,44 @@ async def run_virtual_user(
                     if error is None:
                         error = "no_tokens"
                     log.debug("user %s turn failed: %s", stats.user_id, error)
+                    # Emit a synthetic TurnEvent so the failure shows
+                    # up in the SLA framework instead of disappearing.
+                    # Without this, a request that times out at 300 s
+                    # never produces a measurement row → never counts
+                    # toward combined_violation_rate, even though the
+                    # user clearly experienced a violation. The ttft /
+                    # tpot fields are best-effort — TurnEvent's
+                    # violation methods short-circuit on ``error``
+                    # being set, so the timing values aren't load-
+                    # bearing for the SLA verdict, only for histogram
+                    # / percentile aggregation.
+                    failed_event = TurnEvent(
+                        user_id=stats.user_id,
+                        persona_id=persona.id,
+                        session_id=session_id,
+                        turn_index=turn,
+                        submitted_at_ms=submitted_at_ms,
+                        completed_at_ms=_now_ms(),
+                        # ttft_ms = how long the user waited before
+                        # giving up. For a timeout this is ~timeout_s
+                        # (well past floor); for a fast HTTP error
+                        # it's small but still flagged as violation
+                        # via the error field.
+                        ttft_ms=e2e_ms,
+                        # tpot_ms unknown when no tokens; 0 is the
+                        # most honest sentinel and the violation
+                        # method returns True anyway from error.
+                        tpot_ms=0.0,
+                        end_to_end_ms=e2e_ms,
+                        input_tokens=corpus.count(query_text),
+                        history_tokens=history_token_count,
+                        output_tokens=0,
+                        in_flight_at_submit=in_flight_at_submit,
+                        persona=persona,
+                        error=error,
+                        token_timestamps=[],
+                    )
+                    await state.events.put(failed_event)
                     # Treat as session-aborting for safety
                     break
 

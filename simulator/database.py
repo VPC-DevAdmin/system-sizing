@@ -116,7 +116,14 @@ CREATE TABLE IF NOT EXISTS turn_events (
     sla_tpot_violation INTEGER NOT NULL,
     -- Tier-3 opt-in: JSON array of [elapsed_ms_from_submit, cumulative_token_count]
     -- pairs, one per emitted streaming chunk. NULL when tier-3 capture is off.
-    token_timestamps_json TEXT
+    token_timestamps_json TEXT,
+    -- Failure marker for synthetic events emitted when a request
+    -- timed out / errored / produced no tokens. NULL on successful
+    -- requests; one of "timeout", "no_tokens", or an exception class
+    -- name otherwise. When set, sla_ttft_violation and
+    -- sla_tpot_violation are both 1 by construction (a failure
+    -- counts as a violation in both axes).
+    error TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_measurement ON turn_events(measurement_id);
@@ -234,6 +241,7 @@ class Database:
                  ("prefix_cache_engine_queries", "INTEGER"),
                  ("prefix_cache_engine_hit_rate", "REAL")],
             )
+            self._ensure_columns("turn_events", [("error", "TEXT")])
 
     def _ensure_columns(
         self, table: str, columns: list[tuple[str, str]],

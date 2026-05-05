@@ -436,6 +436,13 @@ def _event_to_row(e: TurnEvent, measurement_id: int) -> dict:
         "token_timestamps_json": (
             _json.dumps(e.token_timestamps) if e.token_timestamps else None
         ),
+        # ``error`` is None on successful turns, set on synthetic
+        # failure events emitted by virtual_user.run_virtual_user
+        # when a request times out / errors / produces no tokens.
+        # Persisting it makes failure modes greppable post-hoc
+        # without losing the SLA-violation signal that's already
+        # encoded in sla_ttft_violation / sla_tpot_violation.
+        "error": e.error,
     }
 
 

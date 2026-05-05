@@ -78,6 +78,8 @@ help:
 	@echo "                                          A/B vLLM launch shapes, pick the best for this host."
 	@echo "                                          Always nohup'd + auto-tailed; resumes existing"
 	@echo "                                          runs/engine_optimizer/run.json by default."
+	@echo "  make optimize-dashboard                 Read-only dashboard against the running optimizer"
+	@echo "                                          (use from a second SSH session)."
 	@echo ""
 	@echo "Diagnostics:"
 	@echo "  make preflight CONFIG=...               Hardware-only check (no install / build)"
@@ -366,6 +368,15 @@ optimize-engine:
 	echo "" ; \
 	echo "=== Optimizer finished (PID $$PID, exit $$OPT_EXIT) — see $$OUT ===" ; \
 	exit $$OPT_EXIT
+
+# Read-only dashboard against a running (or completed) optimizer.
+# Polls runs/engine_optimizer/run.json + the latest optimizer_*.log so
+# you can watch progress from a second SSH session without touching
+# the backgrounded optimizer process. Ctrl-C exits the dashboard.
+.PHONY: optimize-dashboard
+optimize-dashboard:
+	$(PY) scripts/engine_optimizer.py --watch \
+		--out runs/engine_optimizer/run.json
 
 .PHONY: clean
 clean:

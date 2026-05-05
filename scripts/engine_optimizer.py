@@ -967,14 +967,32 @@ async def main_async(
         r for r in _prior_results(existing) if r.name in selected_names
     ]
 
-    if completed:
-        skipped = sorted(completed & selected_names)
-        todo = [c.name for c in selected if c.name not in completed]
-        msg = (
-            f"Resume: {len(skipped)}/{len(selected)} configs already complete "
-            f"({', '.join(skipped)}); todo: {todo or 'none'}"
+    # Always print a startup banner so the user sees clearly whether
+    # this is a fresh run or a resume — and exactly which configs the
+    # resume will skip / re-run / attempt for the first time.
+    print(f"Output: {out_path}")
+    if existing is None:
+        print(
+            f"No prior run at this path — starting fresh "
+            f"({len(selected)} configs)."
         )
-        print(msg)
+    else:
+        skipped = sorted(completed & selected_names)
+        in_prog = sorted(
+            c["name"] for c in existing.get("configs", [])
+            if c.get("status") == "in_progress" and c.get("name") in selected_names
+        )
+        todo = [c.name for c in selected if c.name not in completed]
+        print(
+            f"Loaded prior JSON ({len(existing.get('configs', []))} entries)."
+        )
+        print(f"  done   ({len(skipped)}): {', '.join(skipped) or '—'}")
+        if in_prog:
+            print(
+                f"  in progress ({len(in_prog)}): {', '.join(in_prog)} "
+                f"(will re-run from scratch)"
+            )
+        print(f"  todo   ({len(todo)}): {', '.join(todo) or '—'}")
         if not todo:
             _print_summary(state)
             _save_json(out_path, state)
@@ -1049,6 +1067,102 @@ def _print_summary(state: OptimizerState) -> None:
 DEFAULT_OUT = Path("runs/engine_optimizer/run.json")
 
 
+# ── Read-only watch dashboard (separate process) ────────────────────────
+#
+# When the optimizer runs in the background (via ``make optimize-engine``),
+# stdout is a log file — not a TTY — so the live rich dashboard isn't
+# rendered. ``--watch`` (exposed via ``make optimize-dashboard``) opens a
+# read-only dashboard from any other terminal, polling the JSON + log
+# file the optimizer is writing. Same layout, same data, no interference
+# with the running optimizer (read-only).
+
+
+def _latest_log(log_dir: Path) -> Optional[Path]:
+    if not log_dir.exists():
+        return None
+    logs = sorted(log_dir.glob("optimizer_*.log"), key=lambda p: p.stat().st_mtime)
+    return logs[-1] if logs else None
+
+
+def _tail_log(path: Path | None, n: int = 20) -> list[str]:
+    if path is None or not path.exists():
+        return []
+    try:
+        with path.open("r", errors="replace") as f:
+            return [
+                line.rstrip()
+                for line in f.readlines()[-n:]
+                if line.strip()
+            ]
+    except OSError:
+        return []
+
+
+def _state_from_disk(
+    json_path: Path, log_path: Path | None, total_configs: int,
+) -> OptimizerState:
+    """Build an OptimizerState by reading the JSON + log file. The
+    state's "current config" is whichever entry has status='in_progress'
+    (set by the running optimizer at the start of each config and
+    overwritten at the end)."""
+    state = OptimizerState(total_configs=total_configs)
+    doc = _load_existing(json_path)
+    if doc is not None:
+        state.results = _prior_results(doc)
+    for line in _tail_log(log_path):
+        state.log_lines.append(line)
+
+    current = next(
+        (r for r in state.results if r.status == "in_progress"), None,
+    )
+    if current is not None:
+        for i, c in enumerate(CONFIGS):
+            if c.name == current.name:
+                state.config_index = i
+                break
+        state.config_name = current.name
+        state.current_cells = list(current.cells)
+        state.phase = (
+            f"running ({len(current.cells)}/{len(TEST_CELLS)} cells done)"
+        )
+    elif state.results:
+        # No active config — maybe between configs, or the run finished.
+        # Show the most-recently-completed entry as "current".
+        last = state.results[-1]
+        for i, c in enumerate(CONFIGS):
+            if c.name == last.name:
+                state.config_index = i
+                break
+        state.config_name = last.name
+        state.current_cells = list(last.cells)
+        state.phase = f"latest: {last.status}"
+    return state
+
+
+def watch_dashboard(json_path: Path, refresh_s: float = 2.0) -> None:
+    """Render a live dashboard against an on-disk run.json. Read-only —
+    the running optimizer (in another shell) writes; we just observe."""
+    log_dir = json_path.parent
+    console = Console()
+    state = _state_from_disk(json_path, _latest_log(log_dir), len(CONFIGS))
+    if not json_path.exists():
+        console.print(
+            f"[yellow]Waiting for {json_path} to appear...[/yellow]"
+        )
+    with Live(
+        render(state), console=console, refresh_per_second=1, screen=True,
+    ) as live:
+        try:
+            while True:
+                state = _state_from_disk(
+                    json_path, _latest_log(log_dir), len(CONFIGS),
+                )
+                live.update(render(state))
+                time.sleep(refresh_s)
+        except KeyboardInterrupt:
+            pass
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Iterate engine configs, measure TTFT/TPOT, pick the best."
@@ -1085,6 +1199,15 @@ def main() -> None:
         "--list", action="store_true",
         help="Print the registered configs and exit.",
     )
+    p.add_argument(
+        "--watch", action="store_true",
+        help=(
+            "Read-only dashboard mode: poll the --out JSON + the latest "
+            ".log file in the same directory and render the live view "
+            "from another terminal. Use this against a backgrounded "
+            "``make optimize-engine`` run."
+        ),
+    )
     args = p.parse_args()
 
     if args.list:
@@ -1092,6 +1215,10 @@ def main() -> None:
             print(f"  {c.name:25} {c.description}")
             if c.expected_outcome:
                 print(f"    expect: {c.expected_outcome}")
+        return
+
+    if args.watch:
+        watch_dashboard(args.out)
         return
 
     asyncio.run(main_async(args.out, args.only, args.new_run))

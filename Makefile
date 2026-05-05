@@ -57,10 +57,12 @@ help:
 	@echo "  make run-cohort  CONFIG=... COHORT=...  Run one cohort (a team mix of personas)"
 	@echo "  make run-sweep   CONFIG=... [SWEEP_TYPE=]  Sweep multiple workloads."
 	@echo "                                          SWEEP_TYPE=all|personas|cohorts|a,b,c"
+	@echo "                                          Always nohup'd + auto-tailed; survives SSH disconnect."
+	@echo "                                          Ctrl-C exits the tail (sweep keeps running)."
 	@echo "                                          Resumes latest run_NN by default;"
 	@echo "                                          set RUN_NEW=true to cut a fresh run dir."
-	@echo "  make run-*-bg                           Same as above but nohup'd; survives SSH disconnects"
-	@echo "  make tail-log / make stop-bg            Tail latest -bg log / stop a backgrounded run + engine"
+	@echo "  make run-cohort-bg / run-persona-bg     Single-workload nohup variants (-bg)"
+	@echo "  make tail-log / make stop-bg            Reattach to the latest run / stop a running sweep + engine"
 	@echo "  make list-runs                          List run_NN/ directories under $(RUN_DIR)"
 	@echo "  make list-personas                      List available user archetypes"
 	@echo "  make list-cohorts                       List available team mixes"
@@ -126,14 +128,48 @@ run-persona:
 		$(if $(ENGINE),--engine $(ENGINE)) \
 		$(if $(MODEL),--model $(MODEL))
 
+# Sweeps are always nohup'd + log-teed + auto-tailed. SSH disconnect
+# leaves the simulator (and its docker engine containers) running;
+# Ctrl-C exits the tail without killing the sweep. Reattach later
+# with ``make tail-log``; stop the run with ``make stop-bg``.
+#
+# Why backgrounded with ``&`` works as "Ctrl-C safe": in non-interactive
+# shells (which is what make uses), backgrounded processes get SIGINT
+# explicitly ignored. nohup adds SIGHUP-ignore on top, so terminal
+# disconnect can't kill it either. ``</dev/null`` belt-and-braces so
+# the engine subprocess can never block waiting on stdin.
 .PHONY: run-sweep
 run-sweep:
-	$(PY) -m simulator.cli sweep \
+	@RD="$$($(RESOLVE_RUN_DIR))" ; \
+	LOG="$$RD/sweep_$$(date +%Y%m%dT%H%M%S).log" ; \
+	nohup $(PY) -m simulator.cli sweep \
 		--config $(CONFIG) \
 		--type $(SWEEP_TYPE) \
 		$(if $(RUN_NEW),--new-run) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
-		$(if $(MODEL),--model $(MODEL))
+		$(if $(MODEL),--model $(MODEL)) \
+		>"$$LOG" 2>&1 </dev/null & \
+	PID=$$! ; \
+	echo "" ; \
+	echo "Sweep started in background (PID $$PID) — survives SSH disconnect" ; \
+	echo "  run dir: $$RD$(if $(RUN_NEW), (fresh — RUN_NEW=true))" ; \
+	echo "  log:     $$LOG" ; \
+	echo "" ; \
+	echo "Following live (Ctrl-C exits the tail; the sweep keeps running)." ; \
+	echo "  reattach later: make tail-log" ; \
+	echo "  stop the sweep: make stop-bg" ; \
+	echo "" ; \
+	for i in 1 2 3 4 5 ; do [ -f "$$LOG" ] && break ; sleep 0.2 ; done ; \
+	tail -f "$$LOG" & \
+	TAIL=$$! ; \
+	trap 'kill $$TAIL 2>/dev/null ; exit 0' INT TERM ; \
+	while kill -0 $$PID 2>/dev/null ; do sleep 2 ; done ; \
+	wait $$PID 2>/dev/null ; SWEEP_EXIT=$$? ; \
+	sleep 1 ; \
+	kill $$TAIL 2>/dev/null ; \
+	echo "" ; \
+	echo "=== Sweep finished (PID $$PID, exit $$SWEEP_EXIT) — see $$LOG ===" ; \
+	exit $$SWEEP_EXIT
 
 .PHONY: dashboard
 dashboard:
@@ -177,25 +213,6 @@ run-persona-bg:
 	PID=$$! ; \
 	echo "Persona run started in background (PID $$PID)" ; \
 	echo "  run dir: $$RD" ; \
-	echo "  log: $$LOG" ; \
-	echo "  tail: tail -f $$LOG" ; \
-	echo "  dashboard: make dashboard" ; \
-	echo "  stop: make stop-bg  (or: kill $$PID)"
-
-.PHONY: run-sweep-bg
-run-sweep-bg:
-	@RD="$$($(RESOLVE_RUN_DIR))" ; \
-	LOG="$$RD/sweep_$$(date +%Y%m%dT%H%M%S).log" ; \
-	nohup $(PY) -m simulator.cli sweep \
-		--config $(CONFIG) \
-		--type $(SWEEP_TYPE) \
-		$(if $(RUN_NEW),--new-run) \
-		$(if $(ENGINE),--engine $(ENGINE)) \
-		$(if $(MODEL),--model $(MODEL)) \
-		>"$$LOG" 2>&1 & \
-	PID=$$! ; \
-	echo "Sweep started in background (PID $$PID)" ; \
-	echo "  run dir: $$RD$(if $(RUN_NEW), (fresh — RUN_NEW=true))" ; \
 	echo "  log: $$LOG" ; \
 	echo "  tail: tail -f $$LOG" ; \
 	echo "  dashboard: make dashboard" ; \

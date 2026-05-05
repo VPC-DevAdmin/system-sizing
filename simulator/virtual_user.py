@@ -17,6 +17,7 @@ from typing import Optional
 from openai import AsyncOpenAI
 
 from .personas import Persona
+from .streaming import consume_with_tiers
 from .tokenizer_corpus import TokenCorpus
 
 log = logging.getLogger(__name__)
@@ -188,62 +189,60 @@ async def run_virtual_user(
                 in_flight_at_submit = await state.submit()
                 submitted_at = time.monotonic()
                 submitted_at_ms = _now_ms()
-                ttft_obs: float | None = None
-                output_text_parts: list[str] = []
-                output_tokens = 0
-                error: str | None = None
-                token_timestamps: list[list[float]] = []
 
-                try:
-                    stream = await asyncio.wait_for(
-                        client.chat.completions.create(
-                            model=model_id,
-                            messages=messages,
-                            max_tokens=output_tokens_target,
-                            stream=True,
-                            temperature=0.7,
-                        ),
-                        timeout=request_timeout_s,
-                    )
-                    async for chunk in stream:
-                        delta = chunk.choices[0].delta if chunk.choices else None
-                        if delta and delta.content:
-                            now_rel = time.monotonic() - submitted_at
-                            if ttft_obs is None:
-                                ttft_obs = now_rel
-                            output_text_parts.append(delta.content)
-                            output_tokens += 1
-                            if capture_token_timestamps:
-                                # Stored as [ms_from_submit, cumulative_tokens].
-                                # Floats, not strings — JSON encoder is faster
-                                # and the round-trip is exact for moderate runs.
-                                token_timestamps.append(
-                                    [round(now_rel * 1000.0, 3), output_tokens]
-                                )
-                except asyncio.TimeoutError:
-                    error = "timeout"
-                except Exception as e:  # noqa: BLE001
-                    error = type(e).__name__
+                # Tiered streaming consume. The persona owns the
+                # tier budgets — they're scaled from its SLA floors
+                # so a stricter persona gets stricter abort policy.
+                # ``request_timeout_s`` from config is no longer the
+                # primary stream cap; we keep it as an outer
+                # safety only via the persona's hard_timeout_s
+                # default (override per-persona to tighten).
+                stream_result = await consume_with_tiers(
+                    create_stream=lambda: client.chat.completions.create(
+                        model=model_id,
+                        messages=messages,
+                        max_tokens=output_tokens_target,
+                        stream=True,
+                        temperature=0.7,
+                    ),
+                    pre_ttft_timeout_s=persona.pre_ttft_timeout_s,
+                    inter_token_timeout_s=persona.inter_token_timeout_s,
+                    hard_timeout_s=min(persona.hard_timeout_s, request_timeout_s),
+                    capture_token_timestamps=capture_token_timestamps,
+                )
+                ttft_obs: float | None = (
+                    stream_result.ttft_ms / 1000.0
+                    if stream_result.ttft_ms is not None else None
+                )
+                output_tokens = stream_result.output_tokens
+                output_text_parts: list[str] = (
+                    [stream_result.output_text] if stream_result.output_text else []
+                )
+                token_timestamps: list[list[float]] = stream_result.token_timestamps
+                error: str | None = stream_result.error
 
                 completed_at = time.monotonic()
                 e2e_ms = (completed_at - submitted_at) * 1000.0
 
-                if error or ttft_obs is None or output_tokens < 1:
+                if error is not None:
                     await state.fail()
-                    if error is None:
-                        error = "no_tokens"
                     log.debug("user %s turn failed: %s", stats.user_id, error)
-                    # Emit a synthetic TurnEvent so the failure shows
-                    # up in the SLA framework instead of disappearing.
-                    # Without this, a request that times out at 300 s
-                    # never produces a measurement row → never counts
-                    # toward combined_violation_rate, even though the
-                    # user clearly experienced a violation. The ttft /
-                    # tpot fields are best-effort — TurnEvent's
-                    # violation methods short-circuit on ``error``
-                    # being set, so the timing values aren't load-
-                    # bearing for the SLA verdict, only for histogram
-                    # / percentile aggregation.
+                    # Synthetic TurnEvent so the failure registers
+                    # in the SLA framework. Carries whatever partial
+                    # progress we captured before aborting — ttft if
+                    # we reached the first token (tier 2/3 cases),
+                    # output_tokens received before the abort, etc.
+                    # Lets post-hoc analysis classify failure modes
+                    # ("did the request even start?" vs "did it
+                    # stall mid-stream?") via the ``error`` category.
+                    partial_ttft_ms = stream_result.ttft_ms
+                    partial_tpot_ms = 0.0
+                    if partial_ttft_ms is not None and output_tokens > 1:
+                        # Honest TPOT from the partial stream — useful
+                        # for distinguishing "tier 2 stalled hard" vs
+                        # "tier 3 tripped on slow-but-progressing."
+                        decode_ms = e2e_ms - partial_ttft_ms
+                        partial_tpot_ms = decode_ms / max(1, output_tokens - 1)
                     failed_event = TurnEvent(
                         user_id=stats.user_id,
                         persona_id=persona.id,
@@ -251,24 +250,19 @@ async def run_virtual_user(
                         turn_index=turn,
                         submitted_at_ms=submitted_at_ms,
                         completed_at_ms=_now_ms(),
-                        # ttft_ms = how long the user waited before
-                        # giving up. For a timeout this is ~timeout_s
-                        # (well past floor); for a fast HTTP error
-                        # it's small but still flagged as violation
-                        # via the error field.
-                        ttft_ms=e2e_ms,
-                        # tpot_ms unknown when no tokens; 0 is the
-                        # most honest sentinel and the violation
-                        # method returns True anyway from error.
-                        tpot_ms=0.0,
+                        ttft_ms=(
+                            partial_ttft_ms
+                            if partial_ttft_ms is not None else e2e_ms
+                        ),
+                        tpot_ms=partial_tpot_ms,
                         end_to_end_ms=e2e_ms,
                         input_tokens=corpus.count(query_text),
                         history_tokens=history_token_count,
-                        output_tokens=0,
+                        output_tokens=output_tokens,
                         in_flight_at_submit=in_flight_at_submit,
                         persona=persona,
                         error=error,
-                        token_timestamps=[],
+                        token_timestamps=token_timestamps,
                     )
                     await state.events.put(failed_event)
                     # Treat as session-aborting for safety

@@ -542,6 +542,166 @@ def test_find_completed_runs_handles_empty_dir(tmp_path) -> None:
     assert find_completed_runs(tmp_path, "vllm", "Qwen/Test") == set()
 
 
+class _FakeChunk:
+    """Minimal chunk shape that matches what the openai SDK yields."""
+    def __init__(self, content: str | None):
+        class _Delta:
+            pass
+        d = _Delta()
+        d.content = content
+        class _Choice:
+            pass
+        c = _Choice()
+        c.delta = d
+        self.choices = [c]
+
+
+class _FakeStream:
+    """Async iterator that emits chunks at scheduled times relative
+    to its own start. ``schedule`` is [(elapsed_s, content_or_None), …]
+    where content=None means "no token, just a scheduling tick"."""
+    def __init__(self, schedule: list[tuple[float, str | None]]):
+        self._schedule = schedule
+        self._idx = 0
+        self._t0: float | None = None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        import time as _time
+        if self._t0 is None:
+            self._t0 = _time.monotonic()
+        if self._idx >= len(self._schedule):
+            raise StopAsyncIteration
+        elapsed_target, content = self._schedule[self._idx]
+        self._idx += 1
+        wait = elapsed_target - (_time.monotonic() - self._t0)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        return _FakeChunk(content)
+
+
+def test_tier_1_pre_ttft_stalled() -> None:
+    """A stream that never produces a first token within
+    pre_ttft_timeout_s aborts with error='ttft_stalled'."""
+    from simulator.streaming import consume_with_tiers
+
+    async def go():
+        # Stream that would emit at t=2s, but pre_ttft cap is 0.3s.
+        stream = _FakeStream([(2.0, "hello")])
+        return await consume_with_tiers(
+            create_stream=lambda: _coroutine_returning(stream),
+            pre_ttft_timeout_s=0.3,
+            inter_token_timeout_s=10.0,
+            hard_timeout_s=30.0,
+        )
+
+    result = asyncio.run(go())
+    assert result.error == "ttft_stalled"
+    assert result.ttft_ms is None
+    assert result.output_tokens == 0
+    assert 250 < result.total_ms < 600  # roughly the 0.3s timeout
+
+
+def test_tier_2_decode_stalled() -> None:
+    """A stream that emits the first token quickly but then stalls
+    aborts with error='decode_stalled'. Partial progress (the tokens
+    we did get) is preserved in the result."""
+    from simulator.streaming import consume_with_tiers
+
+    async def go():
+        # First two tokens at t=0.05s and t=0.10s, then a long gap.
+        stream = _FakeStream([
+            (0.05, "first"), (0.10, "second"), (5.0, "stalled"),
+        ])
+        return await consume_with_tiers(
+            create_stream=lambda: _coroutine_returning(stream),
+            pre_ttft_timeout_s=10.0,
+            inter_token_timeout_s=0.3,  # 300ms inter-token cap
+            hard_timeout_s=30.0,
+        )
+
+    result = asyncio.run(go())
+    assert result.error == "decode_stalled"
+    assert result.ttft_ms is not None
+    assert result.ttft_ms < 200  # ~50 ms first token
+    assert result.output_tokens == 2  # partial progress preserved
+    assert result.output_text == "firstsecond"
+
+
+def test_tier_3_hard_timeout() -> None:
+    """A stream that emits tokens steadily but past the hard ceiling
+    aborts with error='hard_timeout'. This is the 'slow-but-
+    progressing' case — engine is functional but past budget."""
+    from simulator.streaming import consume_with_tiers
+
+    async def go():
+        # 6 tokens spaced 0.1s apart = 0.6s total. Pre-TTFT and
+        # inter-token are generous; hard ceiling is 0.3s — should fire
+        # mid-stream after ~3 tokens.
+        stream = _FakeStream([
+            (0.05, f"t{i}") for i in range(6)
+        ])
+        # Adjust schedule so each token is +0.1s after the previous.
+        schedule = [(0.05 + i * 0.1, f"t{i}") for i in range(6)]
+        return await consume_with_tiers(
+            create_stream=lambda: _coroutine_returning(_FakeStream(schedule)),
+            pre_ttft_timeout_s=10.0,
+            inter_token_timeout_s=10.0,
+            hard_timeout_s=0.3,
+        )
+
+    result = asyncio.run(go())
+    assert result.error == "hard_timeout"
+    assert result.ttft_ms is not None  # got first token
+    # We got at least 1 token but not all 6.
+    assert 1 <= result.output_tokens < 6
+
+
+def test_clean_completion_no_error() -> None:
+    """The happy path: a stream that emits tokens within all tier
+    budgets returns no error and full output."""
+    from simulator.streaming import consume_with_tiers
+
+    async def go():
+        schedule = [(0.01 * (i + 1), f"t{i}") for i in range(5)]
+        return await consume_with_tiers(
+            create_stream=lambda: _coroutine_returning(_FakeStream(schedule)),
+            pre_ttft_timeout_s=5.0,
+            inter_token_timeout_s=5.0,
+            hard_timeout_s=5.0,
+        )
+
+    result = asyncio.run(go())
+    assert result.error is None
+    assert result.output_tokens == 5
+    assert result.ttft_ms is not None and result.ttft_ms < 100
+
+
+async def _coroutine_returning(value):
+    """Helper: a coroutine that immediately returns ``value``. Used
+    to wrap a pre-built stream in the create_stream callable shape
+    that consume_with_tiers expects."""
+    return value
+
+
+def test_persona_timeout_properties_scale_with_floors() -> None:
+    """Persona timeout properties should derive from the SLA floors,
+    so tightening the floor automatically tightens the abort policy."""
+    from simulator.personas import PERSONAS
+
+    p = PERSONAS["quick_lookup"]  # ttft_floor=2.0, tpot_floor=200ms
+    assert p.pre_ttft_timeout_s == 2.0 * 5.0
+    assert abs(p.inter_token_timeout_s - (200 / 1000.0) * 20.0) < 1e-6
+
+    # summarizer has the loosest floors, should have the most
+    # generous timeouts.
+    s = PERSONAS["summarizer"]  # ttft_floor=10.0, tpot_floor=220ms
+    assert s.pre_ttft_timeout_s == 10.0 * 5.0
+    assert s.pre_ttft_timeout_s > p.pre_ttft_timeout_s
+
+
 def test_failed_turn_event_counts_as_sla_violation() -> None:
     """A timed-out / errored request must register as both a TTFT
     and TPOT violation regardless of the timing values, otherwise

@@ -26,6 +26,36 @@ class Persona:
     ttft_floor_seconds: float
     tpot_floor_ms: float
 
+    # ── Three-tier termination policy ─────────────────────────────────
+    # Per-request timeouts that fire when a stream is clearly broken,
+    # so a stuck request gets aborted (and counted as an SLA violation
+    # via the synthetic-TurnEvent path) rather than tying up an engine
+    # slot for 15 minutes. Each tier corresponds to a different
+    # failure mode:
+    #
+    #   Tier 1 (pre-TTFT):    no first token by N × ttft_floor →
+    #                          scheduler / admission deadlock
+    #   Tier 2 (inter-token): no new token for M × tpot_floor →
+    #                          mid-stream worker hang
+    #   Tier 3 (hard ceiling):total wall time exceeds hard_timeout_s →
+    #                          slow-but-progressing past the SLA
+    #                          (informative — engine is functional
+    #                           but overloaded, not stuck)
+    #
+    # Defaults are scaled by ``ttft_floor_seconds`` / ``tpot_floor_ms``
+    # so tighter SLAs get tighter timeouts automatically.
+    pre_ttft_factor: float = 5.0
+    inter_token_factor: float = 20.0
+    hard_timeout_s: float = 900.0
+
+    @property
+    def pre_ttft_timeout_s(self) -> float:
+        return self.ttft_floor_seconds * self.pre_ttft_factor
+
+    @property
+    def inter_token_timeout_s(self) -> float:
+        return (self.tpot_floor_ms / 1000.0) * self.inter_token_factor
+
 
 @dataclass
 class Cohort:

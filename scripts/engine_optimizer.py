@@ -132,18 +132,33 @@ class TestCell:
     input_tokens: int
     output_tokens: int
     concurrency: int
-    # Per-request hard cap. When a request exceeds this, abort it and
-    # count as a ``timeouts`` increment (separate from ``errors``,
-    # separate from ``samples``). Excluded from p50/p95 so the
-    # latency stats only describe requests that actually completed.
-    # The aggregate throughput field DOES include timed-out requests'
-    # zero contribution, so it correctly drops on configs with a tail.
+    # Three-tier termination policy (see simulator/streaming.py).
+    # Each tier produces a different ``error`` category so post-hoc
+    # analysis can distinguish failure modes:
     #
-    # Sized as a small multiple of the expected wall-clock time per
-    # cell — generous enough that a healthy config never hits it,
-    # tight enough that a stuck-tail pathology (e.g. baseline pain16's
-    # ~900 s tail) gets killed in seconds rather than minutes.
-    timeout_s: float = 60.0
+    #   pre_ttft_timeout_s:    no first token by this duration →
+    #                          "ttft_stalled" (admission deadlock).
+    #                          Defaults at 120 s — well above any
+    #                          healthy TTFT we've observed (~15 s
+    #                          worst case for 4096-input prefill on
+    #                          AMD CPU).
+    #   inter_token_timeout_s: no new token for this gap (in seconds)
+    #                          since the last → "decode_stalled"
+    #                          (worker hang). Defaults to 10 s, which
+    #                          is ~100× a healthy 50-100 ms TPOT.
+    #   hard_timeout_s:        total wall time → "hard_timeout".
+    #                          Per-cell because long-output cells
+    #                          legitimately take longer than short
+    #                          cells. The user-visible "this config
+    #                          is too slow even when it's not
+    #                          stalled" signal.
+    #
+    # Excluded from p50/p95 (only completed requests count) but
+    # surfaced via ``timeouts`` in CellResult and as ``error``
+    # categories in the JSON for diagnostic drill-down.
+    pre_ttft_timeout_s: float = 120.0
+    inter_token_timeout_s: float = 10.0
+    hard_timeout_s: float = 600.0
 
 
 @dataclass
@@ -157,9 +172,15 @@ class CellResult:
     tpot_p95_ms: Optional[float]
     throughput_out_tok_s: Optional[float]
     error_summary: str = ""
-    # Number of requests killed by the per-cell ``timeout_s`` cap.
-    # Default 0 so old JSON without this field deserialises cleanly.
+    # Number of requests killed by ANY tier of the per-cell timeout
+    # policy. Default 0 so old JSON deserialises cleanly.
     timeouts: int = 0
+    # Per-tier breakdown for diagnostic drill-down. Each key is a
+    # category from the streaming consumer's error vocabulary:
+    # "ttft_stalled" / "decode_stalled" / "hard_timeout" — plus
+    # connection-level errors like "connection_timeout" / exception
+    # class names. Empty dict on cells where every request succeeded.
+    tier_errors: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -430,19 +451,27 @@ CONFIGS: list[EngineConfig] = [
 # ``ONLY=...`` to subset if you want a faster pass.
 
 TEST_CELLS: list[TestCell] = [
-    # ``timeout_s`` is the per-request cap; tuned ~5× the worst-case
-    # healthy completion time so noise doesn't trip it but the
-    # 900-second-tail pathologies do. See _AMD_REFERENCE_TIMINGS in
-    # the docstring above for the math.
-    TestCell("single_stream_short", input_tokens=128,  output_tokens=128,  concurrency=1,  timeout_s=30),
-    TestCell("chat_concurrent",     input_tokens=512,  output_tokens=256,  concurrency=4,  timeout_s=60),
-    TestCell("short_throughput",    input_tokens=128,  output_tokens=128,  concurrency=8,  timeout_s=60),
+    # The three-tier defaults on TestCell (pre_ttft=120s,
+    # inter_token=10s, hard=600s) work for most cells. Override
+    # ``hard_timeout_s`` for long_output (decode-heavy, legitimately
+    # takes longer) and tighten the fast cells where 120s is overkill.
+    TestCell("single_stream_short", input_tokens=128,  output_tokens=128,  concurrency=1,
+             pre_ttft_timeout_s=60.0, hard_timeout_s=120.0),
+    TestCell("chat_concurrent",     input_tokens=512,  output_tokens=256,  concurrency=4,
+             pre_ttft_timeout_s=90.0, hard_timeout_s=180.0),
+    TestCell("short_throughput",    input_tokens=128,  output_tokens=128,  concurrency=8,
+             pre_ttft_timeout_s=90.0, hard_timeout_s=180.0),
     # Pain point: long input + moderate output, two concurrency levels.
-    TestCell("long_pain_8",         input_tokens=4096, output_tokens=512,  concurrency=8,  timeout_s=180),
-    TestCell("long_pain_16",        input_tokens=4096, output_tokens=512,  concurrency=16, timeout_s=300),
-    # Flipped: short input, long output. Decode-dominated; tests
-    # whether AMD's memory-bandwidth advantage actually translates.
-    TestCell("long_output",         input_tokens=512,  output_tokens=4096, concurrency=4,  timeout_s=360),
+    # Healthy TTFT is ~12-15s for 4096 input on AMD; 120s pre_ttft is
+    # ~10× that. Hard ceiling at 600s catches the ~900s baseline tail.
+    TestCell("long_pain_8",         input_tokens=4096, output_tokens=512,  concurrency=8),
+    TestCell("long_pain_16",        input_tokens=4096, output_tokens=512,  concurrency=16),
+    # Flipped: short input, long output (4096 tokens). Decode-heavy.
+    # Healthy total wall time ~225s on AMD; 1200s hard ceiling gives
+    # ~5× headroom. Pre-TTFT is short (small input) so the default
+    # 120s is fine. Inter-token of 10s allows for momentary slowdowns.
+    TestCell("long_output",         input_tokens=512,  output_tokens=4096, concurrency=4,
+             hard_timeout_s=1200.0),
 ]
 
 
@@ -635,58 +664,56 @@ class _ReqResult:
     timed_out: bool = False
 
 
-async def _do_stream(
-    client: AsyncOpenAI, prompt: str, output_tokens: int,
-) -> _ReqResult:
-    """Issue one streaming request, return latency / token-count
-    measurements. Caller is responsible for the asyncio.wait_for
-    wrapper that enforces the per-cell timeout."""
-    t_start = time.monotonic()
-    t_first: Optional[float] = None
-    n_tokens = 0
-    stream = await client.chat.completions.create(
-        model=SERVED_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=output_tokens,
-        stream=True,
-        extra_body={"ignore_eos": True},
-        timeout=REQUEST_TIMEOUT_S,
-    )
-    async for chunk in stream:
-        if t_first is None:
-            t_first = time.monotonic()
-        delta = chunk.choices[0].delta if chunk.choices else None
-        if delta and getattr(delta, "content", None):
-            # Roughly 1 chunk per token for vLLM's stream; count chunks.
-            n_tokens += 1
-    if t_first is None:
-        return _ReqResult(error="no tokens emitted")
-    t_end = time.monotonic()
-    return _ReqResult(
-        ttft_ms=(t_first - t_start) * 1000.0,
-        total_ms=(t_end - t_start) * 1000.0,
-        output_tokens=n_tokens,
-    )
+# Tier-error categories that count as ``timeouts`` (separate from
+# ``errors``). Connection-level failures and HTTP exceptions are
+# still ``errors``. The set matches what simulator/streaming.py
+# emits, so post-hoc analysis can pivot by ``error`` value across
+# both the optimizer's JSON and the simulator's turn_events.
+_TIER_TIMEOUT_CATEGORIES = frozenset({
+    "ttft_stalled", "decode_stalled", "hard_timeout",
+    "connection_timeout",
+})
 
 
 async def measure_one_request(
-    client: AsyncOpenAI, prompt: str, output_tokens: int, timeout_s: float,
+    client: AsyncOpenAI, prompt: str, output_tokens: int,
+    pre_ttft_timeout_s: float,
+    inter_token_timeout_s: float,
+    hard_timeout_s: float,
 ) -> _ReqResult:
-    """Wrap _do_stream in asyncio.wait_for so a stuck request gets
-    killed at ``timeout_s`` and classified as a timeout. The openai
-    SDK's own ``timeout`` parameter only governs per-chunk reads, so
-    a stream that emits tokens slowly enough to take 15 minutes
-    won't trip it — we need our own outer wall-clock cap.
-    """
-    try:
-        return await asyncio.wait_for(
-            _do_stream(client, prompt, output_tokens),
-            timeout=timeout_s,
-        )
-    except asyncio.TimeoutError:
-        return _ReqResult(timed_out=True, error="timeout")
-    except Exception as e:  # noqa: BLE001
-        return _ReqResult(error=str(e)[:200])
+    """Issue one streaming request under the three-tier termination
+    policy. Returns _ReqResult with partial-progress fields populated
+    even on abort, so the caller can compute meaningful percentiles
+    on what got through.
+
+    Tier categories surface in ``error``: ``ttft_stalled`` (no first
+    token), ``decode_stalled`` (mid-stream stall), ``hard_timeout``
+    (slow-but-progressing past budget). Other failures (HTTP error,
+    connection timeout) still come through as exception class names
+    or ``connection_timeout``."""
+    # Re-use the simulator's stream consumer — single source of
+    # truth for the termination policy.
+    from simulator.streaming import consume_with_tiers
+
+    result = await consume_with_tiers(
+        create_stream=lambda: client.chat.completions.create(
+            model=SERVED_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=output_tokens,
+            stream=True,
+            extra_body={"ignore_eos": True},
+        ),
+        pre_ttft_timeout_s=pre_ttft_timeout_s,
+        inter_token_timeout_s=inter_token_timeout_s,
+        hard_timeout_s=hard_timeout_s,
+    )
+    return _ReqResult(
+        ttft_ms=result.ttft_ms,
+        total_ms=result.total_ms,
+        output_tokens=result.output_tokens,
+        error=result.error,
+        timed_out=(result.error in _TIER_TIMEOUT_CATEGORIES),
+    )
 
 
 async def measure_cell(
@@ -695,7 +722,8 @@ async def measure_cell(
 ) -> CellResult:
     state.set_phase(
         f"cell {cell.name} (in={cell.input_tokens} out={cell.output_tokens} "
-        f"c={cell.concurrency} timeout={cell.timeout_s:.0f}s)"
+        f"c={cell.concurrency} ttft<{cell.pre_ttft_timeout_s:.0f}s "
+        f"hard<{cell.hard_timeout_s:.0f}s)"
     )
     # Round-robin requests across replicas.
     clients = [
@@ -705,7 +733,9 @@ async def measure_cell(
     tasks = [
         measure_one_request(
             clients[i % len(clients)], prompts[i], cell.output_tokens,
-            cell.timeout_s,
+            pre_ttft_timeout_s=cell.pre_ttft_timeout_s,
+            inter_token_timeout_s=cell.inter_token_timeout_s,
+            hard_timeout_s=cell.hard_timeout_s,
         )
         for i in range(cell.concurrency)
     ]
@@ -716,14 +746,22 @@ async def measure_cell(
     out_tok_total = 0
     errors = 0
     timeouts = 0
+    tier_errors: dict[str, int] = {}
     error_msgs: list[str] = []
     for r in results:
-        if r.timed_out:
-            timeouts += 1
-            continue
         if r.error is not None:
-            errors += 1
-            error_msgs.append(r.error)
+            tier_errors[r.error] = tier_errors.get(r.error, 0) + 1
+            if r.timed_out:  # tier-policy abort
+                timeouts += 1
+            else:
+                errors += 1
+                error_msgs.append(r.error)
+            # Even on tier abort, the partial-progress data is real
+            # — count whatever output tokens we got toward the
+            # aggregate throughput so a stuck-tail config's
+            # throughput correctly drops.
+            if r.output_tokens:
+                out_tok_total += r.output_tokens
             continue
         if r.ttft_ms is None or r.total_ms is None or r.output_tokens is None:
             errors += 1
@@ -738,6 +776,7 @@ async def measure_cell(
         samples=samples,
         errors=errors,
         timeouts=timeouts,
+        tier_errors=tier_errors,
         ttft_p50_ms=_pct(ttfts, 0.5),
         ttft_p95_ms=_pct(ttfts, 0.95),
         tpot_p50_ms=_pct(tpots, 0.5),
@@ -898,7 +937,10 @@ def render(state: OptimizerState) -> Layout:
     # "12087 *2" means 14 of 16 requests completed at 12 s p95, but
     # 2 were killed at the per-cell timeout. Distinguishes a real win
     # from "fast on the few that didn't get stuck."
-    summary_tbl = Table(title="Configs (so far)  (* = killed by per-cell timeout)", expand=True)
+    summary_tbl = Table(
+        title="Configs (so far)  (*N<T1|T2|T3|C> = N aborts; T1=admission, T2=mid-stream, T3=slow, C=connect)",
+        expand=True,
+    )
     summary_tbl.add_column("config")
     summary_tbl.add_column("status")
     summary_tbl.add_column("launch s", justify="right")
@@ -927,19 +969,40 @@ def render(state: OptimizerState) -> Layout:
     return layout
 
 
+_TIER_SHORT = {
+    "ttft_stalled": "T1",      # admission / pre-TTFT deadlock
+    "decode_stalled": "T2",    # mid-stream stall
+    "hard_timeout": "T3",      # slow-but-progressing past budget
+    "connection_timeout": "C", # couldn't even open the stream
+}
+
+
 def _fmt_ttft_with_timeouts(c: CellResult | None) -> str:
-    """Render p95 TTFT, suffixed with ``*N`` when N requests were
-    killed by the per-cell timeout. ``*`` reads as "warning" — the
-    p95 is from the surviving requests only, so a "fast" number with
-    a high ``*`` count means the config has a tail problem masked by
-    the dashboard summary."""
+    """Render p95 TTFT, suffixed with ``*N<tier>`` when N requests
+    were killed by the tier policy. ``*`` reads as "warning"; the
+    tier code distinguishes WHY:
+
+      *2T1  = 2 admission-deadlock aborts
+      *2T2  = 2 mid-stream stalls
+      *2T3  = 2 slow-but-progressing aborts (engine functional but
+              over-budget)
+
+    p95 is from successful requests only; a fast number with a high
+    *N count means the config has a tail problem the average hides.
+    A high T3 count is itself the diagnostic — engine is working,
+    just not fast enough."""
     if c is None or c.ttft_p95_ms is None:
         return "—"
     timeouts = getattr(c, "timeouts", 0) or 0
     base = f"{c.ttft_p95_ms:.0f}"
-    if timeouts:
-        return f"{base} *{timeouts}"
-    return base
+    if not timeouts:
+        return base
+    tier_errors = getattr(c, "tier_errors", {}) or {}
+    if tier_errors:
+        dominant = max(tier_errors.items(), key=lambda kv: kv[1])
+        suffix = _TIER_SHORT.get(dominant[0], "?")
+        return f"{base} *{timeouts}{suffix}"
+    return f"{base} *{timeouts}"
 
 
 # ── Main loop ───────────────────────────────────────────────────────────
@@ -1008,7 +1071,10 @@ async def run_config(
     for i in range(WARMUP_REQUESTS):
         await measure_one_request(
             warmup_clients[i % len(warmup_clients)], warmup_prompt,
-            output_tokens=32, timeout_s=60.0,
+            output_tokens=32,
+            pre_ttft_timeout_s=60.0,
+            inter_token_timeout_s=10.0,
+            hard_timeout_s=60.0,
         )
     state.append_log("warmup done")
     cell_results: list[CellResult] = []
@@ -1016,9 +1082,15 @@ async def run_config(
         cr = await measure_cell(cfg, cell, prompts[cell.name], state)
         cell_results.append(cr)
         state.push_cell_result(cr)
+        # Compact tier breakdown so the operator can see at a glance
+        # which failure mode dominated. Empty when no errors / timeouts.
+        tier_summary = ""
+        if cr.tier_errors:
+            parts = [f"{k}={v}" for k, v in sorted(cr.tier_errors.items())]
+            tier_summary = " [" + ",".join(parts) + "]"
         state.append_log(
             f"{cell.name}: n={cr.samples} err={cr.errors} "
-            f"timeouts={cr.timeouts} "
+            f"timeouts={cr.timeouts}{tier_summary} "
             f"ttft_p95={cr.ttft_p95_ms or 0:.0f}ms "
             f"tpot_p95={cr.tpot_p95_ms or 0:.0f}ms "
             f"tok/s={cr.throughput_out_tok_s or 0:.1f}"

@@ -1892,3 +1892,156 @@ def test_prefix_cache_per_persona_breakdown() -> None:
     rep = analyse_rows(rows)
     assert rep.per_persona["conversational"]["hit_rate"] >= 0.9
     assert rep.per_persona["quick_lookup"]["hit_rate"] <= 0.1
+
+
+# ── Forklift script (scripts/forklift_run.py) ─────────────────────────
+
+
+def _seed_forklift_source(run_dir: Path) -> dict:
+    """Build a synthetic source ``run.db`` with a mix of personas and
+    cohorts spanning the rename / removal / cohort cases.
+
+    Returns the cohort_run_id → cohort_id mapping for assertion."""
+    from simulator.database import Database
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    db = Database(run_dir / "run.db")
+
+    # 1) drafter (ok)        — should be renamed to writer and kept
+    # 2) conversational (ok) — current persona, keep as-is
+    # 3) ai_engineering (ok) — removed persona, drop
+    # 4) chat_heavy (ok)     — cohort, drop (mix changed)
+    # 5) writer (interrupted) — current persona but bad status, drop
+    seeds = [
+        ("crid-drafter",        "drafter",        "ok"),
+        ("crid-convo",          "conversational", "ok"),
+        ("crid-aieng",          "ai_engineering", "ok"),
+        ("crid-chat-heavy",     "chat_heavy",     "ok"),
+        ("crid-writer-partial", "writer",         "interrupted"),
+    ]
+    for crid, cid, status in seeds:
+        db.insert_run(
+            cohort_run_id=crid, started_at="2026-05-01T00:00:00Z",
+            engine_type="vllm", model_id="Qwen/Test", cohort_id=cid,
+            cohort_definition={"name": cid, "personas": [cid]},
+            config={},
+        )
+        # Add a measurement with a deterministic measurement_id
+        # (auto-incremented; we'll capture it for CSV stubs).
+        mid = db.insert_measurement({
+            "cohort_run_id": crid, "step_index": 0,
+            "target_pool_size": 8,
+            "measured_avg_pool_size": 8.0,
+            "measured_avg_in_flight": 7.5,
+            "measurement_started_at": "2026-05-01T00:01:00Z",
+            "measurement_duration_s": 60, "sample_size": 100,
+            "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+            "combined_violation_rate": 0.0,
+            "violation_rate_ci_lower": 0.0,
+            "violation_rate_ci_upper": 0.0,
+            "capacity_status": "pass",
+        })
+        # Drop a single turn_event so the persona_id rename can be checked.
+        db.insert_events([{
+            "measurement_id": mid,
+            "persona_id": cid,
+            "user_id": f"u-{crid}",
+            "session_id": "s0", "turn_index": 0,
+            "submitted_at_ms": 0, "ttft_ms": 50.0,
+            "completed_at_ms": 1000,
+            "input_tokens": 10, "history_tokens": 0,
+            "output_tokens": 20, "tpot_ms": 30.0,
+            "end_to_end_ms": 1000.0,
+            "in_flight_at_submit": 1,
+            "sla_ttft_violation": 0, "sla_tpot_violation": 0,
+        }])
+        # Drop a perf csv stub for this measurement_id.
+        (run_dir / f"perf_m{mid}_8.csv").write_text("ts,cycles\n0,0\n")
+        db.finalise_run(crid, "2026-05-01T00:30:00Z", status)
+
+    db.close()
+    return {crid: cid for crid, cid, _ in seeds}
+
+
+def test_forklift_keeps_current_personas_renames_drafter(tmp_path) -> None:
+    """End-to-end: source run with drafter+convo+ai_eng+chat_heavy+
+    partial-writer → forklift keeps the two ok current-persona rows
+    (with drafter→writer rename), drops the rest."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    forklift_mod = importlib.import_module("forklift_run")
+
+    src = tmp_path / "run_01"
+    _seed_forklift_source(src)
+    dst = tmp_path / "run_02"
+
+    forklift_mod.forklift(src, dst, dry_run=False)
+
+    # Source must still exist, untouched.
+    assert (src / "run.db").exists()
+    # Destination has run.db + the two carried-over CSVs.
+    assert (dst / "run.db").exists()
+
+    import sqlite3
+    conn = sqlite3.connect(dst / "run.db")
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT cohort_run_id, cohort_id, final_status FROM cohort_run "
+        "ORDER BY cohort_run_id"
+    ).fetchall()
+    by_id = {r["cohort_run_id"]: r["cohort_id"] for r in rows}
+    assert set(by_id.keys()) == {"crid-drafter", "crid-convo"}
+    assert by_id["crid-drafter"] == "writer"      # renamed
+    assert by_id["crid-convo"] == "conversational"
+
+    # turn_events.persona_id was rewritten too.
+    persona_ids = {
+        r["persona_id"] for r in conn.execute(
+            "SELECT persona_id FROM turn_events"
+        )
+    }
+    assert "drafter" not in persona_ids
+    assert "writer" in persona_ids
+    assert "conversational" in persona_ids
+    conn.close()
+
+
+def test_forklift_copies_perf_csvs_for_kept_measurements(tmp_path) -> None:
+    """Perf CSVs (named perf_m<measurement_id>_*.csv) follow the
+    kept measurement_ids so post-export prefix-cache analysis still
+    has its source data."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    forklift_mod = importlib.import_module("forklift_run")
+
+    src = tmp_path / "run_01"
+    _seed_forklift_source(src)
+    dst = tmp_path / "run_02"
+
+    forklift_mod.forklift(src, dst, dry_run=False)
+
+    src_csvs = sorted(p.name for p in src.glob("perf_m*_*.csv"))
+    dst_csvs = sorted(p.name for p in dst.glob("perf_m*_*.csv"))
+    # We seeded 5 source CSVs but only 2 cohort_runs are kept (drafter,
+    # convo) — so 2 CSVs in dest, both also present in source.
+    assert len(src_csvs) == 5
+    assert len(dst_csvs) == 2
+    assert set(dst_csvs).issubset(set(src_csvs))
+
+
+def test_forklift_dry_run_writes_nothing(tmp_path) -> None:
+    """``--dry-run`` reports the plan without creating the dest dir."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    forklift_mod = importlib.import_module("forklift_run")
+
+    src = tmp_path / "run_01"
+    _seed_forklift_source(src)
+    dst = tmp_path / "run_02"
+
+    forklift_mod.forklift(src, dst, dry_run=True)
+
+    assert not dst.exists()

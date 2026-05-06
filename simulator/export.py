@@ -552,6 +552,77 @@ def _summarise_cohort(
         _landing_zones(measurements, "target_status")
     )
 
+    # Derived deployment-shape fields. These are pure post-processing
+    # of the three landing-zone numbers above — let the buyer-page
+    # frontend render the right warnings without parsing the
+    # underlying numbers itself.
+    #
+    #   headroom = soft_capacity − capacity
+    #              "graceful degradation zone" — how many users you
+    #              can add past the premium cap before hitting any
+    #              actual SLA violations.
+    #
+    #   cliff    = fail − soft_capacity
+    #              "warning zone width" — how many pool slots between
+    #              first SLA violation (5%) and substantial fail
+    #              (>30%). A wide cliff means slow degradation; a
+    #              narrow cliff means a sharp transition.
+    #
+    #   deployment_band_shape:
+    #     graceful  — cliff > 16 (gentle slope; oversize forgiving)
+    #     moderate  — 8 ≤ cliff ≤ 16
+    #     sharp     — cliff < 8 (oversize unforgiving — small pool
+    #                            increase past soft_capacity collapses)
+    #     unbounded — fail not observed within probed range
+    #     unmeasured — capacity / soft_capacity not located
+    headroom_pool = (
+        soft_capacity_pool - capacity_pool
+        if (soft_capacity_pool is not None and capacity_pool is not None)
+        else None
+    )
+    cliff_pool = (
+        fail_pool - soft_capacity_pool
+        if (fail_pool is not None and soft_capacity_pool is not None)
+        else None
+    )
+    if cliff_pool is None:
+        if fail_pool is None and soft_capacity_pool is not None:
+            band_shape = "unbounded"
+        elif soft_capacity_pool is None:
+            band_shape = "unmeasured"
+        else:
+            band_shape = "unmeasured"
+    elif cliff_pool > 16:
+        band_shape = "graceful"
+    elif cliff_pool >= 8:
+        band_shape = "moderate"
+    else:
+        band_shape = "sharp"
+
+    # Measurement coverage describes how confident we are in the
+    # capacity numbers. Currently a coarse three-way split — the
+    # two-knee algorithm (forthcoming) will populate finer values:
+    #
+    #   full_curve       — the algorithm reached a sustained fail
+    #                      AND has at least one passing measurement.
+    #   downward_search  — initial pool size already failed; the
+    #                      algorithm searched downward (NOT YET
+    #                      IMPLEMENTED — placeholder for the two-knee
+    #                      stepper that ships next).
+    #   single_point     — only one measurement exists (cohort
+    #                      collapsed at initial_pool_size with no
+    #                      adaptive bisection).
+    #   capped           — algorithm reached max_pool_size without
+    #                      finding a sustained fail.
+    if len(measurements) <= 1:
+        coverage = "single_point"
+    elif fail_pool is not None and capacity_pool is not None:
+        coverage = "full_curve"
+    elif fail_pool is None:
+        coverage = "capped"
+    else:
+        coverage = "single_point"
+
     cohort_def = json.loads(run["cohort_definition_json"])
     # Two parallel bottleneck attributions — what limits SLA capacity
     # vs what limits premium-quality capacity. They can differ; if
@@ -586,6 +657,14 @@ def _summarise_cohort(
         "target_capacity_pool_size": target_capacity_pool,
         "target_soft_capacity_pool_size": target_soft_capacity_pool,
         "target_fail_pool_size": target_fail_pool,
+        # Derived deployment-shape fields — saves the buyer page from
+        # having to compute them. See the comment block above the
+        # ``headroom_pool`` / ``cliff_pool`` / ``band_shape`` /
+        # ``coverage`` definitions.
+        "headroom_pool_size": headroom_pool,
+        "cliff_pool_size": cliff_pool,
+        "deployment_band_shape": band_shape,
+        "measurement_coverage": coverage,
         # Self-documenting band labels so the buyer page can render
         # the three-zone narrative without hardcoding the language
         # in the frontend.

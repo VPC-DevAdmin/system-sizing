@@ -1194,6 +1194,133 @@ def test_bottleneck_freq_droop_uses_mean_not_min() -> None:
     assert evidence["effective_freq_ghz_mean"] == 2.26
 
 
+def test_export_derived_deployment_shape_fields(tmp_path) -> None:
+    """The export's derived fields (headroom, cliff, band_shape,
+    coverage) save the buyer-page frontend from computing them.
+    Tests the four shape categories: graceful / moderate / sharp /
+    unbounded / unmeasured."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    def _build(curve_steps: list[tuple[int, str]]) -> Database:
+        run_dir = tmp_path / f"run_{abs(hash(tuple(curve_steps))) % 99:02d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        db = Database(run_dir / "run.db")
+        db.insert_run(
+            cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+            engine_type="vllm", model_id="Qwen/Test", cohort_id="x",
+            cohort_definition={"name": "x"}, config={},
+        )
+        for i, (pool, status) in enumerate(curve_steps):
+            mid = db.insert_measurement({
+                "cohort_run_id": "crid", "step_index": i,
+                "target_pool_size": pool,
+                "measured_avg_pool_size": float(pool),
+                "measured_avg_in_flight": 0.0,
+                "measurement_started_at": "2026-01-01T00:00:00Z",
+                "measurement_duration_s": 60, "sample_size": 100,
+                "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+                "combined_violation_rate": 0.0,
+                "violation_rate_ci_lower": 0.0,
+                "violation_rate_ci_upper": 0.0,
+                "capacity_status": status,
+            })
+        db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+        db.close()
+        return run_dir
+
+    # graceful: cliff > 16
+    rd = _build([(8, "pass"), (32, "pass"), (64, "marginal"),
+                 (96, "marginal"), (192, "fail")])  # cliff = 192-96 = 96
+    doc, _ = export_dir(rd.parent)
+    cohort = next(c for c in doc["cohorts"] if c["cohort_run_id"] == "crid")
+    assert cohort["capacity_pool_size"] == 32
+    assert cohort["soft_capacity_pool_size"] == 96
+    assert cohort["fail_pool_size"] == 192
+    assert cohort["headroom_pool_size"] == 64
+    assert cohort["cliff_pool_size"] == 96
+    assert cohort["deployment_band_shape"] == "graceful"
+    assert cohort["measurement_coverage"] == "full_curve"
+
+
+def test_export_band_shape_sharp_cliff(tmp_path) -> None:
+    """Sharp transitions (cliff < 8) get flagged as 'sharp' so the
+    buyer page can warn about oversize being unforgiving."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="x",
+        cohort_definition={"name": "x"}, config={},
+    )
+    # pool=8 pass, 16 marginal, 20 fail → cliff=4 < 8 → sharp
+    for i, (pool, status) in enumerate([(8, "pass"), (16, "marginal"), (20, "fail")]):
+        db.insert_measurement({
+            "cohort_run_id": "crid", "step_index": i,
+            "target_pool_size": pool,
+            "measured_avg_pool_size": float(pool),
+            "measured_avg_in_flight": 0.0,
+            "measurement_started_at": "2026-01-01T00:00:00Z",
+            "measurement_duration_s": 60, "sample_size": 100,
+            "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+            "combined_violation_rate": 0.0,
+            "violation_rate_ci_lower": 0.0,
+            "violation_rate_ci_upper": 0.0,
+            "capacity_status": status,
+        })
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    doc, _ = export_dir(tmp_path)
+    cohort = doc["cohorts"][0]
+    assert cohort["cliff_pool_size"] == 4
+    assert cohort["deployment_band_shape"] == "sharp"
+
+
+def test_export_band_shape_unbounded_when_no_fail(tmp_path) -> None:
+    """If we never observed a fail (sweep ran to max without crossing),
+    band_shape is 'unbounded' — explicit signal that the failure
+    threshold wasn't measured."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="x",
+        cohort_definition={"name": "x"}, config={},
+    )
+    for i, (pool, status) in enumerate([(8, "pass"), (32, "pass"), (64, "marginal"), (96, "marginal")]):
+        db.insert_measurement({
+            "cohort_run_id": "crid", "step_index": i,
+            "target_pool_size": pool,
+            "measured_avg_pool_size": float(pool),
+            "measured_avg_in_flight": 0.0,
+            "measurement_started_at": "2026-01-01T00:00:00Z",
+            "measurement_duration_s": 60, "sample_size": 100,
+            "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+            "combined_violation_rate": 0.0,
+            "violation_rate_ci_lower": 0.0,
+            "violation_rate_ci_upper": 0.0,
+            "capacity_status": status,
+        })
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    doc, _ = export_dir(tmp_path)
+    cohort = doc["cohorts"][0]
+    assert cohort["fail_pool_size"] is None
+    assert cohort["cliff_pool_size"] is None
+    assert cohort["deployment_band_shape"] == "unbounded"
+    assert cohort["measurement_coverage"] == "capped"
+
+
 def test_landing_zones_three_band_split() -> None:
     """The export's three-zone landing zones (capacity / soft_capacity
     / fail_pool) must accurately split a curve into the

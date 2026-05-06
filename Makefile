@@ -146,6 +146,15 @@ run-persona:
 # explicitly ignored. nohup adds SIGHUP-ignore on top, so terminal
 # disconnect can't kill it either. ``</dev/null`` belt-and-braces so
 # the engine subprocess can never block waiting on stdin.
+#
+# IMPORTANT: do NOT pass --new-run to the Python sweep here.
+# RESOLVE_RUN_DIR (above) already creates the fresh run_NN+1 when
+# RUN_NEW=true; the Python sweep's resolve_run_dir() with new=False
+# picks up the freshly-created (latest) dir via latest_run_dir().
+# Passing --new-run a second time would create yet another run dir,
+# splitting the sweep's DBs and the wrapper's log file across two
+# directories. Resume-skip is harmless on a fresh dir (find_completed_runs
+# returns empty) so RUN_NEW=true semantics are preserved.
 .PHONY: run-sweep
 run-sweep:
 	@RD="$$($(RESOLVE_RUN_DIR))" ; \
@@ -153,7 +162,6 @@ run-sweep:
 	nohup $(PY) -m simulator.cli sweep \
 		--config $(CONFIG) \
 		--type $(SWEEP_TYPE) \
-		$(if $(RUN_NEW),--new-run) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
 		$(if $(MODEL),--model $(MODEL)) \
 		>"$$LOG" 2>&1 </dev/null & \

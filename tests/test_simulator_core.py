@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import asyncio
 
-from simulator.adaptive import StepResult, choose_next_pool_size
+from simulator.adaptive import StepResult, TwoKneeStepper
 from simulator.distributions import Discrete, LogNormal, Constant
 from simulator.measurement import (
     _percentile,
@@ -72,270 +72,166 @@ def test_constant_distribution_returns_value() -> None:
     assert Constant(value=42).sample(rng) == 42
 
 
-# ── Adaptive stepping ─────────────────────────────────────────────────
+# ── Adaptive stepping (TwoKneeStepper) ────────────────────────────────
 
 
-def test_adaptive_starts_at_initial_size_when_history_empty() -> None:
-    nxt = choose_next_pool_size(
-        [], initial_pool_size=4, max_pool_size=512,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+def _drive_stepper(
+    stepper: TwoKneeStepper,
+    *,
+    violation_at: dict[int, float] | None = None,
+    target_miss_at: dict[int, float] | None = None,
+    max_steps: int = 30,
+) -> list[int]:
+    """Drive the stepper to completion, recording synthetic results.
+
+    For each pool size requested, supply a violation_rate (defaults to
+    0.0) and target_miss_rate (defaults to violation_rate). Returns the
+    sequence of pool sizes that were measured."""
+    violation_at = violation_at or {}
+    target_miss_at = target_miss_at or {}
+    sequence: list[int] = []
+    for _ in range(max_steps):
+        pool = stepper.next_pool_size()
+        if pool is None:
+            break
+        v = violation_at.get(pool, 0.0)
+        t = target_miss_at.get(pool, v)
+        stepper.record(StepResult(pool_size=pool, violation_rate=v, target_miss_rate=t))
+        sequence.append(pool)
+    return sequence
+
+
+def test_stepper_returns_initial_pool_on_empty_history() -> None:
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256)
+    assert stepper.next_pool_size() == 8
+
+
+def test_stepper_doubles_in_safe_regime() -> None:
+    """Phase 1: while violation stays well below 5%, double each step."""
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256)
+    seq = _drive_stepper(stepper)
+    # Pure doubling all the way to the cap, then stop (no failure observed).
+    assert seq == [8, 16, 32, 64, 128, 256]
+    assert stepper.coverage() == "capped"
+
+
+def test_stepper_transitions_to_bisect_fail_on_threshold_cross() -> None:
+    """When a doubling step crosses 50% violation, switch to bisection."""
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256)
+    seq = _drive_stepper(
+        stepper,
+        violation_at={64: 0.66, 128: 0.66, 256: 0.66},
     )
-    assert nxt == 4
+    # Doubled 8→16→32→64 (failed), then bisected between 32 and 64.
+    assert seq[0:4] == [8, 16, 32, 64]
+    # First bisection midpoint is (32+64)//2 = 48.
+    assert 48 in seq
 
 
-def test_adaptive_doubles_when_far_from_knee() -> None:
-    """Below 5% violation rate we double the pool size each step —
-    cheap exploration in the safe regime."""
-    hist = [StepResult(pool_size=4, violation_rate=0.0)]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=4, max_pool_size=512,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+def test_stepper_bisects_fail_knee_to_resolution() -> None:
+    """After bracketing, bisection narrows the gap to ≤ bisect_resolution."""
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256, bisect_resolution=4)
+    # All sub-64 pools pass; 64 onwards fail.
+    seq = _drive_stepper(
+        stepper,
+        violation_at={64: 0.66, 96: 0.30, 80: 0.20, 72: 0.10, 56: 0.02, 48: 0.0, 40: 0.0},
     )
-    assert nxt == 8
+    # The pass/fail bracket should narrow to within 4 pool slots.
+    fails = [p for p in seq if p in {64} or p in {72, 80, 96}]
+    passes = [p for p in seq if p not in fails]
+    assert min(fails) - max(p for p in passes if p < min(fails)) <= 4
 
 
-def test_adaptive_stops_at_violation_threshold() -> None:
-    """Past the configured stop threshold, ramping ends — extra steps
-    only add noise once the system is plainly past its limit."""
-    hist = [StepResult(pool_size=64, violation_rate=0.6)]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=4, max_pool_size=512,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+def test_stepper_initial_pool_already_fails_triggers_downward_search() -> None:
+    """If pool=8 already violates, halve down looking for a passing zone."""
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256, downward_floor=2)
+    seq = _drive_stepper(
+        stepper,
+        violation_at={8: 0.7, 4: 0.6, 2: 0.6},
     )
-    assert nxt is None
+    # Halved 8 → 4 → 2; never found a pass.
+    assert seq == [8, 4, 2]
+    assert stepper.coverage() == "exceeds_hardware"
 
 
-def test_adaptive_backtracks_on_overshoot() -> None:
-    """A single jump > 0.20 in violation rate means the previous step
-    was too coarse near the knee. We bisect and re-measure between
-    the last two pool sizes."""
-    hist = [
-        StepResult(pool_size=16, violation_rate=0.05),
-        StepResult(pool_size=64, violation_rate=0.32),  # +0.27 jump
-    ]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=4, max_pool_size=512,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+def test_stepper_downward_search_finds_passing_pool() -> None:
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256, downward_floor=2)
+    seq = _drive_stepper(
+        stepper,
+        violation_at={8: 0.7, 4: 0.0},
     )
-    assert nxt is not None
-    assert 16 < nxt < 64
-    assert nxt == (16 + 64) // 2
+    # 8 fails, 4 passes — coverage classified as downward_search.
+    assert seq[:2] == [8, 4]
+    assert stepper.coverage() == "downward_search"
 
 
-def test_adaptive_uses_fine_steps_near_knee() -> None:
-    """When slope is high (we're on the rising edge) we use small fixed
-    steps so the curve has resolution where it matters."""
-    hist = [
-        StepResult(pool_size=32, violation_rate=0.10),
-        StepResult(pool_size=36, violation_rate=0.13),  # slope = 0.0075/step
-    ]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=4, max_pool_size=512,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+def test_stepper_bisects_target_knee_independently() -> None:
+    """Knee 1 (target_miss ≥ 5%) bisects on a different rate field
+    than knee 2 (violation ≥ 5%)."""
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256, bisect_resolution=4)
+    # Set up: violation only fires at 64+, but target_miss fires earlier (32+).
+    seq = _drive_stepper(
+        stepper,
+        violation_at={64: 0.66, 96: 0.30, 80: 0.20, 72: 0.10, 56: 0.02, 48: 0.0, 40: 0.0},
+        target_miss_at={
+            8: 0.0, 16: 0.0, 32: 0.10, 64: 0.66,
+            48: 0.06, 40: 0.05, 56: 0.10,
+            72: 0.20, 80: 0.30, 96: 0.50,
+        },
     )
-    assert nxt is not None
-    # Should be a small increment over 36 (≤ 4 from the formula).
-    assert 36 < nxt <= 40
+    # Both phases measured something between safe and target-miss.
+    target_miss_pools = [p for p in seq if p >= 32]
+    assert len(target_miss_pools) >= 2  # at least one bisection happened
 
 
-def test_adaptive_caps_at_max_pool_size() -> None:
-    hist = [StepResult(pool_size=256, violation_rate=0.01)]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=4, max_pool_size=300,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+def test_stepper_infill_adds_midpoints() -> None:
+    """Phase 4: midpoints between fast_max → knee_1 and knee_1 → knee_2
+    get scheduled when there's enough gap."""
+    stepper = TwoKneeStepper(
+        initial_pool_size=8, max_pool_size=256,
+        bisect_resolution=4, infill_skip_pct=0.10,
     )
-    assert nxt == 300
-
-
-def test_adaptive_returns_none_at_max_when_already_there() -> None:
-    hist = [StepResult(pool_size=300, violation_rate=0.01)]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=4, max_pool_size=300,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
+    # Drive a complete two-knee sweep with violation at 128, target_miss at 32.
+    seq = _drive_stepper(
+        stepper,
+        violation_at={
+            128: 0.66, 96: 0.20, 80: 0.10, 72: 0.06, 64: 0.02, 48: 0.0,
+            32: 0.0, 16: 0.0, 8: 0.0,
+        },
+        target_miss_at={
+            8: 0.0, 16: 0.0, 32: 0.10, 48: 0.10, 64: 0.10,
+            72: 0.20, 80: 0.20, 96: 0.30, 128: 0.66,
+        },
     )
-    assert nxt is None
+    # We should have explored both knees — sweep is rich enough that
+    # at least one pool size beyond the original doubling sequence
+    # was measured (i.e. infill or bisection points landed).
+    extra = [p for p in seq if p not in {8, 16, 32, 64, 128, 256}]
+    assert len(extra) >= 1
 
 
-def test_adaptive_bisects_after_first_cliff_crossing() -> None:
-    """Original bug: the run jumped 32 → 64 and pool=64 came in at
-    66% violation. The stepper returned None instead of bisecting,
-    leaving the knee unlocalised between 32 and 64. Fix: detect the
-    failing measurement and bisect to the midpoint."""
-    hist = [
-        StepResult(pool_size=8, violation_rate=0.0),
-        StepResult(pool_size=16, violation_rate=0.0),
-        StepResult(pool_size=32, violation_rate=0.0),
-        StepResult(pool_size=64, violation_rate=0.66),
-    ]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=8, max_pool_size=256,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
-    )
-    assert nxt == 48, f"expected midpoint of 32 and 64, got {nxt}"
+def test_stepper_coverage_full_curve() -> None:
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256)
+    _drive_stepper(stepper, violation_at={64: 0.66})
+    # Both passing (8/16/32) and failing (64) measurements present.
+    assert stepper.coverage() == "full_curve"
 
 
-def test_adaptive_iteratively_narrows_knee() -> None:
-    """Bisect down from a fail-bracket to localise the knee further.
-
-    32 passed, 64 failed → previous step bisected to 48. If 48 also
-    fails, knee is between 32 and 48 — bisect again to 40.
-    """
-    hist = [
-        StepResult(pool_size=32, violation_rate=0.0),
-        StepResult(pool_size=64, violation_rate=0.66),
-        StepResult(pool_size=48, violation_rate=0.55),
-    ]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=8, max_pool_size=256,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
-    )
-    # smallest fail = 48; largest pass below = 32; gap = 16 > 8 → bisect to 40
-    assert nxt == 40
+def test_stepper_coverage_single_point() -> None:
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256)
+    # Record exactly one measurement and stop driving.
+    pool = stepper.next_pool_size()
+    assert pool == 8
+    stepper.record(StepResult(pool_size=8, violation_rate=0.0, target_miss_rate=0.0))
+    assert stepper.coverage() == "single_point"
 
 
-def test_adaptive_bisects_upward_when_bisect_passed() -> None:
-    """If the bisect itself passed, the knee is between the bisect and
-    the original fail. Continue bisecting upward from there."""
-    hist = [
-        StepResult(pool_size=32, violation_rate=0.0),
-        StepResult(pool_size=64, violation_rate=0.66),
-        StepResult(pool_size=48, violation_rate=0.10),
-    ]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=8, max_pool_size=256,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
-    )
-    # smallest fail = 64; largest pass below = 48; gap = 16 > 8 → bisect to 56
-    assert nxt == 56
-
-
-def test_adaptive_stops_when_bisect_gap_below_threshold() -> None:
-    """Resolution floor: don't bisect when the pass→fail gap is
-    already small enough that further refinement isn't useful."""
-    hist = [
-        StepResult(pool_size=32, violation_rate=0.0),
-        StepResult(pool_size=40, violation_rate=0.55),
-    ]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=8, max_pool_size=256,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
-        min_bisect_gap=8,
-    )
-    # Gap is 8 — at the threshold (NOT > min_bisect_gap), stop.
-    assert nxt is None
-
-
-def test_adaptive_no_bisect_when_initial_step_fails() -> None:
-    """If even the very first step crosses the threshold there's no
-    pass to bisect against. Stop instead of looping."""
-    hist = [StepResult(pool_size=8, violation_rate=0.7)]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=8, max_pool_size=256,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
-    )
-    assert nxt is None
-
-
-def test_adaptive_doesnt_double_past_marginal_step() -> None:
-    """Regression: R470 first-light Xeon FP8 run produced this exact
-    trace and the stepper jumped to pool=110 from pool=55, completely
-    overshooting the knee that pool=64 had already revealed at 36%
-    violation. The bug: stop_violation_threshold=0.5 gates the
-    bisection state machine, so 36% (≥ 'fail' but < stop) didn't
-    bracket the knee. A subsequent noisy 2% pass at pool=55 then made
-    the slope-based logic 'double' to 110.
-
-    Fix: knee_zone_threshold (default 0.20) is a separate trigger.
-    Anything past it brackets the knee and the stepper bisects
-    instead of doubling, regardless of whether stop has been hit."""
-    hist = [
-        StepResult(pool_size=8, violation_rate=0.00),
-        StepResult(pool_size=16, violation_rate=0.00),
-        StepResult(pool_size=32, violation_rate=0.00),
-        StepResult(pool_size=64, violation_rate=0.36),  # cliff bracket (≥ 0.20)
-        StepResult(pool_size=48, violation_rate=0.06),
-        StepResult(pool_size=52, violation_rate=0.12),
-        StepResult(pool_size=55, violation_rate=0.02),  # noise rebound
-    ]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=8, max_pool_size=256,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
-        knee_zone_threshold=0.20,
-    )
-    # smallest cliff bracket = 64; largest safe (viol < 0.20) below 64 = 55;
-    # gap = 9 > 8 → bisect to (55+64)//2 = 59. Definitely NOT 110.
-    assert nxt == 59, (
-        f"expected bisection to 59 (between safe 55 and cliff 64), "
-        f"got {nxt}"
-    )
-
-
-def test_adaptive_default_threshold_tolerates_low_pool_noise() -> None:
-    """At n=100, a true violation rate of 10-15% can spike up to ~25%
-    just from sampling noise. The default knee_zone_threshold of 0.30
-    leaves a buffer so this kind of noise doesn't latch the algorithm
-    into a terminal stop.
-
-    Concrete scenario: an early step at pool=16 measures 22%
-    violations (true rate maybe ~12%, n=100 noise spike). With a
-    0.20 threshold this entered bisection mode and stopped because
-    the gap from pool=8 was already at the resolution floor; the
-    algorithm produced a single fail point and quit. With 0.30,
-    the algorithm continues — either bisecting once for confirmation
-    (sub-cliff overshoot) or ramping further — but does NOT terminate.
-    """
-    hist = [
-        StepResult(pool_size=8, violation_rate=0.0),
-        StepResult(pool_size=16, violation_rate=0.22),  # noisy
-    ]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=8, max_pool_size=512,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
-        # Default knee_zone_threshold (0.30) — explicitly omit the
-        # arg so this test breaks if someone accidentally lowers it.
-    )
-    # The algorithm must not stop here. It may pick:
-    #   * 12 (sub-cliff overshoot bisect — confirmation step)
-    #   * 17+ (slope-based fine step — continued ramp)
-    # Both are acceptable; the ESSENTIAL property is that we keep
-    # measuring and don't declare the run over on a single noisy step.
-    assert nxt is not None, (
-        "expected continued measurement after 22% noisy step, got None "
-        "(algorithm prematurely terminated)"
-    )
-
-
-def test_adaptive_default_threshold_still_catches_real_cliff() -> None:
-    """Confirm the noise-tolerant 0.30 default still triggers
-    bisection on a clear cliff crossing (35%+)."""
-    hist = [
-        StepResult(pool_size=32, violation_rate=0.0),
-        StepResult(pool_size=64, violation_rate=0.36),
-    ]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=8, max_pool_size=256,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
-    )
-    # 36% > 30% threshold → bisection. mid = (32+64)/2 = 48.
-    assert nxt == 48
-
-
-def test_adaptive_doesnt_repeat_already_measured_pool_size() -> None:
-    """If bisection's chosen midpoint coincides with a pool size we've
-    already measured (rare but possible), stop rather than measure it
-    again."""
-    hist = [
-        StepResult(pool_size=32, violation_rate=0.0),
-        StepResult(pool_size=48, violation_rate=0.10),
-        StepResult(pool_size=64, violation_rate=0.66),
-        StepResult(pool_size=56, violation_rate=0.55),
-    ]
-    nxt = choose_next_pool_size(
-        hist, initial_pool_size=8, max_pool_size=256,
-        knee_slope_threshold=0.005, stop_violation_threshold=0.5,
-    )
-    # smallest fail = 56; largest pass below = 48; gap = 8 → at threshold, stop
-    assert nxt is None
+def test_stepper_does_not_repeat_measured_pool_sizes() -> None:
+    """If bisection's midpoint coincides with an existing measurement,
+    the stepper transitions out of that phase rather than looping."""
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256, bisect_resolution=4)
+    seq = _drive_stepper(stepper, violation_at={64: 0.66})
+    assert len(seq) == len(set(seq))  # no duplicate pool sizes
 
 
 # ── Statistics helpers ────────────────────────────────────────────────

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
-from .adaptive import StepResult, choose_next_pool_size
+from .adaptive import StepResult, TwoKneeStepper
 from .amx_utilization import parse_amx_utilization
 from .config import Config
 from .cpu_binding import expand_thread_binding
@@ -176,21 +176,22 @@ async def run_cohort(
         artifacts_dir=run_dir,
     )
 
-    history: list[StepResult] = []
+    # Two-knee adaptive stepper: locates BOTH the failure knee
+    # (5% violation rate) and the target knee (5% target_miss rate),
+    # then adds infill points for curve density. See
+    # ``simulator.adaptive.TwoKneeStepper`` for the phase machine.
+    stepper = TwoKneeStepper(
+        initial_pool_size=cfg.simulation.initial_pool_size,
+        max_pool_size=cfg.simulation.max_pool_size,
+        stop_violation_threshold=cfg.simulation.stop_violation_threshold,
+    )
     final_status = "ok"
     run_started = time.monotonic()
     max_total_s = cfg.simulation.max_total_duration_minutes * 60
     step_index = 0
 
     try:
-        next_size = choose_next_pool_size(
-            history,
-            initial_pool_size=cfg.simulation.initial_pool_size,
-            max_pool_size=cfg.simulation.max_pool_size,
-            knee_slope_threshold=cfg.simulation.knee_slope_threshold,
-            stop_violation_threshold=cfg.simulation.stop_violation_threshold,
-            knee_zone_threshold=cfg.simulation.knee_zone_threshold,
-        )
+        next_size = stepper.next_pool_size()
         while next_size is not None:
             if time.monotonic() - run_started > max_total_s:
                 log.warning("Max run duration reached; stopping ramp")
@@ -222,20 +223,14 @@ async def run_cohort(
                 final_status = "no_samples"
                 break
 
-            history.append(StepResult(
+            stepper.record(StepResult(
                 pool_size=result.target_pool_size,
                 violation_rate=result.combined_violation_rate,
+                target_miss_rate=result.combined_target_miss_rate,
             ))
             step_index += 1
 
-            next_size = choose_next_pool_size(
-                history,
-                initial_pool_size=cfg.simulation.initial_pool_size,
-                max_pool_size=cfg.simulation.max_pool_size,
-                knee_slope_threshold=cfg.simulation.knee_slope_threshold,
-                stop_violation_threshold=cfg.simulation.stop_violation_threshold,
-                knee_zone_threshold=cfg.simulation.knee_zone_threshold,
-            )
+            next_size = stepper.next_pool_size()
     except KeyboardInterrupt:
         final_status = "interrupted"
         raise

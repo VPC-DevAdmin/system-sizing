@@ -1119,7 +1119,12 @@ def test_export_derived_deployment_shape_fields(tmp_path) -> None:
                 "combined_violation_rate": 0.0,
                 "violation_rate_ci_lower": 0.0,
                 "violation_rate_ci_upper": 0.0,
+                # Same status on both axes — the derived band-shape
+                # fields are computed off target_status (see export.py),
+                # but mirroring the value keeps the failure-axis
+                # capacity/soft/fail assertions valid too.
                 "capacity_status": status,
+                "target_status": status,
             })
         db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
         db.close()
@@ -1167,6 +1172,7 @@ def test_export_band_shape_sharp_cliff(tmp_path) -> None:
             "violation_rate_ci_lower": 0.0,
             "violation_rate_ci_upper": 0.0,
             "capacity_status": status,
+            "target_status": status,
         })
     db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
     db.close()
@@ -1205,6 +1211,7 @@ def test_export_band_shape_unbounded_when_no_fail(tmp_path) -> None:
             "violation_rate_ci_lower": 0.0,
             "violation_rate_ci_upper": 0.0,
             "capacity_status": status,
+            "target_status": status,
         })
     db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
     db.close()
@@ -1215,6 +1222,116 @@ def test_export_band_shape_unbounded_when_no_fail(tmp_path) -> None:
     assert cohort["cliff_pool_size"] is None
     assert cohort["deployment_band_shape"] == "unbounded"
     assert cohort["measurement_coverage"] == "capped"
+
+
+def test_export_band_shape_uses_target_axis_when_failure_axis_collapses(
+    tmp_path,
+) -> None:
+    """Regression for the May 2026 Intel quick_lookup case:
+    failure-axis capacity == soft_capacity (no marginal band) hides
+    a real headroom story that lives on the target axis. Derived
+    fields must read off the target axis, not the failure axis."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="x",
+        cohort_definition={"name": "x"}, config={},
+    )
+    # Failure axis: pass through 232, then jumps straight to fail at 240.
+    # Target axis: pass at 64, marginal across 128–192, fail at 224.
+    # Derived fields must come from the target axis →
+    #   headroom = 192 - 64 = 128
+    #   cliff    = 224 - 192 = 32  (graceful)
+    curve = [
+        (8,   "pass",     "pass"),
+        (32,  "pass",     "pass"),
+        (64,  "pass",     "pass"),
+        (128, "pass",     "marginal"),
+        (192, "pass",     "marginal"),
+        (224, "pass",     "fail"),
+        (232, "pass",     "fail"),
+        (240, "fail",     "fail"),
+    ]
+    for i, (pool, cap, tgt) in enumerate(curve):
+        db.insert_measurement({
+            "cohort_run_id": "crid", "step_index": i,
+            "target_pool_size": pool,
+            "measured_avg_pool_size": float(pool),
+            "measured_avg_in_flight": 0.0,
+            "measurement_started_at": "2026-01-01T00:00:00Z",
+            "measurement_duration_s": 60, "sample_size": 100,
+            "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+            "combined_violation_rate": 0.0,
+            "violation_rate_ci_lower": 0.0,
+            "violation_rate_ci_upper": 0.0,
+            "capacity_status": cap,
+            "target_status": tgt,
+        })
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    doc, _ = export_dir(tmp_path)
+    cohort = doc["cohorts"][0]
+    # Failure-axis numbers — these still come off capacity_status
+    # and remain the SLA-bound capacity story.
+    assert cohort["capacity_pool_size"] == 232
+    assert cohort["soft_capacity_pool_size"] == 232  # no marginal band
+    assert cohort["fail_pool_size"] == 240
+    # Target-axis numbers — the inputs to the derived fields.
+    assert cohort["target_capacity_pool_size"] == 64
+    assert cohort["target_soft_capacity_pool_size"] == 192
+    assert cohort["target_fail_pool_size"] == 224
+    # Derived fields now reflect the target axis, not the failure axis.
+    # A buyer sees "premium up to 64, tolerable up to 192, hard cliff 32 wide."
+    assert cohort["headroom_pool_size"] == 128
+    assert cohort["cliff_pool_size"] == 32
+    assert cohort["deployment_band_shape"] == "graceful"
+
+
+def test_export_curve_uses_kv_cache_used_pct_field_name(tmp_path) -> None:
+    """The KV usage field is reported as a 0–100 percent (matches the
+    engine's prometheus ``kv_cache_used_pct``). The export mirrors
+    that name so a downstream consumer doesn't multiply by 100
+    treating the value as a 0..1 fraction."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="x",
+        cohort_definition={"name": "x"}, config={},
+    )
+    db.insert_measurement({
+        "cohort_run_id": "crid", "step_index": 0,
+        "target_pool_size": 8,
+        "measured_avg_pool_size": 8.0,
+        "measured_avg_in_flight": 0.0,
+        "measurement_started_at": "2026-01-01T00:00:00Z",
+        "measurement_duration_s": 60, "sample_size": 100,
+        "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+        "combined_violation_rate": 0.0,
+        "violation_rate_ci_lower": 0.0,
+        "violation_rate_ci_upper": 0.0,
+        "avg_kv_cache_pct": 12.5,    # 12.5% — engine-reported scale
+        "capacity_status": "pass",
+        "target_status": "pass",
+    })
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    doc, _ = export_dir(tmp_path)
+    step = doc["cohorts"][0]["curve"][0]
+    assert "kv_cache_used_pct" in step
+    assert step["kv_cache_used_pct"] == 12.5
+    assert "kv_cache_pct" not in step
 
 
 def test_landing_zones_three_band_split() -> None:

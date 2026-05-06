@@ -296,7 +296,7 @@ def _attribute_bottleneck(
 
     kv = tele.get("kv")
     if kv is not None:
-        evidence["kv_cache_pct"] = kv
+        evidence["kv_cache_used_pct"] = kv
         if kv > 90.0:
             return "kv_cache", evidence
 
@@ -526,7 +526,11 @@ def _summarise_cohort(
             "ttft_p95_ms": m["ttft_p95_ms"],
             "tpot_p50_ms": m["tpot_p50_ms"],
             "tpot_p95_ms": m["tpot_p95_ms"],
-            "kv_cache_pct": m["avg_kv_cache_pct"],
+            # 0–100 percent (matches the engine's prometheus
+            # ``kv_cache_used_pct`` field — naming aligned so a
+            # downstream consumer doesn't multiply by 100 thinking
+            # this is a 0..1 fraction).
+            "kv_cache_used_pct": m["avg_kv_cache_pct"],
             "status": m["capacity_status"],          # failure-bound
             "target_status": m.get("target_status"), # target-bound
             "measurement_started_at": m.get("measurement_started_at"),
@@ -553,20 +557,30 @@ def _summarise_cohort(
     )
 
     # Derived deployment-shape fields. These are pure post-processing
-    # of the three landing-zone numbers above — let the buyer-page
-    # frontend render the right warnings without parsing the
-    # underlying numbers itself.
+    # of the landing-zone numbers above — let the buyer-page frontend
+    # render the right warnings without parsing the underlying numbers
+    # itself.
     #
-    #   headroom = soft_capacity − capacity
+    # Computed on the TARGET axis (not the failure axis), because the
+    # buyer-page narrative is "premium experience → tolerable → hard
+    # fail." The target axis fires earlier and gives a wider band to
+    # measure shape on; the failure axis is structurally narrow for
+    # cohorts where the cliff is steep (capacity == soft_capacity on
+    # the failure axis hides a meaningful target-band span). For
+    # example, the May 2026 Intel quick_lookup run had failure-axis
+    # capacity == soft_capacity == 232 (headroom=0) while the target
+    # axis showed target_capacity=64 / target_soft=192 (real headroom
+    # of 128 pool slots).
+    #
+    #   headroom = target_soft_capacity − target_capacity
     #              "graceful degradation zone" — how many users you
-    #              can add past the premium cap before hitting any
-    #              actual SLA violations.
+    #              can add past the premium cap before quality starts
+    #              dropping below the target SLA.
     #
-    #   cliff    = fail − soft_capacity
-    #              "warning zone width" — how many pool slots between
-    #              first SLA violation (5%) and substantial fail
-    #              (>30%). A wide cliff means slow degradation; a
-    #              narrow cliff means a sharp transition.
+    #   cliff    = target_fail − target_soft_capacity
+    #              "warning zone width" — pool slots between first
+    #              target miss (5%) and substantial target miss
+    #              (>30%). Wide = slow degradation; narrow = sharp.
     #
     #   deployment_band_shape:
     #     graceful  — cliff > 16 (gentle slope; oversize forgiving)
@@ -576,19 +590,25 @@ def _summarise_cohort(
     #     unbounded — fail not observed within probed range
     #     unmeasured — capacity / soft_capacity not located
     headroom_pool = (
-        soft_capacity_pool - capacity_pool
-        if (soft_capacity_pool is not None and capacity_pool is not None)
+        target_soft_capacity_pool - target_capacity_pool
+        if (
+            target_soft_capacity_pool is not None
+            and target_capacity_pool is not None
+        )
         else None
     )
     cliff_pool = (
-        fail_pool - soft_capacity_pool
-        if (fail_pool is not None and soft_capacity_pool is not None)
+        target_fail_pool - target_soft_capacity_pool
+        if (
+            target_fail_pool is not None
+            and target_soft_capacity_pool is not None
+        )
         else None
     )
     if cliff_pool is None:
-        if fail_pool is None and soft_capacity_pool is not None:
+        if target_fail_pool is None and target_soft_capacity_pool is not None:
             band_shape = "unbounded"
-        elif soft_capacity_pool is None:
+        elif target_soft_capacity_pool is None:
             band_shape = "unmeasured"
         else:
             band_shape = "unmeasured"

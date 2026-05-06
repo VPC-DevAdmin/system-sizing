@@ -496,7 +496,7 @@ def test_find_completed_runs_returns_only_ok_status(tmp_path) -> None:
     states = [
         ("quick_lookup", "ok"),
         ("conversational", "interrupted"),
-        ("drafter", "no_samples"),
+        ("writer", "no_samples"),
         ("document_qa", None),  # still in-progress, never finalised
     ]
     for cohort_id, status in states:
@@ -1020,7 +1020,7 @@ def test_find_completed_runs_one_db_many_cohorts(tmp_path) -> None:
     cohort_states = [
         ("quick_lookup", "ok"),
         ("conversational", "ok"),
-        ("drafter", "interrupted"),  # NOT completed — should be retried
+        ("writer", "interrupted"),  # NOT completed — should be retried
         ("document_qa", "ok"),
     ]
     for cohort_id, status in cohort_states:
@@ -1197,12 +1197,12 @@ def test_bottleneck_freq_droop_uses_mean_not_min() -> None:
 def test_landing_zones_three_band_split() -> None:
     """The export's three-zone landing zones (capacity / soft_capacity
     / fail_pool) must accurately split a curve into the
-    fast / acceptable / degraded bands. Drafter-dominant from the
+    fast / acceptable / degraded bands. writer_dominant from the
     real AMD sweep is the canonical case — pass through pool=32,
     marginal through pool=96, fail at pool=102."""
     from simulator.export import _landing_zones
 
-    drafter_dominant = [
+    writer_dominant = [
         {"target_pool_size": 8,   "capacity_status": "pass"},
         {"target_pool_size": 16,  "capacity_status": "pass"},
         {"target_pool_size": 32,  "capacity_status": "pass"},
@@ -1213,7 +1213,7 @@ def test_landing_zones_three_band_split() -> None:
         {"target_pool_size": 96,  "capacity_status": "marginal"},
         {"target_pool_size": 102, "capacity_status": "fail"},
     ]
-    capacity, soft, fail_pool = _landing_zones(drafter_dominant)
+    capacity, soft, fail_pool = _landing_zones(writer_dominant)
     assert capacity == 32, f"premium cap = last pass before any non-pass; got {capacity}"
     assert soft == 96, f"acceptable cap = last marginal-or-pass below fail; got {soft}"
     assert fail_pool == 102, f"degraded threshold = first sustained fail; got {fail_pool}"
@@ -1731,7 +1731,7 @@ def test_prefix_cache_classifies_session_as_miss_when_later_ttft_high() -> None:
 
 
 def test_prefix_cache_skips_single_turn_sessions() -> None:
-    """Single-turn personas (summarizer, drafter) can't validate cache
+    """Single-turn personas (summarizer, writer) can't validate cache
     behaviour — the analyser must not pretend otherwise."""
     rows = [_row("u1", "s1", 0, 1000.0)]
     sessions, notes = analyse_sessions(rows)

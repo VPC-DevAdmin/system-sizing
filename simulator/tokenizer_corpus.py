@@ -15,7 +15,7 @@ from functools import lru_cache
 _BASE_PARAGRAPHS = [
     "The system distributes workload across heterogeneous compute resources, balancing latency and throughput per request type.",
     "Field engineers reported intermittent stalls during peak load, traced back to oversubscription of memory bandwidth on socket one.",
-    "Quarterly capacity planning revisited the cohort assumptions; the drafter persona had drifted upward in average input length.",
+    "Quarterly capacity planning revisited the cohort assumptions; the writer persona had drifted upward in average input length.",
     "Document retrieval ran in parallel with summarisation, with the orchestration layer enforcing a strict per-tenant concurrency budget.",
     "The release candidate showed regressions only on long-context workloads, suggesting the prefix cache eviction policy needed revisiting.",
     "Operations reviewed the incident report, focusing on the cascading queue growth observed once mean think-time fell below ten seconds.",

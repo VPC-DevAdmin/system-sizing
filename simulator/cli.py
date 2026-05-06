@@ -62,7 +62,7 @@ def run_persona_cmd(
     """Run a single persona end-to-end (one user archetype, no team mix).
 
     Useful for measuring each archetype's individual capacity so multi-
-    persona cohort results can be decomposed: if engineering_heavy
+    persona cohort results can be decomposed: if software_engineering
     underperforms, you can compare against the code_assist persona run
     to see whether the mix itself is producing interference."""
     _setup_logging(verbose)

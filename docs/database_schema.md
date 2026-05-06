@@ -36,7 +36,7 @@ cohort_run                          (one row per `run_cohort` invocation)
 | `completed_at`            | TEXT | Set on `finalise_run`; NULL while in flight. |
 | `engine_type`             | TEXT NOT NULL | `vllm`, `sglang`, `vllm_dual_socket`. |
 | `model_id`                | TEXT NOT NULL | HF model id (e.g. `Qwen/Qwen3-30B-A3B-Instruct-2507`). |
-| `cohort_id`               | TEXT NOT NULL | `chat_heavy`, `engineering_heavy`, … or a persona id when `cohort_from_persona` was used. |
+| `cohort_id`               | TEXT NOT NULL | `chat_heavy`, `software_engineering`, … or a persona id when `cohort_from_persona` was used. |
 | `cohort_definition_json`  | TEXT NOT NULL | JSON of `{id, name, description, category, persona_weights}`. |
 | `config_json`             | TEXT NOT NULL | Full `Config` dataclass as JSON — engine + simulation + telemetry + output sections. Captures the YAML knobs that produced this measurement. |
 | `final_status`            | TEXT | One of: `ok`, `interrupted`, `time_limit`, `no_samples`, NULL (in progress). Resume only skips `'ok'`. |

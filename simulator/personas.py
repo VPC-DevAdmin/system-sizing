@@ -119,7 +119,7 @@ class Cohort:
 PERSONAS: dict[str, Persona] = {
     "quick_lookup": Persona(
         id="quick_lookup",
-        description="Frontline support, sales reps, inventory checks",
+        description="Short factual queries with brief responses; FAQ-style",
         input_tokens=LogNormal.from_median(350, 0.35),
         output_tokens=LogNormal.from_median(60, 0.4),
         turns_per_session=Discrete({1: 0.7, 2: 0.2, 3: 0.07, 4: 0.03}),
@@ -137,7 +137,7 @@ PERSONAS: dict[str, Persona] = {
     ),
     "conversational": Persona(
         id="conversational",
-        description="Back-and-forth chat: tutoring, coaching, customer dialogue",
+        description="Multi-turn back-and-forth with growing chat history",
         input_tokens=LogNormal.from_median(180, 0.5),
         output_tokens=LogNormal.from_median(220, 0.45),
         turns_per_session=Discrete({3: 0.25, 5: 0.35, 8: 0.25, 12: 0.15}),
@@ -152,9 +152,9 @@ PERSONAS: dict[str, Persona] = {
         tpot_target_ms=150.0,
         tpot_failure_ms=225.0,
     ),
-    "drafter": Persona(
-        id="drafter",
-        description="Email/marketing/short-form writing assistant",
+    "writer": Persona(
+        id="writer",
+        description="Drafting emails, content, and other prose; no long source documents",
         input_tokens=LogNormal.from_median(500, 0.5),
         output_tokens=LogNormal.from_median(350, 0.4),
         turns_per_session=Discrete({1: 0.5, 2: 0.3, 3: 0.15, 5: 0.05}),
@@ -170,7 +170,7 @@ PERSONAS: dict[str, Persona] = {
     ),
     "document_qa": Persona(
         id="document_qa",
-        description="Legal/finance/research analyst working over long docs",
+        description="Question answering over 4K+ token source documents",
         input_tokens=LogNormal.from_median(3500, 0.5),
         output_tokens=LogNormal.from_median(280, 0.4),
         turns_per_session=Discrete({1: 0.4, 2: 0.3, 4: 0.2, 7: 0.1}),
@@ -187,7 +187,7 @@ PERSONAS: dict[str, Persona] = {
     ),
     "code_assist": Persona(
         id="code_assist",
-        description="Engineer pair-programming with the model",
+        description="Pair-programming with code context in the prompt",
         input_tokens=LogNormal.from_median(1200, 0.6),
         output_tokens=LogNormal.from_median(450, 0.5),
         turns_per_session=Discrete({2: 0.3, 4: 0.35, 8: 0.25, 15: 0.1}),
@@ -206,7 +206,7 @@ PERSONAS: dict[str, Persona] = {
     ),
     "summarizer": Persona(
         id="summarizer",
-        description="Single-shot summarisation of large inputs",
+        description="Reducing long inputs to short summaries",
         input_tokens=LogNormal.from_median(5000, 0.4),
         output_tokens=LogNormal.from_median(180, 0.35),
         turns_per_session=Discrete({1: 0.85, 2: 0.15}),
@@ -232,55 +232,56 @@ COHORTS: dict[str, Cohort] = {
     "chat_heavy": Cohort(
         id="chat_heavy",
         name="Customer support team",
-        description="Frontline support: short queries, fast SLAs, high turnover",
+        description="Frontline support: customer service reps, sales, inventory checks",
         persona_weights={
-            "quick_lookup": 0.6,
-            "conversational": 0.3,
-            "drafter": 0.1,
+            "quick_lookup": 0.60,
+            "conversational": 0.30,
+            "writer": 0.10,
         },
     ),
-    "document_heavy": Cohort(
-        id="document_heavy",
-        name="Legal / finance research team",
-        description="Long-context document Q&A and summarisation",
+    "general_knowledge": Cohort(
+        id="general_knowledge",
+        name="General knowledge work",
+        description="Typical knowledge work: mixed chat, writing, light research",
         persona_weights={
-            "document_qa": 0.55,
-            "summarizer": 0.30,
-            "drafter": 0.15,
+            "quick_lookup": 0.30,
+            "conversational": 0.30,
+            "writer": 0.25,
+            "summarizer": 0.10,
+            "document_qa": 0.05,
         },
     ),
-    "balanced_knowledge": Cohort(
-        id="balanced_knowledge",
-        name="Balanced knowledge work",
-        description="Mixed office workload across personas",
+    "writer_dominant": Cohort(
+        id="writer_dominant",
+        name="Marketing / content team",
+        description="Marketing, communications, content team",
         persona_weights={
-            "quick_lookup": 0.20,
+            "quick_lookup": 0.10,
             "conversational": 0.20,
-            "drafter": 0.20,
-            "document_qa": 0.15,
-            "code_assist": 0.15,
+            "writer": 0.60,
             "summarizer": 0.10,
         },
     ),
-    "engineering_heavy": Cohort(
-        id="engineering_heavy",
-        name="Engineering team",
-        description="Code-assist dominant with light docs and chat",
+    "software_engineering": Cohort(
+        id="software_engineering",
+        name="Software engineering team",
+        description="Software engineering team using AI assistance for code work",
         persona_weights={
-            "code_assist": 0.65,
-            "document_qa": 0.15,
+            "quick_lookup": 0.15,
             "conversational": 0.15,
-            "summarizer": 0.05,
+            "writer": 0.05,
+            "code_assist": 0.60,
+            "document_qa": 0.05,
         },
     ),
-    "drafter_dominant": Cohort(
-        id="drafter_dominant",
-        name="Marketing / content team",
-        description="Drafting-heavy workload with bursts of summarisation",
+    "analyst_team": Cohort(
+        id="analyst_team",
+        name="Analyst team",
+        description="Legal, finance, research analysts working over long documents",
         persona_weights={
-            "drafter": 0.65,
-            "summarizer": 0.20,
-            "conversational": 0.15,
+            "writer": 0.15,
+            "summarizer": 0.25,
+            "document_qa": 0.60,
         },
     ),
 }

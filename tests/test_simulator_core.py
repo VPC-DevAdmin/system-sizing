@@ -1194,6 +1194,106 @@ def test_bottleneck_freq_droop_uses_mean_not_min() -> None:
     assert evidence["effective_freq_ghz_mean"] == 2.26
 
 
+def test_landing_zones_three_band_split() -> None:
+    """The export's three-zone landing zones (capacity / soft_capacity
+    / fail_pool) must accurately split a curve into the
+    fast / acceptable / degraded bands. Drafter-dominant from the
+    real AMD sweep is the canonical case — pass through pool=32,
+    marginal through pool=96, fail at pool=102."""
+    from simulator.export import _landing_zones
+
+    drafter_dominant = [
+        {"target_pool_size": 8,   "capacity_status": "pass"},
+        {"target_pool_size": 16,  "capacity_status": "pass"},
+        {"target_pool_size": 32,  "capacity_status": "pass"},
+        {"target_pool_size": 64,  "capacity_status": "marginal"},
+        {"target_pool_size": 72,  "capacity_status": "marginal"},
+        {"target_pool_size": 81,  "capacity_status": "marginal"},
+        {"target_pool_size": 91,  "capacity_status": "marginal"},
+        {"target_pool_size": 96,  "capacity_status": "marginal"},
+        {"target_pool_size": 102, "capacity_status": "fail"},
+    ]
+    capacity, soft, fail_pool = _landing_zones(drafter_dominant)
+    assert capacity == 32, f"premium cap = last pass before any non-pass; got {capacity}"
+    assert soft == 96, f"acceptable cap = last marginal-or-pass below fail; got {soft}"
+    assert fail_pool == 102, f"degraded threshold = first sustained fail; got {fail_pool}"
+
+
+def test_landing_zones_perma_marginal_cohort() -> None:
+    """code_assist on AMD: every measurement is marginal (5-30%
+    violations) until the final fail. capacity=None (no clean
+    pass), soft_capacity exists (the marginal band IS usable),
+    fail_pool is the cliff. Without soft_capacity, the buyer page
+    would have to report "capacity=null" which is misleading —
+    the cohort serves users at marginal quality, just not premium."""
+    from simulator.export import _landing_zones
+
+    code_assist = [
+        {"target_pool_size": 8,  "capacity_status": "marginal"},
+        {"target_pool_size": 16, "capacity_status": "marginal"},
+        {"target_pool_size": 24, "capacity_status": "marginal"},
+        {"target_pool_size": 32, "capacity_status": "marginal"},
+        {"target_pool_size": 37, "capacity_status": "marginal"},
+        {"target_pool_size": 39, "capacity_status": "fail"},
+    ]
+    capacity, soft, fail_pool = _landing_zones(code_assist)
+    assert capacity is None, "no pass step means no premium capacity"
+    assert soft == 37, "soft capacity captures the marginal band"
+    assert fail_pool == 39
+
+
+def test_landing_zones_immediate_fail() -> None:
+    """document_qa on AMD: even pool=8 fails. All three zones
+    should report None for capacity / soft, and the first sustained
+    fail for fail_pool. Honest for the buyer page: "below the
+    measurable range" rather than fudging a number."""
+    from simulator.export import _landing_zones
+
+    document_qa = [{"target_pool_size": 8, "capacity_status": "fail"}]
+    capacity, soft, fail_pool = _landing_zones(document_qa)
+    assert capacity is None
+    assert soft is None
+    assert fail_pool == 8
+
+
+def test_landing_zones_never_fails() -> None:
+    """Sweep that ran to its max_pool without ever failing —
+    capacity and soft_capacity are both the largest pool sampled,
+    fail_pool is None ("no sustained-fail point observed")."""
+    from simulator.export import _landing_zones
+
+    healthy = [
+        {"target_pool_size": 8,  "capacity_status": "pass"},
+        {"target_pool_size": 16, "capacity_status": "pass"},
+        {"target_pool_size": 32, "capacity_status": "pass"},
+    ]
+    capacity, soft, fail_pool = _landing_zones(healthy)
+    assert capacity == 32
+    assert soft == 32
+    assert fail_pool is None
+
+
+def test_landing_zones_tolerates_bisection_noise() -> None:
+    """Bisection produces non-monotonic curves — a noise marginal
+    at pool=32 followed by a recovery to pass at pool=36 should
+    NOT be treated as the capacity boundary. Both capacity and
+    soft_capacity should follow through to the sustained boundary."""
+    from simulator.export import _landing_zones
+
+    noisy = [
+        {"target_pool_size": 8,  "capacity_status": "pass"},
+        {"target_pool_size": 16, "capacity_status": "pass"},
+        {"target_pool_size": 32, "capacity_status": "marginal"},  # noise
+        {"target_pool_size": 36, "capacity_status": "pass"},      # recovery
+        {"target_pool_size": 64, "capacity_status": "marginal"},
+        {"target_pool_size": 96, "capacity_status": "fail"},
+    ]
+    capacity, soft, fail_pool = _landing_zones(noisy)
+    assert capacity == 36, "recovery proves 32-marginal was noise; capacity = last pass below sustained-non-pass = 64"
+    assert soft == 64, "soft cap = last marginal-or-pass below fail at 96"
+    assert fail_pool == 96
+
+
 def test_capacity_and_knee_handles_non_monotonic_curve() -> None:
     """The adaptive bisection produces non-monotonic curves: a noise
     'marginal' at pool 32 followed by a 'pass' at 36 isn't a real

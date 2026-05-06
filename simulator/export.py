@@ -370,39 +370,110 @@ def _hardware_recommendation(bottleneck: str) -> str:
     }.get(bottleneck, "")
 
 
+def _landing_zones(
+    measurements: list[dict],
+    status_field: str = "capacity_status",
+) -> tuple[int | None, int | None, int | None]:
+    """Pick the three landing-zone boundaries from a measurement list:
+
+    Returns (capacity, soft_capacity, fail) where:
+
+      * **capacity**: largest pool with status='pass' below the first
+        non-pass that's never later "rescued" by a higher-pool pass.
+        Premium quality — no SLA violations. The pre-existing
+        ``capacity_pool_size`` semantic.
+
+      * **soft_capacity**: largest pool with status in {'pass',
+        'marginal'} below the first sustained 'fail'. Tolerable
+        operating point — some fraction of users see slower
+        responses, but no one's actually breaking the SLA.
+
+      * **fail**: smallest pool with status='fail' AND no higher-pool
+        non-fail status (i.e. the *sustained* fail point — bisection
+        marginals that recover don't count). The hard cliff.
+
+    These three numbers tell the buyer-page story directly:
+        "supports up to {capacity} users at premium quality;
+         tolerable up to {soft_capacity};
+         degrades past {fail}."
+
+    Use ``status_field="capacity_status"`` for the failure-bound
+    landing zones (hard SLA — TTFT/TPOT past the *failure* threshold)
+    and ``status_field="target_status"`` for the target-bound
+    landing zones (premium-quality SLA — past the *target* threshold).
+
+    Adaptive bisection produces non-monotonic curves — a measurement
+    can flip 'pass' → 'marginal' → 'pass' again as the stepper
+    re-samples around a noisy boundary. The "sustained" criterion
+    (no later pool returns to a better band) tolerates that noise.
+
+    Returns (None, None, None) when no measurements exist or the
+    status field isn't populated.
+    """
+    if not measurements:
+        return None, None, None
+    # Drop measurements missing the requested status field — happens
+    # for legacy (pre-target-status) data when querying target_status.
+    typed = [m for m in measurements if m.get(status_field)]
+    if not typed:
+        return None, None, None
+    sorted_m = sorted(typed, key=lambda m: m["target_pool_size"])
+
+    # capacity: largest pass below first sustained non-pass.
+    capacity_knee: int | None = None
+    for i, m in enumerate(sorted_m):
+        if m[status_field] == "pass":
+            continue
+        # Non-pass at i: counts as the capacity boundary only if no
+        # higher pool returns to pass.
+        if any(later[status_field] == "pass" for later in sorted_m[i + 1:]):
+            continue
+        capacity_knee = m["target_pool_size"]
+        break
+    pass_pools = [
+        m["target_pool_size"] for m in sorted_m if m[status_field] == "pass"
+    ]
+    if capacity_knee is not None:
+        pass_pools = [p for p in pass_pools if p < capacity_knee]
+    capacity = max(pass_pools) if pass_pools else None
+
+    # fail: smallest pool with status='fail' that's sustained
+    # (no higher pool returns to pass-or-marginal).
+    fail_pool: int | None = None
+    for i, m in enumerate(sorted_m):
+        if m[status_field] != "fail":
+            continue
+        if any(
+            later[status_field] in ("pass", "marginal")
+            for later in sorted_m[i + 1:]
+        ):
+            continue
+        fail_pool = m["target_pool_size"]
+        break
+
+    # soft_capacity: largest pass-or-marginal below fail_pool.
+    tolerable_pools = [
+        m["target_pool_size"] for m in sorted_m
+        if m[status_field] in ("pass", "marginal")
+    ]
+    if fail_pool is not None:
+        tolerable_pools = [p for p in tolerable_pools if p < fail_pool]
+    soft_capacity = max(tolerable_pools) if tolerable_pools else None
+
+    return capacity, soft_capacity, fail_pool
+
+
+# Backwards-compat alias for callers that want the old (capacity, knee)
+# pair. Kept thin — new code should use ``_landing_zones`` directly.
 def _capacity_and_knee(
     measurements: list[dict],
     status_field: str = "capacity_status",
 ) -> tuple[int | None, int | None]:
-    """Pick (capacity_pool_size, knee_pool_size) from a measurement
-    list, gating on ``status_field``.
-
-    Use ``status_field="capacity_status"`` for the failure-bound
-    capacity (hard SLA — the headline buyer-page number) and
-    ``status_field="target_status"`` for the target-bound capacity
-    (premium-quality bar — the higher-quality number).
-
-    Adaptive bisection produces non-monotonic curves — a measurement
-    can flip 'pass' → 'marginal' → 'pass' again as the stepper
-    re-samples around a noisy boundary. The previous "first non-pass"
-    rule reported a low knee even when the cohort genuinely passed at
-    higher pools, and "last pass observed" reported a capacity
-    *greater* than the knee. Sort by pool_size and use the *sustained*
-    non-pass (no later pool passes) as the knee:
-
-      * knee = smallest pool_size where status is non-pass AND no
-        higher pool size has status='pass'. Tolerates noise marginals
-        the bisection later disproved.
-      * capacity = largest pool_size with status='pass' that is
-        strictly below the knee. Always ≤ knee.
-
-    Returns (None, None) when no measurements exist or the status
-    field isn't populated (e.g. legacy DB without target_status).
-    """
+    capacity, _soft, _fail = _landing_zones(measurements, status_field)
+    # Legacy "knee" was "first sustained non-pass" — equivalent to
+    # the capacity-side boundary. Compute the same way for shim.
     if not measurements:
         return None, None
-    # Drop measurements missing the requested status field — happens
-    # for legacy (pre-target-status) data when querying target_status.
     typed = [m for m in measurements if m.get(status_field)]
     if not typed:
         return None, None
@@ -411,18 +482,11 @@ def _capacity_and_knee(
     for i, m in enumerate(sorted_m):
         if m[status_field] == "pass":
             continue
-        # Non-pass: only counts as the knee if no pool above also passes.
         if any(later[status_field] == "pass" for later in sorted_m[i + 1:]):
             continue
         knee_pool = m["target_pool_size"]
         break
-    pass_pools = [
-        m["target_pool_size"] for m in sorted_m if m[status_field] == "pass"
-    ]
-    if knee_pool is not None:
-        pass_pools = [p for p in pass_pools if p < knee_pool]
-    capacity_pool = max(pass_pools) if pass_pools else None
-    return capacity_pool, knee_pool
+    return capacity, knee_pool
 
 
 def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
@@ -458,11 +522,18 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
             "telemetry_samples": m.get("telemetry_samples", []),
             "turns": m.get("turns", []),
         })
-    # Two parallel capacity readings — failure-bound (hard SLA, the
-    # buyer-page headline) and target-bound (premium quality bar).
-    capacity_pool, knee_pool = _capacity_and_knee(measurements, "capacity_status")
-    target_capacity_pool, target_knee_pool = _capacity_and_knee(
-        measurements, "target_status",
+    # Three landing-zone boundaries on each axis:
+    #   capacity  — premium / no SLA violations
+    #   soft_cap  — acceptable / tolerable degradation, no actual fails
+    #   fail_pool — degraded / hard cliff
+    # On both the failure-bound (hard SLA) and target-bound (premium
+    # SLA) axes — six numbers per cohort that map directly onto the
+    # buyer-page narrative "fast / acceptable / degraded".
+    capacity_pool, soft_capacity_pool, fail_pool = _landing_zones(
+        measurements, "capacity_status",
+    )
+    target_capacity_pool, target_soft_capacity_pool, target_fail_pool = (
+        _landing_zones(measurements, "target_status")
     )
 
     cohort_def = json.loads(run["cohort_definition_json"])
@@ -489,10 +560,41 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
         "started_at": run["started_at"],
         "completed_at": run["completed_at"],
         "final_status": run["final_status"],
-        "capacity_pool_size": capacity_pool,           # failure-bound (SLA)
-        "knee_pool_size": knee_pool,
-        "target_capacity_pool_size": target_capacity_pool,  # target-bound (quality)
-        "target_knee_pool_size": target_knee_pool,
+        # Failure-bound landing zones (hard SLA — past the FAILURE
+        # threshold). The "fast / acceptable / degraded" story.
+        "capacity_pool_size": capacity_pool,                # premium / fast
+        "soft_capacity_pool_size": soft_capacity_pool,      # acceptable / tolerable
+        "fail_pool_size": fail_pool,                        # degraded / cliff
+        # Target-bound landing zones (premium SLA — past the TARGET
+        # threshold). Same three-zone shape, tighter bar.
+        "target_capacity_pool_size": target_capacity_pool,
+        "target_soft_capacity_pool_size": target_soft_capacity_pool,
+        "target_fail_pool_size": target_fail_pool,
+        # Self-documenting band labels so the buyer page can render
+        # the three-zone narrative without hardcoding the language
+        # in the frontend.
+        "capacity_landing_zones": {
+            "fast": (
+                f"≤{capacity_pool} concurrent users — no SLA violations"
+                if capacity_pool is not None
+                else "no clean-pass operating point — workload is "
+                     "always at least marginal"
+            ),
+            "acceptable": (
+                f"≤{soft_capacity_pool} concurrent users — some users "
+                f"see slower-than-target responses but no failures"
+                if soft_capacity_pool is not None
+                else "no acceptable operating point — workload fails "
+                     "at the smallest probed concurrency"
+            ),
+            "degraded": (
+                f"{fail_pool}+ concurrent users — substantial fraction "
+                f"of users hit the failure threshold"
+                if fail_pool is not None
+                else "no sustained-fail point observed within the "
+                     "tested concurrency range"
+            ),
+        },
         "curve": curve,
         "snapshots": run.get("snapshots", []),
         "bottleneck": bottleneck,                      # what limits SLA capacity

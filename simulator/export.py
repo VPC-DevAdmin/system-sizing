@@ -489,11 +489,25 @@ def _capacity_and_knee(
     return capacity, knee_pool
 
 
-def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
+def _summarise_cohort(
+    run: dict, prefix_cache: dict | None, slim: bool = False,
+) -> dict:
+    """Build the per-cohort export dict.
+
+    ``slim=True`` drops the heavy time-series fields:
+      * curve[i].telemetry_samples (per-second within-window samples)
+      * curve[i].turns             (per-turn events)
+      * cohort.snapshots           (1 Hz whole-run heartbeat)
+
+    Headline summary, per-step rollup, capacity landing zones,
+    bottleneck attribution, and prefix-cache verdict all stay.
+    Typical size reduction: ~99% (35 MB → ~200-500 KB on a full
+    AMD/Intel sweep). Use slim for buyer-page summary distribution;
+    use the full export when drilling into per-step diagnostics."""
     measurements = run.get("measurements", [])
     curve = []
     for m in measurements:
-        curve.append({
+        entry = {
             "step_index": m["step_index"],
             "pool_size": m["target_pool_size"],
             "sample_size": m["sample_size"],
@@ -517,11 +531,13 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
             "target_status": m.get("target_status"), # target-bound
             "measurement_started_at": m.get("measurement_started_at"),
             "measurement_duration_s": m.get("measurement_duration_s"),
+        }
+        if not slim:
             # Per-step time-series; lists may be empty (e.g. a 'pending'
             # row for an in-progress step had no events captured).
-            "telemetry_samples": m.get("telemetry_samples", []),
-            "turns": m.get("turns", []),
-        })
+            entry["telemetry_samples"] = m.get("telemetry_samples", [])
+            entry["turns"] = m.get("turns", [])
+        curve.append(entry)
     # Three landing-zone boundaries on each axis:
     #   capacity  — premium / no SLA violations
     #   soft_cap  — acceptable / tolerable degradation, no actual fails
@@ -596,7 +612,12 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
             ),
         },
         "curve": curve,
-        "snapshots": run.get("snapshots", []),
+        # Cohort-level 1 Hz pool/in-flight heartbeat. Dropped in
+        # slim mode (second-largest contributor to file size after
+        # per-step turns).
+        **(
+            {"snapshots": run.get("snapshots", [])} if not slim else {}
+        ),
         "bottleneck": bottleneck,                      # what limits SLA capacity
         "bottleneck_evidence": evidence,
         "target_bottleneck": target_bottleneck,        # what limits quality capacity
@@ -609,6 +630,8 @@ def _summarise_cohort(run: dict, prefix_cache: dict | None) -> dict:
 def export_dir(
     input_dir: str | Path,
     output_path: str | Path | None = None,
+    *,
+    slim: bool = False,
 ) -> tuple[dict, Path]:
     """Build the buyer-page JSON. Returns ``(doc, output_path)``.
 
@@ -616,15 +639,25 @@ def export_dir(
     directory; we read DBs from the latest ``run_NN``. Flat-directory
     layouts still work as a fallback when no ``run_NN`` exists.
 
+    ``slim=True`` produces a summary-only document (~99% smaller —
+    typical 35 MB → 200-500 KB). Drops per-step time-series fields
+    (telemetry_samples, turns) and the cohort-level 1 Hz heartbeat
+    (snapshots). Headline summary, per-step rollup, capacity landing
+    zones, bottleneck attribution, and prefix-cache verdict all stay.
+    Default output filename in slim mode is
+    ``buyer_page_data_slim.json`` so the full and slim exports can
+    coexist in the same run dir.
+
     When ``output_path`` is None, the JSON lands at
-    ``<source_dir>/buyer_page_data.json`` — same directory as the
-    ``run.db`` it came from, so per-run artifacts stay grouped.
+    ``<source_dir>/buyer_page_data{_slim}.json`` — same directory
+    as the ``run.db`` it came from, so per-run artifacts stay grouped.
     """
     from .runs import latest_run_dir
     input_dir = Path(input_dir)
     db_source = latest_run_dir(input_dir) or input_dir
     if output_path is None:
-        output_path = db_source / "buyer_page_data.json"
+        fname = "buyer_page_data_slim.json" if slim else "buyer_page_data.json"
+        output_path = db_source / fname
     else:
         output_path = Path(output_path)
     cohorts: list[dict] = []
@@ -640,7 +673,7 @@ def export_dir(
                 db, cohort_run_id=run["cohort_run_id"],
             )
             prefix_cache = _attach_engine_hit_rate(prefix_cache, run)
-            cohorts.append(_summarise_cohort(run, prefix_cache))
+            cohorts.append(_summarise_cohort(run, prefix_cache, slim=slim))
 
     doc = {
         "meta": {
@@ -649,6 +682,7 @@ def export_dir(
             "models": sorted(model_seen),
             "source_dir": str(db_source),
             "cohort_count": len(cohorts),
+            "slim": slim,
         },
         "cohorts": cohorts,
     }

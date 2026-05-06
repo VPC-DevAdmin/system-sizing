@@ -280,9 +280,16 @@ list-personas:
 
 # ── Output / analysis ─────────────────────────────────────────────────
 
+# Build buyer_page_data.json from runs/run_NN/run.db.
+#
+# Pass SLIM=true to produce the summary-only buyer_page_data_slim.json
+# (~99% smaller — drops per-step telemetry samples + turn events +
+# the cohort-level 1 Hz heartbeat). Useful for buyer-facing summary
+# distribution; the full export stays available for diagnostics.
 .PHONY: export
 export:
-	$(PY) -m simulator.cli export --input-dir $(RUN_DIR)
+	$(PY) -m simulator.cli export --input-dir $(RUN_DIR) \
+		$(if $(SLIM),--slim)
 
 .PHONY: web
 web: export

@@ -182,16 +182,31 @@ def export_cmd(
         None, "--output",
         help=(
             "Override output path. Default: <input_dir>/run_NN/"
-            "buyer_page_data.json — lands the JSON alongside the run.db "
-            "it was built from so per-run artifacts stay grouped."
+            "buyer_page_data.json (or buyer_page_data_slim.json with "
+            "--slim) — lands the JSON alongside the run.db it was "
+            "built from so per-run artifacts stay grouped."
+        ),
+    ),
+    slim: bool = typer.Option(
+        False, "--slim",
+        help=(
+            "Summary-only export (~99% smaller). Drops per-step "
+            "telemetry samples + turn events and the cohort-level "
+            "1 Hz heartbeat. Headline numbers, per-step rollup, "
+            "landing zones, bottleneck attribution, and prefix-cache "
+            "verdict all stay. Use --slim for buyer-page summary "
+            "distribution; use the full export when drilling into "
+            "per-step diagnostics."
         ),
     ),
 ):
     """Export simplified JSON for the buyer-facing webpage."""
     from .export import export_dir
-    doc, out_path = export_dir(input_dir, output)
+    doc, out_path = export_dir(input_dir, output, slim=slim)
+    size_kb = out_path.stat().st_size // 1024
     typer.echo(
-        f"Exported {doc['meta']['cohort_count']} cohorts -> {out_path}"
+        f"Exported {doc['meta']['cohort_count']} cohorts -> {out_path} "
+        f"({size_kb} KB{'  [slim]' if slim else ''})"
     )
 
 

@@ -1420,6 +1420,98 @@ def test_engine_prefix_cache_hit_rate_surfaces_in_export(tmp_path) -> None:
     assert pc["engine_hit_rate"] == 0.566
 
 
+def test_export_slim_drops_heavy_timeseries(tmp_path) -> None:
+    """``--slim`` mode must drop the per-step telemetry_samples,
+    per-step turns, and cohort-level snapshots — but keep the
+    headline summary, per-step rollup, landing zones, bottleneck
+    attribution, and prefix-cache verdict. Default filename also
+    differs so slim and full exports can coexist."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="chat_heavy",
+        cohort_definition={"name": "x", "persona_weights": {}}, config={},
+    )
+    mid = db.insert_measurement({
+        "cohort_run_id": "crid", "step_index": 0, "target_pool_size": 8,
+        "measured_avg_pool_size": 8.0, "measured_avg_in_flight": 6.5,
+        "measurement_started_at": "2026-01-01T00:00:30Z",
+        "measurement_duration_s": 60, "sample_size": 3,
+        "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+        "combined_violation_rate": 0.0, "violation_rate_ci_lower": 0.0,
+        "violation_rate_ci_upper": 0.0, "capacity_status": "pass",
+    })
+    # Heavy time-series rows that should disappear in slim mode.
+    db.insert_telemetry([
+        {"measurement_id": mid, "sampled_at_ms": 1000,
+         "kv_cache_used_pct": 41.2, "queue_depth": 2,
+         "prefix_cache_hits": 100, "prefix_cache_misses": 0,
+         "cpu_util_avg": 78.3, "memory_used_gb": 60.1,
+         "engine_rss_gb": 38.0, "freq_mhz_mean": 3000.0,
+         "freq_mhz_stddev": 12.0, "freq_mhz_min": 2950.0},
+    ])
+    db.insert_events([
+        {"measurement_id": mid, "persona_id": "quick_lookup",
+         "user_id": "u1", "session_id": "s1", "turn_index": 0,
+         "submitted_at_ms": 1500, "ttft_ms": 1697.0,
+         "completed_at_ms": 5500, "input_tokens": 350,
+         "history_tokens": 0, "output_tokens": 60, "tpot_ms": 62.0,
+         "end_to_end_ms": 4000.0, "in_flight_at_submit": 4,
+         "in_flight_avg_during": 4.5, "in_flight_peak_during": 6,
+         "sla_ttft_violation": 0, "sla_tpot_violation": 0,
+         "ttft_target_miss": 0, "tpot_target_miss": 0,
+         "token_timestamps_json": None},
+    ])
+    db.insert_snapshot({
+        "cohort_run_id": "crid", "snapshot_at_ms": 500,
+        "phase": "warmup", "pool_size": 8, "in_flight": 4,
+        "requests_completed": 0, "errors": 0,
+        "step_samples": 0, "step_target_samples": 0,
+    })
+    db.finalise_run("crid", "2026-01-01T00:01:30Z", "ok")
+    db.close()
+
+    # Slim export
+    slim_doc, slim_path = export_dir(tmp_path, slim=True)
+    assert slim_path.name == "buyer_page_data_slim.json"
+    assert slim_doc["meta"]["slim"] is True
+    cohort = slim_doc["cohorts"][0]
+    assert cohort["curve"][0].get("telemetry_samples") is None, (
+        "slim export must NOT include per-step telemetry_samples"
+    )
+    assert cohort["curve"][0].get("turns") is None, (
+        "slim export must NOT include per-step turns"
+    )
+    assert "snapshots" not in cohort, (
+        "slim export must NOT include cohort-level snapshots"
+    )
+    # Summary fields must still be present.
+    assert cohort["capacity_pool_size"] == 8
+    assert "soft_capacity_pool_size" in cohort
+    assert "fail_pool_size" in cohort
+    assert "bottleneck" in cohort
+    assert len(cohort["curve"]) == 1  # rollup retained
+
+    # Full export — same data, heavier shape.
+    full_doc, full_path = export_dir(tmp_path)
+    assert full_path.name == "buyer_page_data.json"
+    assert full_doc["meta"]["slim"] is False
+    full_cohort = full_doc["cohorts"][0]
+    assert len(full_cohort["curve"][0]["telemetry_samples"]) == 1
+    assert len(full_cohort["curve"][0]["turns"]) == 1
+    assert "snapshots" in full_cohort
+
+    # Slim should be substantially smaller. The model database here
+    # is tiny, so the absolute delta is small — but slim must be
+    # strictly smaller than full.
+    assert slim_path.stat().st_size < full_path.stat().st_size
+
+
 def test_export_default_output_lands_in_run_dir(tmp_path) -> None:
     """``make export`` must default to writing the JSON inside the
     run_NN/ directory the data came from — keeps every artifact for

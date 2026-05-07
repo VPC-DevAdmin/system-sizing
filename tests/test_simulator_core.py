@@ -1334,6 +1334,81 @@ def test_export_curve_uses_kv_cache_used_pct_field_name(tmp_path) -> None:
     assert "kv_cache_pct" not in step
 
 
+def test_export_meta_includes_engine_config(tmp_path) -> None:
+    """The ``engine_config`` block in meta lets cross-host comparisons
+    verify the configs were actually equivalent before reading
+    capacity differences as host effects."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="sglang", model_id="Qwen/Test", cohort_id="x",
+        cohort_definition={"name": "x"},
+        config={
+            "engine": {
+                "type": "sglang",
+                "model_id": "Qwen/Test",
+                "quantization_kind": "fp8",
+                "max_total_tokens": 131072,
+                "chunked_prefill_size": 4096,
+                "mem_fraction_static": 0.85,
+                "tensor_parallel_size": 1,
+                "attention_backend": "intel_amx",
+                "disable_overlap_schedule": True,
+                "docker_image": "sglang-cpu:xeon-fixed",
+                # Fields outside the whitelist must be excluded.
+                "host": "127.0.0.1",
+                "port": 30000,
+                "startup_timeout_s": 1200,
+            },
+            "simulation": {"initial_pool_size": 8},
+        },
+    )
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    doc, _ = export_dir(tmp_path)
+    eng = doc["meta"]["engine_config"]
+    assert eng is not None
+    # Whitelisted fields surface.
+    assert eng["type"] == "sglang"
+    assert eng["quantization_kind"] == "fp8"
+    assert eng["max_total_tokens"] == 131072
+    assert eng["chunked_prefill_size"] == 4096
+    assert eng["attention_backend"] == "intel_amx"
+    assert eng["docker_image"] == "sglang-cpu:xeon-fixed"
+    # Non-whitelisted fields excluded.
+    assert "host" not in eng
+    assert "port" not in eng
+    assert "startup_timeout_s" not in eng
+
+
+def test_export_meta_engine_config_handles_missing_config(tmp_path) -> None:
+    """Legacy / corrupt ``config_json`` shouldn't break the export —
+    engine_config just comes back None."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    # config={} → JSON {} with no 'engine' key
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="x",
+        cohort_definition={"name": "x"}, config={},
+    )
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    doc, _ = export_dir(tmp_path)
+    assert doc["meta"]["engine_config"] is None
+
+
 def test_landing_zones_three_band_split() -> None:
     """The export's three-zone landing zones (capacity / soft_capacity
     / fail_pool) must accurately split a curve into the

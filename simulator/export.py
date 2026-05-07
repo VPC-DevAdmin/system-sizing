@@ -762,12 +762,18 @@ def export_dir(
     cohorts: list[dict] = []
     engine_seen: set[str] = set()
     model_seen: set[str] = set()
+    # First-seen engine config (from config_json) becomes the run-wide
+    # ``engine_config`` block in meta. All cohort_runs in a single
+    # sweep share one config, so the first row is canonical.
+    engine_config: dict | None = None
     # One run.db per run_NN/ holds every cohort_run for that invocation;
     # legacy flat layouts (one .db per cohort) iterate the same way.
     for db in sorted(db_source.glob("*.db")):
         for run in _read_runs(db):
             engine_seen.add(run["engine_type"])
             model_seen.add(run["model_id"])
+            if engine_config is None:
+                engine_config = _extract_engine_config(run)
             prefix_cache = _read_prefix_cache_report(
                 db, cohort_run_id=run["cohort_run_id"],
             )
@@ -782,9 +788,67 @@ def export_dir(
             "source_dir": str(db_source),
             "cohort_count": len(cohorts),
             "slim": slim,
+            # Engine launch parameters that affect throughput / capacity
+            # numbers — KV pool size, chunked prefill, attention backend,
+            # quantization, parallelism. Pinning them in the export lets
+            # cross-host comparisons (Intel vs AMD, etc.) confirm the
+            # configs were actually equivalent before reading the
+            # capacity differences as host effects.
+            "engine_config": engine_config,
         },
         "cohorts": cohorts,
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(doc, indent=2))
     return doc, output_path
+
+
+# Whitelisted engine config fields that materially affect throughput /
+# capacity. Anything outside this list is excluded from the export
+# either because it's noisy (timestamps, ports), redundant (model
+# name is already in meta.models), or irrelevant to a buyer-page
+# comparison (docker mounts).
+_ENGINE_CONFIG_FIELDS = (
+    "type",
+    "model_id",
+    "model_local_path",
+    "served_model_name",
+    "quantization",
+    "quantization_kind",
+    "max_model_len",
+    "context_length",
+    "max_total_tokens",
+    "tensor_parallel_size",
+    "kv_cache_gb",
+    "chunked_prefill_size",
+    "mem_fraction_static",
+    "attention_backend",
+    "disable_overlap_schedule",
+    "enable_metrics",
+    "cpu_bind",
+    "docker_image",
+    "vllm_extra_flags",
+    "sglang_extra_flags",
+)
+
+
+def _extract_engine_config(run: dict) -> dict | None:
+    """Pull a curated subset of the engine config from ``config_json``.
+
+    Returns ``None`` if config_json can't be parsed (legacy / corrupt
+    rows). The returned dict only contains fields from
+    ``_ENGINE_CONFIG_FIELDS`` that were actually present — no
+    placeholders for missing keys, so additions to ``EngineConfig``
+    over time don't leave empty slots in old exports.
+    """
+    raw = run.get("config_json")
+    if not raw:
+        return None
+    try:
+        cfg = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    engine = cfg.get("engine") if isinstance(cfg, dict) else None
+    if not isinstance(engine, dict):
+        return None
+    return {k: engine[k] for k in _ENGINE_CONFIG_FIELDS if k in engine}

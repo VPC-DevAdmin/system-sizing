@@ -87,6 +87,32 @@ def _wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
+# Status thresholds — same numbers for capacity_status and target_status,
+# different rate inputs (failure-bound vs target-bound).
+_STATUS_PASS_UPPER = 0.05  # < 5% — clearly within budget
+_STATUS_FAIL_LOWER = 0.30  # ≥ 30% — clearly past the cliff
+
+
+def _classify_status(misses: int, n: int) -> str:
+    """Wilson-CI-aware classification.
+
+    Use the upper-CI bound to gate ``pass`` and the lower-CI bound to
+    gate ``fail`` — only cross either threshold when statistically
+    confident, so a single sample's worth of measurement noise can't
+    flip a borderline measurement between bands.
+
+    Returns ``pending`` when n == 0 (no completed turns in the window).
+    """
+    if n <= 0:
+        return "pending"
+    lower, upper = _wilson_ci(misses, n)
+    if upper < _STATUS_PASS_UPPER:
+        return "pass"
+    if lower >= _STATUS_FAIL_LOWER:
+        return "fail"
+    return "marginal"
+
+
 async def _wait_for_throughput_convergence(
     state: SharedState,
     *,
@@ -349,23 +375,16 @@ async def run_measurement_step(
     avg_kv = _avg_field(telemetry_rows, "kv_cache_used_pct")
     est_prefix = _estimate_prefix_hit_rate(telemetry_rows)
 
-    # Status bands (5-30% bands apply to BOTH the failure-bound
-    # capacity_status and the target-bound target_status):
-    #   <  5%  pass      — clearly within budget
-    #   < 30%  marginal  — wide noise-tolerant zone; at n=100 a true
-    #                       rate of 10-20% can occasionally measure as
-    #                       high as 25-28% from sampling noise alone,
-    #                       so we don't call it "fail" until 30%+
-    #   ≥ 30%  fail      — real cliff
-    def _status(rate: float) -> str:
-        if rate < 0.05:
-            return "pass"
-        if rate < 0.30:
-            return "marginal"
-        return "fail"
-
-    capacity_status = _status(combined_rate)
-    target_status = _status(combined_target_miss_rate)
+    # Wilson-CI-aware status classification on BOTH the failure-bound
+    # capacity_status and the target-bound target_status. See
+    # ``_classify_status`` — only cross a threshold when statistically
+    # confident, so a single sample's worth of measurement noise can't
+    # flip a borderline measurement between bands. The May 2026 Intel
+    # run surfaced this with a 30/100 measurement (rate=0.30 exactly)
+    # getting classified ``fail`` despite a true rate that could
+    # plausibly be ~21–40%.
+    capacity_status = _classify_status(combined_violations, n)
+    target_status = _classify_status(combined_target_misses, n)
 
     final_row = {
         "measured_avg_pool_size": float(target_pool_size),

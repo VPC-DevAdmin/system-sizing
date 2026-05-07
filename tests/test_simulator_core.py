@@ -19,6 +19,7 @@ import asyncio
 from simulator.adaptive import StepResult, TwoKneeStepper
 from simulator.distributions import Discrete, LogNormal, Constant
 from simulator.measurement import (
+    _classify_status,
     _percentile,
     _wait_for_throughput_convergence,
     _wilson_ci,
@@ -356,6 +357,53 @@ def test_wilson_ci_full_range_when_n_zero() -> None:
     """With no observations the CI is [0,1] — the export reader checks
     sample_size separately and won't draw a bar with zero samples."""
     assert _wilson_ci(0, 0) == (0.0, 1.0)
+
+
+def test_classify_status_clean_pass_at_zero_misses() -> None:
+    """Zero misses out of 100 → upper CI ~0.037, well under 5% → pass."""
+    assert _classify_status(0, 100) == "pass"
+
+
+def test_classify_status_clean_fail_at_high_rate() -> None:
+    """50/100 misses → lower CI ~0.40, well past 30% → fail."""
+    assert _classify_status(50, 100) == "fail"
+    assert _classify_status(80, 100) == "fail"
+
+
+def test_classify_status_boundary_30pct_stays_marginal() -> None:
+    """The May 2026 Intel quick_lookup pool=232 case: 30/100 misses
+    (rate=0.30 exactly) sits on the failure threshold but the lower
+    Wilson CI is well below 30%, so the verdict is marginal — not
+    fail. One sample's worth of noise shouldn't flip the band."""
+    assert _classify_status(30, 100) == "marginal"
+    # Need a clear lower-CI ≥ 0.30 to commit to fail.
+    assert _classify_status(40, 100) == "fail"
+
+
+def test_classify_status_boundary_5pct_stays_marginal() -> None:
+    """4/100 (rate=0.04) might look like pass on the point estimate,
+    but upper Wilson CI is ~0.10 — too noisy to commit to pass. Same
+    asymmetric-rigor design as the fail boundary."""
+    assert _classify_status(4, 100) == "marginal"
+    # Need clearly-below-5% (small upper CI) to call pass.
+    assert _classify_status(0, 100) == "pass"
+    assert _classify_status(1, 100) == "marginal"
+
+
+def test_classify_status_low_n_stays_conservative() -> None:
+    """n=10, 3 misses (rate=0.30): upper CI ~0.60, lower CI ~0.11.
+    Neither bound clears its threshold → marginal. Wilson naturally
+    handles the small-sample case without separate logic."""
+    assert _classify_status(3, 10) == "marginal"
+    # Even 0/5 isn't tight enough for pass — upper CI ~0.43.
+    assert _classify_status(0, 5) == "marginal"
+
+
+def test_classify_status_zero_n_returns_pending() -> None:
+    """No completed turns in window → pending. ``_status`` callers
+    write this through to the row so the curve renderer can show
+    'in flight' rather than misclassify as pass."""
+    assert _classify_status(0, 0) == "pending"
 
 
 # ── Persona / cohort definitions ──────────────────────────────────────

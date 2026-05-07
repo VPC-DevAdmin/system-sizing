@@ -195,10 +195,10 @@ class ConfigResult:
 
 # ── Engine config registry ──────────────────────────────────────────────
 #
-# 5 starter configs from the user request, plus 4 complementary axes:
-# kv-pool size, prefix-cache toggle, block size, and a single-replica
-# all-cores variant (the AMD analog of Intel's ctx_kv_xl winner). Each
-# config tests an isolated change so the result diffs are meaningful.
+# Profiles map a host/model shape to a list of EngineConfig variants
+# the optimizer will sweep. Selected via ``--profile`` (default
+# ``amd_dual_socket``, the original target). Each profile's configs
+# test an isolated change so the result diffs are meaningful.
 
 def _dual_replica_pair() -> list[ReplicaSpec]:
     return [
@@ -223,7 +223,7 @@ def _dual_replica_pair() -> list[ReplicaSpec]:
     ]
 
 
-CONFIGS: list[EngineConfig] = [
+_AMD_DUAL_SOCKET_CONFIGS: list[EngineConfig] = [
     EngineConfig(
         name="baseline",
         description="Dual-replica BF16, 80GB KV per replica. Reference point.",
@@ -435,6 +435,152 @@ CONFIGS: list[EngineConfig] = [
         ),
     ),
 ]
+
+
+# ── Intel single-socket profile (Xeon 6761P / Granite Rapids) ───────────
+#
+# Single-socket 64-core Xeon — no NUMA splitting, so the dual-replica
+# pattern from AMD doesn't apply. One container covers the entire CPU.
+# Defaults are tuned for Gemma 4 26B-A4B (MoE, ~4B active params), which
+# tested significantly faster than Qwen3-30B-A3B on this stack — a
+# working hypothesis being that Gemma's MoE expert routing is properly
+# sparse on vLLM-CPU while Qwen3's isn't.
+#
+# Knobs swept here mirror what the AMD profile explored, minus the
+# NUMA-shape variants (single-replica vs dual-replica) which don't
+# apply on single-socket hardware. Adds an AMX-flavored variant since
+# Granite Rapids has AMX_BF16 — relevant for any oneDNN dispatch
+# choices vLLM-CPU surfaces.
+
+def _intel_single_replica(
+    *, kv_gb: int = 64, extra_env: dict | None = None,
+) -> list[ReplicaSpec]:
+    env = {
+        "VLLM_CPU_KVCACHE_SPACE": str(kv_gb),
+        "VLLM_CPU_OMP_THREADS_BIND": "0-63",
+        "OMP_NUM_THREADS": "64",
+    }
+    if extra_env:
+        env.update(extra_env)
+    return [
+        ReplicaSpec(
+            name="vllm-r0", port=8000,
+            cpuset_cpus="0-63", cpuset_mems=None,
+            env=env,
+        ),
+    ]
+
+
+_INTEL_GEMMA4_CONFIGS: list[EngineConfig] = [
+    EngineConfig(
+        name="baseline",
+        description=(
+            "Single replica, 64 cores, 64 GB KV. Matches the hand-validated "
+            "docker invocation for Gemma 4 on Xeon 6761P. Reference point "
+            "for everything else in this profile."
+        ),
+        replicas=_intel_single_replica(kv_gb=64),
+        expected_outcome="Establishes the baseline TTFT/TPOT/throughput.",
+    ),
+    EngineConfig(
+        name="kv_xl_96",
+        description="Single replica, 96 GB KV (1.5× baseline).",
+        replicas=_intel_single_replica(kv_gb=96),
+        expected_outcome=(
+            "Tests whether 64 GB KV becomes a ceiling at higher concurrency. "
+            "On AMD the analogous lift (80→120) eliminated a c=16 long-prompt "
+            "tail; if Intel sees the same pattern, this'll show it. If "
+            "aggregate metrics don't change, KV wasn't the bottleneck."
+        ),
+    ),
+    EngineConfig(
+        name="kv_xl_128",
+        description="Single replica, 128 GB KV (2× baseline).",
+        replicas=_intel_single_replica(kv_gb=128),
+        expected_outcome=(
+            "Upper-bound KV probe. 128 GB on a 192–256 GB host leaves "
+            "comfortable headroom for weights + scratch. Skip if 96 GB "
+            "didn't help — diminishing returns past that point."
+        ),
+    ),
+    EngineConfig(
+        name="chunked_prefill",
+        description=(
+            "Baseline + chunked prefill (4096 tokens/step, 64 seqs). "
+            "Only relevant if Gemma's prefill exhibits the head-of-line "
+            "blocking we saw on Qwen3."
+        ),
+        replicas=_intel_single_replica(kv_gb=64),
+        replica_args=[
+            "--enable-chunked-prefill",
+            "--max-num-batched-tokens", "4096",
+            "--max-num-seqs", "64",
+        ],
+        expected_outcome=(
+            "If Gemma's MoE routing on vLLM-CPU is genuinely sparse, "
+            "concurrent unique-prompt prefill shouldn't serialize the way "
+            "Qwen3's did, and chunked prefill should be a small win or a "
+            "wash. If chunked prefill produces a large win, that's a hint "
+            "that prefill IS still partially serialized."
+        ),
+    ),
+    EngineConfig(
+        name="block_32",
+        description="Baseline + KV block size 32 (2× default).",
+        replicas=_intel_single_replica(kv_gb=64),
+        replica_args=["--block-size", "32"],
+        expected_outcome=(
+            "Coarser KV blocks reduce per-block bookkeeping overhead. On "
+            "AMD this won the low-concurrency cells. Likely also helps on "
+            "Intel for the same reason; quantify."
+        ),
+    ),
+    EngineConfig(
+        name="batch_budget",
+        description="Baseline + larger batch budget (8192 tokens/step).",
+        replicas=_intel_single_replica(kv_gb=64),
+        replica_args=[
+            "--max-num-batched-tokens", "8192",
+            "--max-num-seqs", "96",
+        ],
+        expected_outcome=(
+            "Higher prefill throughput when many requests arrive together. "
+            "Individual TTFT may rise. Compares against chunked_prefill "
+            "since both target prefill scheduling but from different angles."
+        ),
+    ),
+    EngineConfig(
+        name="kv_xl_chunked_prefill",
+        description="kv_xl_96 + chunked prefill, stacked.",
+        replicas=_intel_single_replica(kv_gb=96),
+        replica_args=[
+            "--enable-chunked-prefill",
+            "--max-num-batched-tokens", "4096",
+            "--max-num-seqs", "64",
+        ],
+        expected_outcome=(
+            "If both KV size AND chunked prefill help individually, the "
+            "stack may give both effects. Watch for destructive interactions "
+            "(AMD's chunked_prefill_block_32 reproduced a 900 s tail when "
+            "stacked with non-default block size)."
+        ),
+    ),
+]
+
+
+PROFILES: dict[str, list[EngineConfig]] = {
+    "amd_dual_socket": _AMD_DUAL_SOCKET_CONFIGS,
+    "intel_gemma4": _INTEL_GEMMA4_CONFIGS,
+}
+
+# Default profile for backwards compatibility — the optimizer originally
+# only had AMD configs and a stable ``--out`` path.
+DEFAULT_PROFILE = "amd_dual_socket"
+
+# Module-level CONFIGS is the *currently selected* profile's list.
+# main() rebinds this when --profile is passed; the rest of the code
+# reads from this name.
+CONFIGS: list[EngineConfig] = PROFILES[DEFAULT_PROFILE]
 
 
 # ── Test cells ──────────────────────────────────────────────────────────
@@ -1457,9 +1603,27 @@ def main() -> None:
             "``make optimize-engine`` run."
         ),
     )
+    p.add_argument(
+        "--profile",
+        default=os.environ.get("OPTIMIZER_PROFILE", DEFAULT_PROFILE),
+        choices=sorted(PROFILES.keys()),
+        help=(
+            "Select which set of EngineConfig variants to sweep. "
+            "Default ``amd_dual_socket`` (the original target). "
+            "Override with ``intel_gemma4`` for Xeon single-socket / "
+            "Gemma 4 testing. Also settable via OPTIMIZER_PROFILE env."
+        ),
+    )
     args = p.parse_args()
 
+    # Rebind the module-level CONFIGS name to the selected profile so
+    # everything downstream (main_async, --list, watch dashboard) reads
+    # from the right list without each caller passing it explicitly.
+    global CONFIGS
+    CONFIGS = PROFILES[args.profile]
+
     if args.list:
+        print(f"profile: {args.profile}")
         for c in CONFIGS:
             print(f"  {c.name:25} {c.description}")
             if c.expected_outcome:

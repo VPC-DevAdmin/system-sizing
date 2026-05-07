@@ -402,7 +402,8 @@ test:
 .PHONY: optimize-engine
 optimize-engine:
 	@if [ -n "$(LIST)" ]; then \
-		$(PY) scripts/engine_optimizer.py --list ; \
+		$(PY) scripts/engine_optimizer.py --list \
+			$(if $(PROFILE),--profile $(PROFILE)) ; \
 		exit 0 ; \
 	fi ; \
 	OUT_DIR="runs/engine_optimizer" ; \
@@ -413,6 +414,7 @@ optimize-engine:
 		--out "$$OUT" \
 		$(if $(RUN_NEW),--new-run) \
 		$(if $(ONLY),--only $$(echo $(ONLY) | tr ',' ' ')) \
+		$(if $(PROFILE),--profile $(PROFILE)) \
 		>"$$LOG" 2>&1 </dev/null & \
 	PID=$$! ; \
 	echo "" ; \

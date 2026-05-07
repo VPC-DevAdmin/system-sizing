@@ -1,0 +1,121 @@
+# vLLM-CPU single-replica on Xeon 6761P (Granite Rapids, 1 socket, 64 cores).
+#
+# Gemma 4 26B-A4B (MoE: ~4B active params per token). The Qwen3-30B-A3B
+# results on AMD vLLM-CPU were dominated by serialized prefill — that
+# model's MoE expert routing isn't accelerated on the CPU path. Gemma 4
+# tested as substantially faster on the same hardware, suggesting its
+# MoE implementation is properly sparse on vLLM-CPU. This config is
+# the starting point; ``make optimize-engine PROFILE=intel_gemma4`` will
+# search variants (KV pool size, chunked prefill, block size) before
+# the run-sweep commits to a final shape.
+#
+# Architecture:
+#   benchmark client → 127.0.0.1:8000  (single vllm-cpu replica, all 64 cores)
+#
+# This Intel host is single-socket — no NUMA splitting, so the dual-
+# replica pattern from AMD doesn't apply. One container covers the
+# entire CPU. ``vllm_dual_socket`` is the engine type because it owns
+# the docker-launching code; the ``replicas`` list just happens to
+# have one entry. (The name is a misnomer for this case; the engine
+# supports N replicas including N=1.)
+#
+# Verified launch shape (2026-05-07, hand-tested):
+#   docker run --network host --shm-size=4g --cpuset-cpus 0-63
+#     -e VLLM_CPU_KVCACHE_SPACE=64 -e VLLM_CPU_OMP_THREADS_BIND=0-63
+#     -e OMP_NUM_THREADS=64
+#     vllm/vllm-openai-cpu:latest-x86_64
+#     --model /models/gemma-4-26B-A4B-it --dtype bfloat16
+#     --max-model-len 8192 --trust-remote-code
+#     --host 0.0.0.0 --port 8000 --served-model-name gemma4_26b_a4b
+
+engine:
+  type: vllm_dual_socket
+  model_id: google/gemma-4-26B-A4B-it
+  model_local_path: /models/gemma-4-26B-A4B-it
+  served_model_name: gemma4_26b_a4b
+  quantization_kind: null              # BF16
+
+  max_model_len: 8192
+  startup_timeout_s: 1800              # ~90-120s cold load
+
+  host: 127.0.0.1
+
+  # Container image. Intel + AMD share the upstream vllm-openai-cpu
+  # image — its torch wheel has the AVX-512 BF16 dispatch both need.
+  vllm_image: vllm/vllm-openai-cpu:latest-x86_64
+
+  # Optimizer-tunable launch flags applied to every replica via
+  # vllm_extra_flags. ``make optimize-engine PROFILE=intel_gemma4``
+  # will sweep variants and report the best shape; once validated,
+  # add the winning flags here.
+  vllm_extra_flags: []
+
+  # ── Replicas ──
+  # Single replica covering all 64 cores of the single-socket Xeon
+  # 6761P. KVCACHE_SPACE=64 GB matches the hand-validated invocation;
+  # the optimizer will probe higher values in the kv_xl shape.
+  replicas:
+    - name: r0
+      cpuset_cpus: '0-63'
+      cpuset_mems: ''                  # single socket — no NUMA pin needed
+      port: 8000
+      env:
+        VLLM_CPU_KVCACHE_SPACE: '64'
+        VLLM_CPU_OMP_THREADS_BIND: '0-63'
+        OMP_NUM_THREADS: '64'
+
+  shutdown_grace_s: 30
+
+  # Volume mounts (model weights live on host, mounted read-only).
+  docker_volumes:
+    /data/ml/models: /models
+    /data/ml/huggingface: /root/.cache/huggingface
+
+  # ── Hardware preflight ──
+  # Granite Rapids has AVX-512 BF16 + AMX. AMX is required for the
+  # SGLang FP8 path (which we're NOT using here — vLLM-CPU has no FP8
+  # dispatch table on either Intel or AMD as of 2026-05). On bf16,
+  # AMX still accelerates matmul through oneDNN's AMX dispatch.
+  hardware_requirements:
+    cpu_vendor: intel
+    cpu_features:
+      - avx512f
+      - avx512_bf16
+      - amx_bf16
+    min_sockets: 1
+    notes: "Single-socket Xeon 6761P; one all-core vLLM replica."
+
+simulation:
+  ramp_spawn_interval_s: 2.0
+  initial_phase_offset_enabled: true
+  initial_pool_size: 8
+  max_pool_size: 256
+  target_samples_per_step: 100
+  measurement_timeout_s: 600
+  warmup_min_duration_s: 30
+  warmup_max_duration_s: 300
+  convergence_window_s: 60
+  convergence_threshold: 0.20
+  convergence_min_completions_per_window: 5
+  knee_slope_threshold: 0.005
+  stop_violation_threshold: 0.5
+  max_total_duration_minutes: 240
+  enable_token_timestamps: false
+  snapshot_interval_s: 1
+  request_timeout_s: 600
+
+telemetry:
+  enable_pmu: true
+  enable_memory_bandwidth: true   # uncore_imc on Xeon — collector reads it
+  enable_power: true
+  enable_engine_metrics: true     # vLLM /metrics works
+  enable_amx_utilization: true    # Intel has AMX — capture dispatch fraction
+  perf_events:
+    - cycles
+    - instructions
+    - cache-misses
+    - cache-references
+
+output:
+  db_directory: runs
+  json_export: true

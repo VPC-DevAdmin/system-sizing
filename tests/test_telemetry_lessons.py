@@ -129,6 +129,66 @@ def test_vllm_dual_socket_engine_command_shape() -> None:
     assert "--served-model-name" in cmd and "qwen3_30b_a3b" in cmd
 
 
+def test_intel_gemma4_single_replica_command_shape() -> None:
+    """Single-socket Intel Xeon variant: one replica, all 64 cores, no
+    NUMA membership pin (cpuset_mems blank). Pins the hand-validated
+    docker invocation for Gemma 4 26B-A4B on Xeon 6761P."""
+    from simulator.config import load_config
+    from simulator.engines.vllm_dual_socket import VllmDualSocketEngine
+
+    cfg = load_config("config/xeon_vllm_gemma4_26b_a4b.yaml")
+    assert len(cfg.engine.replicas) == 1, (
+        "Single-socket profile should declare exactly one replica"
+    )
+
+    eng = VllmDualSocketEngine(cfg.engine)
+    cmd = eng._build_replica_command(cfg.engine.replicas[0], "test-r0")
+
+    # All 64 cores, single replica.
+    assert "--cpuset-cpus" in cmd and "0-63" in cmd
+    # No NUMA-mems pin on single socket — flag must be ABSENT.
+    assert "--cpuset-mems" not in cmd
+    # vLLM env flow-through.
+    assert any("VLLM_CPU_KVCACHE_SPACE=64" in s for s in cmd)
+    assert any("VLLM_CPU_OMP_THREADS_BIND=0-63" in s for s in cmd)
+    assert any("OMP_NUM_THREADS=64" in s for s in cmd)
+    # Model + name match the Gemma 4 hand-validated invocation.
+    assert "/models/gemma-4-26B-A4B-it" in cmd
+    assert "gemma4_26b_a4b" in cmd
+    assert "--dtype" in cmd and "bfloat16" in cmd
+    assert "--port" in cmd and "8000" in cmd
+
+
+def test_optimizer_profile_registry_has_intel_gemma4() -> None:
+    """The engine_optimizer profile registry must expose the
+    Intel Gemma 4 profile alongside the original AMD one, and the
+    profile's configs must use a single-replica all-64-core shape
+    (not the dual-replica AMD pattern)."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    eo = importlib.import_module("engine_optimizer")
+
+    assert "intel_gemma4" in eo.PROFILES
+    assert "amd_dual_socket" in eo.PROFILES
+    assert eo.DEFAULT_PROFILE == "amd_dual_socket"  # backwards compat
+
+    intel_configs = eo.PROFILES["intel_gemma4"]
+    assert intel_configs, "intel_gemma4 profile must contain configs"
+    # Every Intel config is single-replica, single-socket (no mems pin).
+    for c in intel_configs:
+        assert len(c.replicas) == 1, (
+            f"intel_gemma4/{c.name} must have exactly one replica"
+        )
+        r = c.replicas[0]
+        assert r.cpuset_cpus == "0-63", (
+            f"intel_gemma4/{c.name} must use all 64 cores"
+        )
+        assert r.cpuset_mems is None, (
+            f"intel_gemma4/{c.name} must not pin NUMA mems on single socket"
+        )
+
+
 def test_engine_api_model_name_uses_served_name_when_set() -> None:
     """Real bug from the AMD R7735 dual_socket first-light run: the
     simulator was sending ``Qwen/Qwen3-30B-A3B-Instruct-2507`` as the

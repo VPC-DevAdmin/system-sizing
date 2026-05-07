@@ -155,8 +155,15 @@ run-persona:
 # splitting the sweep's DBs and the wrapper's log file across two
 # directories. Resume-skip is harmless on a fresh dir (find_completed_runs
 # returns empty) so RUN_NEW=true semantics are preserved.
+# Depend on ``stop-bg`` so a stale sweep + engine container from a
+# previous invocation are cleaned up before we launch a new one.
+# Symptom this guards against: Ctrl-C on the tail leaves the
+# nohup-detached sweep alive; a follow-up ``make run-sweep`` then
+# silently shares the still-listening engine container with the
+# orphan sweep, halving each one's effective throughput and producing
+# garbage data. ``stop-bg`` is a no-op when nothing is running.
 .PHONY: run-sweep
-run-sweep:
+run-sweep: stop-bg
 	@RD="$$($(RESOLVE_RUN_DIR))" ; \
 	LOG="$$RD/sweep_$$(date +%Y%m%dT%H%M%S).log" ; \
 	nohup $(PY) -m simulator.cli sweep \

@@ -117,8 +117,10 @@ def test_vllm_dual_socket_engine_command_shape() -> None:
     assert "seccomp=unconfined" in cmd
     assert "--cap-add" in cmd
     assert "SYS_NICE" in cmd
-    # vLLM-specific env flow-through
-    assert any("VLLM_CPU_KVCACHE_SPACE=80" in s for s in cmd)
+    # vLLM-specific env flow-through. KV pool size is optimizer-validated
+    # at 120 GB per replica (resolves the c=16 long-prompt 900 s tail);
+    # see the YAML's optimizer-findings header for the rationale.
+    assert any("VLLM_CPU_KVCACHE_SPACE=120" in s for s in cmd)
     assert any("VLLM_CPU_OMP_THREADS_BIND=0-31" in s for s in cmd)
     # vLLM serve flags
     assert "--dtype" in cmd and "bfloat16" in cmd

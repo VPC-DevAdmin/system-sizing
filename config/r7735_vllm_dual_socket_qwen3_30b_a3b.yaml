@@ -19,22 +19,48 @@
 #   The simulator's pool manager owns the per-user routing; no proxy.
 #
 # ── Engine optimizer findings (2026-05-05, scripts/engine_optimizer.py) ──
-# Tested 11 vLLM-CPU launch shapes; ``block_32`` won across 9 of 11
-# ranking cells:
+# Tested 11 vLLM-CPU launch shapes. Two complementary winners:
 #
-#   short_throughput c=8 ttft p95:  1486 ms baseline → 409 ms (-72%)
-#   single_stream c=1 ttft p95:      408 ms baseline → 321 ms (-21%)
-#   long_output c=4 ttft p95:        511 ms baseline → 325 ms (-36%)
-#   long_pain c=16 ttft p95:        BIMODAL 900s tail → 1062 ms (clean)
+#   ``block_32``  improves the low-concurrency cells (single_stream c=1,
+#                 short_throughput c=8) by reducing per-block KV
+#                 bookkeeping overhead.
+#   ``kv_xl_120`` (KVCACHE_SPACE=120 GB per replica) eliminates the
+#                 catastrophic c=16 long-prompt tail. The original
+#                 80 GB baseline showed a BIMODAL 900-second p95 tail on
+#                 long_pain_16 — confirmed as KV-pressure-induced (head-
+#                 of-line eviction). Bumping to 120 GB resolves it:
 #
-# The c=16 baseline-with-80GB-KV bimodal collapse was confirmed as
-# KV-pressure-induced (kv_xl_120 also resolved it). ``--block-size 32``
-# reduces per-block bookkeeping overhead enough that the scheduler
-# doesn't hit the head-of-line eviction trap, while ALSO improving
-# every other cell that's KV-allocation-sensitive.
+#                   long_pain c=16 ttft p95:  900996 ms → 1045 ms
+#                   long_pain c=16 aggregate:    8.7 tok/s → 152 tok/s
 #
-# Stacked tests (chunked_prefill_block_32, batch_budget) added no
-# further gains; ``block_32`` alone is the production answer.
+# ``chunked_prefill`` alone produced essentially identical c=16 numbers
+# to kv_xl_120 (TTFT p95 1060 ms, aggregate 151 tok/s), but stacked
+# DESTRUCTIVELY with block_32 — the chunked_prefill_block_32 combo
+# reproduced the 900 s tail. Default scheduler + larger KV is the
+# proven non-interacting choice.
+#
+# Configurations tested and rejected:
+#   * batch_budget — matched chunked_prefill on c=16 but had a 900 s
+#     tail at c=8 (one-sample artifact, but enough to disqualify).
+#   * no_prefix_cache — catastrophic regression on every concurrency-
+#     stressed cell. Never disable prefix caching.
+#   * kv_xl (160 GB) — health check timeout, possibly genuine memory
+#     pressure at startup.
+#   * single_replica_64core — ~30% lower aggregate throughput than
+#     dual-replica on concurrent workloads.
+#   * tp2_cross_socket / tp2_chunked_prefill — distributed-init failure
+#     (~25s Gloo hang, never resolved). Cuts TTFT in half but trades
+#     ~30% TPOT due to decode crossing the NUMA boundary; even if it
+#     ran cleanly the trade isn't a clear win. Skip TP=2 across NUMA
+#     on AMD vLLM-CPU.
+#
+# Quantization paths surveyed and unavailable on this stack:
+#   * vLLM-CPU FP8       — KeyError: PlatformEnum.CPU (no dispatch).
+#   * vLLM-CPU GPTQ-INT8 — gptq_shuffle operator not compiled into
+#                          the CPU _C extension.
+#   * vLLM-CPU AWQ-WNA16 — gptq_marlin_repack operator missing from CPU.
+#   * SGLang xeon FP8    — hard assert requires AMX (AMD doesn't have).
+# BF16 is the floor; quantization is not a lever on this hardware.
 #
 # Verified working on this hardware (EPYC 9374F, 386 GB DDR5) with
 # Qwen3-30B-A3B-Instruct-2507 BF16, runbook dated 2026-05-03.
@@ -65,16 +91,20 @@ engine:
   # Pin to physical cores only (skip SMT siblings 64-127 — using them
   # hurts BF16 matmul because the AVX-512 SIMD unit is shared between
   # SMT siblings on Zen4). VLLM_CPU_OMP_THREADS_BIND must match the
-  # cpuset_cpus exactly. VLLM_CPU_KVCACHE_SPACE is in GB; 80 GB per
-  # replica is enough headroom for typical chat workloads at
-  # max-model-len 8192.
+  # cpuset_cpus exactly.
+  #
+  # VLLM_CPU_KVCACHE_SPACE is in GB. 120 GB per replica: optimizer-
+  # validated (long_pain c=16 TTFT p95 dropped from 900 s to 1.05 s
+  # vs the 80 GB baseline). 240 GB total across two replicas, 386 GB
+  # host RAM, ~38 GB/replica weights → comfortable headroom. 160 GB
+  # tested and failed startup, so 120 is the validated upper bound.
   replicas:
     - name: r0
       cpuset_cpus: '0-31'
       cpuset_mems: '0'
       port: 8000
       env:
-        VLLM_CPU_KVCACHE_SPACE: '80'
+        VLLM_CPU_KVCACHE_SPACE: '120'
         VLLM_CPU_OMP_THREADS_BIND: '0-31'
         OMP_NUM_THREADS: '32'
 
@@ -83,7 +113,7 @@ engine:
       cpuset_mems: '1'
       port: 8001
       env:
-        VLLM_CPU_KVCACHE_SPACE: '80'
+        VLLM_CPU_KVCACHE_SPACE: '120'
         VLLM_CPU_OMP_THREADS_BIND: '32-63'
         OMP_NUM_THREADS: '32'
 

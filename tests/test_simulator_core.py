@@ -2405,3 +2405,170 @@ def test_forklift_dry_run_writes_nothing(tmp_path) -> None:
     forklift_mod.forklift(src, dst, dry_run=True)
 
     assert not dst.exists()
+
+
+# ── Audit script (scripts/audit_run.py) ───────────────────────────────
+
+
+def _seed_audit_run(run_dir: Path, *, cohort_id: str, points: list[tuple]) -> None:
+    """Insert a cohort_run plus measurement rows from the given
+    points list. Each point is (pool, sample_size, viol_rate, tm_rate,
+    capacity_status, target_status)."""
+    from simulator.database import Database
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    db = Database(run_dir / "run.db")
+    crid = f"crid-{cohort_id}"
+    db.insert_run(
+        cohort_run_id=crid, started_at="2026-05-07T00:00:00Z",
+        engine_type="sglang", model_id="Qwen/Test", cohort_id=cohort_id,
+        cohort_definition={"name": cohort_id}, config={},
+    )
+    for i, (pool, n, viol, tm, cap_s, tgt_s) in enumerate(points):
+        db.insert_measurement({
+            "cohort_run_id": crid, "step_index": i,
+            "target_pool_size": pool,
+            "measured_avg_pool_size": float(pool),
+            "measured_avg_in_flight": 0.0,
+            "measurement_started_at": "2026-05-07T00:01:00Z",
+            "measurement_duration_s": 60, "sample_size": n,
+            "ttft_violation_rate": 0.0, "tpot_violation_rate": viol,
+            "combined_violation_rate": viol,
+            "ttft_target_miss_rate": 0.0, "tpot_target_miss_rate": tm,
+            "combined_target_miss_rate": tm,
+            "violation_rate_ci_lower": 0.0,
+            "violation_rate_ci_upper": 0.0,
+            "capacity_status": cap_s,
+            "target_status": tgt_s,
+        })
+    db.finalise_run(crid, "2026-05-07T00:30:00Z", "ok")
+    db.close()
+
+
+def _import_audit_module():
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    return importlib.import_module("audit_run")
+
+
+def test_audit_detects_no_marginal_band(tmp_path) -> None:
+    """chat_heavy-style sharp cliff: pool=92 pass → pool=96 fail with
+    no marginal status in between."""
+    audit_mod = _import_audit_module()
+    rd = tmp_path / "run_01"
+    _seed_audit_run(rd, cohort_id="chat_heavy", points=[
+        # (pool, n, viol, tm, capacity_status, target_status)
+        (8,  100, 0.0,  0.0,  "pass",     "pass"),
+        (32, 100, 0.0,  0.0,  "pass",     "pass"),
+        (88, 100, 0.0,  0.20, "pass",     "marginal"),
+        (92, 100, 0.0,  0.30, "pass",     "marginal"),  # last failure-axis pass
+        (96, 100, 0.66, 1.0,  "fail",     "fail"),       # straight to fail
+    ])
+
+    result = audit_mod.audit(rd)
+    kinds = {a.kind for a in result.anomalies}
+    assert "no_marginal_band" in kinds
+    a = next(x for x in result.anomalies if x.kind == "no_marginal_band")
+    # midpoint of [92, 96] = 94
+    assert a.pool_sizes_to_remeasure == [94]
+
+
+def test_audit_detects_no_fail_observed(tmp_path) -> None:
+    """analyst_team-style curve that plateaus in marginal without
+    crossing fail."""
+    audit_mod = _import_audit_module()
+    rd = tmp_path / "run_01"
+    _seed_audit_run(rd, cohort_id="general_knowledge", points=[
+        (8,   100, 0.0,  0.0,  "pass",     "pass"),
+        (32,  100, 0.0,  0.0,  "pass",     "pass"),
+        (64,  100, 0.07, 0.55, "marginal", "fail"),  # never hits 30% viol
+    ])
+
+    result = audit_mod.audit(rd)
+    kinds = {a.kind for a in result.anomalies}
+    assert "no_fail_observed" in kinds
+    a = next(x for x in result.anomalies if x.kind == "no_fail_observed")
+    # Suggests doubling beyond max pool=64
+    assert 128 in a.pool_sizes_to_remeasure
+
+
+def test_audit_detects_single_point_rescue(tmp_path) -> None:
+    """writer-style rescue: pool=120 pass between marginal/fail
+    neighbors."""
+    audit_mod = _import_audit_module()
+    rd = tmp_path / "run_01"
+    _seed_audit_run(rd, cohort_id="writer", points=[
+        (96,  100, 0.0,  0.0,  "pass",     "pass"),
+        (112, 100, 0.0,  0.15, "pass",     "marginal"),  # pre-rescue marginal
+        # Note: capacity_status reflects FAILURE axis. For the audit we
+        # need pool=120 to be the lone pass with non-pass neighbors —
+        # synthesize that directly.
+        (115, 100, 0.0,  0.20, "marginal", "marginal"),  # neighbor
+        (120, 100, 0.0,  0.04, "pass",     "pass"),      # rescue
+        (128, 100, 0.81, 1.0,  "fail",     "fail"),       # neighbor
+    ])
+
+    result = audit_mod.audit(rd)
+    kinds = {a.kind for a in result.anomalies}
+    assert "single_point_rescue" in kinds
+    a = next(x for x in result.anomalies if x.kind == "single_point_rescue")
+    assert a.pool_sizes_to_remeasure == [120]
+
+
+def test_audit_detects_boundary_status(tmp_path) -> None:
+    """Legacy point-estimate classification: 30/100 misses got
+    target_status='fail' but Wilson CI says marginal."""
+    audit_mod = _import_audit_module()
+    rd = tmp_path / "run_01"
+    _seed_audit_run(rd, cohort_id="quick_lookup", points=[
+        (32,  100, 0.0, 0.0,  "pass", "pass"),
+        # 30/100 misses, classified 'fail' under old logic — Wilson CI
+        # says marginal because lower CI ~0.21 < 0.30.
+        (232, 100, 0.0, 0.30, "pass", "fail"),
+    ])
+
+    result = audit_mod.audit(rd)
+    kinds = {a.kind for a in result.anomalies}
+    assert "boundary_status" in kinds
+    a = next(x for x in result.anomalies if x.kind == "boundary_status")
+    assert 232 in a.pool_sizes_to_remeasure
+
+
+def test_audit_emits_dedup_rerun_plan(tmp_path) -> None:
+    """The rerun_points list should be deduped across multiple anomaly
+    types that target the same (cohort, pool). Useful when a single
+    pool triggers both 'boundary_status' and 'single_point_rescue'."""
+    audit_mod = _import_audit_module()
+    rd = tmp_path / "run_01"
+    # Synthesize a scenario that fires both 'boundary_status' and
+    # 'single_point_rescue' on pool=120.
+    _seed_audit_run(rd, cohort_id="writer", points=[
+        (96,  100, 0.0,  0.0,  "pass",     "pass"),
+        (112, 100, 0.0,  0.15, "marginal", "marginal"),
+        # 4/100 with status=pass → Wilson says marginal, AND it's a rescue.
+        (120, 100, 0.04, 0.04, "pass",     "pass"),
+        (128, 100, 0.81, 1.0,  "fail",     "fail"),
+    ])
+
+    result = audit_mod.audit(rd)
+    plan = result.as_json()["rerun_points"]
+    pool_120_entries = [p for p in plan if p["pool_size"] == 120 and p["cohort_id"] == "writer"]
+    # Even if both detectors fire, only one rerun entry per (cohort, pool).
+    assert len(pool_120_entries) == 1
+
+
+def test_audit_clean_run_produces_no_anomalies(tmp_path) -> None:
+    """A clean curve with all bands present and no boundary cases
+    should produce zero anomalies."""
+    audit_mod = _import_audit_module()
+    rd = tmp_path / "run_01"
+    _seed_audit_run(rd, cohort_id="conversational", points=[
+        (8,   100, 0.0,  0.0,  "pass",     "pass"),
+        (32,  100, 0.0,  0.0,  "pass",     "pass"),
+        (48,  100, 0.10, 0.10, "marginal", "marginal"),
+        (64,  100, 0.50, 0.80, "fail",     "fail"),
+    ])
+
+    result = audit_mod.audit(rd)
+    assert result.anomalies == []

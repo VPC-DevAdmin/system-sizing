@@ -69,6 +69,17 @@ async def run_cohort(
     db_path: Path | None = None,
     run_dir: Path | None = None,
     new_run: bool = False,
+    # Spot-check mode: when set, skip the adaptive stepper and
+    # measure exactly these pool sizes (in order). Each one appends
+    # a new ``cohort_measurements`` row.
+    pool_size_override: list[int] | None = None,
+    # Append mode: when set, attach the new measurements to an
+    # existing ``cohort_run`` row instead of creating a new one.
+    # Used together with ``pool_size_override`` to enrich a
+    # previously-completed cohort with extra points (e.g. an
+    # audit-driven spot-check). The pre-existing ``final_status``
+    # is preserved — we don't re-finalise.
+    existing_cohort_run_id: str | None = None,
 ) -> Path:
     """Run a single cohort end-to-end. Returns the resulting db path.
 
@@ -96,19 +107,38 @@ async def run_cohort(
     if db_path is None:
         db_path = _run_db_path(run_dir)
 
-    cohort_run_id = uuid.uuid4().hex
-    started_at = datetime.now(timezone.utc).isoformat()
     db = Database(db_path)
-    db.insert_run(
-        cohort_run_id=cohort_run_id,
-        started_at=started_at,
-        engine_type=cfg.engine.type,
-        model_id=cfg.engine.model_id,
-        cohort_id=cohort_id,
-        cohort_definition=_cohort_to_dict(cohort),
-        config=_config_to_dict(cfg),
-    )
-    log.info("Cohort run %s -> %s", cohort_run_id, db_path)
+    append_mode = existing_cohort_run_id is not None
+    if append_mode:
+        cohort_run_id = existing_cohort_run_id
+        # Continue step_index after the existing rows.
+        last_step = db.fetchone(
+            "SELECT MAX(step_index) AS s FROM cohort_measurements "
+            "WHERE cohort_run_id = ?",
+            (cohort_run_id,),
+        )
+        starting_step_index = (
+            (last_step["s"] + 1) if last_step and last_step["s"] is not None
+            else 0
+        )
+        log.info(
+            "Append-mode cohort run %s (existing) — continuing step_index "
+            "from %d", cohort_run_id, starting_step_index,
+        )
+    else:
+        cohort_run_id = uuid.uuid4().hex
+        started_at = datetime.now(timezone.utc).isoformat()
+        db.insert_run(
+            cohort_run_id=cohort_run_id,
+            started_at=started_at,
+            engine_type=cfg.engine.type,
+            model_id=cfg.engine.model_id,
+            cohort_id=cohort_id,
+            cohort_definition=_cohort_to_dict(cohort),
+            config=_config_to_dict(cfg),
+        )
+        starting_step_index = 0
+        log.info("Cohort run %s -> %s", cohort_run_id, db_path)
 
     state = SharedState()
     phase_tracker = PhaseTracker()
@@ -180,18 +210,29 @@ async def run_cohort(
     # (5% violation rate) and the target knee (5% target_miss rate),
     # then adds infill points for curve density. See
     # ``simulator.adaptive.TwoKneeStepper`` for the phase machine.
-    stepper = TwoKneeStepper(
-        initial_pool_size=cfg.simulation.initial_pool_size,
-        max_pool_size=cfg.simulation.max_pool_size,
-        stop_violation_threshold=cfg.simulation.stop_violation_threshold,
-    )
+    #
+    # Spot-check mode bypasses the stepper and measures exactly the
+    # pool sizes the caller passed in.
+    if pool_size_override is None:
+        stepper = TwoKneeStepper(
+            initial_pool_size=cfg.simulation.initial_pool_size,
+            max_pool_size=cfg.simulation.max_pool_size,
+            stop_violation_threshold=cfg.simulation.stop_violation_threshold,
+        )
+        override_iter = None
+    else:
+        stepper = None
+        override_iter = iter(pool_size_override)
     final_status = "ok"
     run_started = time.monotonic()
     max_total_s = cfg.simulation.max_total_duration_minutes * 60
-    step_index = 0
+    step_index = starting_step_index
 
     try:
-        next_size = stepper.next_pool_size()
+        next_size = (
+            stepper.next_pool_size() if stepper is not None
+            else next(override_iter, None)
+        )
         while next_size is not None:
             if time.monotonic() - run_started > max_total_s:
                 log.warning("Max run duration reached; stopping ramp")
@@ -223,14 +264,18 @@ async def run_cohort(
                 final_status = "no_samples"
                 break
 
-            stepper.record(StepResult(
-                pool_size=result.target_pool_size,
-                violation_rate=result.combined_violation_rate,
-                target_miss_rate=result.combined_target_miss_rate,
-            ))
+            if stepper is not None:
+                stepper.record(StepResult(
+                    pool_size=result.target_pool_size,
+                    violation_rate=result.combined_violation_rate,
+                    target_miss_rate=result.combined_target_miss_rate,
+                ))
             step_index += 1
 
-            next_size = stepper.next_pool_size()
+            next_size = (
+                stepper.next_pool_size() if stepper is not None
+                else next(override_iter, None)
+            )
     except KeyboardInterrupt:
         final_status = "interrupted"
         raise
@@ -304,11 +349,15 @@ async def run_cohort(
         except Exception as e:  # noqa: BLE001
             log.debug("AMX util parse failed: %s", e)
 
-        db.finalise_run(
-            cohort_run_id=cohort_run_id,
-            completed_at=datetime.now(timezone.utc).isoformat(),
-            status=final_status,
-        )
+        if not append_mode:
+            db.finalise_run(
+                cohort_run_id=cohort_run_id,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                status=final_status,
+            )
+        # Append-mode: leave the existing cohort_run row alone — its
+        # final_status was set when the original sweep finished. The
+        # spot-check just enriched the cohort_measurements rows.
         db.close()
         if own_engine:
             engine.shutdown()
@@ -435,6 +484,73 @@ async def run_sweep(
         for cid in cohort_ids:
             log.info("=== Sweep: cohort %s ===", cid)
             path = await run_cohort(cfg, cid, engine=engine, run_dir=run_dir)
+            paths.append(path)
+    finally:
+        engine.shutdown()
+    return paths
+
+
+async def run_spot_check(
+    cfg: Config,
+    plan: dict,
+    *,
+    run_dir: Path,
+) -> list[Path]:
+    """Re-measure specific (cohort, pool_size) points from an audit
+    plan. Each point is appended to its existing cohort_run row,
+    enriching the curve with extra measurements without re-running
+    the full ramp.
+
+    ``plan`` is the JSON produced by ``scripts/audit_run.py``: a dict
+    with key ``rerun_points = [{"cohort_id", "cohort_run_id", "pool_size", ...}, ...]``.
+    Points are grouped by cohort_run_id; one engine launch covers all
+    of them.
+    """
+    from collections import defaultdict
+    from .personas import cohort_from_persona
+
+    rerun = plan.get("rerun_points") or []
+    if not rerun:
+        log.info("Spot-check: no rerun points in plan — nothing to do")
+        return []
+
+    by_crid: dict[str, dict] = defaultdict(
+        lambda: {"cohort_id": None, "pools": []}
+    )
+    for entry in rerun:
+        crid = entry["cohort_run_id"]
+        by_crid[crid]["cohort_id"] = entry["cohort_id"]
+        by_crid[crid]["pools"].append(int(entry["pool_size"]))
+
+    log.info(
+        "Spot-check: %d existing cohort_run row(s), %d total point(s)",
+        len(by_crid), sum(len(v["pools"]) for v in by_crid.values()),
+    )
+
+    preflight_check(cfg.engine.hardware_requirements)
+    engine = make_engine(cfg.engine.type, cfg.engine)
+    engine.launch(log_dir=run_dir)
+    paths: list[Path] = []
+    try:
+        for crid, info in by_crid.items():
+            cohort_id = info["cohort_id"]
+            pools = sorted(set(info["pools"]))
+            log.info(
+                "=== Spot-check: cohort %s (run_id=%s) at pools %s ===",
+                cohort_id, crid, pools,
+            )
+            # Build the cohort object — try the cohorts dict first,
+            # fall back to ephemeral persona-cohort for persona-only
+            # entries (e.g. forklifted personas).
+            try:
+                cohort: Cohort | str = get_cohort(cohort_id)
+            except KeyError:
+                cohort = cohort_from_persona(cohort_id)
+            path = await run_cohort(
+                cfg, cohort, engine=engine, run_dir=run_dir,
+                pool_size_override=pools,
+                existing_cohort_run_id=crid,
+            )
             paths.append(path)
     finally:
         engine.shutdown()

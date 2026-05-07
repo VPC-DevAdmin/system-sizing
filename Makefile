@@ -277,6 +277,52 @@ stop-bg:
 		echo "No engine containers running." ; \
 	fi
 
+# Audit a finished run for curve-quality anomalies (no-marginal-band,
+# no-fail-observed, single-point-rescue, boundary-status). Writes a
+# JSON plan to <run-dir>/audit_report.json that ``make spot-check``
+# reads to re-measure the specific points needed to shore up the data.
+.PHONY: audit
+audit:
+	@RD=$$(ls -d $(RUN_DIR)/run_* 2>/dev/null | sort | tail -n 1) ; \
+	[ -n "$$RD" ] || { echo "No run_NN/ in $(RUN_DIR)"; exit 1; } ; \
+	$(PY) scripts/audit_run.py "$$RD"
+
+# Re-measure the (cohort, pool_size) points an ``audit`` flagged.
+# Each point is APPENDED to its existing cohort_run row, so re-running
+# ``make export`` afterward picks up the enriched curve. Depends on
+# ``stop-bg`` to ensure no other engine/sweep is consuming the host.
+.PHONY: spot-check
+spot-check: stop-bg
+	@RD=$$(ls -d $(RUN_DIR)/run_* 2>/dev/null | sort | tail -n 1) ; \
+	[ -n "$$RD" ] || { echo "No run_NN/ in $(RUN_DIR)"; exit 1; } ; \
+	PLAN="$$RD/audit_report.json" ; \
+	[ -f "$$PLAN" ] || { echo "No $$PLAN — run ``make audit`` first"; exit 1; } ; \
+	LOG="$$RD/spot_check_$$(date +%Y%m%dT%H%M%S).log" ; \
+	nohup $(PY) -m simulator.cli spot-check \
+		--config $(CONFIG) \
+		--plan "$$PLAN" \
+		--run-dir "$$RD" \
+		>"$$LOG" 2>&1 </dev/null & \
+	PID=$$! ; \
+	echo "" ; \
+	echo "Spot-check started in background (PID $$PID)" ; \
+	echo "  run dir: $$RD" ; \
+	echo "  log:     $$LOG" ; \
+	echo "  tail:    make tail-log" ; \
+	echo "  stop:    make stop-bg" ; \
+	echo "" ; \
+	for i in 1 2 3 4 5 ; do [ -f "$$LOG" ] && break ; sleep 0.2 ; done ; \
+	tail -f "$$LOG" & \
+	TAIL=$$! ; \
+	trap 'kill $$TAIL 2>/dev/null ; exit 0' INT TERM ; \
+	while kill -0 $$PID 2>/dev/null ; do sleep 2 ; done ; \
+	wait $$PID 2>/dev/null ; SC_EXIT=$$? ; \
+	sleep 1 ; \
+	kill $$TAIL 2>/dev/null ; \
+	echo "" ; \
+	echo "=== Spot-check finished (PID $$PID, exit $$SC_EXIT) — see $$LOG ===" ; \
+	exit $$SC_EXIT
+
 .PHONY: list-cohorts
 list-cohorts:
 	$(PY) -m simulator.cli list-cohorts

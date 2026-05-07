@@ -135,6 +135,68 @@ def sweep(
         typer.echo(f"  {p}")
 
 
+@app.command("spot-check")
+def spot_check(
+    config: Path = typer.Option(Path("config/default.yaml")),
+    plan: Path = typer.Option(
+        ...,
+        "--plan",
+        help=(
+            "JSON plan produced by ``scripts/audit_run.py``. "
+            "Contains ``rerun_points = [{cohort_id, cohort_run_id, "
+            "pool_size, ...}, ...]``."
+        ),
+    ),
+    run_dir: Path = typer.Option(
+        ...,
+        "--run-dir",
+        help=(
+            "The run directory whose run.db holds the cohort_run rows "
+            "to enrich (e.g. runs/run_09). Spot-check measurements are "
+            "appended to existing rows; the engine launches against the "
+            "config in this dir."
+        ),
+    ),
+    engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
+    model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Re-measure specific (cohort, pool_size) points from an audit
+    plan, appending them to the existing cohort_run rows.
+
+    Workflow:
+
+        python scripts/audit_run.py runs/run_09
+        # → writes runs/run_09/audit_report.json
+
+        python -m simulator.cli spot-check \\
+            --config config/xeon_sglang_qwen3_30b_a3b_fp8.yaml \\
+            --run-dir runs/run_09 \\
+            --plan runs/run_09/audit_report.json
+
+        make export       # picks up the enriched curves
+    """
+    import json
+    _setup_logging(verbose)
+    cfg = load_config(config)
+    apply_cli_overrides(cfg, engine=engine, model=model)
+    if not plan.exists():
+        raise typer.BadParameter(f"Plan file not found: {plan}")
+    if not run_dir.exists():
+        raise typer.BadParameter(f"Run dir not found: {run_dir}")
+    plan_doc = json.loads(plan.read_text())
+    if not plan_doc.get("rerun_points"):
+        typer.echo("No rerun points in plan — nothing to do.")
+        return
+
+    from .runner import run_spot_check
+    paths = asyncio.run(run_spot_check(cfg, plan_doc, run_dir=run_dir))
+    typer.echo(
+        f"Spot-check complete: enriched {len(paths)} cohort_run row(s) "
+        f"with {len(plan_doc['rerun_points'])} extra measurement(s)"
+    )
+
+
 @app.command("launch-engine")
 def launch_engine(
     config: Path = typer.Option(Path("config/default.yaml")),

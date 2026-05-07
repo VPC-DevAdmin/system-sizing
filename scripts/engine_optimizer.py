@@ -116,6 +116,12 @@ class EngineConfig:
     ``replica_env`` is merged into every replica's env (per-replica
     env in ReplicaSpec wins on collisions). ``shm_size`` is per-
     container.
+
+    ``launch_timeout_s`` overrides the module-level LAUNCH_TIMEOUT_S
+    for this config alone — set higher for configs with multi-process
+    startup (TP=2/4, distributed-executor mp) or stacked-resource
+    configs that genuinely need more time to allocate before the API
+    is ready. ``None`` means "use the module default."
     """
     name: str
     description: str
@@ -124,6 +130,7 @@ class EngineConfig:
     replica_env: dict = field(default_factory=dict)
     shm_size: str = "4g"
     expected_outcome: str = ""
+    launch_timeout_s: Optional[int] = None
 
 
 @dataclass
@@ -1083,12 +1090,69 @@ def container_running(name: str) -> bool:
     return bool(res.stdout.strip())
 
 
-async def wait_for_health(
-    cfg: EngineConfig, state: "OptimizerState", timeout_s: int = LAUNCH_TIMEOUT_S,
-) -> bool:
-    """Poll /v1/models on every replica until 200, or fail with the
-    last 50 log lines for the offending container."""
+@dataclass(frozen=True)
+class HealthCheckResult:
+    """Outcome of waiting for replicas to become serving-ready.
+
+    ``healthy`` is True only when every replica answered ``/v1/models``
+    AND a probe chat/completions request with ``served_model_name``
+    succeeded (catches the "model failed to register but API stub came
+    up" case that produces silent NotFoundError storms).
+
+    On failure ``reason`` distinguishes the failure mode for the
+    final summary so the user can tell ``container_exited`` from
+    ``deadline_expired`` from ``model_not_registered`` at a glance —
+    the prior unified "health check timeout" string was misleading.
+    """
+    healthy: bool
+    reason: str = ""
+
+
+async def _probe_served_model(replica_name: str, port: int) -> tuple[bool, str]:
+    """Verify the engine actually responds to chat/completions for
+    ``SERVED_NAME``. Returns (ok, error_summary). Catches the kv_xl_128
+    case from the May 2026 Intel run where ``/v1/models`` returned 200
+    but every chat request 404'd because the model never registered."""
     import httpx
+    url = f"http://{HOST}:{port}/v1/chat/completions"
+    body = {
+        "model": SERVED_NAME,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "temperature": 0,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json=body)
+        if resp.status_code == 200:
+            return True, ""
+        # 404 → model name mismatch / model not registered.
+        body_snip = (resp.text or "")[:200]
+        return False, (
+            f"{replica_name}: served_model_name={SERVED_NAME!r} probe "
+            f"returned HTTP {resp.status_code}. Body: {body_snip}"
+        )
+    except Exception as e:  # noqa: BLE001
+        return False, f"{replica_name}: probe request failed: {e!r}"
+
+
+async def wait_for_health(
+    cfg: EngineConfig, state: "OptimizerState",
+    timeout_s: int | None = None,
+) -> HealthCheckResult:
+    """Poll /v1/models on every replica until 200, then verify the
+    served_model_name actually answers chat/completions. Returns a
+    HealthCheckResult so the caller can record the specific failure
+    reason on the result row.
+
+    ``timeout_s`` defaults to ``cfg.launch_timeout_s`` if set, else the
+    module-level ``LAUNCH_TIMEOUT_S``. Configs with multi-process
+    startup (TP=2/4, distributed-executor mp) can set a longer per-
+    config timeout to avoid spurious deadline_expired classifications.
+    """
+    import httpx
+    if timeout_s is None:
+        timeout_s = getattr(cfg, "launch_timeout_s", None) or LAUNCH_TIMEOUT_S
     state.set_phase("waiting for health")
     deadline = time.monotonic() + timeout_s
     poll_interval = 5.0
@@ -1100,13 +1164,26 @@ async def wait_for_health(
             if not container_running(r.name):
                 tail = docker_logs_tail(r.name, 50)
                 state.append_log(f"!! {r.name} EXITED. last 50:\n{tail}")
-                return False
+                # Container died during startup. Surface a specific
+                # reason so the summary doesn't mislabel this as a
+                # "health check timeout" (it isn't — the container
+                # exited before the timeout could fire).
+                last_lines = "\n".join(
+                    (tail or "").strip().splitlines()[-5:]
+                ) or "<no logs captured>"
+                return HealthCheckResult(
+                    healthy=False,
+                    reason=(
+                        f"container_exited: {r.name} died during startup. "
+                        f"Last lines:\n{last_lines}"
+                    ),
+                )
             try:
                 async with httpx.AsyncClient(timeout=2.0) as client:
                     resp = await client.get(f"http://{HOST}:{r.port}/v1/models")
                 if resp.status_code == 200:
                     healthy.add(r.name)
-                    state.append_log(f"✓ {r.name} healthy after "
+                    state.append_log(f"✓ {r.name} /v1/models healthy after "
                                      f"{int(time.monotonic() - state.config_started_at)}s")
             except Exception:
                 pass
@@ -1119,9 +1196,28 @@ async def wait_for_health(
                         state.append_log(f"[{r.name}] {line}")
                 break
         if len(healthy) == len(cfg.replicas):
-            return True
+            # All replicas answer /v1/models. Now verify the served
+            # model name actually responds to chat/completions — the
+            # kv_xl_128 case from the May 2026 Intel run.
+            state.set_phase("probing served_model_name")
+            for r in cfg.replicas:
+                ok, err = await _probe_served_model(r.name, r.port)
+                if not ok:
+                    state.append_log(f"!! {r.name} probe failed: {err}")
+                    return HealthCheckResult(
+                        healthy=False,
+                        reason=f"model_not_registered: {err}",
+                    )
+                state.append_log(f"✓ {r.name} probe ok (served={SERVED_NAME!r})")
+            return HealthCheckResult(healthy=True)
         await asyncio.sleep(poll_interval)
-    return False
+    return HealthCheckResult(
+        healthy=False,
+        reason=(
+            f"deadline_expired: no replica became healthy within "
+            f"{timeout_s}s"
+        ),
+    )
 
 
 # ── Bench client ────────────────────────────────────────────────────────
@@ -1548,9 +1644,9 @@ async def run_config(
         state.upsert_result(result)
         save()
         return result
-    healthy = await wait_for_health(cfg, state)
+    health = await wait_for_health(cfg, state)
     launch_seconds = time.monotonic() - launch_t0
-    if not healthy:
+    if not health.healthy:
         # Capture more log context before tearing down.
         for r in cfg.replicas:
             state.append_log(f"-- {r.name} tail --")
@@ -1560,7 +1656,7 @@ async def run_config(
             name=cfg.name, description=cfg.description,
             status="launch_failed",
             launch_seconds=launch_seconds,
-            failure_reason="health check timeout",
+            failure_reason=health.reason or "health check failed",
         )
         state.upsert_result(result)
         save()
@@ -1703,6 +1799,13 @@ async def main_async(
         print(f"--new-run: removed prior {out_path}")
 
     existing = _load_existing(out_path)
+    if existing is not None:
+        # Resume only when prior JSON's profile/model/image match the
+        # current invocation. Otherwise the prior entries are stale
+        # references to a different run shape and we'd silently mix
+        # them with the new results (the failure mode the May 2026
+        # Intel + AMD optimizer outputs surfaced).
+        _check_resume_compatibility(existing, out_path)
     completed = _completed_names(existing)
     use_dashboard = sys.stdout.isatty()
 
@@ -1792,11 +1895,68 @@ def _save_json(path: Path, state: OptimizerState) -> None:
         "model": MODEL_PATH,
         "served_model_name": SERVED_NAME,
         "host": HOST,
+        # ``profile`` is checked on resume — see _check_resume_compatibility.
+        # If a prior JSON's profile doesn't match the current run's, resume
+        # would silently mix incompatible entries (different hardware
+        # shapes, different config registries). Recording it makes that
+        # detectable rather than confusing.
+        "profile": _ACTIVE_PROFILE,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "test_cells": [dataclasses.asdict(c) for c in TEST_CELLS],
         "configs": [dataclasses.asdict(r) for r in state.results],
     }
     path.write_text(json.dumps(doc, indent=2))
+
+
+# Set by main() once the active profile is selected — read by
+# ``_save_json`` and ``_check_resume_compatibility`` so JSON
+# entries are tagged with the profile that produced them.
+_ACTIVE_PROFILE: str = DEFAULT_PROFILE
+
+
+class ResumeMismatch(SystemExit):
+    """Raised when the prior JSON at --out was produced by a different
+    profile / model / image / served_model_name than the current run.
+    Carrying entries forward across these boundaries silently mixes
+    results from incompatible runs (different hardware shapes,
+    different model weights). Force the user to pick: ``--new-run`` to
+    wipe, or ``--out path/to/other.json`` to keep both."""
+
+
+def _check_resume_compatibility(existing: dict, out_path: Path) -> None:
+    """Compare prior JSON's run-level fields against the current
+    invocation. Raise ResumeMismatch with a clear remediation hint if
+    they disagree."""
+    diffs: list[str] = []
+    expected = {
+        "image": IMAGE,
+        "model": MODEL_PATH,
+        "served_model_name": SERVED_NAME,
+        "profile": _ACTIVE_PROFILE,
+    }
+    for key, want in expected.items():
+        prior = existing.get(key)
+        # Old JSONs may not have ``profile``; treat None as unknown
+        # and flag the mismatch so the user knows the prior file is
+        # stale.
+        if prior is None and key == "profile":
+            diffs.append(
+                f"  {key}: <not recorded — prior run pre-dates the "
+                f"profile-tagging change>  →  current: {want!r}"
+            )
+        elif prior != want:
+            diffs.append(f"  {key}: prior={prior!r}  →  current={want!r}")
+    if not diffs:
+        return
+    raise ResumeMismatch(
+        "Refusing to resume: prior JSON at "
+        f"{out_path} was produced by a different run.\n"
+        + "\n".join(diffs)
+        + "\n\nResolve by either:\n"
+        "  * passing --new-run to wipe the prior JSON and start fresh, or\n"
+        "  * passing --out <other-path> to keep the prior file and "
+        "write a new one."
+    )
 
 
 def _print_summary(state: OptimizerState) -> None:
@@ -1977,8 +2137,12 @@ def main() -> None:
     # Rebind the module-level CONFIGS name to the selected profile so
     # everything downstream (main_async, --list, watch dashboard) reads
     # from the right list without each caller passing it explicitly.
-    global CONFIGS
+    # _ACTIVE_PROFILE is also rebinded so the JSON saver tags entries
+    # with the profile that produced them, and the resume check can
+    # detect cross-profile mismatches.
+    global CONFIGS, _ACTIVE_PROFILE
     CONFIGS = PROFILES[args.profile]
+    _ACTIVE_PROFILE = args.profile
 
     if args.list:
         print(f"profile: {args.profile}")

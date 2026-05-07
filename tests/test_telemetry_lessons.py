@@ -309,6 +309,122 @@ def test_amd_gemma4_yaml_loads_and_builds_command() -> None:
     assert "gemma4_26b_a4b" in cmd
 
 
+def test_optimizer_resume_refuses_when_profile_mismatches(tmp_path) -> None:
+    """The May 2026 Intel optimizer JSON had stale entries from a prior
+    AMD-Qwen3 run that the resume logic silently merged into a fresh
+    Intel-Gemma run. Confusing — the report mixed two profiles' results
+    with no per-entry labels. Fix: detect prior-vs-current profile
+    mismatch and refuse to resume."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    import json as _json
+    eo = importlib.import_module("engine_optimizer")
+    importlib.reload(eo)  # reset module-level state across tests
+
+    # Build a fake prior JSON simulating an amd_dual_socket / Qwen3 run.
+    prior = {
+        "image": "vllm/vllm-openai-cpu:latest-x86_64",
+        "model": "/models/Qwen3-30B-A3B-Instruct-2507",
+        "served_model_name": "qwen3_30b_a3b",
+        "profile": "amd_dual_socket",
+        "configs": [{"name": "baseline", "status": "launch_failed",
+                     "description": "old", "cells": [],
+                     "failure_reason": "stale", "launch_seconds": None}],
+    }
+    json_path = tmp_path / "run.json"
+    json_path.write_text(_json.dumps(prior))
+
+    # Pretend the current run is intel_gemma4 / Gemma 4.
+    eo._ACTIVE_PROFILE = "intel_gemma4"
+    eo.MODEL_PATH = "/models/gemma-4-26B-A4B-it"
+    eo.SERVED_NAME = "gemma4_26b_a4b"
+    eo.IMAGE = "vllm/vllm-openai-cpu:latest-x86_64"
+
+    existing = eo._load_existing(json_path)
+    assert existing is not None
+
+    with pytest.raises(eo.ResumeMismatch) as exc:
+        eo._check_resume_compatibility(existing, json_path)
+    msg = str(exc.value)
+    # The error message must reference each mismatched field so the
+    # user can diagnose what changed.
+    assert "profile" in msg
+    assert "model" in msg
+    assert "served_model_name" in msg
+    # And give a remediation hint.
+    assert "--new-run" in msg
+    assert "--out" in msg
+
+
+def test_optimizer_resume_allows_matching_run(tmp_path) -> None:
+    """Compatibility check must NOT fire when prior JSON's profile /
+    model / image match the current invocation."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    import json as _json
+    eo = importlib.import_module("engine_optimizer")
+
+    eo._ACTIVE_PROFILE = "intel_gemma4"
+    eo.MODEL_PATH = "/models/gemma-4-26B-A4B-it"
+    eo.SERVED_NAME = "gemma4_26b_a4b"
+    eo.IMAGE = "vllm/vllm-openai-cpu:latest-x86_64"
+
+    prior = {
+        "image": eo.IMAGE,
+        "model": eo.MODEL_PATH,
+        "served_model_name": eo.SERVED_NAME,
+        "profile": eo._ACTIVE_PROFILE,
+        "configs": [],
+    }
+    json_path = tmp_path / "run.json"
+    json_path.write_text(_json.dumps(prior))
+
+    # Should not raise.
+    eo._check_resume_compatibility(eo._load_existing(json_path), json_path)
+
+
+def test_optimizer_health_check_distinguishes_failure_modes() -> None:
+    """The previous wait_for_health returned only bool, so run_config
+    labelled every failure as 'health check timeout' — even when the
+    container exited early (tp2/tp4 at ~42s) or when /v1/models came
+    up but the model name didn't register (kv_xl_128 NotFoundError
+    storm). HealthCheckResult records the distinct reason so the
+    summary tells the truth."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    eo = importlib.import_module("engine_optimizer")
+
+    # The dataclass exists with the right fields.
+    res = eo.HealthCheckResult(healthy=True)
+    assert res.reason == ""
+    res = eo.HealthCheckResult(healthy=False, reason="container_exited: foo")
+    assert res.healthy is False
+    assert res.reason.startswith("container_exited")
+
+
+def test_optimizer_engine_config_supports_per_config_launch_timeout() -> None:
+    """Configs with multi-process startup (TP=2/4) or stacked resource
+    pressure may need a longer launch timeout. EngineConfig's
+    ``launch_timeout_s`` field overrides the module default; None
+    means use the default."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    eo = importlib.import_module("engine_optimizer")
+
+    spec = eo.ReplicaSpec(name="r0", port=8000, cpuset_cpus="0-31")
+    default = eo.EngineConfig(name="x", description="x", replicas=[spec])
+    assert default.launch_timeout_s is None  # falls back to LAUNCH_TIMEOUT_S
+    bumped = eo.EngineConfig(
+        name="y", description="y", replicas=[spec],
+        launch_timeout_s=3600,
+    )
+    assert bumped.launch_timeout_s == 3600
+
+
 def test_engine_api_model_name_uses_served_name_when_set() -> None:
     """Real bug from the AMD R7735 dual_socket first-light run: the
     simulator was sending ``Qwen/Qwen3-30B-A3B-Instruct-2507`` as the

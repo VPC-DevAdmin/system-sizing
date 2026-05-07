@@ -218,6 +218,97 @@ def test_optimizer_profile_registry_has_intel_gemma4() -> None:
     )
 
 
+def test_optimizer_profile_registry_has_amd_gemma4() -> None:
+    """The amd_gemma4 profile mirrors intel_gemma4's priority structure
+    on the AMD dual-socket shape, dropping configs Qwen3 already proved
+    are model-agnostic failures (tp2_cross_socket Gloo init, kv_xl 160
+    GB startup) and keeping the AMD-specific block_32 (was the Qwen3
+    low-concurrency winner)."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    eo = importlib.import_module("engine_optimizer")
+
+    assert "amd_gemma4" in eo.PROFILES
+    amd_configs = eo.PROFILES["amd_gemma4"]
+    assert amd_configs, "amd_gemma4 profile must contain configs"
+
+    by_name = {c.name: c for c in amd_configs}
+
+    # Headline shapes (★★★).
+    for expected in ("baseline", "single_replica_64c", "kv_xl_140"):
+        assert expected in by_name, f"missing headline shape: {expected}"
+    # baseline is the dual-replica NUMA-pinned production shape.
+    base = by_name["baseline"]
+    assert len(base.replicas) == 2
+    assert {r.cpuset_cpus for r in base.replicas} == {"0-31", "32-63"}
+    assert {r.cpuset_mems for r in base.replicas} == {"0", "1"}, (
+        "baseline must NUMA-pin replicas — it's the dual-socket AMD shape"
+    )
+    # baseline KV is the Qwen3-validated 120 GB.
+    for r in base.replicas:
+        assert r.env["VLLM_CPU_KVCACHE_SPACE"] == "120"
+
+    # single_replica_64c covers all cores with NO NUMA pin.
+    sr = by_name["single_replica_64c"]
+    assert len(sr.replicas) == 1
+    assert sr.replicas[0].cpuset_cpus == "0-63"
+    assert sr.replicas[0].cpuset_mems is None
+
+    # Primary expected-helpful (★★) and secondary diagnostics (★).
+    for expected in (
+        "chunked_prefill", "block_32",
+        "batch_budget", "batch_8192", "no_compile",
+        "kv_smaller_80", "kv_xl_chunked_prefill",
+    ):
+        assert expected in by_name, f"missing config: {expected}"
+
+    # block_32 must remain — it was the Qwen3 AMD winner. Distinct from
+    # the intel_gemma4 profile, which drops it.
+    assert "block_32" in by_name, (
+        "block_32 was the Qwen3 AMD low-concurrency winner; keep it in "
+        "amd_gemma4 to test transfer to Gemma."
+    )
+
+    # Configs that must be ABSENT — Qwen3 proved these are AMD-stack
+    # failures, not model-specific.
+    assert "tp2_cross_socket" not in by_name, (
+        "tp2_cross_socket failed Gloo distributed-init on Qwen3 — "
+        "model-agnostic infrastructure issue. Don't waste cycles "
+        "retesting on Gemma."
+    )
+    assert "tp2_chunked_prefill" not in by_name, (
+        "Same Gloo init failure as tp2_cross_socket."
+    )
+
+
+def test_amd_gemma4_yaml_loads_and_builds_command() -> None:
+    """The Gemma 4 AMD run-sweep config builds the same dual-replica
+    NUMA-pinned shape as the Qwen3 config, but with the Gemma model."""
+    from simulator.config import load_config
+    from simulator.engines.vllm_dual_socket import VllmDualSocketEngine
+
+    cfg = load_config("config/r7735_vllm_dual_socket_gemma4_26b_a4b.yaml")
+    assert cfg.engine.type == "vllm_dual_socket"
+    assert cfg.engine.model_id == "google/gemma-4-26B-A4B-it"
+    assert cfg.engine.served_model_name == "gemma4_26b_a4b"
+    assert len(cfg.engine.replicas) == 2
+
+    eng = VllmDualSocketEngine(cfg.engine)
+    cmd = eng._build_replica_command(cfg.engine.replicas[0], "test-r0")
+
+    # NUMA pinning matches the dual-socket production shape.
+    assert "--cpuset-cpus" in cmd and "0-31" in cmd
+    assert "--cpuset-mems" in cmd and "0" in cmd
+    # KV pool inherits the Qwen3-validated 120 GB.
+    assert any("VLLM_CPU_KVCACHE_SPACE=120" in s for s in cmd)
+    # Block-size 32 carries forward from the Qwen3 production knobs.
+    assert "--block-size" in cmd and "32" in cmd
+    # Gemma model + name.
+    assert "/models/gemma-4-26B-A4B-it" in cmd
+    assert "gemma4_26b_a4b" in cmd
+
+
 def test_engine_api_model_name_uses_served_name_when_set() -> None:
     """Real bug from the AMD R7735 dual_socket first-light run: the
     simulator was sending ``Qwen/Qwen3-30B-A3B-Instruct-2507`` as the

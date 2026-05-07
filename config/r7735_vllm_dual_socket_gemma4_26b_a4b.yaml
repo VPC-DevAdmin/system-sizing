@@ -1,0 +1,125 @@
+# vLLM-CPU dual-replica on R7735 (2× AMD EPYC 9374F) — Gemma 4 26B-A4B.
+#
+# Companion to ``r7735_vllm_dual_socket_qwen3_30b_a3b.yaml``. Same
+# hardware shape (two NUMA-pinned 32-core replicas), same image
+# (vllm/vllm-openai-cpu:latest-x86_64), same KV pool size (120 GB per
+# replica — the Qwen3-validated win). Different model: Gemma 4 26B-A4B
+# (MoE, ~4B active per token), which tested significantly faster than
+# Qwen3-30B-A3B in hand-validation runs.
+#
+# Why this config exists alongside the Qwen3 one:
+#   * Qwen3 on vLLM-CPU exhibits per-prefill serialisation — concurrent
+#     unique-prompt prefills run roughly one-at-a-time per replica.
+#     Working hypothesis: Qwen3's MoE expert routing isn't using the
+#     sparse path on vLLM-CPU; the engine is paying full 30B compute
+#     for every token instead of the architected ~3B active.
+#   * Gemma 4 26B-A4B in hand-validation showed materially better
+#     concurrent prefill behaviour, suggesting its MoE path on
+#     vLLM-CPU is properly sparse.
+#
+# Run the optimizer first to confirm/refine the launch shape:
+#     make optimize-engine PROFILE=amd_gemma4 \
+#         OPTIMIZER_MODEL_PATH=/models/gemma-4-26B-A4B-it \
+#         OPTIMIZER_SERVED_NAME=gemma4_26b_a4b
+#
+# Then either keep this config as-is or fold the optimizer's winning
+# replica_args into vllm_extra_flags below.
+#
+# Architecture (unchanged from Qwen3):
+#   benchmark client → 127.0.0.1:8000  (vLLM r0, NUMA 0, cores 0-31)
+#                   └→ 127.0.0.1:8001  (vLLM r1, NUMA 1, cores 32-63)
+#   The simulator's pool manager owns sticky per-user routing.
+
+engine:
+  type: vllm_dual_socket
+  model_id: google/gemma-4-26B-A4B-it
+  model_local_path: /models/gemma-4-26B-A4B-it
+  served_model_name: gemma4_26b_a4b
+  quantization_kind: null              # BF16
+
+  max_model_len: 8192
+  startup_timeout_s: 1800              # ~90-120s per replica
+
+  host: 127.0.0.1
+
+  # Optimizer-validated production knobs from the Qwen3 sweep. Carry
+  # forward as the starting point for Gemma; revisit after the
+  # ``amd_gemma4`` optimizer profile reports a winner.
+  vllm_extra_flags:
+    - --block-size
+    - "32"
+
+  vllm_image: vllm/vllm-openai-cpu:latest-x86_64
+
+  # ── Replicas ──
+  # Pin to physical cores only (skip SMT siblings 64-127 — using them
+  # hurts BF16 matmul on Zen4). VLLM_CPU_KVCACHE_SPACE=120 GB matches
+  # the Qwen3 production config; revisit if amd_gemma4/kv_smaller_80
+  # shows Gemma can run with less.
+  replicas:
+    - name: r0
+      cpuset_cpus: '0-31'
+      cpuset_mems: '0'
+      port: 8000
+      env:
+        VLLM_CPU_KVCACHE_SPACE: '120'
+        VLLM_CPU_OMP_THREADS_BIND: '0-31'
+        OMP_NUM_THREADS: '32'
+
+    - name: r1
+      cpuset_cpus: '32-63'
+      cpuset_mems: '1'
+      port: 8001
+      env:
+        VLLM_CPU_KVCACHE_SPACE: '120'
+        VLLM_CPU_OMP_THREADS_BIND: '32-63'
+        OMP_NUM_THREADS: '32'
+
+  shutdown_grace_s: 30
+
+  docker_volumes:
+    /data/ml/models: /models
+    /data/ml/huggingface: /root/.cache/huggingface
+
+  hardware_requirements:
+    cpu_vendor: amd
+    cpu_features:
+      - avx512f
+      - avx512_bf16
+    min_sockets: 2
+    notes: "Dual-socket EPYC required for the 2-replica NUMA-pinned layout"
+
+simulation:
+  ramp_spawn_interval_s: 2.0
+  initial_phase_offset_enabled: true
+  initial_pool_size: 8
+  max_pool_size: 256
+  target_samples_per_step: 100
+  measurement_timeout_s: 600
+  warmup_min_duration_s: 30
+  warmup_max_duration_s: 300
+  convergence_window_s: 60
+  convergence_threshold: 0.20
+  convergence_min_completions_per_window: 5
+  knee_slope_threshold: 0.005
+  stop_violation_threshold: 0.5
+  max_total_duration_minutes: 240
+  enable_token_timestamps: false
+  snapshot_interval_s: 1
+  request_timeout_s: 600
+
+telemetry:
+  enable_pmu: true
+  enable_memory_bandwidth: true   # uncore_imc isn't on AMD; collector reports unavailable
+  enable_power: true
+  enable_engine_metrics: true     # vLLM /metrics works; the dual-socket engine aggregates both replicas
+  enable_amx_utilization: false   # no AMX on EPYC
+  perf_events:
+    - cycles
+    - instructions
+    - cache-misses
+    - cache-references
+
+output:
+  db_directory: runs
+  json_export: true

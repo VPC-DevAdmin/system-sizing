@@ -705,8 +705,229 @@ _INTEL_GEMMA4_CONFIGS: list[EngineConfig] = [
 ]
 
 
+# ── AMD Gemma 4 profile (R7735 / dual EPYC 9374F + Gemma 4 26B-A4B) ─────
+#
+# Same hardware as ``amd_dual_socket`` (the Qwen3 profile) but sweeps
+# only the configs that are still informative once we know what Qwen3
+# already taught us about this stack:
+#
+#   * KV pool size 80 → 120 GB per replica resolved Qwen3's c=16 long-
+#     prompt tail. 120 GB is the validated production baseline; the
+#     Gemma profile starts there and probes higher.
+#   * tp2_cross_socket and tp2_chunked_prefill failed at Gloo
+#     distributed-init (~25s hang) — model-agnostic infrastructure
+#     issue. NOT included here. If a future vLLM/Gloo upgrade fixes
+#     it, retest by adding back to the registry.
+#   * kv_xl_160 failed startup health check on the 386 GB host —
+#     genuine memory pressure. NOT included.
+#   * no_prefix_cache regressed every concurrency-stressed cell —
+#     never disable. NOT included.
+#
+# Priority order matches the Intel profile's structure: headline
+# shapes first, expected-helpful next, secondary diagnostics last.
+
+def _amd_dual_replica_pair(*, kv_gb: int = 120) -> list[ReplicaSpec]:
+    """Two NUMA-pinned 32-core replicas — the AMD production shape.
+    KV defaults to 120 GB per replica (the Qwen3-validated win)."""
+    return [
+        ReplicaSpec(
+            name="vllm-r0", port=8000,
+            cpuset_cpus="0-31", cpuset_mems="0",
+            env={
+                "VLLM_CPU_KVCACHE_SPACE": str(kv_gb),
+                "VLLM_CPU_OMP_THREADS_BIND": "0-31",
+                "OMP_NUM_THREADS": "32",
+            },
+        ),
+        ReplicaSpec(
+            name="vllm-r1", port=8001,
+            cpuset_cpus="32-63", cpuset_mems="1",
+            env={
+                "VLLM_CPU_KVCACHE_SPACE": str(kv_gb),
+                "VLLM_CPU_OMP_THREADS_BIND": "32-63",
+                "OMP_NUM_THREADS": "32",
+            },
+        ),
+    ]
+
+
+def _amd_single_replica_64c(*, kv_gb: int = 100) -> list[ReplicaSpec]:
+    """One replica covering all 64 cores across both NUMA nodes.
+    KV defaults to 100 GB — single-NUMA-node free memory ceiling on
+    AMD's allocator (R7735 had 126 GB free on node 0, observed)."""
+    return [
+        ReplicaSpec(
+            name="vllm-single", port=8000,
+            cpuset_cpus="0-63", cpuset_mems=None,
+            env={
+                "VLLM_CPU_KVCACHE_SPACE": str(kv_gb),
+                "VLLM_CPU_OMP_THREADS_BIND": "0-63",
+                "OMP_NUM_THREADS": "64",
+            },
+        ),
+    ]
+
+
+_AMD_GEMMA4_CONFIGS: list[EngineConfig] = [
+    # ── ★★★ Headline shapes ─────────────────────────────────────────
+    EngineConfig(
+        name="baseline",
+        description=(
+            "Dual-replica 32-core, NUMA-pinned, 120 GB KV per replica "
+            "(the Qwen3-validated AMD production shape). Reference anchor."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=120),
+        expected_outcome=(
+            "Establishes Gemma's TTFT/TPOT/throughput on the AMD shape "
+            "that Qwen3 production uses today."
+        ),
+    ),
+    EngineConfig(
+        name="single_replica_64c",
+        description=(
+            "One container, all 64 cores, no NUMA mems pin, 100 GB KV. "
+            "Tests whether single-stream prefill benefits from cross-NUMA "
+            "compute parallelism more than dual-replica's NUMA-local "
+            "throughput. Headline question for Gemma sizing."
+        ),
+        replicas=_amd_single_replica_64c(kv_gb=100),
+        shm_size="16g",
+        expected_outcome=(
+            "Single user's prefill gets 2× cores at the cost of cross-"
+            "NUMA memory traffic. On Qwen3 this won per-stream TTFT but "
+            "lost ~30% aggregate throughput. Gemma's MoE may rebalance "
+            "the trade — worth re-measuring."
+        ),
+    ),
+    EngineConfig(
+        name="kv_xl_140",
+        description=(
+            "Dual-replica with 140 GB KV per replica (1.17× current "
+            "production). 140×2 = 280 GB on a 386 GB host."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=140),
+        expected_outcome=(
+            "Probes whether 120 GB is still a ceiling for Gemma's KV "
+            "demands at high concurrency. If aggregate metrics don't "
+            "change, KV pool isn't the bottleneck on Gemma either."
+        ),
+    ),
+    # ── ★★ Primary expected-helpful ────────────────────────────────
+    EngineConfig(
+        name="chunked_prefill",
+        description=(
+            "Baseline + chunked prefill (4096 tokens/step, 64 seqs). "
+            "Diagnostic for MoE routing efficiency on AMD."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=120),
+        replica_args=[
+            "--enable-chunked-prefill",
+            "--max-num-batched-tokens", "4096",
+            "--max-num-seqs", "64",
+        ],
+        expected_outcome=(
+            "Qwen3 on AMD showed chunked_prefill matched kv_xl_120 — both "
+            "fixed the c=16 tail. If Gemma's prefill is properly sparse "
+            "(MoE routing working), chunked_prefill should be a small win "
+            "or wash. A LARGE win is the diagnostic that Gemma is also "
+            "partially serialised on the AMD vLLM-CPU path."
+        ),
+    ),
+    EngineConfig(
+        name="block_32",
+        description=(
+            "Baseline + KV block size 32 (the Qwen3 AMD low-concurrency "
+            "winner)."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=120),
+        replica_args=["--block-size", "32"],
+        expected_outcome=(
+            "On Qwen3 this won 9 of 11 ranking cells (-72% short_throughput "
+            "TTFT, -21% single_stream TTFT). Tests whether the per-block "
+            "bookkeeping reduction transfers to Gemma's KV access pattern."
+        ),
+    ),
+    # ── ★ Secondary diagnostics ────────────────────────────────────
+    EngineConfig(
+        name="batch_budget",
+        description=(
+            "Baseline + larger batch budget (6144 tokens/step, 96 seqs). "
+            "Default scheduler — alternative angle on prefill scheduling."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=120),
+        replica_args=[
+            "--max-num-batched-tokens", "6144",
+            "--max-num-seqs", "96",
+        ],
+        expected_outcome=(
+            "Higher prefill throughput when many requests arrive together. "
+            "Compares against chunked_prefill since both target prefill "
+            "scheduling but from different angles."
+        ),
+    ),
+    EngineConfig(
+        name="batch_8192",
+        description=(
+            "Baseline + batched prefill ceiling (8192 tokens/step, 128 "
+            "seqs). Pushes the default-scheduler-with-larger-budget axis."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=120),
+        replica_args=[
+            "--max-num-batched-tokens", "8192",
+            "--max-num-seqs", "128",
+        ],
+        expected_outcome=(
+            "Upper bound of the batched-prefill axis. Skip if batch_budget "
+            "showed flat returns."
+        ),
+    ),
+    EngineConfig(
+        name="no_compile",
+        description="Baseline + ``--enforce-eager`` (disable torch.compile).",
+        replicas=_amd_dual_replica_pair(kv_gb=120),
+        replica_args=["--enforce-eager"],
+        expected_outcome=(
+            "Science experiment. Mirrors the Intel profile — same "
+            "diagnostic about whether torch.compile pessimises CPU "
+            "matmuls on this model."
+        ),
+    ),
+    EngineConfig(
+        name="kv_smaller_80",
+        description=(
+            "Baseline shape with 80 GB KV per replica (the original "
+            "Qwen3 baseline before the 120 GB win)."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=80),
+        expected_outcome=(
+            "Tests whether Gemma can run with the smaller KV pool that "
+            "Qwen3 outgrew. If Gemma's MoE is sparser → less KV per "
+            "active expert → may not need the 120 GB lift. Memory-saving "
+            "diagnostic."
+        ),
+    ),
+    EngineConfig(
+        name="kv_xl_chunked_prefill",
+        description="kv_xl_140 + chunked prefill, stacked.",
+        replicas=_amd_dual_replica_pair(kv_gb=140),
+        replica_args=[
+            "--enable-chunked-prefill",
+            "--max-num-batched-tokens", "4096",
+            "--max-num-seqs", "64",
+        ],
+        expected_outcome=(
+            "If both KV size AND chunked prefill help individually, the "
+            "stack may give both effects. Watch for destructive "
+            "interactions (Qwen3's chunked_prefill_block_32 reproduced "
+            "a 900 s tail; some stacks regress)."
+        ),
+    ),
+]
+
+
 PROFILES: dict[str, list[EngineConfig]] = {
     "amd_dual_socket": _AMD_DUAL_SOCKET_CONFIGS,
+    "amd_gemma4": _AMD_GEMMA4_CONFIGS,
     "intel_gemma4": _INTEL_GEMMA4_CONFIGS,
 }
 

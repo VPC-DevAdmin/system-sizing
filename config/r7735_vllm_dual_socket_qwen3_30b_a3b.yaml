@@ -64,6 +64,42 @@
 #
 # Verified working on this hardware (EPYC 9374F, 386 GB DDR5) with
 # Qwen3-30B-A3B-Instruct-2507 BF16, runbook dated 2026-05-03.
+#
+# ── Concurrent-prefill serialization on vLLM-CPU (2026-05-07) ─────
+# IMPORTANT structural property of this stack: the vLLM-CPU prefill
+# scheduler does NOT parallelize concurrent unique-prompt prefills
+# within a single replica. Each prefill runs serially (or near-
+# serially with marginal overlap). Empirical confirmation from a
+# 4-request isolation test on this hardware:
+#
+#   Single isolated 2.5K-token prefill         : 8.7 s
+#   4× concurrent identical (cache-hitting)   : 1.0 s each
+#   4× concurrent unique-prompt prefills      : 13.8 / 20.5 / 27.2 / 31.4 s
+#                                               (~7 s wall-clock per request,
+#                                                served roughly one after
+#                                                another)
+#
+# Implication for the simulator's long-context cohorts:
+#   TTFT_user_N  ≈  (N / num_replicas) × single_prefill_s
+#
+# pool=8 of unique long-context prompts on this dual-replica config →
+# user 8 sees ~28 s TTFT. The simulator captured this correctly.
+# The "summarizer cap=2 / analyst_team cap=6" numbers from the
+# 2026-05-07 run aren't measurement error; they're the actual
+# serialization floor.
+#
+# This is a vLLM-CPU scheduler characteristic, not a knob. The only
+# levers that would meaningfully reduce per-prefill compute on this
+# hardware (quantization, AMX) are unavailable. TP=2 across NUMA
+# would give each prefill 64 cores but Gloo distributed-init fails
+# (see above) and the ~30% TPOT penalty likely outweighs the ~50%
+# TTFT gain even if it ran cleanly.
+#
+# Buyer-page narrative for this platform: chat-style workloads
+# (short prompts, multi-turn with cache reuse) scale to ~100+
+# concurrent users; long-context workloads (≥2K-token unique
+# prompts) are prefill-serialization-limited and the realistic
+# concurrent ceiling is num_replicas × small constant.
 
 engine:
   type: vllm_dual_socket

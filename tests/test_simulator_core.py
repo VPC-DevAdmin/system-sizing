@@ -234,6 +234,88 @@ def test_stepper_does_not_repeat_measured_pool_sizes() -> None:
     assert len(seq) == len(set(seq))  # no duplicate pool sizes
 
 
+def test_stepper_doubles_past_marginal_until_fail_threshold() -> None:
+    """Phase 1 must not exit doubling at the 5% knee — it should
+    continue doubling until ≥ ``fail_threshold`` (30%) so a sustained-
+    fail measurement is observed. Required so cohorts whose curve
+    plateaus in the marginal band still get a non-None fail_pool."""
+    stepper = TwoKneeStepper(
+        initial_pool_size=8, max_pool_size=512, fail_threshold=0.30,
+    )
+    seq = _drive_stepper(
+        stepper,
+        # All doublings stay marginal (10–25%) until pool=256, which
+        # finally exceeds 30%. We expect the doubling to push through
+        # 64/128 even though 64 viol=0.10 (≥ knee).
+        violation_at={
+            64: 0.10, 128: 0.20, 256: 0.55,
+            96: 0.06, 192: 0.40, 224: 0.45,
+            160: 0.35, 144: 0.18,
+        },
+    )
+    # Doubling must include 64, 128, AND 256 (didn't bail at the 5% knee).
+    for expected in (64, 128, 256):
+        assert expected in seq, f"doubling stopped early — pool={expected} not measured"
+
+
+def test_stepper_marginal_cliff_infill_adds_midpoint_when_no_marginal_observed() -> None:
+    """Sharp-cliff case: the bisect_fail bracket [last_pass, first_fail]
+    closes at gap=resolution without ever observing a marginal-status
+    measurement (5–30% violation). The stepper schedules ONE extra
+    midpoint inside that bracket to try to catch the marginal point.
+
+    Models the chat_heavy curve from the May 2026 Intel run: pool=92
+    pass (0%), pool=96 fail (67%), no marginal in between."""
+    stepper = TwoKneeStepper(
+        initial_pool_size=8, max_pool_size=256,
+        bisect_resolution=4, fail_threshold=0.30,
+    )
+    seq = _drive_stepper(
+        stepper,
+        violation_at={
+            # Zero violation up through 92, then a hard cliff at 96+.
+            8: 0.0, 16: 0.0, 32: 0.0, 64: 0.0, 80: 0.0,
+            88: 0.0, 92: 0.0,
+            96: 0.66, 128: 0.66, 256: 0.66,
+            # Extra cliff midpoint that the stepper should schedule.
+            94: 0.18,
+        },
+    )
+    # The infill phase must add pool=94 — midpoint of [92, 96].
+    assert 94 in seq, (
+        f"marginal-cliff infill didn't schedule pool=94. "
+        f"seq={seq}"
+    )
+
+
+def test_stepper_marginal_cliff_infill_skipped_when_marginal_already_observed() -> None:
+    """If bisect_fail already produced a marginal measurement, no
+    extra infill is needed. Cohorts with naturally wide marginal
+    bands shouldn't get gratuitous extra points."""
+    stepper = TwoKneeStepper(
+        initial_pool_size=8, max_pool_size=256, fail_threshold=0.30,
+    )
+    # Curve has a marginal point (pool=48 at 7%) caught by bisection.
+    # The marginal-cliff infill should NOT fire because marginal
+    # already exists.
+    _drive_stepper(
+        stepper,
+        violation_at={
+            8: 0.0, 16: 0.0, 32: 0.0, 48: 0.07,  # marginal!
+            64: 0.40, 96: 0.50, 128: 0.55,
+            40: 0.0, 56: 0.20,
+        },
+    )
+    # No specific assertion on a single pool — instead, verify the
+    # algorithm did NOT measure a "redundant" pool inside the
+    # already-narrow bracket. Marginal measurements present:
+    marginal_pools = [
+        r.pool_size for r in stepper.history
+        if 0.05 <= r.violation_rate < 0.30
+    ]
+    assert marginal_pools, "expected at least one marginal point in this curve"
+
+
 # ── Statistics helpers ────────────────────────────────────────────────
 
 

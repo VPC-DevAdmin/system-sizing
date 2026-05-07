@@ -92,6 +92,14 @@ class TwoKneeStepper:
         max_pool_size: int = 256,
         bisect_resolution: int = 4,
         knee_threshold: float = 0.05,
+        # Doubling continues until violation crosses this threshold
+        # (or max_pool_size is hit). Default 0.30 matches the
+        # ``capacity_status='fail'`` threshold so every cohort is
+        # guaranteed at least one fail measurement when the host is
+        # capable of producing one — needed so ``fail_pool_size``
+        # can be reported instead of None for cohorts whose curve
+        # plateaus in the marginal band (5–30% violation).
+        fail_threshold: float = 0.30,
         stop_violation_threshold: float = 0.50,
         infill_skip_pct: float = 0.10,
         downward_floor: int = 2,
@@ -100,6 +108,7 @@ class TwoKneeStepper:
         self.max_pool_size = max_pool_size
         self.bisect_resolution = bisect_resolution
         self.knee_threshold = knee_threshold
+        self.fail_threshold = fail_threshold
         self.stop_violation_threshold = stop_violation_threshold
         self.infill_skip_pct = infill_skip_pct
         self.downward_floor = downward_floor
@@ -192,9 +201,18 @@ class TwoKneeStepper:
         return {r.pool_size for r in self.history}
 
     def _next_doubling(self) -> Optional[int]:
-        """Phase 1 — double until violation crosses 0.50 or pool hits
-        max. If the initial pool ALREADY fails, transition to
-        downward search."""
+        """Phase 1 — double until violation crosses ``fail_threshold``
+        (or stop_violation_threshold or max_pool_size). If the initial
+        pool ALREADY fails (≥ knee_threshold), transition to downward
+        search.
+
+        Doubling now continues past the 5% knee threshold up to the
+        ``fail_threshold`` (30%) — required so a sustained-fail point
+        is observed even when the curve plateaus in the marginal
+        band. The 5%-knee bracket is still located naturally during
+        bisect_fail because the doubling sequence visited at least
+        one sub-knee point.
+        """
         last = self.history[-1]
 
         # Initial pool failed — switch to downward search.
@@ -210,14 +228,14 @@ class TwoKneeStepper:
             self.phase = PHASE_BISECT_FAIL
             return None
 
-        # Crossed knee threshold (5% violation) but not stop — also
-        # enough to start bisecting knee 2.
-        if last.violation_rate >= self.knee_threshold:
+        # Crossed the fail threshold (30% violation) — bracket the
+        # sustained-fail point, then proceed to bisect knee 2.
+        if last.violation_rate >= self.fail_threshold:
             self.phase = PHASE_BISECT_FAIL
             return None
 
-        # Hit the cap — go bisect knees with what we have. (Both
-        # knee bisections will no-op since we never crossed.)
+        # Hit the cap — go bisect knees with what we have. (Will
+        # no-op gracefully if no fail-side bracket exists.)
         if last.pool_size >= self.max_pool_size:
             self.phase = PHASE_BISECT_FAIL
             return None
@@ -326,9 +344,15 @@ class TwoKneeStepper:
     def _build_infill_queue(self) -> None:
         """Compute midpoints for phase 4 (called once on entry).
 
-        Two midpoints potentially:
+        Three midpoint cases:
           * fast_max → knee 1   (between premium-quality and target-miss)
           * knee 1 → knee 2     (between target-miss and SLA-fail)
+          * marginal-cliff      — when bisect_fail's bracket
+            ``[last_pass, first_violation]`` contains no measurement
+            with status='marginal' (5–30% violation), schedule one
+            extra midpoint inside the bracket. Catches cohorts whose
+            failure transition is sharp enough that the regular
+            bisection skipped over the marginal band entirely.
 
         Skipped when an existing measurement is already within ±10%
         of the midpoint."""
@@ -357,6 +381,19 @@ class TwoKneeStepper:
         if knee_1 is not None and knee_2 is not None and knee_1 < knee_2:
             midpoints.append((knee_1 + knee_2) // 2)
 
+        # Marginal-cliff case: bisect_fail's bracket may have narrowed
+        # to gap=resolution without ever observing a marginal-status
+        # point (≥5%/<30% violation). Schedule one midpoint inside
+        # that bracket to try to catch one. ONE attempt only —
+        # marginal might genuinely not exist (very sharp cliff), and
+        # we don't want to bisect indefinitely. The bracket itself
+        # has gap ≤ resolution, so the midpoint is at most
+        # ``resolution//2`` away from a measured point — bypass the
+        # ±10% skip below for this case via direct append.
+        marginal_cliff_mp = self._marginal_cliff_midpoint()
+        if marginal_cliff_mp is not None:
+            self._infill_queue.append(marginal_cliff_mp)
+
         measured = self._measured()
         for mp in midpoints:
             # Skip if mp is already measured or within ±10% of an existing point.
@@ -369,6 +406,48 @@ class TwoKneeStepper:
             if too_close:
                 continue
             self._infill_queue.append(mp)
+
+    def _marginal_cliff_midpoint(self) -> Optional[int]:
+        """If bisect_fail closed without any marginal-status point in
+        the [last_pass, first_violation] bracket, return the bracket
+        midpoint to schedule one extra measurement. Otherwise None.
+        """
+        # Failure-axis bracket — the [last_pass, first_violation]
+        # slice we already located via bisect_fail.
+        lows = [
+            r for r in self.history if r.violation_rate < self.knee_threshold
+        ]
+        highs = [
+            r for r in self.history if r.violation_rate >= self.knee_threshold
+        ]
+        if not lows or not highs:
+            return None
+        smallest_high = min(r.pool_size for r in highs)
+        candidates = [r for r in lows if r.pool_size < smallest_high]
+        if not candidates:
+            return None
+        largest_low = max(r.pool_size for r in candidates)
+
+        # Already a marginal-status measurement somewhere? (Anything
+        # with viol in [knee_threshold, fail_threshold).) If yes, the
+        # cliff has been characterised and we can skip this infill.
+        any_marginal = any(
+            self.knee_threshold <= r.violation_rate < self.fail_threshold
+            for r in self.history
+        )
+        if any_marginal:
+            return None
+
+        # Sharp-cliff case: bracket has no marginal point. Add one
+        # midpoint measurement IF the bracket is wide enough to fit
+        # one (gap ≥ 2). Skip if the midpoint is already measured.
+        gap = smallest_high - largest_low
+        if gap < 2:
+            return None
+        mp = (largest_low + smallest_high) // 2
+        if mp in self._measured() or mp == largest_low or mp == smallest_high:
+            return None
+        return mp
 
     def _next_infill(self) -> Optional[int]:
         """Phase 4 — pop infill targets one at a time."""

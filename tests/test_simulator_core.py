@@ -1717,6 +1717,44 @@ def test_engine_prefix_cache_hit_rate_surfaces_in_export(tmp_path) -> None:
     assert pc["engine_hit_rate"] == 0.566
 
 
+def test_export_drops_engine_hit_rate_when_only_rate_was_scraped(tmp_path) -> None:
+    """SGLang's ``sglang:cache_hit_rate`` is a moving-window value,
+    not a cumulative counter. When only the rate (not hits+queries)
+    was scraped, the export must NOT publish a misleading run-wide
+    ``engine_hit_rate`` — instead surface a reason field so the
+    buyer page can omit the metric.
+    """
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="sglang", model_id="Qwen/Test",
+        cohort_id="chat_heavy",
+        cohort_definition={"name": "x"}, config={},
+    )
+    # SGLang scrape: rate present, but no cumulative counters.
+    db.update_cohort_run("crid", {
+        "prefix_cache_engine_hits": None,
+        "prefix_cache_engine_queries": None,
+        "prefix_cache_engine_hit_rate": 0.95,  # window-snapshot
+    })
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    doc, _ = export_dir(tmp_path)
+    cohort = doc["cohorts"][0]
+    pc = cohort["prefix_cache"]
+    assert "engine_hit_rate" not in pc
+    assert "engine_hits" not in pc
+    assert "engine_queries" not in pc
+    assert "engine_hit_rate_unavailable_reason" in pc
+    assert "moving-window" in pc["engine_hit_rate_unavailable_reason"]
+
+
 def test_export_slim_drops_heavy_timeseries(tmp_path) -> None:
     """``--slim`` mode must drop the per-step telemetry_samples,
     per-step turns, and cohort-level snapshots — but keep the

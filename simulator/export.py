@@ -94,6 +94,18 @@ def _attach_engine_hit_rate(prefix_cache: dict | None, run: dict) -> dict | None
     engine reuse can be high (~50%+) yet the TTFT speedup may not
     cross the analysis threshold — surfacing both keeps the
     downstream story honest.
+
+    **Cumulative-counter requirement.** Only emit ``engine_hit_rate``
+    when both ``engine_hits`` and ``engine_queries`` (cumulative
+    counters since engine launch) were scraped. SGLang's
+    ``sglang:cache_hit_rate`` is a moving-window value, not a
+    cumulative counter — taking that as the run-wide rate produces a
+    snapshot of "what was happening at the end of the cohort," not
+    "how often was the cache useful overall." The May 2026 Intel run
+    surfaced this as wildly bimodal hit rates (0.0 for cohorts that
+    ramped to high concurrency, 0.84–0.95 for cohorts that ended at
+    low concurrency). When only the rate was scraped, drop it
+    rather than mislead the buyer page.
     """
     eng_hits = run.get("prefix_cache_engine_hits")
     eng_queries = run.get("prefix_cache_engine_queries")
@@ -101,11 +113,26 @@ def _attach_engine_hit_rate(prefix_cache: dict | None, run: dict) -> dict | None
     if eng_hits is None and eng_queries is None and eng_rate is None:
         return prefix_cache
     out = dict(prefix_cache or {})
-    out["engine_hits"] = int(eng_hits) if eng_hits is not None else None
-    out["engine_queries"] = int(eng_queries) if eng_queries is not None else None
-    out["engine_hit_rate"] = (
-        float(eng_rate) if eng_rate is not None else None
-    )
+    # Counters are the trustworthy run-wide signal. Only when both
+    # are present do we surface engine_hit_rate.
+    if eng_hits is not None and eng_queries is not None:
+        out["engine_hits"] = int(eng_hits)
+        out["engine_queries"] = int(eng_queries)
+        out["engine_hit_rate"] = (
+            float(eng_rate) if eng_rate is not None else (
+                float(eng_hits) / float(eng_queries) if eng_queries else None
+            )
+        )
+    else:
+        # Snapshot-only (e.g. SGLang) — record the source signal so
+        # downstream consumers can see why engine_hit_rate is
+        # missing, but DO NOT publish a misleading rate.
+        out["engine_hit_rate_unavailable_reason"] = (
+            "engine reports hit_rate as a moving-window value "
+            "(e.g. sglang:cache_hit_rate); cumulative hits/queries "
+            "counters were not exposed, so a run-wide rate cannot "
+            "be computed reliably"
+        )
     return out
 
 

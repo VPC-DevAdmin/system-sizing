@@ -160,10 +160,11 @@ def test_intel_gemma4_single_replica_command_shape() -> None:
 
 
 def test_optimizer_profile_registry_has_intel_gemma4() -> None:
-    """The engine_optimizer profile registry must expose the
-    Intel Gemma 4 profile alongside the original AMD one, and the
-    profile's configs must use a single-replica all-64-core shape
-    (not the dual-replica AMD pattern)."""
+    """The engine_optimizer profile registry must expose the Intel
+    Gemma 4 profile alongside the original AMD one. Validates the
+    profile-level invariants (no NUMA mems pin since the host is
+    single-socket) and the priority-list contents (headline shapes
+    present, AMD-specific block_32 absent)."""
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
     import importlib
@@ -175,18 +176,46 @@ def test_optimizer_profile_registry_has_intel_gemma4() -> None:
 
     intel_configs = eo.PROFILES["intel_gemma4"]
     assert intel_configs, "intel_gemma4 profile must contain configs"
-    # Every Intel config is single-replica, single-socket (no mems pin).
+
+    # Single-socket invariant: NO replica anywhere in the Intel profile
+    # may pin cpuset_mems — the host has only one NUMA node.
     for c in intel_configs:
-        assert len(c.replicas) == 1, (
-            f"intel_gemma4/{c.name} must have exactly one replica"
-        )
-        r = c.replicas[0]
-        assert r.cpuset_cpus == "0-63", (
-            f"intel_gemma4/{c.name} must use all 64 cores"
-        )
-        assert r.cpuset_mems is None, (
-            f"intel_gemma4/{c.name} must not pin NUMA mems on single socket"
-        )
+        for r in c.replicas:
+            assert r.cpuset_mems is None, (
+                f"intel_gemma4/{c.name}/{r.name} must not pin NUMA mems "
+                f"on single-socket Xeon (cpuset_mems={r.cpuset_mems!r})"
+            )
+
+    by_name = {c.name: c for c in intel_configs}
+
+    # Headline shapes (★★★) — these are the primary axes of variation.
+    assert "baseline" in by_name
+    assert "dual_replica_32c" in by_name
+    assert "tp2" in by_name
+    assert "tp4" in by_name
+    # dual_replica_32c is the only Intel config with two replicas;
+    # everything else is single-replica.
+    assert len(by_name["dual_replica_32c"].replicas) == 2
+    assert {r.cpuset_cpus for r in by_name["dual_replica_32c"].replicas} == {
+        "0-31", "32-63",
+    }
+
+    # Primary expected-helpful (★★).
+    assert "kv_xl_96" in by_name
+    assert "chunked_prefill" in by_name
+
+    # Secondary diagnostics (★).
+    assert "batch_budget" in by_name
+    assert "batch_8192" in by_name
+    assert "no_compile" in by_name
+    assert "kv_xl_128" in by_name
+    assert "kv_xl_chunked_prefill" in by_name
+
+    # AMD-specific configs that should NOT be in the Intel profile.
+    assert "block_32" not in by_name, (
+        "block_32 was the AMD low-concurrency winner; not motivated for "
+        "Granite Rapids — should not appear in intel_gemma4 profile"
+    )
 
 
 def test_engine_api_model_name_uses_served_name_when_set() -> None:

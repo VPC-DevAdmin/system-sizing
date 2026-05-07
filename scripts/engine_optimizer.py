@@ -439,18 +439,24 @@ _AMD_DUAL_SOCKET_CONFIGS: list[EngineConfig] = [
 
 # ── Intel single-socket profile (Xeon 6761P / Granite Rapids) ───────────
 #
-# Single-socket 64-core Xeon — no NUMA splitting, so the dual-replica
-# pattern from AMD doesn't apply. One container covers the entire CPU.
-# Defaults are tuned for Gemma 4 26B-A4B (MoE, ~4B active params), which
-# tested significantly faster than Qwen3-30B-A3B on this stack — a
-# working hypothesis being that Gemma's MoE expert routing is properly
-# sparse on vLLM-CPU while Qwen3's isn't.
+# Single-socket 64-core Xeon. Configs are ordered by priority — the
+# top three are headline (★★★), the next two are primary expected-
+# helpful (★★), and the rest are secondary diagnostics (★). The
+# AMD-specific ``block_32`` config is intentionally absent — its win
+# was AMD-Zen4-prefill-specific and there's no reason to expect it
+# to transfer to Granite Rapids.
 #
-# Knobs swept here mirror what the AMD profile explored, minus the
-# NUMA-shape variants (single-replica vs dual-replica) which don't
-# apply on single-socket hardware. Adds an AMX-flavored variant since
-# Granite Rapids has AMX_BF16 — relevant for any oneDNN dispatch
-# choices vLLM-CPU surfaces.
+# Tuned for Gemma 4 26B-A4B (MoE, ~4B active params), which tested
+# significantly faster than Qwen3-30B-A3B on this stack — a working
+# hypothesis being that Gemma's MoE expert routing is properly sparse
+# on vLLM-CPU while Qwen3's isn't.
+#
+# The headline question this profile answers: which of single-replica,
+# dual-replica-by-core-split, TP=2, or TP=4 gives the best balance of
+# TTFT (prefill latency at low concurrency) vs aggregate throughput
+# (multi-user steady state) on a single-socket Xeon. The AMD answer
+# was dual-replica because of the NUMA boundary; Intel single-socket
+# has no such boundary so the answer is genuinely unknown.
 
 def _intel_single_replica(
     *, kv_gb: int = 64, extra_env: dict | None = None,
@@ -471,17 +477,115 @@ def _intel_single_replica(
     ]
 
 
+def _intel_dual_replica_32c(*, kv_gb: int = 64) -> list[ReplicaSpec]:
+    """Two 32-core replicas split across the single Xeon socket. NO
+    cpuset_mems pin since there's only one NUMA node — the split is
+    purely about whether two independent vLLM scheduler queues serve
+    concurrent users better than one big queue does. AMD-analog
+    structurally, but not justified by NUMA on this hardware."""
+    return [
+        ReplicaSpec(
+            name="vllm-r0", port=8000,
+            cpuset_cpus="0-31", cpuset_mems=None,
+            env={
+                "VLLM_CPU_KVCACHE_SPACE": str(kv_gb),
+                "VLLM_CPU_OMP_THREADS_BIND": "0-31",
+                "OMP_NUM_THREADS": "32",
+            },
+        ),
+        ReplicaSpec(
+            name="vllm-r1", port=8001,
+            cpuset_cpus="32-63", cpuset_mems=None,
+            env={
+                "VLLM_CPU_KVCACHE_SPACE": str(kv_gb),
+                "VLLM_CPU_OMP_THREADS_BIND": "32-63",
+                "OMP_NUM_THREADS": "32",
+            },
+        ),
+    ]
+
+
 _INTEL_GEMMA4_CONFIGS: list[EngineConfig] = [
+    # ── ★★★ Headline shapes ─────────────────────────────────────────
     EngineConfig(
         name="baseline",
         description=(
             "Single replica, 64 cores, 64 GB KV. Matches the hand-validated "
-            "docker invocation for Gemma 4 on Xeon 6761P. Reference point "
+            "docker invocation for Gemma 4 on Xeon 6761P. Reference anchor "
             "for everything else in this profile."
         ),
         replicas=_intel_single_replica(kv_gb=64),
         expected_outcome="Establishes the baseline TTFT/TPOT/throughput.",
     ),
+    EngineConfig(
+        name="dual_replica_32c",
+        description=(
+            "Two 32-core replicas (the AMD-analog production shape, but on "
+            "single-socket Intel). Two independent scheduler queues, ports "
+            "8000 + 8001. KV split: 64 GB per replica → 128 GB total."
+        ),
+        replicas=_intel_dual_replica_32c(kv_gb=64),
+        expected_outcome=(
+            "On AMD this won at higher concurrency because each socket got "
+            "an independent KV pool with no cross-NUMA chatter. On single-"
+            "socket Intel the NUMA argument doesn't apply, so this tests "
+            "whether two scheduler queues alone (without NUMA isolation) "
+            "are still better than one queue covering all 64 cores. "
+            "Headline question for the Intel sizing story."
+        ),
+    ),
+    EngineConfig(
+        name="tp2",
+        description=(
+            "Single replica, TP=2 across 64 cores (32 per shard). One vLLM "
+            "instance with the model split layer-by-layer across two "
+            "worker processes. Each forward pass pays Gloo all-reduce, but "
+            "single-stream prefill is parallelised across both shards."
+        ),
+        replicas=_intel_single_replica(
+            kv_gb=64,
+            extra_env={"VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
+        ),
+        replica_args=[
+            "--tensor-parallel-size", "2",
+            "--distributed-executor-backend", "mp",
+        ],
+        shm_size="32g",
+        expected_outcome=(
+            "Best case: ~2× single-stream prefill speedup at the cost of "
+            "all-reduce overhead per layer. On AMD this failed at "
+            "distributed init (Gloo across NUMA). Intel single-socket should "
+            "have a clearer path — both shards on the same memory domain. "
+            "If it works, TP=2 gives the latency-vs-throughput trade-off "
+            "the dual_replica shape can't: lower per-stream TTFT instead "
+            "of higher aggregate throughput."
+        ),
+    ),
+    EngineConfig(
+        name="tp4",
+        description=(
+            "Single replica, TP=4 across 64 cores (16 per shard). Aggressive "
+            "model parallelism — four-way split, four times the all-reduce "
+            "traffic, four times the per-shard sharding overhead."
+        ),
+        replicas=_intel_single_replica(
+            kv_gb=64,
+            extra_env={"VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
+        ),
+        replica_args=[
+            "--tensor-parallel-size", "4",
+            "--distributed-executor-backend", "mp",
+        ],
+        shm_size="32g",
+        expected_outcome=(
+            "Probes whether splitting further past TP=2 is still helpful or "
+            "becomes all-reduce-bound. On CPU the marginal cost of each "
+            "extra all-reduce is high; expect TP=4 to be worse than TP=2 "
+            "unless the per-shard matmuls fit in cache substantially better. "
+            "Run only if tp2 looks promising."
+        ),
+    ),
+    # ── ★★ Primary expected-helpful ────────────────────────────────
     EngineConfig(
         name="kv_xl_96",
         description="Single replica, 96 GB KV (1.5× baseline).",
@@ -494,21 +598,11 @@ _INTEL_GEMMA4_CONFIGS: list[EngineConfig] = [
         ),
     ),
     EngineConfig(
-        name="kv_xl_128",
-        description="Single replica, 128 GB KV (2× baseline).",
-        replicas=_intel_single_replica(kv_gb=128),
-        expected_outcome=(
-            "Upper-bound KV probe. 128 GB on a 192–256 GB host leaves "
-            "comfortable headroom for weights + scratch. Skip if 96 GB "
-            "didn't help — diminishing returns past that point."
-        ),
-    ),
-    EngineConfig(
         name="chunked_prefill",
         description=(
             "Baseline + chunked prefill (4096 tokens/step, 64 seqs). "
-            "Only relevant if Gemma's prefill exhibits the head-of-line "
-            "blocking we saw on Qwen3."
+            "Diagnostic for MoE routing efficiency — large win here means "
+            "Gemma's prefill is partially serialised the way Qwen3's was."
         ),
         replicas=_intel_single_replica(kv_gb=64),
         replica_args=[
@@ -520,33 +614,76 @@ _INTEL_GEMMA4_CONFIGS: list[EngineConfig] = [
             "If Gemma's MoE routing on vLLM-CPU is genuinely sparse, "
             "concurrent unique-prompt prefill shouldn't serialize the way "
             "Qwen3's did, and chunked prefill should be a small win or a "
-            "wash. If chunked prefill produces a large win, that's a hint "
-            "that prefill IS still partially serialized."
+            "wash. If chunked prefill produces a LARGE win, that's a hint "
+            "that prefill IS still partially serialized — same diagnostic "
+            "value either way."
         ),
     ),
-    EngineConfig(
-        name="block_32",
-        description="Baseline + KV block size 32 (2× default).",
-        replicas=_intel_single_replica(kv_gb=64),
-        replica_args=["--block-size", "32"],
-        expected_outcome=(
-            "Coarser KV blocks reduce per-block bookkeeping overhead. On "
-            "AMD this won the low-concurrency cells. Likely also helps on "
-            "Intel for the same reason; quantify."
-        ),
-    ),
+    # ── ★ Secondary diagnostics ────────────────────────────────────
     EngineConfig(
         name="batch_budget",
-        description="Baseline + larger batch budget (8192 tokens/step).",
+        description=(
+            "Baseline + larger batch budget (6144 tokens/step, 96 seqs). "
+            "Default scheduler — no chunked prefill — just a bigger budget. "
+            "Tests prefill-scheduling-via-budget vs prefill-scheduling-via-"
+            "chunked_prefill as alternative angles on the same problem."
+        ),
         replicas=_intel_single_replica(kv_gb=64),
         replica_args=[
-            "--max-num-batched-tokens", "8192",
+            "--max-num-batched-tokens", "6144",
             "--max-num-seqs", "96",
         ],
         expected_outcome=(
             "Higher prefill throughput when many requests arrive together. "
-            "Individual TTFT may rise. Compares against chunked_prefill "
-            "since both target prefill scheduling but from different angles."
+            "Compares against chunked_prefill since both target prefill "
+            "scheduling but from different angles."
+        ),
+    ),
+    EngineConfig(
+        name="batch_8192",
+        description=(
+            "Baseline + batched prefill ceiling (8192 tokens/step, 128 seqs). "
+            "Pushes the default-scheduler-with-larger-budget axis further "
+            "than batch_budget."
+        ),
+        replicas=_intel_single_replica(kv_gb=64),
+        replica_args=[
+            "--max-num-batched-tokens", "8192",
+            "--max-num-seqs", "128",
+        ],
+        expected_outcome=(
+            "Upper bound of the batched-prefill axis. Beyond 8192 tokens "
+            "per step the engine often hits memory bandwidth before "
+            "compute scaling. Skip if batch_budget already showed flat or "
+            "negative returns."
+        ),
+    ),
+    EngineConfig(
+        name="no_compile",
+        description=(
+            "Baseline + ``--enforce-eager`` (disable torch.compile / CUDA "
+            "graph capture)."
+        ),
+        replicas=_intel_single_replica(kv_gb=64),
+        replica_args=["--enforce-eager"],
+        expected_outcome=(
+            "Science experiment. On GPU torch.compile is a clear win; on "
+            "CPU the situation is murkier — compilation can pessimise "
+            "small-batch matmuls the JIT doesn't recognise. If "
+            "no_compile is faster than baseline, the default compile path "
+            "is regressing on this model. If slower, compile is doing its "
+            "job. Either result is informative; this is a diagnostic, not "
+            "a candidate for production."
+        ),
+    ),
+    EngineConfig(
+        name="kv_xl_128",
+        description="Single replica, 128 GB KV (2× baseline).",
+        replicas=_intel_single_replica(kv_gb=128),
+        expected_outcome=(
+            "Upper-bound KV probe. 128 GB on a 192–256 GB host leaves "
+            "comfortable headroom for weights + scratch. Skip if kv_xl_96 "
+            "didn't help — diminishing returns past that point."
         ),
     ),
     EngineConfig(

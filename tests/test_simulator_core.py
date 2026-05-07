@@ -2558,6 +2558,63 @@ def test_audit_emits_dedup_rerun_plan(tmp_path) -> None:
     assert len(pool_120_entries) == 1
 
 
+def test_load_config_from_run_dir_reads_stored_config(tmp_path) -> None:
+    """Spot-check / audit follow-ons must reconstruct the original
+    sweep's engine config from run.db, NOT default to config/default.yaml.
+    Using a different config (e.g. defaulting to vllm + Qwen2.5-7B
+    when the original ran sglang + Qwen3-30B-FP8) launches the wrong
+    engine and produces non-comparable measurements."""
+    from simulator.database import Database
+    from simulator.runner import load_config_from_run_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="sglang", model_id="Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+        cohort_id="x", cohort_definition={"name": "x"},
+        config={
+            "engine": {
+                "type": "sglang",
+                "model_id": "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+                "quantization_kind": "fp8",
+                "max_total_tokens": 131072,
+                "tensor_parallel_size": 1,
+                "attention_backend": "intel_amx",
+            },
+            "simulation": {"initial_pool_size": 8, "max_pool_size": 256},
+        },
+    )
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    cfg = load_config_from_run_dir(run_dir)
+    # Engine fields restored from config_json — NOT defaults.
+    assert cfg.engine.type == "sglang"
+    assert cfg.engine.model_id == "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
+    assert cfg.engine.quantization_kind == "fp8"
+    assert cfg.engine.max_total_tokens == 131072
+    assert cfg.engine.attention_backend == "intel_amx"
+    # Simulation fields too.
+    assert cfg.simulation.initial_pool_size == 8
+
+
+def test_load_config_from_run_dir_raises_for_empty_db(tmp_path) -> None:
+    """Empty run.db (no cohort_run rows) → clear error rather than a
+    default Config that would silently mismatch."""
+    from simulator.database import Database
+    from simulator.runner import load_config_from_run_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.close()
+
+    with pytest.raises(ValueError, match="No cohort_run rows"):
+        load_config_from_run_dir(run_dir)
+
+
 def test_audit_clean_run_produces_no_anomalies(tmp_path) -> None:
     """A clean curve with all bands present and no boundary cases
     should produce zero anomalies."""

@@ -51,6 +51,43 @@ def _config_to_dict(cfg: Config) -> dict:
     return dataclasses.asdict(cfg)
 
 
+def load_config_from_run_dir(run_dir: Path) -> Config:
+    """Reconstruct the Config that was used to produce the run.db in
+    ``run_dir``. Reads any cohort_run row's ``config_json`` and applies
+    it onto a default ``Config()`` via the same merger ``load_config``
+    uses for YAML files.
+
+    Used by spot-check / audit follow-on runs to guarantee the
+    follow-on uses the SAME engine / model / KV pool / quantization
+    as the original sweep — otherwise the new measurements aren't
+    comparable to the cohort's existing curve.
+    """
+    from .config import _merge_dataclass, ReplicaConfig
+    db_path = _run_db_path(run_dir)
+    if not db_path.exists():
+        raise FileNotFoundError(f"No run.db in {run_dir}")
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        row = conn.execute(
+            "SELECT config_json FROM cohort_run "
+            "ORDER BY started_at ASC LIMIT 1"
+        ).fetchone()
+    if row is None or not row[0]:
+        raise ValueError(
+            f"No cohort_run rows in {db_path} — cannot reconstruct "
+            f"engine config from this run dir."
+        )
+    import json as _json
+    raw = _json.loads(row[0])
+    cfg = Config()
+    _merge_dataclass(cfg, raw)
+    # Same special-case as load_config(): list[ReplicaConfig] needs
+    # explicit dataclass reconstruction since the generic merger only
+    # handles dataclass-typed scalars.
+    if cfg.engine.replicas and isinstance(cfg.engine.replicas[0], dict):
+        cfg.engine.replicas = [ReplicaConfig(**r) for r in cfg.engine.replicas]
+    return cfg
+
+
 def _cohort_to_dict(cohort: Cohort) -> dict:
     return {
         "id": cohort.id,

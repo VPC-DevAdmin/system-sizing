@@ -299,7 +299,6 @@ spot-check: stop-bg
 	[ -f "$$PLAN" ] || { echo "No $$PLAN — run ``make audit`` first"; exit 1; } ; \
 	LOG="$$RD/spot_check_$$(date +%Y%m%dT%H%M%S).log" ; \
 	nohup $(PY) -m simulator.cli spot-check \
-		--config $(CONFIG) \
 		--plan "$$PLAN" \
 		--run-dir "$$RD" \
 		>"$$LOG" 2>&1 </dev/null & \

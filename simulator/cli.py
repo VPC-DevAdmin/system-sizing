@@ -137,7 +137,6 @@ def sweep(
 
 @app.command("spot-check")
 def spot_check(
-    config: Path = typer.Option(Path("config/default.yaml")),
     plan: Path = typer.Option(
         ...,
         "--plan",
@@ -152,13 +151,20 @@ def spot_check(
         "--run-dir",
         help=(
             "The run directory whose run.db holds the cohort_run rows "
-            "to enrich (e.g. runs/run_09). Spot-check measurements are "
-            "appended to existing rows; the engine launches against the "
-            "config in this dir."
+            "to enrich (e.g. runs/run_09). The engine config is loaded "
+            "from the existing cohort_run rows so the spot-check uses "
+            "the SAME engine + model + KV size as the original run — "
+            "any other config would produce non-comparable measurements."
         ),
     ),
-    engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
-    model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
+    config: Path = typer.Option(
+        None,
+        help=(
+            "Optional: override the engine config (DANGEROUS — emits "
+            "a warning, since the spot-check measurements would no "
+            "longer be comparable to the original cohort_run's curve)."
+        ),
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Re-measure specific (cohort, pool_size) points from an audit
@@ -170,7 +176,6 @@ def spot_check(
         # → writes runs/run_09/audit_report.json
 
         python -m simulator.cli spot-check \\
-            --config config/xeon_sglang_qwen3_30b_a3b_fp8.yaml \\
             --run-dir runs/run_09 \\
             --plan runs/run_09/audit_report.json
 
@@ -178,8 +183,7 @@ def spot_check(
     """
     import json
     _setup_logging(verbose)
-    cfg = load_config(config)
-    apply_cli_overrides(cfg, engine=engine, model=model)
+
     if not plan.exists():
         raise typer.BadParameter(f"Plan file not found: {plan}")
     if not run_dir.exists():
@@ -188,6 +192,25 @@ def spot_check(
     if not plan_doc.get("rerun_points"):
         typer.echo("No rerun points in plan — nothing to do.")
         return
+
+    # Default: reconstruct the engine config from the run.db so the
+    # spot-check uses the EXACT engine / model / KV pool / quantization
+    # the original sweep used. Otherwise data isn't comparable.
+    if config is None:
+        from .runner import load_config_from_run_dir
+        cfg = load_config_from_run_dir(run_dir)
+        typer.echo(
+            f"spot-check: loaded engine config from {run_dir}/run.db "
+            f"(engine.type={cfg.engine.type}, model={cfg.engine.model_id})"
+        )
+    else:
+        typer.echo(
+            f"WARNING: spot-check is using --config={config!s} instead "
+            f"of the config stored on the original cohort_run. "
+            f"Measurements will only be comparable if this matches the "
+            f"original engine launch parameters."
+        )
+        cfg = load_config(config)
 
     from .runner import run_spot_check
     paths = asyncio.run(run_spot_check(cfg, plan_doc, run_dir=run_dir))

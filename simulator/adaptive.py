@@ -50,6 +50,7 @@ Use:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -63,6 +64,43 @@ class StepResult:
     # — they get the old behavior (knee 1 == knee 2 since target
     # never gets missed).
     target_miss_rate: float = 0.0
+    # Sample size of the measurement window the rates came from.
+    # Used to compute Wilson CI bounds for phase transitions — see
+    # ``_wilson_*`` helpers below. Default 100 (the simulator's
+    # ``target_samples_per_step``) preserves point-estimate-equivalent
+    # behaviour for callers that don't pass it; runner.py passes the
+    # real sample_size from the measurement window.
+    sample_size: int = 100
+
+
+def _wilson_lower(rate: float, n: int, z: float = 1.96) -> float:
+    """Lower bound of the Wilson 95% CI for a proportion ``rate``
+    observed across ``n`` trials. Used by the stepper to gate
+    "statistically confident the rate is past the knee" decisions —
+    so a noisy small-sample 20% measurement (CI ~3-62%) doesn't get
+    treated the same as a clean 20% from n=100 (CI ~12-30%).
+    Returns 0.0 when n=0 (no information)."""
+    if n <= 0:
+        return 0.0
+    successes = round(rate * n)
+    p = successes / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = (z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / denom
+    return max(0.0, centre - half)
+
+
+def _wilson_upper(rate: float, n: int, z: float = 1.96) -> float:
+    """Upper bound of the Wilson 95% CI. Mirror of ``_wilson_lower``;
+    returns 1.0 when n=0."""
+    if n <= 0:
+        return 1.0
+    successes = round(rate * n)
+    p = successes / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = (z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / denom
+    return min(1.0, centre + half)
 
 
 # Phase labels — exposed as class constants on TwoKneeStepper too.
@@ -206,31 +244,40 @@ class TwoKneeStepper:
         pool ALREADY fails (≥ knee_threshold), transition to downward
         search.
 
-        Doubling now continues past the 5% knee threshold up to the
-        ``fail_threshold`` (30%) — required so a sustained-fail point
-        is observed even when the curve plateaus in the marginal
-        band. The 5%-knee bracket is still located naturally during
-        bisect_fail because the doubling sequence visited at least
-        one sub-knee point.
+        Threshold checks use Wilson CI lower bound, not the raw point
+        estimate. This prevents small-sample noise (e.g. 1/5 = 20%
+        with Wilson lower CI ~3.6%) from triggering downward search
+        when the data isn't statistically past the knee. Mirrors
+        what ``measurement._classify_status`` does for status labels.
+
+        Doubling continues past the 5% knee up to ``fail_threshold``
+        (30%) so a sustained-fail point is observed even when the
+        curve plateaus in marginal. The 5%-knee bracket is still
+        located naturally during bisect_fail.
         """
         last = self.history[-1]
+        last_lower = _wilson_lower(last.violation_rate, last.sample_size)
 
-        # Initial pool failed — switch to downward search.
+        # Initial pool failed — switch to downward search. Require
+        # statistical confidence (Wilson lower CI ≥ knee) before
+        # committing to "this pool is past the knee" — otherwise a
+        # noisy 20%-with-n=5 spuriously triggers backoff.
         if (
             last.pool_size == self.initial_pool_size
-            and last.violation_rate >= self.knee_threshold
+            and last_lower >= self.knee_threshold
         ):
             self.phase = PHASE_DOWNWARD_SEARCH
             return None
 
-        # Crossed the stop threshold — bracket established, bisect.
-        if last.violation_rate >= self.stop_violation_threshold:
+        # Crossed the stop threshold (50%) — bracket established, bisect.
+        # Use Wilson lower CI for the same reason as above.
+        if last_lower >= self.stop_violation_threshold:
             self.phase = PHASE_BISECT_FAIL
             return None
 
         # Crossed the fail threshold (30% violation) — bracket the
         # sustained-fail point, then proceed to bisect knee 2.
-        if last.violation_rate >= self.fail_threshold:
+        if last_lower >= self.fail_threshold:
             self.phase = PHASE_BISECT_FAIL
             return None
 
@@ -258,6 +305,11 @@ class TwoKneeStepper:
         )
 
         # Found a passing sub-initial pool — proceed to bisect.
+        # NOTE: this uses the raw point estimate intentionally. False
+        # negatives here ("don't stop halving") are far worse than
+        # false positives ("stop halving early"); a small-n 0% rate
+        # with Wilson upper ~37% would otherwise keep halving down to
+        # the floor for no useful reason.
         if smallest_record.violation_rate < self.knee_threshold:
             self.phase = PHASE_BISECT_FAIL
             return None
@@ -276,14 +328,26 @@ class TwoKneeStepper:
     def _next_bisect_fail(self) -> Optional[int]:
         """Phase 2 — bisect between largest violation-passing pool
         and smallest violation-failing pool until gap ≤ resolution.
-        Pins knee 2 (5% violation rate)."""
+        Pins knee 2 (5% violation rate).
+
+        Wilson-CI-aware: a pool is treated as confidently below the
+        knee (``low``) only when its Wilson UPPER CI is below
+        knee_threshold; confidently above (``high``) only when its
+        Wilson LOWER CI is at/above knee_threshold. Marginal pools
+        (in between) participate in NEITHER bracket — which means
+        the bisector won't keep narrowing on a 1/5=20% Wilson-noisy
+        measurement and won't claim a 1/100=1% measurement is past
+        the knee. Mirrors ``measurement._classify_status`` semantics.
+        """
         lows = sorted(
             r.pool_size for r in self.history
-            if r.violation_rate < self.knee_threshold
+            if _wilson_upper(r.violation_rate, r.sample_size)
+            < self.knee_threshold
         )
         highs = sorted(
             r.pool_size for r in self.history
-            if r.violation_rate >= self.knee_threshold
+            if _wilson_lower(r.violation_rate, r.sample_size)
+            >= self.knee_threshold
         )
         if not lows or not highs:
             # Can't bisect without both sides — go to knee 1.
@@ -308,14 +372,17 @@ class TwoKneeStepper:
 
     def _next_bisect_target(self) -> Optional[int]:
         """Phase 3 — bisect knee 1 (5% target_miss_rate) using the
-        same logic as phase 2 but on a different rate field."""
+        same logic as phase 2 but on a different rate field.
+        Wilson-CI-aware partitioning, same rationale as bisect_fail."""
         lows = sorted(
             r.pool_size for r in self.history
-            if r.target_miss_rate < self.knee_threshold
+            if _wilson_upper(r.target_miss_rate, r.sample_size)
+            < self.knee_threshold
         )
         highs = sorted(
             r.pool_size for r in self.history
-            if r.target_miss_rate >= self.knee_threshold
+            if _wilson_lower(r.target_miss_rate, r.sample_size)
+            >= self.knee_threshold
         )
         if not lows or not highs:
             self.phase = PHASE_INFILL

@@ -51,7 +51,14 @@ engine:
   reasoning: true
   reasoning_effort: medium             # minimal | low | medium | high
 
-  max_model_len: 8192
+  # 16384 (was 8192). The 2026-05-08 AMD diagnostic showed
+  # ``BadRequestError`` storms on analyst_team — long-context
+  # personas (document_qa median 3500 input tokens, summarizer
+  # 5000) plus accumulated multi-turn chat history quickly exceed
+  # 8192. With 120 GB KV per replica there's plenty of headroom for
+  # 16K context — bumping is the operationally simpler answer than
+  # adding history truncation in the simulator.
+  max_model_len: 16384
   startup_timeout_s: 1800              # ~90-120s per replica
 
   host: 127.0.0.1

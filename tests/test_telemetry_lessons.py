@@ -338,6 +338,9 @@ def test_amd_gpt_oss_yaml_loads_and_builds_command() -> None:
     # GPT-OSS model + name.
     assert "/models/gpt-oss-20b-bf16" in cmd
     assert "gpt_oss_20b" in cmd
+    # max_model_len bumped to 16384 — long-context personas
+    # (document_qa median 3500 + multi-turn history) overflow 8192.
+    assert "--max-model-len" in cmd and "16384" in cmd
 
 
 def test_intel_gpt_oss_yaml_loads_and_builds_command() -> None:

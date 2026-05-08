@@ -311,6 +311,12 @@ async def run_cohort(
                     pool_size=result.target_pool_size,
                     violation_rate=result.combined_violation_rate,
                     target_miss_rate=result.combined_target_miss_rate,
+                    # Wilson-CI-aware stepper: gate phase decisions on
+                    # the actual sample size rather than the implicit
+                    # n=100 default. Critical when measurement windows
+                    # capture few samples (e.g. long-context cohorts at
+                    # high concurrency where only n=5-9 turns finish).
+                    sample_size=result.sample_size,
                 ))
             step_index += 1
 

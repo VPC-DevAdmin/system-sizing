@@ -235,6 +235,83 @@ def test_stepper_does_not_repeat_measured_pool_sizes() -> None:
     assert len(seq) == len(set(seq))  # no duplicate pool sizes
 
 
+def test_stepper_wilson_ci_avoids_small_sample_panic_backoff() -> None:
+    """The May 2026 AMD GPT-OSS analyst_team symptom: a measurement
+    of 1/5 = 20% violations (Wilson lower CI ~3.6%) at the initial
+    pool was triggering DOWNWARD_SEARCH even though the sample is
+    statistically indistinguishable from a true rate of <5%. The
+    Wilson-CI fix gates phase transitions on the lower bound — so
+    noisy low-n measurements stay in PHASE_DOUBLING.
+
+    Mirrors what ``_classify_status`` already does for the status
+    label."""
+    from simulator.adaptive import StepResult, TwoKneeStepper
+
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256)
+    # Empty history → first measurement at initial pool.
+    assert stepper.next_pool_size() == 8
+    # Record a noisy 1-of-5 = 20% rate at pool=8. Wilson lower CI
+    # is ~3.6%, so we are NOT statistically past the 5% knee.
+    stepper.record(StepResult(
+        pool_size=8, violation_rate=0.20, sample_size=5,
+    ))
+    # Without Wilson CI: this would trigger downward search.
+    # With Wilson CI: stay in doubling, advance to pool=16.
+    nxt = stepper.next_pool_size()
+    assert stepper.phase == TwoKneeStepper.PHASE_DOUBLING
+    assert nxt == 16
+
+
+def test_stepper_wilson_ci_still_triggers_on_clean_signal() -> None:
+    """Wilson-CI fix must not regress clean-signal cases: a 4/9 =
+    44% measurement (Wilson lower ~18.7%) IS confidently past the
+    5% knee, so downward_search MUST still fire."""
+    from simulator.adaptive import StepResult, TwoKneeStepper
+
+    stepper = TwoKneeStepper(initial_pool_size=8, max_pool_size=256)
+    assert stepper.next_pool_size() == 8
+    stepper.record(StepResult(
+        pool_size=8, violation_rate=0.44, sample_size=9,
+    ))
+    # Phase transitions happen on next_pool_size(), not record().
+    # Calling next_pool_size advances DOUBLING → DOWNWARD_SEARCH for
+    # this confidently-past-knee measurement, then DOWNWARD_SEARCH
+    # picks pool=4 as the halve target.
+    nxt = stepper.next_pool_size()
+    assert stepper.phase == TwoKneeStepper.PHASE_DOWNWARD_SEARCH
+    assert nxt == 4
+
+
+def test_stepper_wilson_ci_bisect_partition_excludes_marginal() -> None:
+    """In bisect_fail, a noisy 1/5=20% measurement (Wilson lower
+    ~3.6%, upper ~62%) is neither confidently low nor confidently
+    high — so it must NOT pull the bisection bracket toward itself.
+    Otherwise small-sample noise in the marginal zone keeps narrowing
+    the bracket past the point of useful information."""
+    from simulator.adaptive import StepResult, TwoKneeStepper
+
+    stepper = TwoKneeStepper(
+        initial_pool_size=8, max_pool_size=256, bisect_resolution=4,
+    )
+    # Manually drive into bisect_fail with two clean points + one
+    # marginal noisy point.
+    stepper.next_pool_size()  # Sets phase=DOUBLING; advances internally
+    stepper.record(StepResult(pool_size=8, violation_rate=0.0, sample_size=100))
+    stepper.next_pool_size()
+    stepper.record(StepResult(pool_size=64, violation_rate=0.50, sample_size=100))
+    stepper.next_pool_size()  # Should now be in BISECT_FAIL
+    # Add a marginal 20%-on-5-samples measurement at pool=32.
+    stepper.record(StepResult(pool_size=32, violation_rate=0.20, sample_size=5))
+    # The Wilson-CI partition: pool=32 is neither 'low' (upper 62% >> 5%)
+    # nor 'high' (lower 3.6% < 5%) → excluded from the bracket. So
+    # the bracket stays [8, 64] and bisects to ~36, not ~24 or ~48.
+    nxt = stepper.next_pool_size()
+    # The midpoint of [8, 64] is 36; the algorithm should choose
+    # something in that vicinity rather than collapsing toward 32.
+    assert nxt is not None
+    assert 16 <= nxt <= 56, f"unexpected pool: {nxt}"
+
+
 def test_stepper_doubles_past_marginal_until_fail_threshold() -> None:
     """Phase 1 must not exit doubling at the 5% knee — it should
     continue doubling until ≥ ``fail_threshold`` (30%) so a sustained-
@@ -848,10 +925,13 @@ def test_reasoning_overhead_table_covers_all_effort_levels() -> None:
     )
     # ``medium`` (the default declared in GPT-OSS YAMLs) must be
     # large enough to cover quick_lookup's typical answer (~30 tokens
-    # of content) PLUS the observed reasoning-phase length.
-    assert REASONING_OVERHEAD_TOKENS["medium"] >= 200, (
+    # of content) PLUS the observed reasoning-phase length. AMD
+    # 2026-05-08 measurement showed reasoning hit 532 tokens on
+    # document_qa no-content-tokens cases — so the budget needs to
+    # cover at least that much, with headroom.
+    assert REASONING_OVERHEAD_TOKENS["medium"] >= 550, (
         "medium overhead must accommodate the observed GPT-OSS "
-        "reasoning-phase length (~150-250 tokens) before content"
+        "reasoning-phase length (~530+ tokens at medium effort)"
     )
 
 

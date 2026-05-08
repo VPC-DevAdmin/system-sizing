@@ -39,11 +39,20 @@ log = logging.getLogger(__name__)
 # Values calibrated from GPT-OSS-20B observed reasoning-phase length
 # at each effort level. Conservative — better to over-budget and let
 # the engine emit content than under-budget and lose the entire turn.
+#
+# 2026-05-08 calibration update: AMD analyst_team / document_qa
+# turns at reasoning_effort=medium emitted 532 reasoning tokens on
+# the no-content-tokens cases (i.e. reasoning was BIGGER than the
+# 250-token budget we'd given). Bumped medium 250 → 600 to cover
+# observed reasoning-phase lengths with margin. Other levels scaled
+# proportionally to stay monotonic and roughly 2× of the original
+# calibration. Real reasoning models on real prompts use a lot more
+# than the early back-of-envelope estimates suggested.
 REASONING_OVERHEAD_TOKENS = {
-    "minimal": 50,
-    "low":     100,
-    "medium":  250,
-    "high":    500,
+    "minimal": 100,
+    "low":     250,
+    "medium":  600,
+    "high":    1200,
 }
 
 

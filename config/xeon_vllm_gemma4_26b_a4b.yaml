@@ -27,6 +27,40 @@
 #     --model /models/gemma-4-26B-A4B-it --dtype bfloat16
 #     --max-model-len 8192 --trust-remote-code
 #     --host 0.0.0.0 --port 8000 --served-model-name gemma4_26b_a4b
+#
+# ── Optimizer findings (intel_gemma4 profile, 2026-05-07) ──────────
+# Sweep ran 11 launch shapes; 9 succeeded, tp2/tp4 failed at engine-
+# core init ("Engine core initialization failed. Failed core proc(s):
+# {}") — same multi-process startup brittleness vLLM-CPU exhibits
+# elsewhere. Skip TP variants on this stack.
+#
+# kv_xl_128 won short_throughput (c=8) cleanly:
+#
+#   chat_concurrent c=4 ttft p50/p95: kv_xl_128 476/703 ms vs
+#                                     baseline       545/546 ms
+#   short_throughput c=8 ttft p50/p95: kv_xl_128 526/528 ms vs
+#                                      baseline       399/732 ms
+#   short_throughput c=8 throughput:   kv_xl_128 74.6 tok/s   vs
+#                                      baseline       72.9 tok/s
+#
+# kv_xl_128 has the tightest p50/p95 spread under c=8 (526 → 528,
+# essentially zero queueing variance), best TPOT (103 ms), and best
+# aggregate throughput. dual_replica_32c was uniformly the worst non-
+# eager config — single-socket Intel has no NUMA boundary to align
+# with, so don't split. no_compile was meaningfully worse on TPOT
+# (131 ms vs 103 ms at c=8) — torch.compile is earning its keep.
+#
+# Long-prompt cells (4096-token input × c=8/16) timed out on EVERY
+# config. Gemma 4 doesn't escape the prefill-serialisation ceiling
+# under heavy long-context load — the simulator's summarizer /
+# document_qa / analyst_team cohorts will still hit this.
+#
+# ── Compatibility note ────────────────────────────────────────────
+# Gemma 4 emits a startup warning about heterogeneous head dimensions
+# requiring TRITON_ATTN, then falls back to a CPU attention backend.
+# The fallback works under concurrency on Intel (likely AMX-accelerated
+# path) but collapses on AMD (single_stream only — see the AMD AMD-
+# Gemma optimizer JSON for the contrast). This config is Intel-only.
 
 engine:
   type: vllm_dual_socket
@@ -52,15 +86,16 @@ engine:
 
   # ── Replicas ──
   # Single replica covering all 64 cores of the single-socket Xeon
-  # 6761P. KVCACHE_SPACE=64 GB matches the hand-validated invocation;
-  # the optimizer will probe higher values in the kv_xl shape.
+  # 6761P. KVCACHE_SPACE=128 GB is optimizer-validated (kv_xl_128
+  # winner — see the findings header). 128 GB on a 256 GB host
+  # leaves comfortable headroom for the 48 GB weights + scratch.
   replicas:
     - name: r0
       cpuset_cpus: '0-63'
       cpuset_mems: ''                  # single socket — no NUMA pin needed
       port: 8000
       env:
-        VLLM_CPU_KVCACHE_SPACE: '64'
+        VLLM_CPU_KVCACHE_SPACE: '128'
         VLLM_CPU_OMP_THREADS_BIND: '0-63'
         OMP_NUM_THREADS: '64'
 

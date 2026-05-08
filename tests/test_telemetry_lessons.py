@@ -149,7 +149,10 @@ def test_intel_gemma4_single_replica_command_shape() -> None:
     # No NUMA-mems pin on single socket — flag must be ABSENT.
     assert "--cpuset-mems" not in cmd
     # vLLM env flow-through.
-    assert any("VLLM_CPU_KVCACHE_SPACE=64" in s for s in cmd)
+    # KV pool size is optimizer-validated at 128 GB — kv_xl_128 won
+    # the chat_concurrent and short_throughput cells of the May 2026
+    # intel_gemma4 sweep. See the YAML's optimizer-findings header.
+    assert any("VLLM_CPU_KVCACHE_SPACE=128" in s for s in cmd)
     assert any("VLLM_CPU_OMP_THREADS_BIND=0-63" in s for s in cmd)
     assert any("OMP_NUM_THREADS=64" in s for s in cmd)
     # Model + name match the Gemma 4 hand-validated invocation.

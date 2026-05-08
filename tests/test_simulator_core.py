@@ -830,6 +830,31 @@ def test_engine_config_reasoning_defaults_off() -> None:
     assert cfg.reasoning_effort == "medium"  # default if reasoning ever enabled
 
 
+def test_reasoning_overhead_table_covers_all_effort_levels() -> None:
+    """REASONING_OVERHEAD_TOKENS must have an entry for every effort
+    level YAMLs declare. Otherwise a config typo silently falls back
+    to the default and short-output personas hit the no_content_tokens
+    deadlock from the May 2026 GPT-OSS run."""
+    from simulator.virtual_user import REASONING_OVERHEAD_TOKENS
+    expected = {"minimal", "low", "medium", "high"}
+    assert expected.issubset(set(REASONING_OVERHEAD_TOKENS.keys())), (
+        f"Missing overhead entries: {expected - set(REASONING_OVERHEAD_TOKENS.keys())}"
+    )
+    # Monotonically increasing — higher effort = more reasoning budget.
+    levels = ["minimal", "low", "medium", "high"]
+    values = [REASONING_OVERHEAD_TOKENS[lv] for lv in levels]
+    assert values == sorted(values), (
+        f"reasoning overhead must increase with effort level: {values}"
+    )
+    # ``medium`` (the default declared in GPT-OSS YAMLs) must be
+    # large enough to cover quick_lookup's typical answer (~30 tokens
+    # of content) PLUS the observed reasoning-phase length.
+    assert REASONING_OVERHEAD_TOKENS["medium"] >= 200, (
+        "medium overhead must accommodate the observed GPT-OSS "
+        "reasoning-phase length (~150-250 tokens) before content"
+    )
+
+
 def test_gpt_oss_yaml_declares_reasoning() -> None:
     """Both GPT-OSS configs (Intel + AMD) must declare reasoning=true
     with reasoning_effort=medium — see the YAML's reasoning-model

@@ -23,6 +23,30 @@ from .tokenizer_corpus import TokenCorpus
 log = logging.getLogger(__name__)
 
 
+# Reasoning-model token overhead. When the engine is a reasoning model
+# (engine.reasoning=True in YAML), the chain-of-thought is streamed
+# BEFORE the answer and consumes ``max_tokens`` budget. Personas
+# describe answer length (the user-facing metric); the wire-level
+# budget needs headroom on top so reasoning doesn't crowd out content.
+#
+# Without this bump, short-output personas (quick_lookup median ~30
+# tokens) hit the May 2026 GPT-OSS symptom: every request truncates
+# during reasoning with finish_reason=length, content never starts,
+# the simulator records ``no_content_tokens`` errors on every turn,
+# and the convergence detector deadlocks at warmup waiting for
+# completions that never arrive.
+#
+# Values calibrated from GPT-OSS-20B observed reasoning-phase length
+# at each effort level. Conservative — better to over-budget and let
+# the engine emit content than under-budget and lose the entire turn.
+REASONING_OVERHEAD_TOKENS = {
+    "minimal": 50,
+    "low":     100,
+    "medium":  250,
+    "high":    500,
+}
+
+
 @dataclass
 class TurnEvent:
     """One completed request — captured for analysis."""
@@ -199,6 +223,16 @@ async def run_virtual_user(
 
                 input_tokens_target = persona.input_tokens.sample_int(rng)
                 output_tokens_target = persona.output_tokens.sample_int(rng)
+                # Reasoning models consume budget on chain-of-thought
+                # before content streams. Bump the wire-level
+                # max_tokens by the per-effort overhead so the answer
+                # fits even for short-output personas (quick_lookup
+                # median ~30 tokens). Persona's output_tokens stays
+                # the user-facing answer-length target.
+                if reasoning_effort:
+                    output_tokens_target += REASONING_OVERHEAD_TOKENS.get(
+                        reasoning_effort, 250,
+                    )
                 query_text = corpus.make_text(input_tokens_target, rng)
 
                 messages = list(history_messages) + [

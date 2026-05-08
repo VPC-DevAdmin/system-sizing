@@ -932,9 +932,124 @@ _AMD_GEMMA4_CONFIGS: list[EngineConfig] = [
 ]
 
 
+# ── AMD GPT-OSS profile (R7735 / dual EPYC 9374F + GPT-OSS-20B BF16) ────
+#
+# Same hardware as ``amd_dual_socket`` and ``amd_gemma4``. Tighter
+# config registry — five configs only, ordered by the user's priority
+# list. The headline question: does GPT-OSS-20B respond to the same
+# axes Qwen3-30B-A3B did on this hardware (KV pool size, single vs
+# dual replica, chunked prefill)?
+#
+# GPT-OSS is smaller (20B params at BF16 = ~40 GB weights) than the
+# 30B Qwen3 / 26B Gemma 4. Smaller weights mean more headroom for
+# KV — so 80 GB might be enough, or 120 GB might still win for the
+# same scheduling reasons. The sweep tells us.
+#
+# NOT included (Qwen3 / earlier sweeps proved these are AMD-stack
+# failures, model-agnostic):
+#   * tp2_cross_socket / tp2_chunked_prefill — Gloo init hang
+#   * kv_xl_160 — host startup timeout
+#   * no_prefix_cache — catastrophic regression
+#   * block_32 (intentionally absent here too — already validated
+#     as production knob in the YAML's ``vllm_extra_flags``;
+#     adding it as a separate optimizer config would shadow that
+#     baseline rather than test something new).
+
+_AMD_GPT_OSS_CONFIGS: list[EngineConfig] = [
+    # ── ★★★ Headline shapes ─────────────────────────────────────────
+    EngineConfig(
+        name="baseline_dual_replica",
+        description=(
+            "Two 32-core replicas, 80 GB KV per replica, default scheduler. "
+            "Same shape that worked for Qwen3 BEFORE the 120 GB KV lift. "
+            "Tests whether GPT-OSS needs the bigger pool or runs cleanly "
+            "at the original 80 GB."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=80),
+        expected_outcome=(
+            "Reference anchor. If GPT-OSS shows a c=16 tail like Qwen3's "
+            "did at 80 GB, that's the same KV-eviction failure mode and "
+            "dual_kv_120 should fix it."
+        ),
+    ),
+    EngineConfig(
+        name="single_replica_64c",
+        description=(
+            "One container, all 64 cores, 120 GB KV. Tests whether GPT-OSS "
+            "prefers cross-NUMA compute parallelism (single-stream prefill "
+            "gets all 64 cores) over dual-replica's NUMA-local throughput."
+        ),
+        replicas=_amd_single_replica_64c(kv_gb=120),
+        shm_size="16g",
+        expected_outcome=(
+            "On Qwen3 this won per-stream TTFT but lost ~30% aggregate "
+            "throughput. Smaller GPT-OSS model may rebalance the trade — "
+            "single-replica may now win outright if the per-prefill compute "
+            "savings outweigh the cross-NUMA overhead."
+        ),
+    ),
+    EngineConfig(
+        name="dual_kv_120",
+        description=(
+            "Dual replica + 120 GB KV per replica — the AMD Qwen3 "
+            "production winner, applied to GPT-OSS."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=120),
+        expected_outcome=(
+            "If GPT-OSS responds the same way Qwen3 did, this beats "
+            "baseline_dual_replica clearly at c=8/c=16 long-prompt cells. "
+            "If it doesn't help (smaller model → less KV pressure), 80 GB "
+            "is sufficient and we save 80 GB of host RAM."
+        ),
+    ),
+    # ── ★★ Primary expected-helpful ────────────────────────────────
+    EngineConfig(
+        name="dual_chunked_prefill",
+        description=(
+            "Dual replica + chunked prefill (4096 tokens/step, 64 seqs). "
+            "Was important for Qwen3 long-context — diagnostic for whether "
+            "GPT-OSS exhibits the same prefill-serialisation pattern."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=80),
+        replica_args=[
+            "--enable-chunked-prefill",
+            "--max-num-batched-tokens", "4096",
+            "--max-num-seqs", "64",
+        ],
+        expected_outcome=(
+            "Qwen3 chunked_prefill matched kv_xl_120 — both fixed the c=16 "
+            "tail. If GPT-OSS shows the same pattern, both knobs are "
+            "available; pick whichever is operationally simpler. If "
+            "chunked_prefill produces a LARGE win without KV bumping, "
+            "GPT-OSS is still partially serialised on the AMD vLLM-CPU path."
+        ),
+    ),
+    EngineConfig(
+        name="dual_batch_8192",
+        description=(
+            "Dual replica + larger batch budget (8192 tokens/step, 128 "
+            "seqs). Default scheduler — alternative angle on prefill "
+            "scheduling than chunked_prefill. Won on Intel for Gemma 4 "
+            "(short_throughput c=8 cleanly); worth checking on AMD."
+        ),
+        replicas=_amd_dual_replica_pair(kv_gb=80),
+        replica_args=[
+            "--max-num-batched-tokens", "8192",
+            "--max-num-seqs", "128",
+        ],
+        expected_outcome=(
+            "Higher prefill throughput when many requests arrive together. "
+            "Compares against dual_chunked_prefill — both target the same "
+            "problem from different angles."
+        ),
+    ),
+]
+
+
 PROFILES: dict[str, list[EngineConfig]] = {
     "amd_dual_socket": _AMD_DUAL_SOCKET_CONFIGS,
     "amd_gemma4": _AMD_GEMMA4_CONFIGS,
+    "amd_gpt_oss": _AMD_GPT_OSS_CONFIGS,
     "intel_gemma4": _INTEL_GEMMA4_CONFIGS,
 }
 

@@ -1,0 +1,100 @@
+# vLLM-CPU single-replica on Xeon 6761P (Granite Rapids, 1 socket, 64 cores).
+#
+# GPT-OSS-20B BF16. Companion to ``xeon_vllm_gemma4_26b_a4b.yaml``;
+# same hardware shape (single-socket all-cores) and image, different
+# model. Validated to launch on Intel — the simulator's run-sweep
+# can drive it directly. KV pool starts at 64 GB (the conservative
+# baseline matching Gemma 4's pre-optimizer launch); bump to 128 GB
+# once the optimizer confirms it (kv_xl_128 won on Intel for Gemma 4).
+#
+# Architecture:
+#   benchmark client → 127.0.0.1:8000  (single vllm-cpu replica, all 64 cores)
+#
+# Single-socket Xeon — no NUMA splitting. ``vllm_dual_socket`` engine
+# type with one replica entry (the engine supports N replicas
+# including N=1; the name is a misnomer for this case).
+
+engine:
+  type: vllm_dual_socket
+  model_id: gpt-oss-20b
+  model_local_path: /models/gpt-oss-20b-bf16
+  served_model_name: gpt_oss_20b
+  quantization_kind: null              # BF16
+
+  max_model_len: 8192
+  startup_timeout_s: 1800              # ~90-120s cold load
+
+  host: 127.0.0.1
+
+  vllm_image: vllm/vllm-openai-cpu:latest-x86_64
+
+  # No extra flags out of the box. After optimizer validation,
+  # consider the same 128 GB KV pool that won for Gemma 4 on this
+  # host — GPT-OSS-20B is smaller (20B vs 26B params) so KV pressure
+  # should be lower, but the same axis is worth probing.
+  vllm_extra_flags: []
+
+  # ── Replicas ──
+  # Single replica covering all 64 cores. KVCACHE_SPACE=64 GB is the
+  # conservative starting baseline — bump to 128 GB after probing
+  # if the simulator hits queueing pressure under high-concurrency
+  # cohorts (chat_heavy, quick_lookup at pool=128+).
+  replicas:
+    - name: r0
+      cpuset_cpus: '0-63'
+      cpuset_mems: ''                  # single socket — no NUMA pin needed
+      port: 8000
+      env:
+        VLLM_CPU_KVCACHE_SPACE: '64'
+        VLLM_CPU_OMP_THREADS_BIND: '0-63'
+        OMP_NUM_THREADS: '64'
+
+  shutdown_grace_s: 30
+
+  docker_volumes:
+    /data/ml/models: /models
+    /data/ml/huggingface: /root/.cache/huggingface
+
+  hardware_requirements:
+    cpu_vendor: intel
+    cpu_features:
+      - avx512f
+      - avx512_bf16
+      - amx_bf16
+    min_sockets: 1
+    notes: "Single-socket Xeon 6761P; one all-core vLLM replica."
+
+simulation:
+  ramp_spawn_interval_s: 2.0
+  initial_phase_offset_enabled: true
+  initial_pool_size: 8
+  max_pool_size: 256
+  target_samples_per_step: 100
+  measurement_timeout_s: 600
+  warmup_min_duration_s: 30
+  warmup_max_duration_s: 300
+  convergence_window_s: 60
+  convergence_threshold: 0.20
+  convergence_min_completions_per_window: 5
+  knee_slope_threshold: 0.005
+  stop_violation_threshold: 0.5
+  max_total_duration_minutes: 240
+  enable_token_timestamps: false
+  snapshot_interval_s: 1
+  request_timeout_s: 600
+
+telemetry:
+  enable_pmu: true
+  enable_memory_bandwidth: true   # uncore_imc on Xeon — collector reads it
+  enable_power: true
+  enable_engine_metrics: true     # vLLM /metrics works
+  enable_amx_utilization: true    # Intel has AMX — capture dispatch fraction
+  perf_events:
+    - cycles
+    - instructions
+    - cache-misses
+    - cache-references
+
+output:
+  db_directory: runs
+  json_export: true

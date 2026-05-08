@@ -1,0 +1,126 @@
+# vLLM-CPU dual-replica on R7735 (2× AMD EPYC 9374F) — GPT-OSS-20B BF16.
+#
+# Companion to ``r7735_vllm_dual_socket_qwen3_30b_a3b.yaml`` and
+# ``r7735_vllm_dual_socket_gemma4_26b_a4b.yaml``. Same hardware shape
+# (two NUMA-pinned 32-core replicas), same image. Different model:
+# GPT-OSS-20B BF16, locally served as ``gpt_oss_20b``.
+#
+# Validated launch shape (2026-05-07, hand-tested):
+#   docker run --network host --shm-size=4g
+#     --cpuset-cpus 0-31 --cpuset-mems 0
+#     -e VLLM_CPU_KVCACHE_SPACE=120 -e VLLM_CPU_OMP_THREADS_BIND=0-31
+#     -e OMP_NUM_THREADS=32
+#     vllm/vllm-openai-cpu:latest-x86_64
+#     --model /models/gpt-oss-20b-bf16 --dtype bfloat16
+#     --max-model-len 8192 --trust-remote-code
+#     --host 0.0.0.0 --port 8000 --served-model-name gpt_oss_20b
+#   # symmetric replica on cores 32-63, NUMA node 1, port 8001.
+#
+# Architecture (unchanged from Qwen3/Gemma):
+#   benchmark client → 127.0.0.1:8000  (vLLM r0, NUMA 0, cores 0-31)
+#                   └→ 127.0.0.1:8001  (vLLM r1, NUMA 1, cores 32-63)
+#   The simulator's pool manager owns sticky per-user routing.
+#
+# Run the optimizer first to confirm/refine the launch shape:
+#     make optimize-engine PROFILE=amd_gpt_oss \
+#         OPTIMIZER_MODEL_PATH=/models/gpt-oss-20b-bf16 \
+#         OPTIMIZER_SERVED_NAME=gpt_oss_20b
+#
+# Then either keep this config as-is or fold the optimizer's winning
+# replica_args into vllm_extra_flags below.
+
+engine:
+  type: vllm_dual_socket
+  model_id: gpt-oss-20b
+  model_local_path: /models/gpt-oss-20b-bf16
+  served_model_name: gpt_oss_20b
+  quantization_kind: null              # BF16
+
+  max_model_len: 8192
+  startup_timeout_s: 1800              # ~90-120s per replica
+
+  host: 127.0.0.1
+
+  # Optimizer-validated production knobs from the Qwen3 sweep —
+  # block-size 32 won broadly across model sizes on this hardware.
+  # Carry forward as the starting point for GPT-OSS; revisit after
+  # the ``amd_gpt_oss`` optimizer sweep reports a winner.
+  vllm_extra_flags:
+    - --block-size
+    - "32"
+
+  vllm_image: vllm/vllm-openai-cpu:latest-x86_64
+
+  # ── Replicas ──
+  # Dual-socket NUMA-pinned, 32 cores each. KVCACHE_SPACE=120 GB
+  # matches the Qwen3-validated AMD production. GPT-OSS-20B at BF16
+  # is ~40 GB weights per replica — well within node-local memory
+  # even at the 120 GB KV pool. Optimizer sweep will probe whether
+  # 80 GB is enough or 120 stays the right ceiling.
+  replicas:
+    - name: r0
+      cpuset_cpus: '0-31'
+      cpuset_mems: '0'
+      port: 8000
+      env:
+        VLLM_CPU_KVCACHE_SPACE: '120'
+        VLLM_CPU_OMP_THREADS_BIND: '0-31'
+        OMP_NUM_THREADS: '32'
+
+    - name: r1
+      cpuset_cpus: '32-63'
+      cpuset_mems: '1'
+      port: 8001
+      env:
+        VLLM_CPU_KVCACHE_SPACE: '120'
+        VLLM_CPU_OMP_THREADS_BIND: '32-63'
+        OMP_NUM_THREADS: '32'
+
+  shutdown_grace_s: 30
+
+  docker_volumes:
+    /data/ml/models: /models
+    /data/ml/huggingface: /root/.cache/huggingface
+
+  hardware_requirements:
+    cpu_vendor: amd
+    cpu_features:
+      - avx512f
+      - avx512_bf16
+    min_sockets: 2
+    notes: "Dual-socket EPYC required for the 2-replica NUMA-pinned layout"
+
+simulation:
+  ramp_spawn_interval_s: 2.0
+  initial_phase_offset_enabled: true
+  initial_pool_size: 8
+  max_pool_size: 256
+  target_samples_per_step: 100
+  measurement_timeout_s: 600
+  warmup_min_duration_s: 30
+  warmup_max_duration_s: 300
+  convergence_window_s: 60
+  convergence_threshold: 0.20
+  convergence_min_completions_per_window: 5
+  knee_slope_threshold: 0.005
+  stop_violation_threshold: 0.5
+  max_total_duration_minutes: 240
+  enable_token_timestamps: false
+  snapshot_interval_s: 1
+  request_timeout_s: 600
+
+telemetry:
+  enable_pmu: true
+  enable_memory_bandwidth: true   # uncore_imc isn't on AMD; collector reports unavailable
+  enable_power: true
+  enable_engine_metrics: true     # vLLM /metrics works; the dual-socket engine aggregates both replicas
+  enable_amx_utilization: false   # no AMX on EPYC
+  perf_events:
+    - cycles
+    - instructions
+    - cache-misses
+    - cache-references
+
+output:
+  db_directory: runs
+  json_export: true

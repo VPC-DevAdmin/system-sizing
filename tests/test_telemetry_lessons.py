@@ -312,6 +312,116 @@ def test_amd_gemma4_yaml_loads_and_builds_command() -> None:
     assert "gemma4_26b_a4b" in cmd
 
 
+def test_amd_gpt_oss_yaml_loads_and_builds_command() -> None:
+    """AMD GPT-OSS run-sweep config: dual NUMA-pinned 32-core replicas,
+    120 GB KV per replica (Qwen3-validated production), block_32
+    carry-forward, GPT-OSS-20B BF16 model."""
+    from simulator.config import load_config
+    from simulator.engines.vllm_dual_socket import VllmDualSocketEngine
+
+    cfg = load_config("config/r7735_vllm_dual_socket_gpt_oss.yaml")
+    assert cfg.engine.type == "vllm_dual_socket"
+    assert cfg.engine.model_id == "gpt-oss-20b"
+    assert cfg.engine.served_model_name == "gpt_oss_20b"
+    assert len(cfg.engine.replicas) == 2
+
+    eng = VllmDualSocketEngine(cfg.engine)
+    cmd = eng._build_replica_command(cfg.engine.replicas[0], "test-r0")
+
+    # NUMA-pinned dual-replica AMD shape.
+    assert "--cpuset-cpus" in cmd and "0-31" in cmd
+    assert "--cpuset-mems" in cmd and "0" in cmd
+    # KV inherits the Qwen3-validated 120 GB.
+    assert any("VLLM_CPU_KVCACHE_SPACE=120" in s for s in cmd)
+    # Production block_32 knob carries forward.
+    assert "--block-size" in cmd and "32" in cmd
+    # GPT-OSS model + name.
+    assert "/models/gpt-oss-20b-bf16" in cmd
+    assert "gpt_oss_20b" in cmd
+
+
+def test_intel_gpt_oss_yaml_loads_and_builds_command() -> None:
+    """Intel GPT-OSS run-sweep config: single-replica all 64 cores,
+    no NUMA mems pin, GPT-OSS-20B BF16. KV starts at 64 GB
+    (conservative baseline pre-optimizer); will likely lift to 128
+    once the Intel optimizer confirms it."""
+    from simulator.config import load_config
+    from simulator.engines.vllm_dual_socket import VllmDualSocketEngine
+
+    cfg = load_config("config/xeon_vllm_gpt_oss.yaml")
+    assert cfg.engine.type == "vllm_dual_socket"
+    assert cfg.engine.model_id == "gpt-oss-20b"
+    assert cfg.engine.served_model_name == "gpt_oss_20b"
+    assert len(cfg.engine.replicas) == 1
+
+    eng = VllmDualSocketEngine(cfg.engine)
+    cmd = eng._build_replica_command(cfg.engine.replicas[0], "test-r0")
+
+    # Single-replica all-cores Intel shape — no NUMA mems pin.
+    assert "--cpuset-cpus" in cmd and "0-63" in cmd
+    assert "--cpuset-mems" not in cmd
+    # KV at 64 GB starting baseline.
+    assert any("VLLM_CPU_KVCACHE_SPACE=64" in s for s in cmd)
+    # No carry-forward optimizer flags yet — pre-optimizer-validation.
+    assert "--block-size" not in cmd
+    # GPT-OSS model + name.
+    assert "/models/gpt-oss-20b-bf16" in cmd
+    assert "gpt_oss_20b" in cmd
+
+
+def test_optimizer_profile_registry_has_amd_gpt_oss() -> None:
+    """The amd_gpt_oss profile mirrors the Qwen3 / Gemma profile
+    structure but is intentionally tighter: just the 5 priority
+    configs the user needs to answer the headline question (dual vs
+    single replica, 80 vs 120 GB KV, chunked_prefill, batch_8192)."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import importlib
+    eo = importlib.import_module("engine_optimizer")
+
+    assert "amd_gpt_oss" in eo.PROFILES
+    configs = eo.PROFILES["amd_gpt_oss"]
+    by_name = {c.name: c for c in configs}
+
+    # ★★★ headline shapes.
+    assert "baseline_dual_replica" in by_name
+    assert "single_replica_64c" in by_name
+    assert "dual_kv_120" in by_name
+
+    # baseline_dual_replica is the 80 GB Qwen3-pre-win baseline.
+    base = by_name["baseline_dual_replica"]
+    assert len(base.replicas) == 2
+    for r in base.replicas:
+        assert r.env["VLLM_CPU_KVCACHE_SPACE"] == "80"
+    # NUMA-pinned (this IS the AMD dual-socket shape).
+    assert {r.cpuset_mems for r in base.replicas} == {"0", "1"}
+
+    # dual_kv_120 is the 120 GB Qwen3 winner shape.
+    kv120 = by_name["dual_kv_120"]
+    for r in kv120.replicas:
+        assert r.env["VLLM_CPU_KVCACHE_SPACE"] == "120"
+
+    # single_replica_64c uses all cores with NO NUMA mems pin.
+    sr = by_name["single_replica_64c"]
+    assert len(sr.replicas) == 1
+    assert sr.replicas[0].cpuset_cpus == "0-63"
+    assert sr.replicas[0].cpuset_mems is None
+
+    # ★★ secondary diagnostics.
+    assert "dual_chunked_prefill" in by_name
+    assert "dual_batch_8192" in by_name
+
+    # Configs intentionally absent — Qwen3-proven failures or
+    # production-knob shadows.
+    for absent in (
+        "tp2_cross_socket", "tp2_chunked_prefill", "kv_xl_160",
+        "no_prefix_cache", "block_32",
+    ):
+        assert absent not in by_name, (
+            f"{absent} should not appear in amd_gpt_oss profile"
+        )
+
+
 def test_optimizer_resume_refuses_when_profile_mismatches(tmp_path) -> None:
     """The May 2026 Intel optimizer JSON had stale entries from a prior
     AMD-Qwen3 run that the resume logic silently merged into a fresh

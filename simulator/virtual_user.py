@@ -302,12 +302,21 @@ async def run_virtual_user(
                     # stall mid-stream?") via the ``error`` category.
                     partial_ttft_ms = stream_result.ttft_ms
                     partial_tpot_ms = 0.0
-                    if partial_ttft_ms is not None and output_tokens > 1:
-                        # Honest TPOT from the partial stream — useful
-                        # for distinguishing "tier 2 stalled hard" vs
-                        # "tier 3 tripped on slow-but-progressing."
+                    # Honest TPOT from the partial stream — useful for
+                    # distinguishing "tier 2 stalled hard" vs "tier 3
+                    # tripped on slow-but-progressing." Counts reasoning
+                    # tokens too: when the engine is a reasoning model,
+                    # ``no_content_tokens`` errors still streamed real
+                    # decode work (just no content), and we want the
+                    # rate captured. For non-reasoning models
+                    # reasoning_tokens=0 so this collapses to the
+                    # original output_tokens-only formula.
+                    partial_total = (
+                        output_tokens + stream_result.reasoning_tokens
+                    )
+                    if partial_ttft_ms is not None and partial_total > 1:
                         decode_ms = e2e_ms - partial_ttft_ms
-                        partial_tpot_ms = decode_ms / max(1, output_tokens - 1)
+                        partial_tpot_ms = decode_ms / max(1, partial_total - 1)
                     failed_ttft = (
                         partial_ttft_ms
                         if partial_ttft_ms is not None else e2e_ms

@@ -1693,6 +1693,179 @@ def test_export_curve_uses_kv_cache_used_pct_field_name(tmp_path) -> None:
     assert "kv_cache_pct" not in step
 
 
+def test_export_curve_includes_token_aggregates(tmp_path) -> None:
+    """Per-step token totals + per-second rates surface on every
+    curve entry (slim and full export). Drives the buyer-page
+    'how many tokens/sec at this concurrency' view."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="x",
+        cohort_definition={"name": "x"}, config={},
+    )
+    mid = db.insert_measurement({
+        "cohort_run_id": "crid", "step_index": 0,
+        "target_pool_size": 8,
+        "measured_avg_pool_size": 8.0,
+        "measured_avg_in_flight": 0.0,
+        "measurement_started_at": "2026-01-01T00:00:00Z",
+        "measurement_duration_s": 60, "sample_size": 5,
+        "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+        "combined_violation_rate": 0.0,
+        "violation_rate_ci_lower": 0.0,
+        "violation_rate_ci_upper": 0.0,
+        "capacity_status": "pass",
+        "target_status": "pass",
+    })
+    # 5 turns @ 100 input, 50 content, 200 reasoning each.
+    db.insert_events([
+        {
+            "measurement_id": mid,
+            "persona_id": "x_persona",
+            "user_id": f"u{i}", "session_id": f"s{i}", "turn_index": 0,
+            "submitted_at_ms": i * 10, "ttft_ms": 50.0,
+            "completed_at_ms": i * 10 + 1000,
+            "input_tokens": 100, "history_tokens": 0,
+            "output_tokens": 50, "reasoning_tokens": 200,
+            "tpot_ms": 30.0, "end_to_end_ms": 1000.0,
+            "in_flight_at_submit": 1,
+            "sla_ttft_violation": 0, "sla_tpot_violation": 0,
+        }
+        for i in range(5)
+    ])
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    # Slim export — token aggregates must still be present.
+    doc, _ = export_dir(tmp_path, slim=True)
+    step = doc["cohorts"][0]["curve"][0]
+    assert step["prompt_tokens"] == 5 * 100
+    assert step["content_tokens"] == 5 * 50
+    assert step["reasoning_tokens"] == 5 * 200
+    assert step["total_visible_output_tokens"] == 5 * (50 + 200)
+    # Rates: 500 prompt / 60s window = 8.33; 250 content / 60s = 4.17;
+    # 1250 visible / 60s = 20.83.
+    assert abs(step["prompt_tok_per_s"] - 500 / 60) < 0.1
+    assert abs(step["content_tok_per_s"] - 250 / 60) < 0.1
+    assert abs(step["visible_output_tok_per_s"] - 1250 / 60) < 0.1
+
+
+def test_export_capacity_throughput_surfaces_at_capacity_pool(tmp_path) -> None:
+    """The cohort's ``capacity_throughput`` block aggregates token
+    volume + rates at capacity_pool_size — the SLA-bound deployment
+    concurrency. Headline buyer-page metric: 'sustains X tokens/sec
+    at recommended pool=N'."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="x",
+        cohort_definition={"name": "x"}, config={},
+    )
+    # Three steps. capacity_status='pass' at pool=16 makes that the
+    # capacity_pool_size; that's where the throughput block sums.
+    for i, (pool, status, n_turns) in enumerate(
+        [(8, "pass", 5), (16, "pass", 10), (32, "fail", 0)]
+    ):
+        mid = db.insert_measurement({
+            "cohort_run_id": "crid", "step_index": i,
+            "target_pool_size": pool,
+            "measured_avg_pool_size": float(pool),
+            "measured_avg_in_flight": 0.0,
+            "measurement_started_at": "2026-01-01T00:00:00Z",
+            "measurement_duration_s": 60, "sample_size": n_turns,
+            "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+            "combined_violation_rate": 0.0 if status != "fail" else 0.5,
+            "violation_rate_ci_lower": 0.0,
+            "violation_rate_ci_upper": 0.0,
+            "capacity_status": status,
+            "target_status": status,
+        })
+        db.insert_events([
+            {
+                "measurement_id": mid,
+                "persona_id": "x_p",
+                "user_id": f"u{j}", "session_id": "s",
+                "turn_index": 0,
+                "submitted_at_ms": 0, "ttft_ms": 50.0,
+                "completed_at_ms": 1000,
+                "input_tokens": 100, "history_tokens": 0,
+                "output_tokens": 50, "reasoning_tokens": 200,
+                "tpot_ms": 30.0, "end_to_end_ms": 1000.0,
+                "in_flight_at_submit": 1,
+                "sla_ttft_violation": 0, "sla_tpot_violation": 0,
+            }
+            for j in range(n_turns)
+        ])
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    doc, _ = export_dir(tmp_path, slim=True)
+    cohort = doc["cohorts"][0]
+    assert cohort["capacity_pool_size"] == 16
+    block = cohort["capacity_throughput"]
+    assert block is not None
+    assert block["pool_size"] == 16
+    assert block["sample_size"] == 10
+    assert block["prompt_tokens"] == 10 * 100
+    assert block["content_tokens"] == 10 * 50
+    assert block["reasoning_tokens"] == 10 * 200
+    assert block["total_visible_output_tokens"] == 10 * 250
+    # 1000 prompt / 60s ≈ 16.67
+    assert abs(block["prompt_tok_per_s"] - 1000 / 60) < 0.1
+    # 500 content / 60s ≈ 8.33
+    assert abs(block["content_tok_per_s"] - 500 / 60) < 0.1
+    # 2500 visible / 60s ≈ 41.67
+    assert abs(block["visible_output_tok_per_s"] - 2500 / 60) < 0.1
+
+
+def test_export_capacity_throughput_is_none_when_no_capacity(tmp_path) -> None:
+    """A cohort that never produced a clean-pass measurement has
+    capacity_pool_size=None; the throughput block should be None
+    too rather than crashing or surfacing zeros."""
+    from simulator.database import Database
+    from simulator.export import export_dir
+
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="Qwen/Test", cohort_id="x",
+        cohort_definition={"name": "x"}, config={},
+    )
+    db.insert_measurement({
+        "cohort_run_id": "crid", "step_index": 0,
+        "target_pool_size": 8,
+        "measured_avg_pool_size": 8.0,
+        "measured_avg_in_flight": 0.0,
+        "measurement_started_at": "2026-01-01T00:00:00Z",
+        "measurement_duration_s": 60, "sample_size": 0,
+        "ttft_violation_rate": 0.5, "tpot_violation_rate": 0.5,
+        "combined_violation_rate": 0.5,
+        "violation_rate_ci_lower": 0.0,
+        "violation_rate_ci_upper": 1.0,
+        "capacity_status": "fail",
+        "target_status": "fail",
+    })
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+
+    doc, _ = export_dir(tmp_path, slim=True)
+    cohort = doc["cohorts"][0]
+    assert cohort["capacity_pool_size"] is None
+    assert cohort["capacity_throughput"] is None
+
+
 def test_export_meta_includes_engine_config(tmp_path) -> None:
     """The ``engine_config`` block in meta lets cross-host comparisons
     verify the configs were actually equivalent before reading

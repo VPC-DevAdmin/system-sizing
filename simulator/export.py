@@ -235,6 +235,25 @@ def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
                 (m["measurement_id"],),
             )
         ]
+        # Token-volume aggregates per measurement window. Driven by
+        # the user's question "how do I derive total token usage per
+        # cohort over a fixed time" — surfacing these directly in the
+        # export saves the consumer an SQL roundtrip and keeps the
+        # buyer page free of derived-on-the-fly arithmetic. Reasoning
+        # tokens are summed separately so reasoning-model overhead is
+        # visible alongside content output.
+        token_agg = conn.execute(
+            """SELECT
+                  COALESCE(SUM(input_tokens + history_tokens), 0)  AS prompt_tok,
+                  COALESCE(SUM(output_tokens), 0)                  AS content_tok,
+                  COALESCE(SUM(reasoning_tokens), 0)               AS reasoning_tok
+               FROM turn_events
+               WHERE measurement_id = ?""",
+            (m["measurement_id"],),
+        ).fetchone()
+        m["tokens"] = dict(token_agg) if token_agg else {
+            "prompt_tok": 0, "content_tok": 0, "reasoning_tok": 0,
+        }
     # Whole-run heartbeat (1 Hz pool/in-flight ticks).
     snap_cols = ", ".join(_SNAPSHOT_COLUMNS)
     run["snapshots"] = [
@@ -570,6 +589,30 @@ def _summarise_cohort(
             "measurement_started_at": m.get("measurement_started_at"),
             "measurement_duration_s": m.get("measurement_duration_s"),
         }
+        # Token-volume + per-second rates for this step. Always in
+        # the export (slim or full) — small per-step overhead, big
+        # value for buyer-page throughput sizing. Reasoning tokens
+        # surfaced separately so consumers can see chain-of-thought
+        # overhead vs the user-facing answer rate.
+        tokens = m.get("tokens") or {}
+        prompt_tok = tokens.get("prompt_tok") or 0
+        content_tok = tokens.get("content_tok") or 0
+        reasoning_tok = tokens.get("reasoning_tok") or 0
+        dur_s = m.get("measurement_duration_s") or 0
+        entry["prompt_tokens"] = prompt_tok
+        entry["content_tokens"] = content_tok
+        entry["reasoning_tokens"] = reasoning_tok
+        entry["total_visible_output_tokens"] = content_tok + reasoning_tok
+        if dur_s and dur_s > 0:
+            entry["prompt_tok_per_s"] = round(prompt_tok / dur_s, 2)
+            entry["content_tok_per_s"] = round(content_tok / dur_s, 2)
+            entry["visible_output_tok_per_s"] = round(
+                (content_tok + reasoning_tok) / dur_s, 2,
+            )
+        else:
+            entry["prompt_tok_per_s"] = None
+            entry["content_tok_per_s"] = None
+            entry["visible_output_tok_per_s"] = None
         if not slim:
             # Per-step time-series; lists may be empty (e.g. a 'pending'
             # row for an in-progress step had no events captured).
@@ -757,7 +800,67 @@ def _summarise_cohort(
         "target_bottleneck_evidence": target_evidence,
         "hardware_recommendation": _hardware_recommendation(bottleneck),
         "prefix_cache": prefix_cache,
+        # Throughput at the SLA-bound capacity pool — the headline
+        # buyer-page question "how many tokens/sec does this hardware
+        # sustain at the recommended deployment concurrency."
+        "capacity_throughput": _capacity_throughput(
+            measurements, capacity_pool,
+        ),
     }
+
+
+def _capacity_throughput(
+    measurements: list[dict], capacity_pool: int | None,
+) -> dict | None:
+    """Aggregate token-volume + per-second rates at the cohort's
+    capacity_pool_size measurement. Returns None when capacity isn't
+    located (cohort never produced a clean-pass measurement).
+
+    The block answers "deploy at this concurrency to sustain X
+    tokens/sec at SLA." Tokens are split by phase:
+      * prompt_tokens — input prefill load on the engine
+      * content_tokens — user-facing answer output
+      * reasoning_tokens — chain-of-thought (zero for non-reasoning)
+      * total_visible_output_tokens = content + reasoning
+    """
+    if capacity_pool is None:
+        return None
+    matching = [
+        m for m in measurements if m.get("target_pool_size") == capacity_pool
+    ]
+    if not matching:
+        return None
+    # If multiple measurements landed on the same pool size (e.g. a
+    # spot-check appended a re-measurement), prefer the one with the
+    # most samples — that's the more statistically meaningful row.
+    m = max(matching, key=lambda r: r.get("sample_size") or 0)
+    tokens = m.get("tokens") or {}
+    prompt_tok = tokens.get("prompt_tok") or 0
+    content_tok = tokens.get("content_tok") or 0
+    reasoning_tok = tokens.get("reasoning_tok") or 0
+    dur_s = m.get("measurement_duration_s") or 0
+    sample_size = m.get("sample_size") or 0
+
+    out = {
+        "pool_size": capacity_pool,
+        "measurement_duration_s": dur_s,
+        "sample_size": sample_size,
+        "prompt_tokens": prompt_tok,
+        "content_tokens": content_tok,
+        "reasoning_tokens": reasoning_tok,
+        "total_visible_output_tokens": content_tok + reasoning_tok,
+    }
+    if dur_s and dur_s > 0:
+        out["prompt_tok_per_s"] = round(prompt_tok / dur_s, 2)
+        out["content_tok_per_s"] = round(content_tok / dur_s, 2)
+        out["visible_output_tok_per_s"] = round(
+            (content_tok + reasoning_tok) / dur_s, 2,
+        )
+    else:
+        out["prompt_tok_per_s"] = None
+        out["content_tok_per_s"] = None
+        out["visible_output_tok_per_s"] = None
+    return out
 
 
 def export_dir(

@@ -588,12 +588,21 @@ def test_find_completed_runs_handles_empty_dir(tmp_path) -> None:
 
 
 class _FakeChunk:
-    """Minimal chunk shape that matches what the openai SDK yields."""
-    def __init__(self, content: str | None):
+    """Minimal chunk shape that matches what the openai SDK yields.
+
+    ``kind`` controls which delta field carries the text — ``content``
+    (default; emulates standard chat.completions chunks) or
+    ``reasoning`` (reasoning models like GPT-OSS stream chain-of-
+    thought via this field BEFORE the content phase).
+    """
+    def __init__(self, content: str | None, kind: str = "content"):
         class _Delta:
             pass
         d = _Delta()
-        d.content = content
+        # Always assign both attrs so getattr() in streaming.py finds
+        # whichever one is set; the other is None and falsy.
+        d.content = content if kind == "content" else None
+        d.reasoning = content if kind == "reasoning" else None
         class _Choice:
             pass
         c = _Choice()
@@ -603,9 +612,13 @@ class _FakeChunk:
 
 class _FakeStream:
     """Async iterator that emits chunks at scheduled times relative
-    to its own start. ``schedule`` is [(elapsed_s, content_or_None), …]
-    where content=None means "no token, just a scheduling tick"."""
-    def __init__(self, schedule: list[tuple[float, str | None]]):
+    to its own start.
+
+    Schedule entries can be:
+      * (elapsed_s, content_or_None) — content chunk, default ``kind``.
+      * (elapsed_s, text, kind)      — reasoning or content chunk.
+    """
+    def __init__(self, schedule: list[tuple]):
         self._schedule = schedule
         self._idx = 0
         self._t0: float | None = None
@@ -619,12 +632,15 @@ class _FakeStream:
             self._t0 = _time.monotonic()
         if self._idx >= len(self._schedule):
             raise StopAsyncIteration
-        elapsed_target, content = self._schedule[self._idx]
+        entry = self._schedule[self._idx]
         self._idx += 1
+        elapsed_target = entry[0]
+        text = entry[1]
+        kind = entry[2] if len(entry) > 2 else "content"
         wait = elapsed_target - (_time.monotonic() - self._t0)
         if wait > 0:
             await asyncio.sleep(wait)
-        return _FakeChunk(content)
+        return _FakeChunk(text, kind=kind)
 
 
 def test_tier_1_pre_ttft_stalled() -> None:
@@ -722,6 +738,114 @@ def test_clean_completion_no_error() -> None:
     assert result.error is None
     assert result.output_tokens == 5
     assert result.ttft_ms is not None and result.ttft_ms < 100
+    # For non-reasoning models ttfct equals ttft trivially (content
+    # IS the first user-visible token; no reasoning phase).
+    assert result.ttfct_ms == result.ttft_ms
+    assert result.reasoning_tokens == 0
+
+
+def test_reasoning_model_ttft_uses_first_reasoning_token() -> None:
+    """For reasoning models (GPT-OSS etc.), TTFT must be measured
+    against the first user-visible token of any kind — including
+    chain-of-thought delta.reasoning chunks. Without this fix, TTFT
+    would lag by the entire reasoning duration (typically several
+    seconds), badly distorting capacity gating."""
+    from simulator.streaming import consume_with_tiers
+
+    async def go():
+        # Reasoning starts at t=0.05s, content at t=0.30s.
+        schedule = [
+            (0.05, "The", "reasoning"),
+            (0.10, " user", "reasoning"),
+            (0.15, " asks", "reasoning"),
+            (0.30, "4", "content"),
+            (0.35, ".", "content"),
+        ]
+        return await consume_with_tiers(
+            create_stream=lambda: _coroutine_returning(_FakeStream(schedule)),
+            pre_ttft_timeout_s=5.0,
+            inter_token_timeout_s=5.0,
+            hard_timeout_s=5.0,
+        )
+
+    result = asyncio.run(go())
+    assert result.error is None
+    # TTFT = first reasoning token (~50ms in).
+    assert result.ttft_ms is not None
+    assert 30 < result.ttft_ms < 200, (
+        f"ttft should track first reasoning chunk, got {result.ttft_ms}"
+    )
+    # TTFCT = first content token (~300ms in).
+    assert result.ttfct_ms is not None
+    assert 250 < result.ttfct_ms < 450, (
+        f"ttfct should track first content chunk, got {result.ttfct_ms}"
+    )
+    # ttfct must be strictly later than ttft (reasoning came first).
+    assert result.ttfct_ms > result.ttft_ms
+    assert result.reasoning_tokens == 3
+    assert result.output_tokens == 2  # content tokens only
+    assert result.output_text == "4."  # reasoning NOT included
+
+
+def test_reasoning_only_response_flagged_as_no_content_tokens() -> None:
+    """The May 2026 GPT-OSS diagnostic: with too-tight max_tokens,
+    reasoning consumes the entire output budget and finish_reason=length
+    fires before any content streams. The simulator should record this
+    as a distinct ``no_content_tokens`` error so post-hoc analysis can
+    tell it apart from generic ``no_tokens`` (engine emitted nothing
+    at all)."""
+    from simulator.streaming import consume_with_tiers
+
+    async def go():
+        # All reasoning, no content. Simulates a reasoning model
+        # hitting max_tokens before reasoning finishes.
+        schedule = [
+            (0.05, "The", "reasoning"),
+            (0.10, " user", "reasoning"),
+            (0.15, " asks", "reasoning"),
+        ]
+        return await consume_with_tiers(
+            create_stream=lambda: _coroutine_returning(_FakeStream(schedule)),
+            pre_ttft_timeout_s=5.0,
+            inter_token_timeout_s=5.0,
+            hard_timeout_s=5.0,
+        )
+
+    result = asyncio.run(go())
+    assert result.error == "no_content_tokens"
+    # ttft IS set (reasoning did stream); ttfct is None (no content).
+    assert result.ttft_ms is not None
+    assert result.ttfct_ms is None
+    assert result.reasoning_tokens == 3
+    assert result.output_tokens == 0
+
+
+def test_engine_config_reasoning_defaults_off() -> None:
+    """Default Config has reasoning disabled — preserves existing
+    non-reasoning model behavior. ``reasoning_effort`` is harmless
+    when reasoning=False (never gets passed to the engine)."""
+    from simulator.config import EngineConfig
+    cfg = EngineConfig()
+    assert cfg.reasoning is False
+    assert cfg.reasoning_effort == "medium"  # default if reasoning ever enabled
+
+
+def test_gpt_oss_yaml_declares_reasoning() -> None:
+    """Both GPT-OSS configs (Intel + AMD) must declare reasoning=true
+    with reasoning_effort=medium — see the YAML's reasoning-model
+    block for rationale."""
+    from simulator.config import load_config
+    for path in (
+        "config/r7735_vllm_dual_socket_gpt_oss.yaml",
+        "config/xeon_vllm_gpt_oss.yaml",
+    ):
+        cfg = load_config(path)
+        assert cfg.engine.reasoning is True, (
+            f"{path}: GPT-OSS is a reasoning model"
+        )
+        assert cfg.engine.reasoning_effort == "medium", (
+            f"{path}: reasoning_effort default is medium"
+        )
 
 
 async def _coroutine_returning(value):

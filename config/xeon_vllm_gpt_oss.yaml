@@ -21,6 +21,12 @@ engine:
   served_model_name: gpt_oss_20b
   quantization_kind: null              # BF16
 
+  # GPT-OSS is a reasoning model — see the AMD GPT-OSS YAML's matching
+  # block for full rationale. TTFT counts reasoning + content tokens;
+  # TTFCT (Time to First Content Token) is recorded separately.
+  reasoning: true
+  reasoning_effort: medium             # minimal | low | medium | high
+
   max_model_len: 8192
   startup_timeout_s: 1800              # ~90-120s cold load
 

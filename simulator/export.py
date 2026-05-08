@@ -553,6 +553,13 @@ def _summarise_cohort(
             "ttft_p95_ms": m["ttft_p95_ms"],
             "tpot_p50_ms": m["tpot_p50_ms"],
             "tpot_p95_ms": m["tpot_p95_ms"],
+            # TTFCT — Time to First Content Token. For non-reasoning
+            # models == ttft trivially; for reasoning models lags
+            # ttft by the chain-of-thought duration. Diagnostic only;
+            # capacity_status still gates on ttft.
+            "ttfct_p50_ms": m.get("ttfct_p50_ms"),
+            "ttfct_p95_ms": m.get("ttfct_p95_ms"),
+            "avg_reasoning_tokens": m.get("avg_reasoning_tokens"),
             # 0–100 percent (matches the engine's prometheus
             # ``kv_cache_used_pct`` field — naming aligned so a
             # downstream consumer doesn't multiply by 100 thinking

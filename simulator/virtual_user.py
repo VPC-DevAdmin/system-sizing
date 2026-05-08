@@ -46,6 +46,13 @@ class TurnEvent:
     # Tier-3 opt-in: per-emitted-chunk (elapsed_ms_from_submit, cumulative_tokens).
     # Empty list when capture is off. Persisted as JSON on the turn_events row.
     token_timestamps: list = field(default_factory=list, repr=False)
+    # Reasoning-model support. ``ttft_ms`` always tracks the first
+    # user-visible token (reasoning OR content); ``ttfct_ms`` tracks
+    # specifically when the content/answer phase started — equals
+    # ttft_ms for non-reasoning models. ``reasoning_tokens`` counts
+    # chain-of-thought chunks separately from content output_tokens.
+    ttfct_ms: float = 0.0
+    reasoning_tokens: int = 0
 
     def ttft_violation(self) -> bool:
         """Hard SLA violation — past the FAILURE threshold. This is
@@ -150,6 +157,7 @@ async def run_virtual_user(
     cancel_event: asyncio.Event,
     capture_token_timestamps: bool = False,
     initial_phase_offset_enabled: bool = True,
+    reasoning_effort: str | None = None,
 ) -> None:
     """Run one virtual user to completion (or until cancelled)."""
     sessions_target = stats.sessions_target
@@ -208,6 +216,17 @@ async def run_virtual_user(
                 # primary stream cap; we keep it as an outer
                 # safety only via the persona's hard_timeout_s
                 # default (override per-persona to tighten).
+                # Reasoning-model passthrough: when configured, the
+                # OpenAI ``extra_body`` lets us pass a non-OpenAI-
+                # canonical ``reasoning_effort`` field through the
+                # SDK to vLLM. vLLM ignores it for non-reasoning
+                # models, so it's safe to plumb unconditionally — but
+                # we only set it when configured to keep request
+                # bodies minimal.
+                extra_body = (
+                    {"reasoning_effort": reasoning_effort}
+                    if reasoning_effort else None
+                )
                 stream_result = await consume_with_tiers(
                     create_stream=lambda: client.chat.completions.create(
                         model=model_id,
@@ -215,6 +234,7 @@ async def run_virtual_user(
                         max_tokens=output_tokens_target,
                         stream=True,
                         temperature=0.7,
+                        extra_body=extra_body,
                     ),
                     pre_ttft_timeout_s=persona.pre_ttft_timeout_s,
                     inter_token_timeout_s=persona.inter_token_timeout_s,
@@ -254,6 +274,10 @@ async def run_virtual_user(
                         # "tier 3 tripped on slow-but-progressing."
                         decode_ms = e2e_ms - partial_ttft_ms
                         partial_tpot_ms = decode_ms / max(1, output_tokens - 1)
+                    failed_ttft = (
+                        partial_ttft_ms
+                        if partial_ttft_ms is not None else e2e_ms
+                    )
                     failed_event = TurnEvent(
                         user_id=stats.user_id,
                         persona_id=persona.id,
@@ -261,10 +285,7 @@ async def run_virtual_user(
                         turn_index=turn,
                         submitted_at_ms=submitted_at_ms,
                         completed_at_ms=_now_ms(),
-                        ttft_ms=(
-                            partial_ttft_ms
-                            if partial_ttft_ms is not None else e2e_ms
-                        ),
+                        ttft_ms=failed_ttft,
                         tpot_ms=partial_tpot_ms,
                         end_to_end_ms=e2e_ms,
                         input_tokens=corpus.count(query_text),
@@ -274,13 +295,36 @@ async def run_virtual_user(
                         persona=persona,
                         error=error,
                         token_timestamps=token_timestamps,
+                        # ttfct: reasoning may have started but content
+                        # never did → fall back to ttft (so non-reasoning
+                        # paths see ttfct == ttft trivially).
+                        ttfct_ms=(
+                            stream_result.ttfct_ms
+                            if stream_result.ttfct_ms is not None
+                            else failed_ttft
+                        ),
+                        reasoning_tokens=stream_result.reasoning_tokens,
                     )
                     await state.events.put(failed_event)
                     # Treat as session-aborting for safety
                     break
 
                 ttft_ms = ttft_obs * 1000.0
-                tpot_ms = (e2e_ms - ttft_ms) / max(1, output_tokens - 1)
+                # TPOT measured against the user-VISIBLE token stream:
+                # reasoning + content tokens. For non-reasoning models
+                # reasoning_tokens=0 so this collapses to the previous
+                # formula (output_tokens - 1).
+                total_visible_tokens = (
+                    output_tokens + stream_result.reasoning_tokens
+                )
+                tpot_ms = (e2e_ms - ttft_ms) / max(1, total_visible_tokens - 1)
+                # ttfct_ms: time to first content token. For non-reasoning
+                # models this equals ttft_ms (no reasoning phase).
+                ttfct_ms = (
+                    stream_result.ttfct_ms
+                    if stream_result.ttfct_ms is not None
+                    else ttft_ms
+                )
 
                 response_text = "".join(output_text_parts)
                 event = TurnEvent(
@@ -299,6 +343,8 @@ async def run_virtual_user(
                     in_flight_at_submit=in_flight_at_submit,
                     persona=persona,
                     token_timestamps=token_timestamps,
+                    ttfct_ms=ttfct_ms,
+                    reasoning_tokens=stream_result.reasoning_tokens,
                 )
 
                 await state.complete()

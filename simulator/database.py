@@ -67,6 +67,17 @@ CREATE TABLE IF NOT EXISTS cohort_measurements (
     violation_rate_ci_upper REAL NOT NULL,
     ttft_p50_ms REAL, ttft_p75_ms REAL, ttft_p95_ms REAL,
     tpot_p50_ms REAL, tpot_p75_ms REAL, tpot_p95_ms REAL,
+    -- Time to First Content Token percentiles. For non-reasoning models
+    -- these equal the ttft percentiles trivially (content IS the first
+    -- visible token). For reasoning models, ttfct lags ttft by the
+    -- reasoning-phase duration; surfaced separately so the buyer page
+    -- can show "system started responding" (TTFT) and "answer started"
+    -- (TTFCT) as distinct user-experience metrics.
+    ttfct_p50_ms REAL, ttfct_p75_ms REAL, ttfct_p95_ms REAL,
+    -- Average reasoning chunks per turn in the window. 0 for non-
+    -- reasoning models; non-zero is a useful sanity check that
+    -- reasoning_effort is actually firing on the engine side.
+    avg_reasoning_tokens REAL,
     avg_kv_cache_pct REAL,
     estimated_prefix_hit_rate REAL,
     capacity_status TEXT NOT NULL,
@@ -141,7 +152,15 @@ CREATE TABLE IF NOT EXISTS turn_events (
     -- name otherwise. When set, sla_ttft_violation and
     -- sla_tpot_violation are both 1 by construction (a failure
     -- counts as a violation in both axes).
-    error TEXT
+    error TEXT,
+    -- Reasoning-model support. ``ttft_ms`` always tracks first
+    -- user-visible token (reasoning OR content); ``ttfct_ms``
+    -- tracks specifically when content/answer phase started — for
+    -- non-reasoning models this equals ttft_ms trivially.
+    -- ``reasoning_tokens`` counts chain-of-thought chunks separately
+    -- from output_tokens (which stays as content tokens).
+    ttfct_ms REAL,
+    reasoning_tokens INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_measurement ON turn_events(measurement_id);
@@ -272,6 +291,19 @@ class Database:
                 "turn_events",
                 [("ttft_target_miss", "INTEGER"),
                  ("tpot_target_miss", "INTEGER")],
+            )
+            # Reasoning-model support — see TurnEvent / streaming.py.
+            self._ensure_columns(
+                "turn_events",
+                [("ttfct_ms", "REAL"),
+                 ("reasoning_tokens", "INTEGER")],
+            )
+            self._ensure_columns(
+                "cohort_measurements",
+                [("ttfct_p50_ms", "REAL"),
+                 ("ttfct_p75_ms", "REAL"),
+                 ("ttfct_p95_ms", "REAL"),
+                 ("avg_reasoning_tokens", "REAL")],
             )
 
     def _ensure_columns(

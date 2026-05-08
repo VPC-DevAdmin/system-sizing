@@ -45,6 +45,12 @@ class PoolManager:
         capture_token_timestamps: bool = False,
         ramp_spawn_interval_s: float = 1.0,
         initial_phase_offset_enabled: bool = True,
+        # Reasoning-model support: when set, passed via ``extra_body``
+        # on every chat/completions request so the engine emits a
+        # chain-of-thought scaled to the configured effort level. Only
+        # meaningful for reasoning-capable models (GPT-OSS, etc.) —
+        # vLLM safely ignores it for non-reasoning models.
+        reasoning_effort: str | None = None,
     ):
         if not clients:
             raise ValueError("PoolManager requires at least one AsyncOpenAI client")
@@ -68,6 +74,7 @@ class PoolManager:
         self._capture_token_timestamps = capture_token_timestamps
         self._ramp_spawn_interval_s = ramp_spawn_interval_s
         self._initial_phase_offset_enabled = initial_phase_offset_enabled
+        self._reasoning_effort = reasoning_effort
 
     @property
     def target_size(self) -> int:
@@ -205,6 +212,7 @@ class PoolManager:
                 cancel_event=cancel_event,
                 capture_token_timestamps=self._capture_token_timestamps,
                 initial_phase_offset_enabled=self._initial_phase_offset_enabled,
+                reasoning_effort=self._reasoning_effort,
             ),
             name=f"vu:{persona_id}:{user_id[:8]}",
         )

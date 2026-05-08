@@ -92,6 +92,23 @@ class EngineConfig:
     # for pre-downloaded weights mounted into /models.
     model_local_path: str | None = None
 
+    # ── Reasoning-model support ───────────────────────────────────────
+    # When ``reasoning=True`` the simulator:
+    #   * passes ``reasoning_effort`` in every chat/completions request
+    #     (the OpenAI-compatible param vLLM honors for GPT-OSS and other
+    #     reasoning models) so the engine emits a chain-of-thought trace
+    #     before the answer, scaled to the configured effort level.
+    #   * splits TTFT measurement: ``ttft_ms`` captures the first user-
+    #     visible token of any kind (reasoning or content) — the
+    #     "system started responding" signal that gates capacity. A
+    #     parallel ``ttfct_ms`` (Time to First Content Token) records
+    #     when the user-facing answer starts; for non-reasoning models
+    #     ttft_ms == ttfct_ms trivially.
+    # Non-reasoning models leave ``reasoning=False`` (the default) and
+    # ``reasoning_effort`` is ignored.
+    reasoning: bool = False
+    reasoning_effort: str = "medium"  # "minimal" | "low" | "medium" | "high"
+
     # Hardware requirements that the host must satisfy. Validated by
     # ``simulator.preflight.preflight_check`` before launch — fails fast
     # so we don't waste minutes loading weights only to crash on, say,

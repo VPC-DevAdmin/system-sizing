@@ -209,6 +209,11 @@ async def run_cohort(
         capture_token_timestamps=cfg.simulation.enable_token_timestamps,
         ramp_spawn_interval_s=cfg.simulation.ramp_spawn_interval_s,
         initial_phase_offset_enabled=cfg.simulation.initial_phase_offset_enabled,
+        # Only pass reasoning_effort when the engine is declared as a
+        # reasoning model — keeps non-reasoning request bodies clean.
+        reasoning_effort=(
+            cfg.engine.reasoning_effort if cfg.engine.reasoning else None
+        ),
     )
     pool.start()
 

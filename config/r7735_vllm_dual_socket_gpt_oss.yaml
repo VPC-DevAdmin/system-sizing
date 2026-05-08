@@ -36,6 +36,21 @@ engine:
   served_model_name: gpt_oss_20b
   quantization_kind: null              # BF16
 
+  # GPT-OSS is a reasoning model — vLLM streams chain-of-thought as
+  # ``delta.reasoning`` BEFORE ``delta.content``. Without this flag
+  # the simulator's optimizer-style short cells failed because
+  # max_tokens=128 was eaten entirely by reasoning, leaving content
+  # empty (May 2026 AMD diagnostic). Setting reasoning=true:
+  #   * passes ``reasoning_effort`` in every chat/completions request
+  #     so the engine scales its chain-of-thought to a known budget
+  #   * tells the streaming consumer to count reasoning tokens
+  #     toward TTFT (first user-visible token), with a parallel
+  #     TTFCT (Time to First Content Token) for the answer phase.
+  # Capacity gating still uses TTFT (the user-perceived "system is
+  # responding" moment); TTFCT is recorded as additional diagnostic.
+  reasoning: true
+  reasoning_effort: medium             # minimal | low | medium | high
+
   max_model_len: 8192
   startup_timeout_s: 1800              # ~90-120s per replica
 

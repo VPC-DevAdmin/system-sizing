@@ -46,6 +46,12 @@ class MeasurementResult:
     tpot_p50_ms: float = 0.0
     tpot_p75_ms: float = 0.0
     tpot_p95_ms: float = 0.0
+    # TTFCT — Time to First Content Token. Equals ttft_* for non-
+    # reasoning models; lags by reasoning duration for reasoning models.
+    ttfct_p50_ms: float = 0.0
+    ttfct_p75_ms: float = 0.0
+    ttfct_p95_ms: float = 0.0
+    avg_reasoning_tokens: float = 0.0
     avg_kv_cache_pct: Optional[float] = None
     estimated_prefix_hit_rate: Optional[float] = None
     capacity_status: str = "pass"          # failure-bound (hard SLA)
@@ -348,6 +354,13 @@ async def run_measurement_step(
     # Aggregate
     ttft_values = [e.ttft_ms for e in buffer]
     tpot_values = [e.tpot_ms for e in buffer]
+    # TTFCT (time to first content token). For non-reasoning models
+    # these equal ttft trivially; for reasoning models, ttfct lags
+    # ttft by the chain-of-thought duration. Reported as a parallel
+    # diagnostic but does NOT gate capacity_status — that stays on
+    # ttft (the user-perceived "system is responding" signal).
+    ttfct_values = [e.ttfct_ms for e in buffer]
+    reasoning_token_counts = [e.reasoning_tokens for e in buffer]
     # FAILURE rates — capacity_status / hard SLA gate.
     ttft_violations = sum(1 for e in buffer if e.ttft_violation())
     tpot_violations = sum(1 for e in buffer if e.tpot_violation())
@@ -405,6 +418,13 @@ async def run_measurement_step(
         "tpot_p50_ms": _percentile(tpot_values, 0.5),
         "tpot_p75_ms": _percentile(tpot_values, 0.75),
         "tpot_p95_ms": _percentile(tpot_values, 0.95),
+        "ttfct_p50_ms": _percentile(ttfct_values, 0.5),
+        "ttfct_p75_ms": _percentile(ttfct_values, 0.75),
+        "ttfct_p95_ms": _percentile(ttfct_values, 0.95),
+        "avg_reasoning_tokens": (
+            statistics.fmean(reasoning_token_counts)
+            if reasoning_token_counts else 0.0
+        ),
         "avg_kv_cache_pct": avg_kv,
         "estimated_prefix_hit_rate": est_prefix,
         "capacity_status": capacity_status,
@@ -502,6 +522,12 @@ def _event_to_row(e: TurnEvent, measurement_id: int) -> dict:
         # without losing the SLA-violation signal that's already
         # encoded in sla_ttft_violation / sla_tpot_violation.
         "error": e.error,
+        # Reasoning-model fields. ``ttfct_ms`` is the time to the
+        # first content (answer) token; equals ttft_ms for non-
+        # reasoning models. ``reasoning_tokens`` counts chain-of-
+        # thought chunks; 0 for non-reasoning models.
+        "ttfct_ms": e.ttfct_ms,
+        "reasoning_tokens": e.reasoning_tokens,
     }
 
 

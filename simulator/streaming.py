@@ -48,22 +48,46 @@ CONNECT_TIMEOUT_S = 30.0
 class StreamResult:
     """Outcome of a tiered streaming consume.
 
+    Two latency-to-first-token metrics, distinct for reasoning models:
+
+    * ``ttft_ms`` — time to the first user-visible streaming token,
+      regardless of kind (reasoning OR content). For non-reasoning
+      models the only kind that ever streams is content, so
+      ``ttft_ms == ttfct_ms``. For reasoning models (GPT-OSS, etc.)
+      the engine streams its chain-of-thought as ``delta.reasoning``
+      first, then ``delta.content``. The user SEES reasoning as it
+      arrives, so ``ttft_ms`` captures "the system is responding"
+      and is what the simulator gates capacity on.
+
+    * ``ttfct_ms`` — Time to First Content Token. Diagnostic only:
+      tracks when the user-facing answer starts (post-reasoning for
+      reasoning models, identical to TTFT for non-reasoning).
+
+    Token counts are kept separate so analysis can distinguish
+    reasoning-phase output from content-phase output:
+
+    * ``output_tokens`` — content chunks (the "answer" the persona
+      asked for; this is what cost / quality analysis cares about).
+    * ``reasoning_tokens`` — chain-of-thought chunks. Always 0 for
+      non-reasoning models.
+
     On success: ``error is None``, ``ttft_ms`` and ``output_tokens``
     are set, ``total_ms`` is the wall time of the full completion.
 
     On any tier abort: ``error`` is one of ``"ttft_stalled"``,
     ``"decode_stalled"``, ``"hard_timeout"``. ``ttft_ms`` is set if
     we reached the first token before aborting (tier 2 or 3 cases),
-    else None. ``output_tokens`` is the count of tokens received
-    before abort. ``total_ms`` is the wall time at abort.
+    else None.
 
     On other failures (HTTP 5xx, connection refused, etc.):
     ``error`` is the exception class name, partial fields filled in
     where possible.
     """
     ttft_ms: Optional[float] = None
+    ttfct_ms: Optional[float] = None
     total_ms: Optional[float] = None
     output_tokens: int = 0
+    reasoning_tokens: int = 0
     output_text: str = ""
     token_timestamps: list = None  # list[[elapsed_ms, cum_tokens]]
     error: Optional[str] = None
@@ -92,8 +116,10 @@ async def consume_with_tiers(
     """
     submitted_at = time.monotonic()
     ttft_obs: Optional[float] = None
+    ttfct_obs: Optional[float] = None
     output_text_parts: list[str] = []
     output_tokens = 0
+    reasoning_tokens = 0
     token_timestamps: list = []
     t_last_chunk = submitted_at
 
@@ -137,8 +163,9 @@ async def consume_with_tiers(
         if tier_remaining <= 0:
             # We're already past the deadline — abort immediately.
             return _abort_result(
-                tier_label, submitted_at, now, ttft_obs,
-                output_tokens, output_text_parts, token_timestamps,
+                tier_label, submitted_at, now, ttft_obs, ttfct_obs,
+                output_tokens, reasoning_tokens,
+                output_text_parts, token_timestamps,
             )
 
         try:
@@ -153,8 +180,9 @@ async def consume_with_tiers(
                 pre_ttft_timeout_s, inter_token_timeout_s, hard_timeout_s,
             )
             return _abort_result(
-                attributed, submitted_at, now2, ttft_obs,
-                output_tokens, output_text_parts, token_timestamps,
+                attributed, submitted_at, now2, ttft_obs, ttfct_obs,
+                output_tokens, reasoning_tokens,
+                output_text_parts, token_timestamps,
             )
         except StopAsyncIteration:
             break
@@ -162,21 +190,45 @@ async def consume_with_tiers(
             now2 = time.monotonic()
             return StreamResult(
                 ttft_ms=ttft_obs * 1000.0 if ttft_obs is not None else None,
+                ttfct_ms=ttfct_obs * 1000.0 if ttfct_obs is not None else None,
                 total_ms=(now2 - submitted_at) * 1000.0,
                 output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens,
                 output_text="".join(output_text_parts),
                 token_timestamps=token_timestamps,
                 error=type(e).__name__,
             )
 
-        # Process the chunk.
+        # Process the chunk. For reasoning models (GPT-OSS, etc.) the
+        # engine streams ``delta.reasoning`` BEFORE ``delta.content``.
+        # Both kinds are user-visible, so either one resets the inter-
+        # token deadline and either one (whichever arrives first) sets
+        # ttft_obs. Content arrival sets ttfct_obs separately.
         delta = chunk.choices[0].delta if chunk.choices else None
-        if delta and getattr(delta, "content", None):
+        reasoning_chunk = (
+            getattr(delta, "reasoning", None)
+            or getattr(delta, "reasoning_content", None)
+            if delta else None
+        )
+        content_chunk = getattr(delta, "content", None) if delta else None
+
+        if reasoning_chunk:
             now_chunk = time.monotonic()
             if ttft_obs is None:
                 ttft_obs = now_chunk - submitted_at
             t_last_chunk = now_chunk
-            output_text_parts.append(delta.content)
+            reasoning_tokens += 1
+            # Note: reasoning text deliberately not appended to
+            # output_text_parts — analysis layers expect output_text
+            # to be the user-facing answer, not the chain-of-thought.
+        if content_chunk:
+            now_chunk = time.monotonic()
+            if ttft_obs is None:
+                ttft_obs = now_chunk - submitted_at
+            if ttfct_obs is None:
+                ttfct_obs = now_chunk - submitted_at
+            t_last_chunk = now_chunk
+            output_text_parts.append(content_chunk)
             output_tokens += 1
             if capture_token_timestamps:
                 token_timestamps.append([
@@ -186,20 +238,41 @@ async def consume_with_tiers(
 
     # Stream finished cleanly.
     if ttft_obs is None:
-        # No tokens emitted but no exception either — pathological
-        # but technically not a tier abort.
+        # No tokens emitted at all (neither reasoning nor content) —
+        # pathological but technically not a tier abort.
         return StreamResult(
             total_ms=(time.monotonic() - submitted_at) * 1000.0,
             output_tokens=0,
+            reasoning_tokens=0,
             output_text="",
             token_timestamps=token_timestamps,
             error="no_tokens",
         )
+    if ttfct_obs is None and output_tokens == 0:
+        # Reasoning streamed but content never started. For reasoning
+        # models with too-tight max_tokens this is the empty-content /
+        # finish_reason="length" case from the May 2026 GPT-OSS
+        # diagnostic. Still surfaces as ``no_tokens`` for the SLA
+        # framework — the user got no answer — but ttft_ms IS set
+        # (we did see reasoning), so post-hoc analysis can tell this
+        # apart from "engine emitted absolutely nothing."
+        return StreamResult(
+            ttft_ms=ttft_obs * 1000.0,
+            ttfct_ms=None,
+            total_ms=(time.monotonic() - submitted_at) * 1000.0,
+            output_tokens=0,
+            reasoning_tokens=reasoning_tokens,
+            output_text="",
+            token_timestamps=token_timestamps,
+            error="no_content_tokens",
+        )
     t_end = time.monotonic()
     return StreamResult(
         ttft_ms=ttft_obs * 1000.0,
+        ttfct_ms=ttfct_obs * 1000.0 if ttfct_obs is not None else None,
         total_ms=(t_end - submitted_at) * 1000.0,
         output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
         output_text="".join(output_text_parts),
         token_timestamps=token_timestamps,
     )
@@ -236,14 +309,18 @@ def _abort_result(
     submitted_at: float,
     now: float,
     ttft_obs: Optional[float],
+    ttfct_obs: Optional[float],
     output_tokens: int,
+    reasoning_tokens: int,
     output_text_parts: list[str],
     token_timestamps: list,
 ) -> StreamResult:
     return StreamResult(
         ttft_ms=ttft_obs * 1000.0 if ttft_obs is not None else None,
+        ttfct_ms=ttfct_obs * 1000.0 if ttfct_obs is not None else None,
         total_ms=(now - submitted_at) * 1000.0,
         output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
         output_text="".join(output_text_parts),
         token_timestamps=token_timestamps,
         error=tier,

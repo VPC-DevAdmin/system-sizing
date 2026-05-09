@@ -218,9 +218,25 @@ async def run_virtual_user(
                 except asyncio.TimeoutError:
                     pass
 
-        for session_index in range(sessions_target):
-            if cancel_event.is_set():
-                break
+        # Per-session respawn model: each virtual user runs ONE
+        # session (multi-turn within the session, history accumulates),
+        # then terminates. The pool manager spawns a replacement.
+        #
+        # This replaces the prior model where a user ran N sessions
+        # with inter-session gaps. The old model represented "long-
+        # lived authenticated user" lifecycle, which doesn't reflect
+        # what the engine actually sees — from the engine's
+        # perspective, a user returning after a long gap is
+        # indistinguishable from a fresh user (KV is evicted, no
+        # shared content between sessions). Modeling each session as
+        # a separate virtual user lets pool_size mean "active
+        # concurrent sessions," which is the buyer-page-intuitive
+        # answer.
+        #
+        # ``sessions_before_leaving`` and ``inter_session_gap_seconds``
+        # on the Persona are deprecated — kept on the dataclass for
+        # back-compat with older configs but no longer drive runtime.
+        if not cancel_event.is_set():
             history_messages = []
             history_token_count = 0
             session_id = uuid.uuid4().hex
@@ -426,13 +442,8 @@ async def run_virtual_user(
                         pass
 
             stats.sessions_completed += 1
-
-            if session_index < sessions_target - 1:
-                gap = persona.inter_session_gap_seconds.sample(rng)
-                try:
-                    await asyncio.wait_for(cancel_event.wait(), timeout=gap)
-                    return
-                except asyncio.TimeoutError:
-                    pass
+        # Session done — return so the pool manager spawns a
+        # replacement user. inter_session_gap behavior intentionally
+        # removed; see comment above the session block.
     finally:
         stats.terminated_at_ms = _now_ms()

@@ -186,12 +186,16 @@ class PoolManager:
         persona_id = self._pick_persona_id()
         persona = PERSONAS[persona_id]
         user_id = uuid.uuid4().hex
-        sessions_target = persona.sessions_before_leaving.sample_int(self._rng)
+        # Per-session-respawn model: each virtual user runs ONE
+        # session then terminates and is replaced. ``sessions_target``
+        # is hardcoded to 1 — ``persona.sessions_before_leaving`` is
+        # deprecated and no longer drives runtime behavior. See
+        # virtual_user.run_virtual_user for the rationale.
         stats = UserStats(
             user_id=user_id,
             persona_id=persona_id,
             spawned_at_ms=_now_ms(),
-            sessions_target=sessions_target,
+            sessions_target=1,
             pool_size_at_spawn=self._target_size,
             replaced_user_id=replaced_user_id,
         )

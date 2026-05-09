@@ -960,6 +960,53 @@ async def _coroutine_returning(value):
     return value
 
 
+def test_pool_manager_spawns_users_with_single_session() -> None:
+    """Per-session-respawn model: each virtual user gets sessions_target=1
+    regardless of persona.sessions_before_leaving. Each session is
+    its own user spawn — pool_size means ``active concurrent sessions``,
+    matching what the engine actually sees and what the buyer-page
+    deployment narrative wants."""
+    import asyncio
+    from openai import AsyncOpenAI
+    from simulator.pool_manager import PoolManager
+    from simulator.personas import get_cohort
+    from simulator.virtual_user import SharedState
+    from simulator.tokenizer_corpus import TokenCorpus
+
+    async def go():
+        cohort = get_cohort("chat_heavy")
+        # Real client; never used because we'll inspect stats before any
+        # request fires. AsyncOpenAI requires an api_key arg.
+        client = AsyncOpenAI(base_url="http://127.0.0.1:8000/v1", api_key="x")
+        state = SharedState()
+        # Avoid loading a real tokenizer — corpus.count is unused by
+        # _spawn_one.
+        class _StubCorpus:
+            def make_text(self, n, rng): return "hi"
+            def count(self, s): return 1
+        pool = PoolManager(
+            cohort=cohort, clients=[client], model_id="gpt_oss",
+            corpus=_StubCorpus(), state=state, request_timeout_s=600,
+            ramp_spawn_interval_s=0.001,
+        )
+        pool._spawn_one(replaced_user_id=None)
+        # The freshly-spawned user must have sessions_target=1.
+        assert len(pool._users) == 1
+        u = next(iter(pool._users.values()))
+        assert u.stats.sessions_target == 1, (
+            f"per-session-respawn requires sessions_target=1, got "
+            f"{u.stats.sessions_target}"
+        )
+        u.cancel_event.set()
+        # Drain the task so we don't leak.
+        try:
+            await asyncio.wait_for(u.task, timeout=1.0)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+    asyncio.run(go())
+
+
 def test_persona_timeout_properties_scale_with_failure_thresholds() -> None:
     """Tier-abort timeouts derive from the FAILURE thresholds (so
     a request stays alive long enough to actually exhaust its

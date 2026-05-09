@@ -221,6 +221,35 @@ PERSONAS: dict[str, Persona] = {
         tpot_target_ms=200.0,
         tpot_failure_ms=300.0,
     ),
+    "long_form_generator": Persona(
+        id="long_form_generator",
+        # The decode-stress counterweight to document_qa / summarizer.
+        # Both of those are prefill-heavy (long input, short output);
+        # this persona is the inverse — short input, very long output —
+        # so a cohort that mixes long-context personas with this one
+        # exercises both halves of the engine pipeline.
+        description=(
+            "Long-form content generation — extended drafts, articles, "
+            "reports. Short prompt, very long output (decode-bound)."
+        ),
+        input_tokens=LogNormal.from_median(200, 0.5),
+        output_tokens=LogNormal.from_median(3000, 0.4),
+        turns_per_session=Discrete({2: 0.75, 3: 0.25}),
+        # Deprecated under the per-session-respawn model but retained
+        # for back-compat with the dataclass shape — see
+        # virtual_user.run_virtual_user.
+        sessions_before_leaving=Discrete({1: 1.0}),
+        inter_session_gap_seconds=LogNormal.from_median(1200, 1.0),
+        # 3000-token output: residual reading is substantial even with
+        # concurrent streaming. User pauses to review + revise long
+        # output before the next turn — 90 s reading, 120 s composing.
+        read_time_seconds=LogNormal.from_median(90, 0.5),
+        active_think_seconds=LogNormal.from_median(120, 0.6),
+        ttft_target_seconds=15.0,
+        ttft_failure_seconds=45.0,
+        tpot_target_ms=180.0,
+        tpot_failure_ms=270.0,
+    ),
 }
 
 
@@ -247,7 +276,7 @@ COHORTS: dict[str, Cohort] = {
             "quick_lookup": 0.30,
             "conversational": 0.30,
             "writer": 0.25,
-            "summarizer": 0.10,
+            "long_form_generator": 0.10,
             "document_qa": 0.05,
         },
     ),
@@ -256,10 +285,10 @@ COHORTS: dict[str, Cohort] = {
         name="Marketing / content team",
         description="Marketing, communications, content team",
         persona_weights={
-            "quick_lookup": 0.10,
+            "writer": 0.40,
+            "long_form_generator": 0.30,
             "conversational": 0.20,
-            "writer": 0.60,
-            "summarizer": 0.10,
+            "quick_lookup": 0.10,
         },
     ),
     "software_engineering": Cohort(
@@ -267,10 +296,10 @@ COHORTS: dict[str, Cohort] = {
         name="Software engineering team",
         description="Software engineering team using AI assistance for code work",
         persona_weights={
+            "code_assist": 0.50,
+            "long_form_generator": 0.15,
             "quick_lookup": 0.15,
             "conversational": 0.15,
-            "writer": 0.05,
-            "code_assist": 0.60,
             "document_qa": 0.05,
         },
     ),
@@ -279,9 +308,9 @@ COHORTS: dict[str, Cohort] = {
         name="Analyst team",
         description="Legal, finance, research analysts working over long documents",
         persona_weights={
-            "writer": 0.15,
-            "summarizer": 0.25,
-            "document_qa": 0.60,
+            "document_qa": 0.70,
+            "writer": 0.20,
+            "long_form_generator": 0.10,
         },
     ),
 }

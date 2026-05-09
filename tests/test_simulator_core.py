@@ -493,6 +493,61 @@ def test_every_cohort_validates() -> None:
         get_cohort(cid)
 
 
+def test_long_form_generator_persona_decode_stress_shape() -> None:
+    """The decode-stress counterweight to document_qa / summarizer.
+    Short prompt, very long output — stresses the engine's decode
+    pipeline rather than its prefill pipeline. Spec is fixed in
+    personas.py; test pins it so accidental edits to the LogNormal
+    parameters get caught."""
+    import math
+    p = PERSONAS["long_form_generator"]
+    assert math.isclose(math.exp(p.input_tokens.mu), 200, rel_tol=0.01)
+    assert math.isclose(math.exp(p.output_tokens.mu), 3000, rel_tol=0.01)
+    # Output is 15× larger than input — defining property of this persona.
+    assert math.exp(p.output_tokens.mu) > 10 * math.exp(p.input_tokens.mu), (
+        "long_form_generator must be heavily output-skewed (decode-bound)"
+    )
+    assert p.ttft_target_seconds == 15.0
+    assert p.ttft_failure_seconds == 45.0
+    assert p.tpot_target_ms == 180.0
+    assert p.tpot_failure_ms == 270.0
+
+
+def test_long_form_generator_in_expected_cohorts() -> None:
+    """Long-form generator must appear in the four cohort mixes that
+    have meaningful content-generation load. chat_heavy is the
+    short-prompt cohort and intentionally excludes it."""
+    expected_membership = {
+        "chat_heavy": False,                # quick_lookup-dominant; no decode stress needed
+        "general_knowledge": True,          # 10%
+        "writer_dominant": True,            # 30%
+        "software_engineering": True,       # 15%
+        "analyst_team": True,               # 10%
+    }
+    for cid, should_have in expected_membership.items():
+        weights = COHORTS[cid].persona_weights
+        present = "long_form_generator" in weights
+        assert present == should_have, (
+            f"{cid}: long_form_generator membership expected={should_have}, "
+            f"actual={present}, weights={weights}"
+        )
+
+
+def test_summarizer_no_longer_in_cohort_mixes() -> None:
+    """Summarizer was redundant with document_qa (both prefill-stress)
+    and is removed from every cohort mix. The persona definition
+    stays for diagnostic / standalone use via ``run-persona``."""
+    assert "summarizer" in PERSONAS, (
+        "summarizer persona must remain defined for standalone runs"
+    )
+    for cid, c in COHORTS.items():
+        assert "summarizer" not in c.persona_weights, (
+            f"{cid}: summarizer dropped from cohort mixes — "
+            f"document_qa covers prefill-stress, long_form_generator "
+            f"covers decode-stress"
+        )
+
+
 def test_every_persona_has_target_and_failure_thresholds() -> None:
     """The aggregator reads target + failure thresholds per-event;
     missing fields would silently classify every request as a

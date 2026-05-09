@@ -204,26 +204,9 @@ PERSONAS: dict[str, Persona] = {
         tpot_target_ms=220.0,
         tpot_failure_ms=330.0,
     ),
-    "summarizer": Persona(
-        id="summarizer",
-        description="Reducing long inputs to short summaries",
-        input_tokens=LogNormal.from_median(5000, 0.4),
-        output_tokens=LogNormal.from_median(180, 0.35),
-        turns_per_session=Discrete({1: 0.85, 2: 0.15}),
-        sessions_before_leaving=Discrete({2: 0.4, 4: 0.4, 8: 0.2}),
-        inter_session_gap_seconds=LogNormal.from_median(900, 1.0),
-        # 180-token summary: residual ~22 s; user reviews + uses
-        # output to inform next action — ~45 s active.
-        read_time_seconds=LogNormal.from_median(22, 0.5),
-        active_think_seconds=LogNormal.from_median(45, 0.6),
-        ttft_target_seconds=30.0,
-        ttft_failure_seconds=120.0,
-        tpot_target_ms=200.0,
-        tpot_failure_ms=300.0,
-    ),
     "long_form_generator": Persona(
         id="long_form_generator",
-        # The decode-stress counterweight to document_qa / summarizer.
+        # The decode-stress counterweight to document_qa.
         # Both of those are prefill-heavy (long input, short output);
         # this persona is the inverse — short input, very long output —
         # so a cohort that mixes long-context personas with this one

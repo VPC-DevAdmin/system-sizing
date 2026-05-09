@@ -66,7 +66,6 @@ CURRENT_PERSONAS = {
     "writer",
     "document_qa",
     "code_assist",
-    "summarizer",
 }
 
 # Renames applied during forklift. Keys are old persona ids, values

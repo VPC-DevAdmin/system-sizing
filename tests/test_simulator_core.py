@@ -494,7 +494,7 @@ def test_every_cohort_validates() -> None:
 
 
 def test_long_form_generator_persona_decode_stress_shape() -> None:
-    """The decode-stress counterweight to document_qa / summarizer.
+    """The decode-stress counterweight to document_qa.
     Short prompt, very long output — stresses the engine's decode
     pipeline rather than its prefill pipeline. Spec is fixed in
     personas.py; test pins it so accidental edits to the LogNormal
@@ -530,21 +530,6 @@ def test_long_form_generator_in_expected_cohorts() -> None:
         assert present == should_have, (
             f"{cid}: long_form_generator membership expected={should_have}, "
             f"actual={present}, weights={weights}"
-        )
-
-
-def test_summarizer_no_longer_in_cohort_mixes() -> None:
-    """Summarizer was redundant with document_qa (both prefill-stress)
-    and is removed from every cohort mix. The persona definition
-    stays for diagnostic / standalone use via ``run-persona``."""
-    assert "summarizer" in PERSONAS, (
-        "summarizer persona must remain defined for standalone runs"
-    )
-    for cid, c in COHORTS.items():
-        assert "summarizer" not in c.persona_weights, (
-            f"{cid}: summarizer dropped from cohort mixes — "
-            f"document_qa covers prefill-stress, long_form_generator "
-            f"covers decode-stress"
         )
 
 
@@ -1075,9 +1060,9 @@ def test_persona_timeout_properties_scale_with_failure_thresholds() -> None:
         p.inter_token_timeout_s - (p.tpot_failure_ms / 1000.0) * 20.0
     ) < 1e-6
 
-    # summarizer has the loosest failure thresholds → most generous
+    # document_qa has the loosest failure thresholds → most generous
     # tier-abort timeouts.
-    s = PERSONAS["summarizer"]
+    s = PERSONAS["document_qa"]
     assert s.pre_ttft_timeout_s == s.ttft_failure_seconds * 5.0
     assert s.pre_ttft_timeout_s > p.pre_ttft_timeout_s
 
@@ -2618,7 +2603,7 @@ def test_prefix_cache_classifies_session_as_miss_when_later_ttft_high() -> None:
 
 
 def test_prefix_cache_skips_single_turn_sessions() -> None:
-    """Single-turn personas (summarizer, writer) can't validate cache
+    """Single-turn personas (writer, quick_lookup) can't validate cache
     behaviour — the analyser must not pretend otherwise."""
     rows = [_row("u1", "s1", 0, 1000.0)]
     sessions, notes = analyse_sessions(rows)

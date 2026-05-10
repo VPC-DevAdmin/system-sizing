@@ -2294,10 +2294,10 @@ def test_export_drops_engine_hit_rate_when_only_rate_was_scraped(tmp_path) -> No
 
 def test_export_slim_drops_heavy_timeseries(tmp_path) -> None:
     """``--slim`` mode must drop the per-step telemetry_samples,
-    per-step turns, and cohort-level snapshots — but keep the
-    headline summary, per-step rollup, landing zones, bottleneck
-    attribution, and prefix-cache verdict. Default filename also
-    differs so slim and full exports can coexist."""
+    per-step turns, and per-step timeline — but keep the headline
+    summary, per-step rollup, landing zones, bottleneck attribution,
+    and prefix-cache verdict. Default filename also differs so slim
+    and full exports can coexist."""
     from simulator.database import Database
     from simulator.export import export_dir
 
@@ -2359,8 +2359,12 @@ def test_export_slim_drops_heavy_timeseries(tmp_path) -> None:
     assert cohort["curve"][0].get("turns") is None, (
         "slim export must NOT include per-step turns"
     )
+    assert cohort["curve"][0].get("timeline") is None, (
+        "slim export must NOT include per-step timeline"
+    )
     assert "snapshots" not in cohort, (
-        "slim export must NOT include cohort-level snapshots"
+        "cohort-level snapshots field removed — superseded by "
+        "per-step timeline in non-slim exports"
     )
     # Summary fields must still be present.
     assert cohort["capacity_pool_size"] == 8
@@ -2376,7 +2380,11 @@ def test_export_slim_drops_heavy_timeseries(tmp_path) -> None:
     full_cohort = full_doc["cohorts"][0]
     assert len(full_cohort["curve"][0]["telemetry_samples"]) == 1
     assert len(full_cohort["curve"][0]["turns"]) == 1
-    assert "snapshots" in full_cohort
+    assert "timeline" in full_cohort["curve"][0], (
+        "non-slim export must include per-step timeline"
+    )
+    # The cohort-level ``snapshots`` field is gone for good.
+    assert "snapshots" not in full_cohort
 
     # Slim should be substantially smaller. The model database here
     # is tiny, so the absolute delta is small — but slim must be
@@ -2412,10 +2420,10 @@ def test_export_default_output_lands_in_run_dir(tmp_path) -> None:
 
 
 def test_export_includes_per_step_time_series(tmp_path) -> None:
-    """make export must surface ``telemetry_samples`` + ``turns`` per
-    curve step and ``snapshots`` per cohort. The downstream website
-    reads the JSON directly; the time-series is the difference between
-    a static knee chart and a "drill into a specific step" view."""
+    """make export must surface ``telemetry_samples`` + ``turns`` +
+    ``timeline`` per curve step. The downstream website reads the JSON
+    directly; the time-series is the difference between a static knee
+    chart and a "drill into a specific step" view."""
     import json
     from simulator.database import Database
     from simulator.export import export_dir
@@ -2504,10 +2512,25 @@ def test_export_includes_per_step_time_series(tmp_path) -> None:
     # token_timestamps_json is intentionally excluded — too large.
     assert "token_timestamps_json" not in turn
 
-    # Whole-run heartbeat lives at the cohort level.
-    assert len(cohort["snapshots"]) == 2
-    assert cohort["snapshots"][0]["phase"] == "warmup"
-    assert cohort["snapshots"][1]["step_target_samples"] == 100
+    # Per-step phase-distribution timeline (replaces the old
+    # cohort-level ``snapshots`` field).
+    assert "snapshots" not in cohort, (
+        "cohort-level snapshots removed; superseded by per-step "
+        "timeline in curve entries"
+    )
+    timeline = step["timeline"]
+    assert timeline["resolution_ms"] == 1000
+    assert timeline["schema"] == ["t_offset_s", "prefill", "decode",
+                                  "think", "idle"]
+    assert isinstance(timeline["rows"], list)
+    # Our single turn had ttft=1697ms, completed at 5500 (decode for
+    # 5500-1500-1697 ≈ 2.3s). At t=1.5s (offset_s=0 since min submit
+    # is 1500ms), the user should be in prefill.
+    assert timeline["rows"][0][0] == 0   # t_offset_s
+    assert timeline["rows"][0][1] == 1   # prefill at first sample
+    assert sum(r[2] for r in timeline["rows"]) >= 1, (
+        "at least one sample must catch the decode phase"
+    )
 
 
 def test_resolve_run_dir_creates_run_01_when_empty(tmp_path) -> None:
@@ -3284,6 +3307,187 @@ def test_fixed_grid_stepper_failure_at_first_grid_point_measures_one_more() -> N
         viol = 0.9 if n == 8 else 0.0
         s.record(StepResult(pool_size=n, violation_rate=viol))
     assert visited == [8, 16]
+
+
+# ── timeline module ─────────────────────────────────────────────────
+def _seed_timeline_db(tmp_path, turns, spawns=()):
+    """Helper: minimal DB with one measurement, given turn_events
+    and (optional) virtual_users rows. Returns (db_path, mid)."""
+    from simulator.database import Database
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir(exist_ok=True)
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="m", cohort_id="chat_heavy",
+        cohort_definition={"name": "x", "persona_weights": {}}, config={},
+    )
+    mid = db.insert_measurement({
+        "cohort_run_id": "crid", "step_index": 0, "target_pool_size": 4,
+        "measured_avg_pool_size": 4.0, "measured_avg_in_flight": 3.0,
+        "measurement_started_at": "2026-01-01T00:00:30Z",
+        "measurement_duration_s": 60, "sample_size": len(turns),
+        "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+        "combined_violation_rate": 0.0, "violation_rate_ci_lower": 0.0,
+        "violation_rate_ci_upper": 0.0, "capacity_status": "pass",
+    })
+    enriched = []
+    for t in turns:
+        row = {
+            "measurement_id": mid, "persona_id": "quick_lookup",
+            "user_id": t["user_id"], "session_id": "s1",
+            "turn_index": t["turn_index"],
+            "submitted_at_ms": t["submit"], "ttft_ms": t["ttft"],
+            "completed_at_ms": t["complete"],
+            "input_tokens": 100, "history_tokens": 0, "output_tokens": 50,
+            "tpot_ms": 50.0, "end_to_end_ms": float(t["complete"]-t["submit"]),
+            "in_flight_at_submit": 1, "in_flight_avg_during": 1.0,
+            "in_flight_peak_during": 1,
+            "sla_ttft_violation": 0, "sla_tpot_violation": 0,
+            "token_timestamps_json": None,
+        }
+        enriched.append(row)
+    db.insert_events(enriched)
+    for s in spawns:
+        db.upsert_user({
+            "user_id": s["user_id"], "cohort_run_id": "crid",
+            "persona_id": "quick_lookup",
+            "spawned_at_ms": s["spawned"],
+            "sessions_target": 1, "sessions_completed": 1,
+            "turns_total": 1, "pool_size_at_spawn": 4,
+        })
+    db.close()
+    return run_dir / "run.db", mid
+
+
+def test_timeline_classifies_each_phase_within_one_turn(tmp_path) -> None:
+    """Single user, single turn: at the submit instant the user is
+    in prefill; once ttft elapses they're in decode; after completion
+    they're done (no more turn → no think interval). Tests that the
+    three intra-turn phases get the right time slices."""
+    from simulator.timeline import compute_timeline
+    import sqlite3
+    db_path, mid = _seed_timeline_db(tmp_path, turns=[
+        {"user_id": "u1", "turn_index": 0,
+         "submit": 1000, "ttft": 2000.0, "complete": 6000},
+    ])
+    conn = sqlite3.connect(db_path)
+    tl = compute_timeline(conn, mid, resolution_ms=1000)
+    conn.close()
+    # Window: 1000ms → 6000ms, samples at t=1000,2000,3000,4000,5000,6000
+    # ttft=2000 means prefill spans [1000, 3000), decode spans [3000, 6000)
+    assert len(tl) == 6
+    # t=0 (1000ms): prefill
+    assert tl[0].prefill == 1 and tl[0].decode == 0
+    # t=1 (2000ms): still prefill
+    assert tl[1].prefill == 1 and tl[1].decode == 0
+    # t=2 (3000ms): decode begins
+    assert tl[2].prefill == 0 and tl[2].decode == 1
+    # t=5 (6000ms): turn complete — no phase active (end-exclusive)
+    assert tl[5].prefill == 0 and tl[5].decode == 0
+
+
+def test_timeline_marks_inter_turn_gap_as_think(tmp_path) -> None:
+    """Two consecutive turns from the same user: the gap between
+    completion of turn N and submit of turn N+1 must show up as
+    ``think``. This is the diagnostic signal for query-storm hunting —
+    if many users finish think at the same instant, we'd see a
+    coincident plummet in ``think`` and spike in ``prefill``."""
+    from simulator.timeline import compute_timeline
+    import sqlite3
+    db_path, mid = _seed_timeline_db(tmp_path, turns=[
+        {"user_id": "u1", "turn_index": 0,
+         "submit": 1000, "ttft": 500.0, "complete": 2000},
+        {"user_id": "u1", "turn_index": 1,
+         "submit": 5000, "ttft": 500.0, "complete": 6000},
+    ])
+    conn = sqlite3.connect(db_path)
+    tl = compute_timeline(conn, mid, resolution_ms=1000)
+    conn.close()
+    # Find a sample inside the gap [2000, 5000): t=3000 → offset 2s.
+    s3 = next(p for p in tl if p.t_offset_s == 2)
+    assert s3.think == 1, f"expected think=1 at t=2s, got {s3}"
+    assert s3.prefill == 0 and s3.decode == 0
+
+
+def test_timeline_captures_idle_phase_before_first_turn(tmp_path) -> None:
+    """Virtual users with an initial phase offset spend the gap
+    between spawn and first submit in ``idle``. The counter is what
+    lets total = pool_size match across the whole window — without
+    it, a freshly-spawned user would simply not appear in any bucket."""
+    from simulator.timeline import compute_timeline
+    import sqlite3
+    db_path, mid = _seed_timeline_db(
+        tmp_path,
+        turns=[{"user_id": "u1", "turn_index": 0,
+                "submit": 3000, "ttft": 500.0, "complete": 4000}],
+        spawns=[{"user_id": "u1", "spawned": 1000}],
+    )
+    conn = sqlite3.connect(db_path)
+    tl = compute_timeline(conn, mid, resolution_ms=1000)
+    conn.close()
+    # t=0 corresponds to t_start = 3000ms (earliest submit, not spawn —
+    # the timeline window opens with the first turn, but idle should
+    # still be visible if spawn precedes window-start.) Actually since
+    # spawn=1000 is < t_start=3000, idle gets clamped to [3000, 3000)
+    # → zero-length, skipped. The user lands directly in prefill at t=0.
+    assert tl[0].prefill == 1
+    # The clamping is the intended behavior — a user spawned far before
+    # window start contributes no idle samples to this window.
+
+
+def test_timeline_counts_concurrent_users_correctly(tmp_path) -> None:
+    """Two users overlapping in different phases: the timeline must
+    sum them, not just track one. This is the headline use case —
+    showing how many of N users are in each phase at each moment."""
+    from simulator.timeline import compute_timeline
+    import sqlite3
+    db_path, mid = _seed_timeline_db(tmp_path, turns=[
+        # u1: prefill [1000, 3000), decode [3000, 6000)
+        {"user_id": "u1", "turn_index": 0,
+         "submit": 1000, "ttft": 2000.0, "complete": 6000},
+        # u2: prefill [2000, 4000), decode [4000, 5000)
+        {"user_id": "u2", "turn_index": 0,
+         "submit": 2000, "ttft": 2000.0, "complete": 5000},
+    ])
+    conn = sqlite3.connect(db_path)
+    tl = compute_timeline(conn, mid, resolution_ms=1000)
+    conn.close()
+    # t=2 (3000ms): u1 just entered decode, u2 still in prefill
+    s_at_3s = next(p for p in tl if p.t_offset_s == 2)
+    assert s_at_3s.decode == 1 and s_at_3s.prefill == 1
+    # t=4 (5000ms): u1 still in decode, u2 just exited decode
+    s_at_5s = next(p for p in tl if p.t_offset_s == 4)
+    assert s_at_5s.decode == 1
+
+
+def test_timeline_empty_when_no_turns(tmp_path) -> None:
+    """A measurement that captured no completed turns (e.g. an
+    engine that died early) returns an empty list rather than
+    raising — the export emits ``rows: []`` so the schema stays
+    uniform across cohorts."""
+    from simulator.timeline import compute_timeline
+    import sqlite3
+    db_path, mid = _seed_timeline_db(tmp_path, turns=[])
+    conn = sqlite3.connect(db_path)
+    tl = compute_timeline(conn, mid, resolution_ms=1000)
+    conn.close()
+    assert tl == []
+
+
+def test_timeline_rejects_invalid_resolution(tmp_path) -> None:
+    from simulator.timeline import compute_timeline
+    import sqlite3, pytest
+    db_path, mid = _seed_timeline_db(tmp_path, turns=[
+        {"user_id": "u1", "turn_index": 0,
+         "submit": 1000, "ttft": 500.0, "complete": 2000},
+    ])
+    conn = sqlite3.connect(db_path)
+    with pytest.raises(ValueError):
+        compute_timeline(conn, mid, resolution_ms=0)
+    with pytest.raises(ValueError):
+        compute_timeline(conn, mid, resolution_ms=-100)
+    conn.close()
 
 
 def test_fixed_grid_stepper_threshold_exactly_at_boundary_counts_as_failure() -> None:

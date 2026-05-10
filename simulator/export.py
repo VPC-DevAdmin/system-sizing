@@ -31,16 +31,14 @@ by [web/index.html](../web/index.html) (or any downstream parser):
                  history_tokens, output_tokens, in_flight_at_submit,
                  sla_ttft_violation, sla_tpot_violation, ...},
                 ...
-              ]
+              ],
+              timeline: {                        // phase distribution
+                resolution_ms: 1000,             // per second
+                schema: ["t_offset_s", "prefill", "decode",
+                         "think", "idle"],
+                rows: [[0,0,0,0,8], [1,2,0,0,6], ...]
+              }
             },
-            ...
-          ],
-
-          snapshots: [           // 1 Hz pool/in-flight heartbeat for
-                                 // the whole cohort run
-            {snapshot_at_ms, phase, pool_size, in_flight,
-             requests_completed, errors,
-             step_samples, step_target_samples},
             ...
           ]
         },
@@ -50,7 +48,9 @@ by [web/index.html](../web/index.html) (or any downstream parser):
 
 The website iterates ``cohorts``, then ``curve`` for the rollup chart,
 then drills into ``curve[i].turns`` / ``curve[i].telemetry_samples``
-for per-step detail, or ``snapshots`` for whole-run timeline plots.
+for per-step detail, or ``curve[i].timeline`` for phase-distribution
+plots (storm/oscillation diagnostic — prior schemas had a cohort-level
+``snapshots`` field, now superseded).
 """
 
 from __future__ import annotations
@@ -177,17 +177,13 @@ _TURN_EVENT_COLUMNS = (
     "sla_tpot_violation",
 )
 
-# Columns surfaced in the per-cohort ``snapshots`` array.
-_SNAPSHOT_COLUMNS = (
-    "snapshot_at_ms",
-    "phase",
-    "pool_size",
-    "in_flight",
-    "requests_completed",
-    "errors",
-    "step_samples",
-    "step_target_samples",
-)
+# NOTE: prior schema surfaced a per-cohort ``snapshots`` array
+# (columns from ``simulation_snapshots`` — just aggregate in_flight
+# over time). Removed in favor of per-step ``curve[i].timeline`` which
+# carries finer-grain phase distribution (prefill/decode/think/idle).
+# The ``simulation_snapshots`` DB table is still written at run time
+# because the live dashboard reads it — but it's no longer echoed
+# into the export JSON.
 
 
 def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
@@ -254,16 +250,16 @@ def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
         m["tokens"] = dict(token_agg) if token_agg else {
             "prompt_tok": 0, "content_tok": 0, "reasoning_tok": 0,
         }
-    # Whole-run heartbeat (1 Hz pool/in-flight ticks).
-    snap_cols = ", ".join(_SNAPSHOT_COLUMNS)
-    run["snapshots"] = [
-        {k: r[k] for k in _SNAPSHOT_COLUMNS}
-        for r in conn.execute(
-            f"SELECT {snap_cols} FROM simulation_snapshots "
-            f"WHERE cohort_run_id = ? ORDER BY snapshot_at_ms",
-            (run["cohort_run_id"],),
+        # Per-step phase-distribution timeline: how many users in
+        # each of prefill/decode/think/idle, sampled every second.
+        # Replaces the per-cohort ``snapshots`` array (which only
+        # carried aggregate in_flight). Built from turn_events so the
+        # raw data already in the DB; no new run-time write needed.
+        from .timeline import compute_timeline, timeline_to_export_dict
+        m["timeline"] = timeline_to_export_dict(
+            compute_timeline(conn, m["measurement_id"], resolution_ms=1000),
+            resolution_ms=1000,
         )
-    ]
     return run
 
 
@@ -543,7 +539,7 @@ def _summarise_cohort(
     ``slim=True`` drops the heavy time-series fields:
       * curve[i].telemetry_samples (per-second within-window samples)
       * curve[i].turns             (per-turn events)
-      * cohort.snapshots           (1 Hz whole-run heartbeat)
+      * curve[i].timeline          (phase-distribution per second)
 
     Headline summary, per-step rollup, capacity landing zones,
     bottleneck attribution, and prefix-cache verdict all stay.
@@ -618,6 +614,13 @@ def _summarise_cohort(
             # row for an in-progress step had no events captured).
             entry["telemetry_samples"] = m.get("telemetry_samples", [])
             entry["turns"] = m.get("turns", [])
+            # Phase-distribution timeline (prefill/decode/think/idle
+            # per second). Replaces the cohort-level ``snapshots``
+            # field from the prior schema — finer grain (per-step
+            # rather than per-cohort) and richer info (4 phases vs.
+            # 1 aggregate counter). Slim mode drops it since it's a
+            # diagnostic for storm detection, not a buyer-page metric.
+            entry["timeline"] = m.get("timeline", {})
         curve.append(entry)
     # Three landing-zone boundaries on each axis:
     #   capacity  — premium / no SLA violations
@@ -788,12 +791,13 @@ def _summarise_cohort(
             ),
         },
         "curve": curve,
-        # Cohort-level 1 Hz pool/in-flight heartbeat. Dropped in
-        # slim mode (second-largest contributor to file size after
-        # per-step turns).
-        **(
-            {"snapshots": run.get("snapshots", [])} if not slim else {}
-        ),
+        # NOTE: the prior ``snapshots`` cohort-level heartbeat field is
+        # gone — superseded by per-step ``curve[i].timeline`` which
+        # carries finer-grain phase distribution (prefill/decode/
+        # think/idle) instead of just aggregate in_flight. The
+        # ``simulation_snapshots`` table is still populated at run
+        # time (the live dashboard reads it) but it's no longer
+        # echoed into the export JSON.
         "bottleneck": bottleneck,                      # what limits SLA capacity
         "bottleneck_evidence": evidence,
         "target_bottleneck": target_bottleneck,        # what limits quality capacity

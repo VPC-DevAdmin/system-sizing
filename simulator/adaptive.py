@@ -525,3 +525,64 @@ class TwoKneeStepper:
             return nxt
         self.phase = PHASE_DONE
         return None
+
+
+# Default fixed grid for capacity-curve generation. Powers of 2 from 4
+# to 256 — gives a half-decade of below-knee data for the
+# "comfortable" zone, then doubles up through the failure cliff. Wide
+# enough to span every cohort we've tested without manual tuning.
+DEFAULT_FIXED_GRID: list[int] = [4, 8, 16, 32, 64, 128, 256]
+
+
+class FixedGridStepper:
+    """Pre-defined pool-size grid with early-stop past first failure.
+
+    Used as the default sweep mode (the adaptive ``TwoKneeStepper`` is
+    opt-in via ``--adaptive``). Measures each pool size in the grid in
+    order. When a step's ``violation_rate`` first exceeds
+    ``failure_threshold``, the remaining grid is truncated so we
+    measure exactly one more point past the failure (which by
+    construction is roughly 2× the failure pool for a powers-of-2
+    grid) and then stop. That bounds wall-clock at the cost of not
+    extending the curve into clearly-broken territory — measurements
+    past the first failure are duplicative for capacity sizing.
+
+    Implements the same ``next_pool_size()`` / ``record()`` interface
+    as ``TwoKneeStepper`` so the runner loop is uniform across modes.
+    """
+
+    def __init__(
+        self,
+        grid: list[int] | None = None,
+        failure_threshold: float = 0.5,
+    ):
+        self._grid: list[int] = list(grid) if grid else list(DEFAULT_FIXED_GRID)
+        self._idx: int = 0
+        self._failure_threshold = failure_threshold
+        self._failure_observed: bool = False
+
+    def next_pool_size(self) -> Optional[int]:
+        if self._idx >= len(self._grid):
+            return None
+        return self._grid[self._idx]
+
+    def record(self, result: StepResult) -> None:
+        # ``record`` is invoked AFTER the just-yielded step completes.
+        # Advance the cursor first, then evaluate early-stop. Truncating
+        # to ``self._idx + 1`` keeps exactly one more grid point — the
+        # next pool size in the sequence — before next_pool_size starts
+        # returning None.
+        self._idx += 1
+        if (
+            not self._failure_observed
+            and result.violation_rate >= self._failure_threshold
+        ):
+            self._failure_observed = True
+            self._grid = self._grid[: self._idx + 1]
+
+    @property
+    def grid(self) -> list[int]:
+        """Current grid (post-truncation if a failure has been
+        observed). Exposed for tests and run-end logging — not used
+        by the runner loop."""
+        return list(self._grid)

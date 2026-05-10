@@ -13,7 +13,7 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
-from .adaptive import StepResult, TwoKneeStepper
+from .adaptive import FixedGridStepper, StepResult, TwoKneeStepper
 from .amx_utilization import parse_amx_utilization
 from .config import Config
 from .cpu_binding import expand_thread_binding
@@ -106,10 +106,21 @@ async def run_cohort(
     db_path: Path | None = None,
     run_dir: Path | None = None,
     new_run: bool = False,
-    # Spot-check mode: when set, skip the adaptive stepper and
-    # measure exactly these pool sizes (in order). Each one appends
-    # a new ``cohort_measurements`` row.
+    # Spot-check / audit-only escape hatch: measure exactly these pool
+    # sizes in order, NO early-stop, regardless of violation rate. Used
+    # by ``run_spot_check`` to re-measure flagged points. Production
+    # sweeps should use ``adaptive`` + ``fixed_grid_pool_sizes`` below
+    # — those go through the FixedGridStepper / TwoKneeStepper
+    # interface and get early-stop-on-failure semantics.
     pool_size_override: list[int] | None = None,
+    # Stepper-mode controls (mutually exclusive with pool_size_override):
+    #   * adaptive=True → TwoKneeStepper (knee-localizing bisection).
+    #   * adaptive=False (default) → FixedGridStepper at the powers-of-2
+    #     grid in ``adaptive.DEFAULT_FIXED_GRID``, OR at
+    #     ``fixed_grid_pool_sizes`` when supplied. Both fixed-grid
+    #     paths early-stop one step past the first observed failure.
+    adaptive: bool = False,
+    fixed_grid_pool_sizes: list[int] | None = None,
     # Append mode: when set, attach the new measurements to an
     # existing ``cohort_run`` row instead of creating a new one.
     # Used together with ``pool_size_override`` to enrich a
@@ -248,14 +259,21 @@ async def run_cohort(
         artifacts_dir=run_dir,
     )
 
-    # Two-knee adaptive stepper: locates BOTH the failure knee
-    # (5% violation rate) and the target knee (5% target_miss rate),
-    # then adds infill points for curve density. See
-    # ``simulator.adaptive.TwoKneeStepper`` for the phase machine.
-    #
-    # Spot-check mode bypasses the stepper and measures exactly the
-    # pool sizes the caller passed in.
-    if pool_size_override is None:
+    # Stepper selection (precedence: spot-check override → adaptive →
+    # fixed grid). All three drive the same measurement loop below;
+    # only the next-pool-size decision differs:
+    #   * pool_size_override  — explicit list, no early-stop. Used only
+    #                           by run_spot_check / audit re-runs.
+    #   * adaptive            — TwoKneeStepper (locates both knees +
+    #                           infill via Wilson-CI-aware bisection).
+    #   * default             — FixedGridStepper at powers-of-2
+    #                           [4..256] (or ``fixed_grid_pool_sizes``
+    #                           when supplied) with early-stop one
+    #                           step past the first observed failure.
+    if pool_size_override is not None:
+        stepper = None
+        override_iter = iter(pool_size_override)
+    elif adaptive:
         stepper = TwoKneeStepper(
             initial_pool_size=cfg.simulation.initial_pool_size,
             max_pool_size=cfg.simulation.max_pool_size,
@@ -263,8 +281,11 @@ async def run_cohort(
         )
         override_iter = None
     else:
-        stepper = None
-        override_iter = iter(pool_size_override)
+        stepper = FixedGridStepper(
+            grid=fixed_grid_pool_sizes,
+            failure_threshold=cfg.simulation.stop_violation_threshold,
+        )
+        override_iter = None
     final_status = "ok"
     run_started = time.monotonic()
     max_total_s = cfg.simulation.max_total_duration_minutes * 60
@@ -476,6 +497,13 @@ async def run_sweep(
     cohort_ids: list[str] | None = None,
     *,
     new_run: bool = False,
+    # Stepper mode for every cohort in the sweep. Defaults match
+    # run_cohort: adaptive=False uses FixedGridStepper (the new
+    # default), adaptive=True opts into the TwoKneeStepper.
+    # ``fixed_grid_pool_sizes`` overrides the default
+    # powers-of-2 grid when adaptive=False.
+    adaptive: bool = False,
+    fixed_grid_pool_sizes: list[int] | None = None,
 ) -> list[Path]:
     """Run multiple personas + cohorts back-to-back against the same engine.
 
@@ -521,17 +549,32 @@ async def run_sweep(
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
     engine.launch(log_dir=run_dir)
+    if adaptive:
+        log.info("Sweep mode: adaptive (TwoKneeStepper)")
+    else:
+        from .adaptive import DEFAULT_FIXED_GRID
+        grid = fixed_grid_pool_sizes or DEFAULT_FIXED_GRID
+        log.info(
+            "Sweep mode: fixed grid %s (early-stop one step past first failure)",
+            grid,
+        )
     paths: list[Path] = []
     try:
         for pid in persona_ids:
             log.info("=== Sweep: persona %s ===", pid)
             path = await run_cohort(
                 cfg, cohort_from_persona(pid), engine=engine, run_dir=run_dir,
+                adaptive=adaptive,
+                fixed_grid_pool_sizes=fixed_grid_pool_sizes,
             )
             paths.append(path)
         for cid in cohort_ids:
             log.info("=== Sweep: cohort %s ===", cid)
-            path = await run_cohort(cfg, cid, engine=engine, run_dir=run_dir)
+            path = await run_cohort(
+                cfg, cid, engine=engine, run_dir=run_dir,
+                adaptive=adaptive,
+                fixed_grid_pool_sizes=fixed_grid_pool_sizes,
+            )
             paths.append(path)
     finally:
         engine.shutdown()

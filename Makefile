@@ -17,6 +17,16 @@ COHORT  ?= chat_heavy
 PERSONA ?= quick_lookup
 # What to sweep: 'all' | 'personas' | 'cohorts' | a,b,c list of ids.
 SWEEP_TYPE ?= all
+# Stepper mode. Default is the fixed-grid sweep (powers of 2 from 4
+# to 256 with early-stop one step past first failure) — gives uniform
+# x-axis density for downstream capacity curves. Set ADAPTIVE=true to
+# opt into the two-knee adaptive stepper (Wilson-CI bisection) when
+# you care more about precise knee placement than uniform sampling.
+ADAPTIVE ?=
+# POOL_SIZES=8,16,32,... overrides the default powers-of-2 grid in
+# fixed-grid mode. Mutually exclusive with ADAPTIVE=true. Empty =
+# use the default grid.
+POOL_SIZES ?=
 CONFIG  ?= config/default.yaml
 RUN_DIR ?= runs
 # RUN_NEW=true cuts a fresh runs/run_NN+1/ instead of resuming the
@@ -55,8 +65,13 @@ help:
 	@echo "Run:"
 	@echo "  make run-persona CONFIG=... PERSONA=... Run one persona (a single user archetype)"
 	@echo "  make run-cohort  CONFIG=... COHORT=...  Run one cohort (a team mix of personas)"
-	@echo "  make run-sweep   CONFIG=... [SWEEP_TYPE=]  Sweep multiple workloads."
+	@echo "  make run-sweep   CONFIG=... [SWEEP_TYPE=] [POOL_SIZES=] [ADAPTIVE=true]"
+	@echo "                                          Sweep multiple workloads."
 	@echo "                                          SWEEP_TYPE=all|personas|cohorts|a,b,c"
+	@echo "                                          Default: fixed-grid sweep (4,8,16,32,64,128,256)"
+	@echo "                                          early-stops one step past first failure."
+	@echo "                                          POOL_SIZES=... overrides the default grid."
+	@echo "                                          ADAPTIVE=true → two-knee adaptive stepper."
 	@echo "                                          Always nohup'd + auto-tailed; survives SSH disconnect."
 	@echo "                                          Ctrl-C exits the tail (sweep keeps running)."
 	@echo "                                          Resumes latest run_NN by default;"
@@ -126,7 +141,9 @@ run-cohort:
 		--cohort $(COHORT) \
 		--config $(CONFIG) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
-		$(if $(MODEL),--model $(MODEL))
+		$(if $(MODEL),--model $(MODEL)) \
+		$(if $(filter true,$(ADAPTIVE)),--adaptive) \
+		$(if $(POOL_SIZES),--pool-sizes $(POOL_SIZES))
 
 .PHONY: run-persona
 run-persona:
@@ -134,7 +151,9 @@ run-persona:
 		--persona $(PERSONA) \
 		--config $(CONFIG) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
-		$(if $(MODEL),--model $(MODEL))
+		$(if $(MODEL),--model $(MODEL)) \
+		$(if $(filter true,$(ADAPTIVE)),--adaptive) \
+		$(if $(POOL_SIZES),--pool-sizes $(POOL_SIZES))
 
 # Sweeps are always nohup'd + log-teed + auto-tailed. SSH disconnect
 # leaves the simulator (and its docker engine containers) running;
@@ -171,6 +190,8 @@ run-sweep: stop-bg
 		--type $(SWEEP_TYPE) \
 		$(if $(ENGINE),--engine $(ENGINE)) \
 		$(if $(MODEL),--model $(MODEL)) \
+		$(if $(filter true,$(ADAPTIVE)),--adaptive) \
+		$(if $(POOL_SIZES),--pool-sizes $(POOL_SIZES)) \
 		>"$$LOG" 2>&1 </dev/null & \
 	PID=$$! ; \
 	echo "" ; \

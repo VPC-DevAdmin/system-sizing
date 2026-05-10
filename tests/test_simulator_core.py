@@ -3118,3 +3118,183 @@ def test_audit_clean_run_produces_no_anomalies(tmp_path) -> None:
 
     result = audit_mod.audit(rd)
     assert result.anomalies == []
+
+
+# ── Fixed-grid pool-sizes parser ─────────────────────────────────────
+def test_parse_pool_sizes_returns_none_for_empty_or_missing() -> None:
+    """Empty/None means adaptive stepper mode (the default). Both
+    forms must round-trip to ``None`` so the runner takes the
+    stepper path, not the override path."""
+    from simulator.cli import _parse_pool_sizes
+    assert _parse_pool_sizes(None) is None
+    assert _parse_pool_sizes("") is None
+
+
+def test_parse_pool_sizes_preserves_caller_order() -> None:
+    """The runner walks the override list in order — sorting would
+    silently change measurement sequence. Caller controls the order."""
+    from simulator.cli import _parse_pool_sizes
+    assert _parse_pool_sizes("8,16,32,64,128,256") == [8, 16, 32, 64, 128, 256]
+    assert _parse_pool_sizes("64,8,32") == [64, 8, 32]
+
+
+def test_parse_pool_sizes_tolerates_whitespace_and_empty_segments() -> None:
+    """Hand-typed grids in shells often pick up stray spaces or
+    trailing commas; reject only what's truly invalid."""
+    from simulator.cli import _parse_pool_sizes
+    assert _parse_pool_sizes(" 8, 16 ,  32  ") == [8, 16, 32]
+    assert _parse_pool_sizes("8,16,") == [8, 16]
+
+
+def test_parse_pool_sizes_rejects_non_positive_or_non_int() -> None:
+    """Zero pool size would spawn no users (silently no-op step);
+    negative is meaningless. Both must error rather than be
+    silently skipped — the run would otherwise complete with an
+    incomplete curve and no warning."""
+    import typer
+    from simulator.cli import _parse_pool_sizes
+    for bad in ["0", "0,8", "8,-1,16", "abc", "8,abc", "8,1.5,16"]:
+        try:
+            _parse_pool_sizes(bad)
+        except typer.BadParameter:
+            continue
+        raise AssertionError(f"expected BadParameter for {bad!r}")
+
+
+def test_resolve_stepper_args_rejects_adaptive_with_pool_sizes() -> None:
+    """The two flags pick different stepper modes; combining them is
+    nonsensical (the adaptive stepper picks pool sizes itself). Reject
+    at parse time so it surfaces immediately, not after a long run."""
+    import typer
+    from simulator.cli import _resolve_stepper_args
+    try:
+        _resolve_stepper_args("8,16,32", adaptive=True)
+    except typer.BadParameter:
+        return
+    raise AssertionError("expected BadParameter for --adaptive + --pool-sizes")
+
+
+def test_resolve_stepper_args_default_returns_fixed_grid_with_no_override() -> None:
+    """No flags = fixed grid (default), no override list. The runner
+    then uses ``adaptive.DEFAULT_FIXED_GRID``."""
+    from simulator.cli import _resolve_stepper_args
+    assert _resolve_stepper_args(None, adaptive=False) == (False, None)
+
+
+def test_resolve_stepper_args_pool_sizes_only_means_fixed_with_grid() -> None:
+    from simulator.cli import _resolve_stepper_args
+    adaptive, grid = _resolve_stepper_args("8,16,32", adaptive=False)
+    assert adaptive is False
+    assert grid == [8, 16, 32]
+
+
+def test_resolve_stepper_args_adaptive_only_means_adaptive_no_grid() -> None:
+    from simulator.cli import _resolve_stepper_args
+    assert _resolve_stepper_args(None, adaptive=True) == (True, None)
+
+
+# ── FixedGridStepper ─────────────────────────────────────────────────
+def test_fixed_grid_stepper_walks_default_grid_when_no_failures() -> None:
+    """Clean run (every step under threshold) should visit every
+    point in the default powers-of-2 grid, in order, then return None."""
+    from simulator.adaptive import (
+        DEFAULT_FIXED_GRID, FixedGridStepper, StepResult,
+    )
+    s = FixedGridStepper()
+    visited = []
+    while (n := s.next_pool_size()) is not None:
+        visited.append(n)
+        s.record(StepResult(pool_size=n, violation_rate=0.0))
+    assert visited == list(DEFAULT_FIXED_GRID)
+
+
+def test_fixed_grid_stepper_default_grid_is_powers_of_two_to_256() -> None:
+    """Pin the default grid so accidental edits get caught — downstream
+    capacity charts depend on this x-axis sampling."""
+    from simulator.adaptive import DEFAULT_FIXED_GRID
+    assert DEFAULT_FIXED_GRID == [4, 8, 16, 32, 64, 128, 256]
+
+
+def test_fixed_grid_stepper_uses_caller_grid_when_provided() -> None:
+    from simulator.adaptive import FixedGridStepper, StepResult
+    s = FixedGridStepper(grid=[10, 20, 40])
+    visited = []
+    while (n := s.next_pool_size()) is not None:
+        visited.append(n)
+        s.record(StepResult(pool_size=n, violation_rate=0.0))
+    assert visited == [10, 20, 40]
+
+
+def test_fixed_grid_stepper_stops_one_step_past_first_failure() -> None:
+    """The whole point of early-stop: when pool=N fails, measure the
+    next grid point (which by construction roughly doubles N for the
+    powers-of-2 default) and then halt — rather than wasting wall-clock
+    on every larger pool size where failure is already certain."""
+    from simulator.adaptive import FixedGridStepper, StepResult
+    s = FixedGridStepper(grid=[4, 8, 16, 32, 64, 128, 256])
+    visited = []
+    while (n := s.next_pool_size()) is not None:
+        visited.append(n)
+        # Pool=32 fails (violation_rate ≥ stop threshold of 0.5)
+        viol = 0.7 if n == 32 else 0.0
+        s.record(StepResult(pool_size=n, violation_rate=viol))
+    # Should visit 4,8,16,32 (during which failure observed), then
+    # one more — 64 — then stop. NOT 128 or 256.
+    assert visited == [4, 8, 16, 32, 64]
+
+
+def test_fixed_grid_stepper_does_not_re_truncate_on_subsequent_failures() -> None:
+    """Once the post-failure step has been scheduled, additional
+    failures at higher pools must not re-extend the grid (would
+    create an infinite loop) nor re-truncate it (would drop the
+    just-scheduled confirmatory step)."""
+    from simulator.adaptive import FixedGridStepper, StepResult
+    s = FixedGridStepper(grid=[8, 16, 32, 64, 128])
+    visited = []
+    while (n := s.next_pool_size()) is not None:
+        visited.append(n)
+        # Both 32 and 64 fail. Only the first failure should affect
+        # grid; the second is just measured and recorded.
+        viol = 0.9 if n in (32, 64) else 0.0
+        s.record(StepResult(pool_size=n, violation_rate=viol))
+    assert visited == [8, 16, 32, 64]
+
+
+def test_fixed_grid_stepper_failure_at_last_grid_point_stops_immediately() -> None:
+    """Failure at the last grid point should stop without trying to
+    extend past the end of the grid (no IndexError, no extra step)."""
+    from simulator.adaptive import FixedGridStepper, StepResult
+    s = FixedGridStepper(grid=[8, 16, 32])
+    visited = []
+    while (n := s.next_pool_size()) is not None:
+        visited.append(n)
+        viol = 0.8 if n == 32 else 0.0
+        s.record(StepResult(pool_size=n, violation_rate=viol))
+    assert visited == [8, 16, 32]
+
+
+def test_fixed_grid_stepper_failure_at_first_grid_point_measures_one_more() -> None:
+    """Even if the first pool already fails, we still want at least
+    two data points for a usable curve."""
+    from simulator.adaptive import FixedGridStepper, StepResult
+    s = FixedGridStepper(grid=[8, 16, 32, 64])
+    visited = []
+    while (n := s.next_pool_size()) is not None:
+        visited.append(n)
+        viol = 0.9 if n == 8 else 0.0
+        s.record(StepResult(pool_size=n, violation_rate=viol))
+    assert visited == [8, 16]
+
+
+def test_fixed_grid_stepper_threshold_exactly_at_boundary_counts_as_failure() -> None:
+    """``violation_rate >= failure_threshold`` is the contract — a
+    measurement that lands EXACTLY at the threshold must trigger
+    early-stop, not be treated as still-passing."""
+    from simulator.adaptive import FixedGridStepper, StepResult
+    s = FixedGridStepper(grid=[8, 16, 32, 64], failure_threshold=0.5)
+    visited = []
+    while (n := s.next_pool_size()) is not None:
+        visited.append(n)
+        viol = 0.5 if n == 16 else 0.0
+        s.record(StepResult(pool_size=n, violation_rate=viol))
+    assert visited == [8, 16, 32]

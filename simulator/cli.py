@@ -31,12 +31,75 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+def _parse_pool_sizes(arg: str | None) -> list[int] | None:
+    """Parse a ``--pool-sizes`` CLI value into a list of positive ints.
+
+    Returns ``None`` when ``arg`` is empty/None (adaptive stepper mode).
+    Otherwise returns the parsed list, raising BadParameter for non-int
+    or non-positive values. Preserves caller order — the runner walks
+    the list in order, so the caller controls measurement sequence.
+    """
+    if not arg:
+        return None
+    try:
+        sizes = [int(s.strip()) for s in arg.split(",") if s.strip()]
+    except ValueError as e:
+        raise typer.BadParameter(
+            f"--pool-sizes must be a comma-separated list of integers: {e}"
+        ) from e
+    if not sizes:
+        raise typer.BadParameter("--pool-sizes is empty")
+    if any(n <= 0 for n in sizes):
+        raise typer.BadParameter(
+            f"--pool-sizes must be positive integers (got {sizes})"
+        )
+    return sizes
+
+
+_POOL_SIZES_HELP = (
+    "Override the default fixed grid (powers of 2 from 4 to 256) "
+    "with a comma-separated list of pool sizes (e.g. "
+    "``8,16,32,64,128,256``). Each is measured in order; the run "
+    "still early-stops one step past the first observed failure. "
+    "Has no effect with --adaptive."
+)
+
+_ADAPTIVE_HELP = (
+    "Use the two-knee adaptive stepper (Wilson-CI-aware bisection) "
+    "instead of the default fixed-grid sweep. The adaptive stepper "
+    "localizes both knees and infills curve density around them; "
+    "the fixed grid gives uniform x-axis density across powers of 2. "
+    "Pick adaptive when you care about precise knee placement; "
+    "pick fixed grid (the default) when you're plotting the curve "
+    "downstream and want consistent x-axis sampling."
+)
+
+
+def _resolve_stepper_args(
+    pool_sizes: str | None, adaptive: bool
+) -> tuple[bool, list[int] | None]:
+    """Validate the (adaptive, pool_sizes) flag combo and return
+    ``(adaptive, fixed_grid)`` ready to pass to run_cohort/run_sweep.
+    Rejects ``--adaptive --pool-sizes ...`` since the grid is
+    meaningless when the adaptive stepper is in charge."""
+    parsed = _parse_pool_sizes(pool_sizes)
+    if adaptive and parsed is not None:
+        raise typer.BadParameter(
+            "--pool-sizes and --adaptive are mutually exclusive: "
+            "--adaptive picks pool sizes via the two-knee stepper, "
+            "--pool-sizes only applies to fixed-grid mode."
+        )
+    return adaptive, parsed
+
+
 @app.command()
 def run(
     cohort: str = typer.Option(..., help="Cohort (team mix) id"),
     config: Path = typer.Option(Path("config/default.yaml"), help="Config file"),
     engine: str = typer.Option(None, help="Override engine.type from CONFIG (vllm | sglang)"),
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
+    pool_sizes: str = typer.Option(None, "--pool-sizes", help=_POOL_SIZES_HELP),
+    adaptive: bool = typer.Option(False, "--adaptive", help=_ADAPTIVE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Run a single cohort (team mix) end-to-end."""
@@ -46,8 +109,13 @@ def run(
     if cohort not in COHORTS:
         raise typer.BadParameter(f"Unknown cohort '{cohort}'. Known: {sorted(COHORTS)}")
 
+    use_adaptive, grid = _resolve_stepper_args(pool_sizes, adaptive)
     from .runner import run_cohort
-    db_path = asyncio.run(run_cohort(cfg, cohort))
+    db_path = asyncio.run(run_cohort(
+        cfg, cohort,
+        adaptive=use_adaptive,
+        fixed_grid_pool_sizes=grid,
+    ))
     typer.echo(f"Run complete -> {db_path}")
 
 
@@ -57,6 +125,8 @@ def run_persona_cmd(
     config: Path = typer.Option(Path("config/default.yaml"), help="Config file"),
     engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
+    pool_sizes: str = typer.Option(None, "--pool-sizes", help=_POOL_SIZES_HELP),
+    adaptive: bool = typer.Option(False, "--adaptive", help=_ADAPTIVE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Run a single persona end-to-end (one user archetype, no team mix).
@@ -73,8 +143,13 @@ def run_persona_cmd(
             f"Unknown persona '{persona}'. Known: {sorted(PERSONAS)}"
         )
 
+    use_adaptive, grid = _resolve_stepper_args(pool_sizes, adaptive)
     from .runner import run_cohort
-    db_path = asyncio.run(run_cohort(cfg, cohort_from_persona(persona)))
+    db_path = asyncio.run(run_cohort(
+        cfg, cohort_from_persona(persona),
+        adaptive=use_adaptive,
+        fixed_grid_pool_sizes=grid,
+    ))
     typer.echo(f"Run complete -> {db_path}")
 
 
@@ -103,6 +178,8 @@ def sweep(
             "previous run's data should NOT be merged with the new one."
         ),
     ),
+    pool_sizes: str = typer.Option(None, "--pool-sizes", help=_POOL_SIZES_HELP),
+    adaptive: bool = typer.Option(False, "--adaptive", help=_ADAPTIVE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Run multiple personas + cohorts back-to-back against one engine.
@@ -123,9 +200,12 @@ def sweep(
     if not persona_ids and not cohort_ids:
         raise typer.BadParameter(f"Nothing resolved from --type={type!r}")
 
+    use_adaptive, grid = _resolve_stepper_args(pool_sizes, adaptive)
     from .runner import run_sweep
     paths = asyncio.run(run_sweep(
         cfg, persona_ids=persona_ids, cohort_ids=cohort_ids, new_run=new_run,
+        adaptive=use_adaptive,
+        fixed_grid_pool_sizes=grid,
     ))
     typer.echo(
         f"Sweep complete: {len(paths)} runs "

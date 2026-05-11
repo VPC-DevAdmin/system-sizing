@@ -150,7 +150,20 @@ class _IntervalSample:
     queue_depth: Optional[int] = None
     prefix_cache_hits: Optional[int] = None
     prefix_cache_misses: Optional[int] = None
+    # Host-wide CPU utilization (mean across every logical CPU the
+    # kernel sees). Useful for "did anything else compete with the
+    # engine on this box" forensics but misleading as a workload
+    # utilization number — on a 128-logical-CPU host with the engine
+    # pinned to 64 cores, this caps at ~50% even when the engine is
+    # pegged because the unused HT siblings / unused socket are
+    # averaged in.
     cpu_util_avg: Optional[float] = None
+    # Bound-set CPU utilization (mean across only the cores in the
+    # engine's cpu_bind cpuset). This is the actual workload
+    # utilization number — at 100% the engine has saturated its
+    # allocated CPU budget. Falls back to host-wide when no
+    # bound_cpus is configured.
+    cpu_util_bound_avg: Optional[float] = None
     memory_used_gb: Optional[float] = None
     engine_rss_gb: Optional[float] = None
     freq_mhz_mean: Optional[float] = None
@@ -265,7 +278,7 @@ class MeasurementTelemetry:
         return (self._measurement_id or -1), rows, agg
 
     async def _loop(self) -> None:
-        last_cpu: tuple[int, int] | None = None
+        last_cpu: dict[int, tuple[int, int]] | None = None
         try:
             while not self._stopped:
                 sample = _IntervalSample(sampled_at_ms=_now_ms())
@@ -283,9 +296,13 @@ class MeasurementTelemetry:
                     if "prefix_cache_hits" in m:
                         sample.prefix_cache_hits = int(m["prefix_cache_hits"])
 
-                # CPU util via /proc/stat delta
-                util, last_cpu = _read_cpu_util(last_cpu)
-                sample.cpu_util_avg = util
+                # CPU util via /proc/stat — both views from a single
+                # per-CPU read so the two metrics share an interval.
+                host_util, bound_util, last_cpu = _read_cpu_util(
+                    last_cpu, bound_cpus=self.bound_cpus,
+                )
+                sample.cpu_util_avg = host_util
+                sample.cpu_util_bound_avg = bound_util
 
                 # Memory used (system + engine RSS)
                 sample.memory_used_gb = _read_memory_used_gb()
@@ -311,6 +328,7 @@ class MeasurementTelemetry:
             "prefix_cache_hits": s.prefix_cache_hits,
             "prefix_cache_misses": s.prefix_cache_misses,
             "cpu_util_avg": s.cpu_util_avg,
+            "cpu_util_bound_avg": s.cpu_util_bound_avg,
             "memory_used_gb": s.memory_used_gb,
             "engine_rss_gb": s.engine_rss_gb,
             "freq_mhz_mean": s.freq_mhz_mean,
@@ -322,29 +340,94 @@ class MeasurementTelemetry:
 # ── /proc helpers ─────────────────────────────────────────────────────
 
 
-def _read_cpu_util(last: tuple[int, int] | None) -> tuple[Optional[float], tuple[int, int] | None]:
-    """Best-effort host CPU util via /proc/stat delta. Returns (util, new_last)."""
+def _read_cpu_util(
+    last: dict[int, tuple[int, int]] | None,
+    *,
+    bound_cpus: set[int] | None = None,
+) -> tuple[Optional[float], Optional[float], dict[int, tuple[int, int]] | None]:
+    """Read /proc/stat per-CPU and return BOTH host-wide and bound-set
+    utilization for the interval since ``last``.
+
+    Returns ``(host_util, bound_util, new_last)``:
+      * ``host_util`` — mean utilization across every logical CPU
+        the kernel reports. Useful for forensic "did anything else
+        compete with the engine" diagnosis. On a multi-socket or
+        HT-enabled host with a single-socket cpuset, this is diluted
+        by idle cores outside the binding and dramatically
+        understates the workload's actual CPU pressure.
+      * ``bound_util`` — mean utilization across only the CPUs in
+        ``bound_cpus``. This is the workload-relevant number — at
+        100% the engine has saturated its allocated CPU budget.
+        Falls back to ``host_util`` when ``bound_cpus`` is None
+        (e.g. an engine without an explicit cpu_bind).
+
+    Both metrics are computed from a single /proc/stat read so the
+    two views share the same interval and any sampling skew is
+    identical. ``new_last`` is a dict of ``{cpu_id: (idle_ticks,
+    total_ticks)}`` for the next delta computation.
+
+    On the first call ``last`` is None — returns ``(None, None,
+    initial_snapshot)`` since you need two samples to compute a
+    delta. Returns ``(None, None, last)`` on any read failure;
+    callers should tolerate Nones and skip the sample.
+    """
     if not os.path.exists("/proc/stat"):
-        return None, last
+        return None, None, last
     try:
+        per_cpu_now: dict[int, tuple[int, int]] = {}
         with open("/proc/stat") as f:
-            line = f.readline()
-        parts = line.split()
-        if not parts or parts[0] != "cpu":
-            return None, last
-        nums = [int(x) for x in parts[1:]]
-        idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
-        total = sum(nums)
+            for line in f:
+                # Per-CPU rows look like ``cpu0 ...``, ``cpu127 ...``;
+                # the aggregate row is ``cpu ...`` (note trailing space)
+                # which we skip — we synthesize it from the per-CPU
+                # numbers so host and bound aggregates share a base.
+                if not line.startswith("cpu"):
+                    break  # /proc/stat puts all cpu lines first; bail
+                if line.startswith("cpu "):
+                    continue
+                parts = line.split()
+                if not parts or len(parts) < 5:
+                    continue
+                try:
+                    cpu_id = int(parts[0][3:])
+                except ValueError:
+                    continue
+                nums = [int(x) for x in parts[1:]]
+                # idle + iowait (col 3 + 4 in /proc/stat) — same
+                # definition as the prior single-line reader.
+                idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
+                total = sum(nums)
+                per_cpu_now[cpu_id] = (idle, total)
+        if not per_cpu_now:
+            return None, None, last
         if last is None:
-            return None, (idle, total)
-        d_idle = idle - last[0]
-        d_total = total - last[1]
-        if d_total <= 0:
-            return None, (idle, total)
-        util = 100.0 * (1.0 - d_idle / d_total)
-        return util, (idle, total)
+            return None, None, per_cpu_now
+
+        def _mean_util(cpu_ids) -> Optional[float]:
+            utils: list[float] = []
+            for cpu_id in cpu_ids:
+                if cpu_id not in last or cpu_id not in per_cpu_now:
+                    continue
+                d_idle = per_cpu_now[cpu_id][0] - last[cpu_id][0]
+                d_total = per_cpu_now[cpu_id][1] - last[cpu_id][1]
+                if d_total <= 0:
+                    continue
+                utils.append(100.0 * (1.0 - d_idle / d_total))
+            if not utils:
+                return None
+            return sum(utils) / len(utils)
+
+        host_util = _mean_util(per_cpu_now.keys())
+        if bound_cpus:
+            bound_util = _mean_util(bound_cpus)
+        else:
+            # No explicit binding → bound view equals host view, so
+            # consumers can read either field safely without
+            # special-casing the "no cpu_bind set" case.
+            bound_util = host_util
+        return host_util, bound_util, per_cpu_now
     except Exception:
-        return None, last
+        return None, None, last
 
 
 def _read_memory_used_gb() -> Optional[float]:

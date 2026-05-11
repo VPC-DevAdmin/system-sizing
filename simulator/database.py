@@ -305,6 +305,18 @@ class Database:
                  ("ttfct_p95_ms", "REAL"),
                  ("avg_reasoning_tokens", "REAL")],
             )
+            # Bound-set CPU util (mean utilization across only the
+            # cores the engine is pinned to). The pre-existing
+            # ``cpu_util_avg`` is host-wide and on a multi-socket or
+            # HT-enabled host gets diluted by idle cores outside the
+            # cpuset (e.g. a 64-core cpuset on a 128-logical-CPU
+            # host caps at ~50% even when the engine is pegged).
+            # Keep both: host-wide for "did anything else compete?"
+            # forensics, bound for actual workload utilization.
+            self._ensure_columns(
+                "measurement_telemetry",
+                [("cpu_util_bound_avg", "REAL")],
+            )
 
     def _ensure_columns(
         self, table: str, columns: list[tuple[str, str]],

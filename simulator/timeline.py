@@ -9,18 +9,21 @@ lockstep and submit simultaneously.
 
 Phases:
 
-    idle      — virtual user has been spawned but hasn't fired its
-                first request yet. Initial phase-offset (per-user
-                think-time fraction sleep at spawn) lives here.
     prefill   — request submitted, awaiting first token. Span =
                 ``[submitted_at_ms, submitted_at_ms + ttft_ms)``.
     decode    — first token received, streaming continuing. Span =
                 ``[submitted_at_ms + ttft_ms, completed_at_ms)``.
     think     — user is reading the response / thinking up the next
                 turn. Span = ``[prev_completed_at_ms, this_submitted_at_ms)``
-                for consecutive turns within a session.
+                for consecutive turns within a session. Also covers the
+                pre-first-turn window: a freshly-spawned user sleeps for
+                a random fraction of one (read_time + active_think)
+                sample as its "initial phase offset" before submitting
+                turn 0 — physically the same state as a post-turn
+                think gap (waiting to fire next request), so it folds
+                into ``think`` rather than getting its own bucket.
 
-At any given timestamp, ``prefill + decode + think + idle`` equals the
+At any given timestamp, ``prefill + decode + think`` equals the
 number of users alive in the pool — modulo measurement-window edge
 effects (a user spawned outside the window contributes a partial
 phase trail). The sum should hover near the target pool size after
@@ -38,7 +41,9 @@ import sqlite3
 from dataclasses import dataclass
 
 # Phase counter keys — the schema fields downstream consumers expect.
-PHASES: tuple[str, ...] = ("prefill", "decode", "think", "idle")
+# Pre-first-turn "idle" (initial phase offset) folds into ``think``
+# since it's physically the same state — see module docstring.
+PHASES: tuple[str, ...] = ("prefill", "decode", "think")
 
 
 @dataclass
@@ -50,16 +55,15 @@ class TimelinePoint:
     prefill: int
     decode: int
     think: int
-    idle: int
 
     @property
     def total(self) -> int:
-        return self.prefill + self.decode + self.think + self.idle
+        return self.prefill + self.decode + self.think
 
     def as_row(self) -> list[int]:
-        """Ordered ``[t_offset_s, prefill, decode, think, idle]`` —
+        """Ordered ``[t_offset_s, prefill, decode, think]`` —
         matches the compact array-of-arrays JSON shape."""
-        return [self.t_offset_s, self.prefill, self.decode, self.think, self.idle]
+        return [self.t_offset_s, self.prefill, self.decode, self.think]
 
 
 def compute_timeline(
@@ -135,18 +139,23 @@ def compute_timeline(
         events.append((end, idx, -1))
 
     for user_id, turns in user_turns.items():
-        # Idle: spawn → first submit. Clamped to window start so a
-        # user spawned long before the measurement window doesn't
-        # contribute idle time outside the window.
+        # Pre-first-turn read+think: spawn → first submit. Clamped
+        # to window start so a user spawned long before the window
+        # doesn't contribute time outside the window. Goes into
+        # ``think`` rather than a separate ``idle`` bucket because
+        # physically it IS the same state — the initial phase offset
+        # is a random fraction of one (read_time + active_think)
+        # sample, so the user is "sleeping until time to fire next
+        # request," indistinguishable from a between-turn gap.
         first_submit = turns[0][3]
         spawned = spawn_times.get(user_id)
         if spawned is not None and spawned < first_submit:
-            add(max(spawned, t_start), first_submit, "idle")
+            add(max(spawned, t_start), first_submit, "think")
 
         prev_complete: int | None = None
         for (_, _sid, _tidx, submit, ttft, complete) in turns:
-            # Think: previous completion → this submit. Captures both
-            # in-session read+active-think gaps. (Cross-session gaps
+            # Think: previous completion → this submit. Captures the
+            # in-session read+active-think gap. (Cross-session gaps
             # don't exist under per-session-respawn — users terminate
             # after one session.)
             if prev_complete is not None:
@@ -180,7 +189,6 @@ def compute_timeline(
                 prefill=counters[phase_index["prefill"]],
                 decode=counters[phase_index["decode"]],
                 think=counters[phase_index["think"]],
-                idle=counters[phase_index["idle"]],
             )
         )
         t += resolution_ms
@@ -199,8 +207,8 @@ def timeline_to_export_dict(
     Schema:
         {
           "resolution_ms": 1000,
-          "schema": ["t_offset_s", "prefill", "decode", "think", "idle"],
-          "rows": [[t, p, d, th, i], ...]
+          "schema": ["t_offset_s", "prefill", "decode", "think"],
+          "rows": [[t, p, d, th], ...]
         }
 
     Array-of-arrays is ~3× smaller than array-of-objects on this

@@ -34,9 +34,9 @@ by [web/index.html](../web/index.html) (or any downstream parser):
               ],
               timeline: {                        // phase distribution
                 resolution_ms: 1000,             // per second
-                schema: ["t_offset_s", "prefill", "decode",
-                         "think", "idle"],
-                rows: [[0,0,0,0,8], [1,2,0,0,6], ...]
+                schema: ["t_offset_s", "prefill",
+                         "decode", "think"],
+                rows: [[0,0,0,8], [1,2,0,6], ...]
               }
             },
             ...
@@ -145,7 +145,15 @@ _TELEMETRY_SAMPLE_COLUMNS = (
     "queue_depth",
     "prefix_cache_hits",
     "prefix_cache_misses",
+    # Host-wide CPU util (every logical CPU the kernel sees). Diluted
+    # by idle cores outside the engine's cpuset on multi-socket /
+    # HT-enabled hosts; use for "did anything else compete" forensics.
     "cpu_util_avg",
+    # Bound-set CPU util (only cores in the engine's cpu_bind cpuset).
+    # The actual workload-utilization number — 100% means the engine
+    # has saturated its allocated CPU budget. Falls back to host-wide
+    # when no cpu_bind is configured.
+    "cpu_util_bound_avg",
     "memory_used_gb",
     "engine_rss_gb",
     "freq_mhz_mean",
@@ -203,6 +211,7 @@ def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
         tele = conn.execute(
             """SELECT AVG(kv_cache_used_pct) AS kv,
                       AVG(cpu_util_avg) AS cpu,
+                      AVG(cpu_util_bound_avg) AS cpu_bound,
                       AVG(engine_rss_gb) AS engine_rss_gb_avg,
                       AVG(freq_mhz_mean) AS freq_mhz_avg
                FROM measurement_telemetry

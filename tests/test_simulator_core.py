@@ -2520,8 +2520,11 @@ def test_export_includes_per_step_time_series(tmp_path) -> None:
     )
     timeline = step["timeline"]
     assert timeline["resolution_ms"] == 1000
+    # Three phases — pre-first-turn "idle" is folded into ``think``
+    # since it's physically the same state (waiting to fire next
+    # request).
     assert timeline["schema"] == ["t_offset_s", "prefill", "decode",
-                                  "think", "idle"]
+                                  "think"]
     assert isinstance(timeline["rows"], list)
     # Our single turn had ttft=1697ms, completed at 5500 (decode for
     # 5500-1500-1697 ≈ 2.3s). At t=1.5s (offset_s=0 since min submit
@@ -3410,30 +3413,42 @@ def test_timeline_marks_inter_turn_gap_as_think(tmp_path) -> None:
     assert s3.prefill == 0 and s3.decode == 0
 
 
-def test_timeline_captures_idle_phase_before_first_turn(tmp_path) -> None:
-    """Virtual users with an initial phase offset spend the gap
-    between spawn and first submit in ``idle``. The counter is what
-    lets total = pool_size match across the whole window — without
-    it, a freshly-spawned user would simply not appear in any bucket."""
+def test_timeline_folds_pre_first_turn_gap_into_think(tmp_path) -> None:
+    """A virtual user's pre-first-turn window (spawn → first submit,
+    minus the initial-phase-offset sleep) is the same physical state
+    as a between-turn read+think gap: the user is sleeping until it's
+    time to fire next. It folds into ``think`` rather than a separate
+    ``idle`` bucket so the chart doesn't show a misleading 'idle wedge'
+    at measurement-window start when users still mid-cycle from
+    warmup-phase turns appear before their first measurement-window
+    submit."""
     from simulator.timeline import compute_timeline
     import sqlite3
+    # spawn 1000ms before any turn data; second user spawned later
+    # to give us a window where the pre-first-turn gap is visible.
     db_path, mid = _seed_timeline_db(
         tmp_path,
-        turns=[{"user_id": "u1", "turn_index": 0,
-                "submit": 3000, "ttft": 500.0, "complete": 4000}],
-        spawns=[{"user_id": "u1", "spawned": 1000}],
+        turns=[
+            {"user_id": "u1", "turn_index": 0,
+             "submit": 1000, "ttft": 500.0, "complete": 2000},
+            {"user_id": "u2", "turn_index": 0,
+             "submit": 5000, "ttft": 500.0, "complete": 6000},
+        ],
+        spawns=[
+            {"user_id": "u1", "spawned": 500},
+            {"user_id": "u2", "spawned": 500},  # spawned early; in pre-first-turn window
+        ],
     )
     conn = sqlite3.connect(db_path)
     tl = compute_timeline(conn, mid, resolution_ms=1000)
     conn.close()
-    # t=0 corresponds to t_start = 3000ms (earliest submit, not spawn —
-    # the timeline window opens with the first turn, but idle should
-    # still be visible if spawn precedes window-start.) Actually since
-    # spawn=1000 is < t_start=3000, idle gets clamped to [3000, 3000)
-    # → zero-length, skipped. The user lands directly in prefill at t=0.
-    assert tl[0].prefill == 1
-    # The clamping is the intended behavior — a user spawned far before
-    # window start contributes no idle samples to this window.
+    # At t_offset=2s (3000ms), u2 has been spawned but hasn't fired
+    # its first turn yet → must be in ``think`` (was previously
+    # ``idle``).
+    s_at_3s = next(p for p in tl if p.t_offset_s == 2)
+    assert s_at_3s.think >= 1, (
+        f"u2 between spawn and first turn must register as think; got {s_at_3s}"
+    )
 
 
 def test_timeline_counts_concurrent_users_correctly(tmp_path) -> None:
@@ -3502,3 +3517,155 @@ def test_fixed_grid_stepper_threshold_exactly_at_boundary_counts_as_failure() ->
         viol = 0.5 if n == 16 else 0.0
         s.record(StepResult(pool_size=n, violation_rate=viol))
     assert visited == [8, 16, 32]
+
+
+# ── CPU utilization: host-wide vs bound-set ──────────────────────────
+def _write_proc_stat(path, per_cpu):
+    """Write a minimal /proc/stat-style file with one ``cpu N ...``
+    aggregate row plus per-CPU rows. Each per_cpu entry is
+    ``(cpu_id, [user, nice, system, idle, iowait])`` — the columns
+    the reader pulls. We pad with zeros where needed."""
+    lines = []
+    total_user = sum(v[0] for _, v in per_cpu)
+    total_nice = sum(v[1] for _, v in per_cpu)
+    total_sys = sum(v[2] for _, v in per_cpu)
+    total_idle = sum(v[3] for _, v in per_cpu)
+    total_iowait = sum(v[4] for _, v in per_cpu)
+    lines.append(f"cpu  {total_user} {total_nice} {total_sys} {total_idle} {total_iowait} 0 0 0 0 0")
+    for cpu_id, vals in per_cpu:
+        u, n, s, i, w = vals
+        lines.append(f"cpu{cpu_id} {u} {n} {s} {i} {w} 0 0 0 0 0")
+    lines.append("intr 0")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_read_cpu_util_bound_set_unaffected_by_idle_cpus_outside_binding(tmp_path, monkeypatch) -> None:
+    """The dilution bug this whole change fixes: a 64-core cpuset on a
+    128-logical-CPU host pegging its bound cores must report ~100% in
+    the bound view, even though the host-wide average is ~50%
+    (because the unused HT siblings / unused socket are idle)."""
+    import os
+    from simulator import telemetry as t
+
+    fake_proc = tmp_path / "stat"
+
+    # Snapshot 1: all CPUs have done zero work (run-start).
+    per_cpu_t0 = [(i, [0, 0, 0, 0, 0]) for i in range(128)]
+    _write_proc_stat(fake_proc, per_cpu_t0)
+    monkeypatch.setattr(os.path, "exists", lambda p: p == str(fake_proc))
+    monkeypatch.setattr(t, "open", lambda p, *a, **kw: open(fake_proc), raising=False)
+    # Re-use the real open() via the module's __builtins__; instead
+    # patch /proc/stat path lookup by monkeypatching the function's
+    # path constant via a wrapper.
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/stat":
+            return real_open(fake_proc, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(os.path, "exists", lambda p: True if p == "/proc/stat" else os.path.lexists(p))
+
+    bound = set(range(64))  # cpuset 0-63 (one socket, primary HT siblings)
+    host_t0, bound_t0, state = t._read_cpu_util(None, bound_cpus=bound)
+    assert host_t0 is None and bound_t0 is None, "first read must return Nones"
+    assert state is not None and len(state) == 128
+
+    # Snapshot 2: CPUs 0-63 did 1000 ticks of user work (busy);
+    # CPUs 64-127 did 1000 ticks of idle (asleep).
+    per_cpu_t1 = []
+    for i in range(64):
+        per_cpu_t1.append((i, [1000, 0, 0, 0, 0]))  # all user, no idle
+    for i in range(64, 128):
+        per_cpu_t1.append((i, [0, 0, 0, 1000, 0]))  # all idle
+    _write_proc_stat(fake_proc, per_cpu_t1)
+
+    host, bound_util, _ = t._read_cpu_util(state, bound_cpus=bound)
+    # Bound view: pinned cores 100% busy → ~100%
+    assert bound_util is not None and bound_util > 99.0, (
+        f"bound-set util at 100%-busy must report ~100%, got {bound_util}"
+    )
+    # Host view: half the logical CPUs are busy, half idle → ~50%
+    assert host is not None and 45.0 < host < 55.0, (
+        f"host-wide util with half-idle CPUs must dilute to ~50%, got {host}"
+    )
+
+
+def test_read_cpu_util_falls_back_to_host_when_no_binding(tmp_path, monkeypatch) -> None:
+    """An engine launched without ``cpu_bind`` (e.g. dev runs with
+    everything host-wide) gets ``bound_util == host_util`` so the
+    consumer can read either field without special-casing.
+    """
+    import os
+    from simulator import telemetry as t
+
+    fake_proc = tmp_path / "stat"
+    per_cpu_t0 = [(i, [0, 0, 0, 0, 0]) for i in range(8)]
+    _write_proc_stat(fake_proc, per_cpu_t0)
+
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/stat":
+            return real_open(fake_proc, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(os.path, "exists", lambda p: True if p == "/proc/stat" else os.path.lexists(p))
+
+    _, _, state = t._read_cpu_util(None, bound_cpus=None)
+    # Half busy, half idle
+    per_cpu_t1 = [(i, [1000, 0, 0, 0, 0]) for i in range(4)] + \
+                 [(i, [0, 0, 0, 1000, 0]) for i in range(4, 8)]
+    _write_proc_stat(fake_proc, per_cpu_t1)
+    host, bound_util, _ = t._read_cpu_util(state, bound_cpus=None)
+    assert host is not None and bound_util is not None
+    assert host == bound_util, (
+        "without bound_cpus, bound view must equal host view "
+        "(consumers should be able to read either field safely)"
+    )
+    assert 45.0 < host < 55.0
+
+
+def test_read_cpu_util_first_call_returns_nones(tmp_path, monkeypatch) -> None:
+    """The first call has no prior snapshot to delta against — both
+    util fields must be None on first read so the caller knows to
+    skip the sample. The state dict is still populated for the next
+    call's delta."""
+    import os
+    from simulator import telemetry as t
+
+    fake_proc = tmp_path / "stat"
+    _write_proc_stat(fake_proc, [(i, [10, 0, 0, 5, 0]) for i in range(4)])
+
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/stat":
+            return real_open(fake_proc, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(os.path, "exists", lambda p: True if p == "/proc/stat" else os.path.lexists(p))
+
+    host, bound_util, state = t._read_cpu_util(None, bound_cpus={0, 1})
+    assert host is None and bound_util is None
+    assert state is not None and 0 in state and 1 in state
+
+
+def test_telemetry_schema_includes_cpu_util_bound_avg(tmp_path) -> None:
+    """Idempotent migration ensures legacy DBs get the new column;
+    fresh DBs pick it up from the CREATE TABLE."""
+    from simulator.database import Database
+    rd = tmp_path / "run_01"
+    rd.mkdir()
+    db = Database(rd / "run.db")
+    cols = {r["name"] for r in db.fetchall(
+        "PRAGMA table_info(measurement_telemetry)"
+    )}
+    assert "cpu_util_avg" in cols, "host-wide column must remain"
+    assert "cpu_util_bound_avg" in cols, (
+        "bound-set column must be added by the schema migration"
+    )
+    db.close()

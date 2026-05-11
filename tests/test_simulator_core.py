@@ -3669,3 +3669,145 @@ def test_telemetry_schema_includes_cpu_util_bound_avg(tmp_path) -> None:
         "bound-set column must be added by the schema migration"
     )
     db.close()
+
+
+def test_export_tolerates_legacy_db_missing_cpu_util_bound_avg(tmp_path) -> None:
+    """Old run.db files predate ``cpu_util_bound_avg``. The export
+    opens DBs read-only — it CAN'T apply the schema migration on the
+    fly — so the read path must filter SELECTs against the live
+    schema. Without this, ``make export`` / ``make dashboard`` fails
+    with ``OperationalError: no such column`` on every legacy run."""
+    import sqlite3
+    from simulator.export import export_dir
+
+    rd = tmp_path / "run_01"
+    rd.mkdir()
+    # Hand-build a DB whose ``measurement_telemetry`` table is the
+    # PRE-migration shape (no cpu_util_bound_avg). Exercises the
+    # read-tolerance code path specifically.
+    db_path = rd / "run.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE cohort_run (
+            cohort_run_id TEXT PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            engine_type TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            cohort_id TEXT NOT NULL,
+            cohort_definition_json TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            final_status TEXT
+        );
+        CREATE TABLE cohort_measurements (
+            measurement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cohort_run_id TEXT NOT NULL,
+            step_index INTEGER NOT NULL,
+            target_pool_size INTEGER NOT NULL,
+            measured_avg_pool_size REAL NOT NULL,
+            measured_avg_in_flight REAL NOT NULL,
+            measurement_started_at TEXT NOT NULL,
+            measurement_duration_s INTEGER NOT NULL,
+            sample_size INTEGER NOT NULL,
+            ttft_violation_rate REAL NOT NULL,
+            tpot_violation_rate REAL NOT NULL,
+            combined_violation_rate REAL NOT NULL,
+            violation_rate_ci_lower REAL NOT NULL,
+            violation_rate_ci_upper REAL NOT NULL,
+            ttft_p50_ms REAL,
+            ttft_p95_ms REAL,
+            tpot_p50_ms REAL,
+            tpot_p95_ms REAL,
+            avg_kv_cache_pct REAL,
+            capacity_status TEXT
+        );
+        -- LEGACY shape: no cpu_util_bound_avg column.
+        CREATE TABLE measurement_telemetry (
+            telemetry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            measurement_id INTEGER NOT NULL,
+            sampled_at_ms INTEGER NOT NULL,
+            kv_cache_used_pct REAL,
+            queue_depth INTEGER,
+            prefix_cache_hits INTEGER,
+            prefix_cache_misses INTEGER,
+            cpu_util_avg REAL,
+            memory_used_gb REAL,
+            engine_rss_gb REAL,
+            freq_mhz_mean REAL,
+            freq_mhz_stddev REAL,
+            freq_mhz_min REAL
+        );
+        CREATE TABLE turn_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            measurement_id INTEGER NOT NULL,
+            persona_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            turn_index INTEGER NOT NULL,
+            submitted_at_ms INTEGER NOT NULL,
+            ttft_ms REAL NOT NULL,
+            completed_at_ms INTEGER NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            history_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL,
+            tpot_ms REAL NOT NULL,
+            end_to_end_ms REAL NOT NULL,
+            in_flight_at_submit INTEGER NOT NULL,
+            sla_ttft_violation INTEGER NOT NULL,
+            sla_tpot_violation INTEGER NOT NULL
+        );
+        CREATE TABLE virtual_users (
+            user_id TEXT PRIMARY KEY,
+            cohort_run_id TEXT NOT NULL,
+            persona_id TEXT NOT NULL,
+            spawned_at_ms INTEGER NOT NULL,
+            terminated_at_ms INTEGER,
+            sessions_target INTEGER NOT NULL,
+            sessions_completed INTEGER NOT NULL,
+            turns_total INTEGER NOT NULL,
+            pool_size_at_spawn INTEGER NOT NULL
+        );
+    """)
+    conn.execute(
+        "INSERT INTO cohort_run VALUES (?,?,?,?,?,?,?,?,?)",
+        ("crid", "2026-01-01T00:00:00Z", "2026-01-01T00:01:30Z",
+         "vllm", "Qwen/Test", "chat_heavy",
+         '{"name":"x","persona_weights":{"quick_lookup":1.0}}', "{}", "ok"),
+    )
+    conn.execute(
+        "INSERT INTO cohort_measurements ("
+        "cohort_run_id, step_index, target_pool_size, "
+        "measured_avg_pool_size, measured_avg_in_flight, "
+        "measurement_started_at, measurement_duration_s, sample_size, "
+        "ttft_violation_rate, tpot_violation_rate, combined_violation_rate, "
+        "violation_rate_ci_lower, violation_rate_ci_upper, capacity_status"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("crid", 0, 8, 8.0, 6.5,
+         "2026-01-01T00:00:30Z", 60, 1,
+         0.0, 0.0, 0.0, 0.0, 0.0, "pass"),
+    )
+    conn.execute(
+        "INSERT INTO measurement_telemetry ("
+        "measurement_id, sampled_at_ms, kv_cache_used_pct, queue_depth, "
+        "prefix_cache_hits, cpu_util_avg, memory_used_gb, engine_rss_gb, "
+        "freq_mhz_mean, freq_mhz_stddev, freq_mhz_min"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (1, 1000, 41.2, 2, 100, 78.3, 60.1, 38.0, 3000.0, 12.0, 2950.0),
+    )
+    conn.commit()
+    conn.close()
+
+    # Should NOT raise OperationalError — the read path filters out
+    # the missing column instead of demanding it.
+    doc, _ = export_dir(tmp_path)
+    assert doc["meta"]["cohort_count"] == 1
+    cohort = doc["cohorts"][0]
+    step = cohort["curve"][0]
+    # The sample DOES still get exported; just the new field is absent.
+    assert len(step["telemetry_samples"]) == 1
+    sample = step["telemetry_samples"][0]
+    assert sample["cpu_util_avg"] == 78.3
+    assert "cpu_util_bound_avg" not in sample, (
+        "legacy DBs without the column shouldn't have the field "
+        "synthesized — consumers should test for presence"
+    )

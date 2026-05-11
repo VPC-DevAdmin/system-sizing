@@ -194,6 +194,22 @@ _TURN_EVENT_COLUMNS = (
 # into the export JSON.
 
 
+def _present_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return the set of column names present on ``table`` in this DB.
+
+    The export connects read-only, so we can't apply ``_ensure_columns``
+    migrations on legacy DBs. Instead, callers filter their desired
+    column list against the live schema — newly-added columns silently
+    drop from SELECTs against older runs, the new export still works
+    (the missing-column fields are absent from the output rather than
+    triggering ``OperationalError``)."""
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {r[1] for r in rows}
+
+
 def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
     run = dict(run_row)
     # Window aggregates (PMU / BW / power / AMX / freq) live as columns
@@ -205,37 +221,63 @@ def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
         (run["cohort_run_id"],),
     ).fetchall()
     run["measurements"] = [dict(m) for m in ms]
+    # Filter declared column lists to what's actually present — old
+    # run.db files predate later-added columns (e.g.
+    # ``cpu_util_bound_avg`` on measurement_telemetry, the target-miss
+    # / reasoning-token columns on turn_events). Probe once per
+    # connection rather than per measurement.
+    tele_present = _present_columns(conn, "measurement_telemetry")
+    tele_sample_cols = tuple(
+        c for c in _TELEMETRY_SAMPLE_COLUMNS if c in tele_present
+    )
+    turn_present = _present_columns(conn, "turn_events")
+    turn_cols_filtered = tuple(
+        c for c in _TURN_EVENT_COLUMNS if c in turn_present
+    )
+    has_cpu_bound = "cpu_util_bound_avg" in tele_present
     for m in run["measurements"]:
         # Per-second telemetry rollup: averages of kv usage / cpu /
-        # engine RSS / freq across the window.
+        # engine RSS / freq across the window. ``cpu_util_bound_avg``
+        # is dropped from the SELECT entirely on legacy DBs — adding
+        # it as ``NULL AS cpu_bound`` would be cleaner but SQLite
+        # complains when the column doesn't exist in any UNION arm,
+        # so we just omit the field.
+        rollup_cols = [
+            "AVG(kv_cache_used_pct) AS kv",
+            "AVG(cpu_util_avg) AS cpu",
+        ]
+        if has_cpu_bound:
+            rollup_cols.append("AVG(cpu_util_bound_avg) AS cpu_bound")
+        rollup_cols += [
+            "AVG(engine_rss_gb) AS engine_rss_gb_avg",
+            "AVG(freq_mhz_mean) AS freq_mhz_avg",
+        ]
         tele = conn.execute(
-            """SELECT AVG(kv_cache_used_pct) AS kv,
-                      AVG(cpu_util_avg) AS cpu,
-                      AVG(cpu_util_bound_avg) AS cpu_bound,
-                      AVG(engine_rss_gb) AS engine_rss_gb_avg,
-                      AVG(freq_mhz_mean) AS freq_mhz_avg
-               FROM measurement_telemetry
-               WHERE measurement_id = ?""",
+            f"SELECT {', '.join(rollup_cols)} "
+            f"FROM measurement_telemetry WHERE measurement_id = ?",
             (m["measurement_id"],),
         ).fetchone()
         m["telemetry"] = dict(tele) if tele else {}
         # Raw per-second telemetry samples (drives in-window time-series
         # charts on the website).
-        tele_cols = ", ".join(_TELEMETRY_SAMPLE_COLUMNS)
+        tele_cols_sql = ", ".join(tele_sample_cols)
         m["telemetry_samples"] = [
-            {k: r[k] for k in _TELEMETRY_SAMPLE_COLUMNS}
+            {k: r[k] for k in tele_sample_cols}
             for r in conn.execute(
-                f"SELECT {tele_cols} FROM measurement_telemetry "
+                f"SELECT {tele_cols_sql} FROM measurement_telemetry "
                 f"WHERE measurement_id = ? ORDER BY sampled_at_ms",
                 (m["measurement_id"],),
             )
         ]
-        # Per-turn events captured during the window.
-        turn_cols = ", ".join(_TURN_EVENT_COLUMNS)
+        # Per-turn events captured during the window. Column list
+        # filtered against live schema so legacy DBs without later-
+        # added columns (target-miss flags, reasoning tokens, ttfct)
+        # still export cleanly.
+        turn_cols_sql = ", ".join(turn_cols_filtered)
         m["turns"] = [
-            {k: r[k] for k in _TURN_EVENT_COLUMNS}
+            {k: r[k] for k in turn_cols_filtered}
             for r in conn.execute(
-                f"SELECT {turn_cols} FROM turn_events "
+                f"SELECT {turn_cols_sql} FROM turn_events "
                 f"WHERE measurement_id = ? ORDER BY submitted_at_ms",
                 (m["measurement_id"],),
             )
@@ -247,11 +289,18 @@ def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
         # buyer page free of derived-on-the-fly arithmetic. Reasoning
         # tokens are summed separately so reasoning-model overhead is
         # visible alongside content output.
+        # ``reasoning_tokens`` was added later — pre-migration DBs
+        # don't have the column. Probe and fall back to 0 so legacy
+        # exports don't blow up.
+        if "reasoning_tokens" in turn_present:
+            reasoning_expr = "COALESCE(SUM(reasoning_tokens), 0)"
+        else:
+            reasoning_expr = "0"
         token_agg = conn.execute(
-            """SELECT
+            f"""SELECT
                   COALESCE(SUM(input_tokens + history_tokens), 0)  AS prompt_tok,
                   COALESCE(SUM(output_tokens), 0)                  AS content_tok,
-                  COALESCE(SUM(reasoning_tokens), 0)               AS reasoning_tok
+                  {reasoning_expr}                                 AS reasoning_tok
                FROM turn_events
                WHERE measurement_id = ?""",
             (m["measurement_id"],),

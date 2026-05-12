@@ -364,7 +364,11 @@ TPOT is computed across `output_tokens + reasoning_tokens` so the per-token deco
 
 - **prefill** — request submitted, awaiting first token (`[submit, submit + ttft)`)
 - **decode** — streaming tokens (`[submit + ttft, complete)`)
-- **think** — sleeping until next request. Covers two cases that are physically identical (a user waiting to fire next): the between-turn read+active_think gap inside a session, AND the pre-first-turn initial phase offset window (`[spawn, first_submit)` clamped to window bounds). They fold into one bucket because the initial phase offset is sampled from the same `(read_time + active_think)` distributions as a between-turn gap — there's no observable difference in user behavior.
+- **think** — sleeping until next request. Covers four physically-identical cases (all a user waiting to fire):
+  1. Between-turn read+active_think gap inside a session.
+  2. Pre-first-turn initial phase offset window (`[spawn, first_submit)` clamped to window bounds).
+  3. **Trailing think** — from a user's last completed turn to either their termination or window-end, whichever is earlier. Without this the chart drained toward window-end as users fell off after their last completion.
+  4. **Alive-but-turnless** — users spawned during the window whose first turn doesn't complete before window-end. At high concurrency on slow cohorts (long-prompt AMD, etc.) this can be a substantial fraction of the pool. They sit in pre-first-turn think for their entire alive-in-window interval. The timeline enumerates `virtual_users` (alive predicate: spawn ≤ window_end AND (terminate IS NULL OR terminate ≥ window_start)) so these users are visible even though they have zero rows in `turn_events`.
 
 At any timestamp, `prefill + decode + think` should equal the active pool size (within measurement-window edge effects: a user whose warmup turns were drained before measurement starts appears in `think` from window-start until their first measurement-window submit).
 

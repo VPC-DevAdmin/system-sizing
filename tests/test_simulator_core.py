@@ -3413,6 +3413,135 @@ def test_timeline_marks_inter_turn_gap_as_think(tmp_path) -> None:
     assert s3.prefill == 0 and s3.decode == 0
 
 
+def test_timeline_emits_trailing_think_after_last_turn(tmp_path) -> None:
+    """A user whose last turn completes mid-window and who is still
+    alive at window end must register as ``think`` for the trailing
+    gap. Without this, the chart shows the pool draining toward
+    window-end when reality is a fully-populated steady state — this
+    is the bug that produced the misleading 'vanishing pool at the
+    end' on the AMD software_engineering pool=64 chart."""
+    from simulator.timeline import compute_timeline
+    import sqlite3
+    # Single user, one turn that completes well before window-end
+    # (window-end inferred from latest event = the only turn's
+    # complete time, so we need a SECOND user to extend the window).
+    db_path, mid = _seed_timeline_db(
+        tmp_path,
+        turns=[
+            {"user_id": "u1", "turn_index": 0,
+             "submit": 1000, "ttft": 500.0, "complete": 2000},
+            {"user_id": "u2", "turn_index": 0,
+             "submit": 1000, "ttft": 500.0, "complete": 10000},
+        ],
+        spawns=[
+            {"user_id": "u1", "spawned": 500},
+            {"user_id": "u2", "spawned": 500},
+        ],
+    )
+    conn = sqlite3.connect(db_path)
+    tl = compute_timeline(conn, mid, resolution_ms=1000)
+    conn.close()
+    # u1 completes at t=2000ms; window extends to 10000ms (u2 still
+    # streaming). Between u1's complete and window-end, u1 must
+    # register as think.
+    # t_offset=5 (6000ms in absolute = 5s after t_start=1000ms):
+    #   u1 is in trailing think
+    #   u2 is in decode (TTFT=500 means decode started at 1500ms)
+    s_at_5s = next(p for p in tl if p.t_offset_s == 5)
+    assert s_at_5s.think >= 1, (
+        f"u1's trailing think must be visible at t=5s; got {s_at_5s}"
+    )
+
+
+def test_timeline_counts_users_alive_in_window_with_no_completed_turns(tmp_path) -> None:
+    """Users spawned mid-window whose first turn doesn't complete
+    before window-end exist in the pool but have zero rows in
+    turn_events. Under per-session-respawn at high concurrency on
+    slow cohorts, this can be a substantial fraction of the pool.
+    They must register as ``think`` (pre-first-turn waiting) for
+    their alive-in-window interval — otherwise the chart undercounts
+    the pool, dramatically so on slow long-prompt workloads."""
+    from simulator.timeline import compute_timeline
+    import sqlite3
+    # u1 actually completes a turn (anchors the window). u2 is
+    # spawned but never completes anything within the window.
+    db_path, mid = _seed_timeline_db(
+        tmp_path,
+        turns=[
+            {"user_id": "u1", "turn_index": 0,
+             "submit": 1000, "ttft": 500.0, "complete": 10000},
+        ],
+        spawns=[
+            {"user_id": "u1", "spawned": 500},
+            {"user_id": "u2", "spawned": 3000},  # spawned mid-window
+        ],
+    )
+    conn = sqlite3.connect(db_path)
+    tl = compute_timeline(conn, mid, resolution_ms=1000)
+    conn.close()
+    # At t_offset=5 (6000ms): u1 is mid-decode, u2 is in pre-first-turn
+    # think (it spawned at 3000ms, hasn't fired yet).
+    s_at_5s = next(p for p in tl if p.t_offset_s == 5)
+    # u2 must be visible as think — without the fix u2 would be
+    # invisible because it has no rows in turn_events.
+    assert s_at_5s.think >= 1, (
+        f"u2 (alive, no turns) must register as think; got {s_at_5s}"
+    )
+
+
+def test_timeline_caps_intervals_at_user_termination(tmp_path) -> None:
+    """A user that died mid-window shouldn't contribute phase
+    intervals past their terminate timestamp. The reaper replaces
+    them with a new user_id; the dead one is gone from the pool."""
+    from simulator.timeline import compute_timeline
+    import sqlite3
+    db_path, mid = _seed_timeline_db(
+        tmp_path,
+        turns=[
+            # u1 dies at 5000ms (terminated below) — last turn complete=4000
+            {"user_id": "u1", "turn_index": 0,
+             "submit": 1000, "ttft": 500.0, "complete": 4000},
+            # u2 anchors the window's right edge
+            {"user_id": "u2", "turn_index": 0,
+             "submit": 8000, "ttft": 500.0, "complete": 12000},
+        ],
+        spawns=[
+            {"user_id": "u1", "spawned": 500},
+            {"user_id": "u2", "spawned": 500},
+        ],
+    )
+    # Set u1's termination explicitly. _seed_timeline_db defaults
+    # terminated_at_ms to None; here we want u1 terminated.
+    import sqlite3 as _sql
+    conn = _sql.connect(db_path)
+    conn.execute(
+        "UPDATE virtual_users SET terminated_at_ms = ? WHERE user_id = ?",
+        (5000, "u1"),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(db_path)
+    tl = compute_timeline(conn, mid, resolution_ms=1000)
+    conn.close()
+
+    # t_offset=4 (5000ms = exactly u1's termination): u1's trailing
+    # think runs from complete=4000 to terminate=5000 → present at t=4
+    s_at_4s = next(p for p in tl if p.t_offset_s == 4)
+    # t_offset=8 (9000ms): u1 should be GONE (died at 5000ms); u2 is
+    # in decode. think count from u1 must be 0; only u2's
+    # pre-first-turn think (if any) would contribute.
+    s_at_8s = next(p for p in tl if p.t_offset_s == 8)
+    # u2 entered prefill at 8000ms and ttft=500 → decode at 8500ms.
+    # At t=8s (9000ms), u2 is in decode.
+    assert s_at_8s.decode == 1
+    # u1 must NOT still appear as think after termination
+    assert s_at_8s.think <= 1, (
+        "dead user shouldn't contribute think past terminate; "
+        f"got {s_at_8s}"
+    )
+
+
 def test_timeline_folds_pre_first_turn_gap_into_think(tmp_path) -> None:
     """A virtual user's pre-first-turn window (spawn → first submit,
     minus the initial-phase-offset sleep) is the same physical state

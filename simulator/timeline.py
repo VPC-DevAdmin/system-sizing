@@ -104,24 +104,48 @@ def compute_timeline(
     t_end = max(r[5] for r in turn_rows)
 
     # Group turns by user. We need per-user iteration to derive the
-    # ``think`` interval between consecutive turns. ``idle`` (spawn →
-    # first submit) is sourced from ``virtual_users``.
+    # ``think`` interval between consecutive turns.
     user_turns: dict[str, list[tuple]] = {}
     for row in turn_rows:
         user_turns.setdefault(row[0], []).append(row)
 
-    # Spawn timestamps for the idle window. Some users in turn_events
-    # may not have a virtual_users row if the run was forklifted from
-    # a pre-table-existence DB; skip the idle phase for those users.
-    spawn_times: dict[str, int] = {}
-    if user_turns:
-        placeholders = ",".join("?" * len(user_turns))
-        spawn_rows = conn.execute(
-            f"SELECT user_id, spawned_at_ms FROM virtual_users "
-            f"WHERE user_id IN ({placeholders})",
-            list(user_turns.keys()),
-        ).fetchall()
-        spawn_times = {r[0]: r[1] for r in spawn_rows}
+    # Look up the cohort_run_id for this measurement so we can
+    # enumerate ALL users alive during the window (not just users that
+    # completed turns in it). Under per-session-respawn at high
+    # concurrency on slow-cohorts, many users alive in the pool never
+    # complete a turn within the measurement window — they were either
+    # spawned late or are mid-turn at window-end. Without enumerating
+    # them, the timeline drains toward window-end (chart shows a
+    # vanishing pool when reality is steady-state at target size).
+    cohort_run_id_row = conn.execute(
+        "SELECT cohort_run_id FROM cohort_measurements WHERE measurement_id = ?",
+        (measurement_id,),
+    ).fetchone()
+
+    # ``user_lifetimes`` maps user_id -> (spawned_at_ms, terminated_at_ms
+    # or None). Covers both users with turns AND users alive but turn-
+    # less in this window. Missing rows (e.g. forklifted DBs without a
+    # virtual_users table) degrade gracefully — those users get the
+    # legacy "pre-first-turn from min(submitted) is the only think we
+    # can infer" treatment.
+    user_lifetimes: dict[str, tuple[int, int | None]] = {}
+    if cohort_run_id_row is not None:
+        cohort_run_id = cohort_run_id_row[0]
+        # Alive-during-window predicate:
+        #   spawn <= t_end                         (born before window ends)
+        # AND (terminated IS NULL OR terminated >= t_start)
+        #                                          (still alive or
+        #                                           died after window
+        #                                           opened)
+        for r in conn.execute(
+            """SELECT user_id, spawned_at_ms, terminated_at_ms
+               FROM virtual_users
+               WHERE cohort_run_id = ?
+                 AND spawned_at_ms <= ?
+                 AND (terminated_at_ms IS NULL OR terminated_at_ms >= ?)""",
+            (cohort_run_id, t_end, t_start),
+        ):
+            user_lifetimes[r[0]] = (r[1], r[2])
 
     # Sweep-line event stream: each phase interval emits a +1 at start
     # and -1 at end. We rebuild counters by walking events in order.
@@ -138,6 +162,17 @@ def compute_timeline(
         events.append((start, idx, +1))
         events.append((end, idx, -1))
 
+    def alive_window_end(user_id: str) -> int:
+        """The upper bound for a user's presence in the chart window.
+        Capped at the chart's t_end so a user that survives the window
+        doesn't contribute phase samples past it; capped at their
+        terminate timestamp so a user that died mid-window doesn't
+        contribute think past their death."""
+        lifetime = user_lifetimes.get(user_id)
+        if lifetime is None or lifetime[1] is None:
+            return t_end
+        return min(lifetime[1], t_end)
+
     for user_id, turns in user_turns.items():
         # Pre-first-turn read+think: spawn → first submit. Clamped
         # to window start so a user spawned long before the window
@@ -148,7 +183,8 @@ def compute_timeline(
         # sample, so the user is "sleeping until time to fire next
         # request," indistinguishable from a between-turn gap.
         first_submit = turns[0][3]
-        spawned = spawn_times.get(user_id)
+        lifetime = user_lifetimes.get(user_id)
+        spawned = lifetime[0] if lifetime else None
         if spawned is not None and spawned < first_submit:
             add(max(spawned, t_start), first_submit, "think")
 
@@ -166,6 +202,35 @@ def compute_timeline(
             # Decode: submit + ttft → complete.
             add(submit + ttft_int, complete, "decode")
             prev_complete = complete
+
+        # Trailing think: from the user's last turn completion to
+        # either their termination or the window end, whichever is
+        # earlier. Under per-session-respawn ``terminate ≈
+        # last-turn-complete`` so this is usually a no-op for users
+        # whose session ended within the window — but for users still
+        # alive at t_end (because their next session was scheduled to
+        # fire after window-close), this captures the post-last-turn
+        # think that would otherwise drop off the chart.
+        if prev_complete is not None:
+            end_t = alive_window_end(user_id)
+            if end_t > prev_complete:
+                add(prev_complete, end_t, "think")
+
+    # Users alive during the window but with NO turns in turn_events.
+    # Most common cause: a replacement user spawned mid-window whose
+    # first turn hasn't completed by window-end (especially on slow
+    # cohorts where one turn takes 20-60s). These users are in
+    # initial-phase-offset / pre-first-turn think for their entire
+    # alive-in-window interval. Without this branch the chart's pool
+    # count drains toward window-end as old users terminate and new
+    # arrivals stay invisible.
+    for user_id, (spawned, terminated) in user_lifetimes.items():
+        if user_id in user_turns:
+            continue  # already handled above
+        alive_start = max(spawned, t_start)
+        alive_end = min(terminated if terminated is not None else t_end, t_end)
+        if alive_end > alive_start:
+            add(alive_start, alive_end, "think")
 
     # Sort events. Ties: process -1 (close) BEFORE +1 (open) so that
     # back-to-back phases (e.g. decode ending exactly when think

@@ -42,6 +42,16 @@ class PoolManager:
         request_timeout_s: int,
         rng_seed: int = 0xC0FFEE,
         on_user_terminated=None,
+        # Symmetric to on_user_terminated. Fires synchronously inside
+        # ``_spawn_one`` right after the asyncio task is created. The
+        # runner uses it to write a row to ``virtual_users`` at spawn
+        # time so the timeline reconstruction can enumerate alive
+        # users without having to wait for them to terminate first.
+        # Without this, slow long-cycle cohorts at high pool sizes
+        # (e.g. long_form_generator at pool=256) under-count
+        # dramatically in the timeline because most users alive in
+        # the window haven't yet terminated by export time.
+        on_user_spawned=None,
         capture_token_timestamps: bool = False,
         ramp_spawn_interval_s: float = 1.0,
         initial_phase_offset_enabled: bool = True,
@@ -71,6 +81,7 @@ class PoolManager:
         self._reaper_task: asyncio.Task | None = None
         self._stopped = False
         self._on_user_terminated = on_user_terminated
+        self._on_user_spawned = on_user_spawned
         self._capture_token_timestamps = capture_token_timestamps
         self._ramp_spawn_interval_s = ramp_spawn_interval_s
         self._initial_phase_offset_enabled = initial_phase_offset_enabled
@@ -221,6 +232,11 @@ class PoolManager:
             name=f"vu:{persona_id}:{user_id[:8]}",
         )
         self._users[user_id] = _ActiveUser(stats=stats, task=task, cancel_event=cancel_event)
+        if self._on_user_spawned:
+            try:
+                self._on_user_spawned(stats)
+            except Exception:
+                log.exception("on_user_spawned callback failed")
 
     async def _reaper_loop(self) -> None:
         """Periodically detect terminated users and replace them."""

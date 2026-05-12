@@ -209,6 +209,12 @@ async def run_cohort(
              engine.api_model_name)
 
     user_termination_buffer: list = []
+    # Symmetric to user_termination_buffer. Captures user stats at
+    # spawn time so the timeline reconstruction can see alive-but-
+    # not-yet-terminated users without waiting for them to die. The
+    # row is upserted twice — once at spawn (no terminate timestamp),
+    # once at terminate (with timestamp + final session/turn counts).
+    user_spawn_buffer: list = []
     pool = PoolManager(
         cohort=cohort,
         clients=clients,
@@ -217,6 +223,7 @@ async def run_cohort(
         state=state,
         request_timeout_s=cfg.simulation.request_timeout_s,
         on_user_terminated=lambda s: user_termination_buffer.append(s),
+        on_user_spawned=lambda s: user_spawn_buffer.append(s),
         capture_token_timestamps=cfg.simulation.enable_token_timestamps,
         ramp_spawn_interval_s=cfg.simulation.ramp_spawn_interval_s,
         initial_phase_offset_enabled=cfg.simulation.initial_phase_offset_enabled,
@@ -320,7 +327,11 @@ async def run_cohort(
                 convergence_min_completions_per_window=cfg.simulation.convergence_min_completions_per_window,
             )
 
-            # Persist any user terminations seen
+            # Persist any new spawns + terminations seen since last
+            # flush. Spawns make alive users visible to timeline
+            # reconstruction during the next step; terminations
+            # complete their rows with terminate timestamps.
+            _flush_user_spawns(db, cohort_run_id, user_spawn_buffer)
             _flush_users(db, cohort_run_id, user_termination_buffer)
 
             if result.status == "no_samples":
@@ -393,6 +404,7 @@ async def run_cohort(
         except Exception as e:  # noqa: BLE001
             log.debug("end-of-run metrics scrape failed: %s", e)
         await pool.stop()
+        _flush_user_spawns(db, cohort_run_id, user_spawn_buffer)
         _flush_users(db, cohort_run_id, user_termination_buffer)
 
         # Parse oneDNN verbose output (only meaningful after engine has run).
@@ -446,6 +458,31 @@ def _flush_users(db: Database, cohort_run_id: str, buffer: list) -> None:
             "sessions_target": s.sessions_target,
             "sessions_completed": s.sessions_completed,
             "turns_total": s.turns_total,
+            "pool_size_at_spawn": s.pool_size_at_spawn,
+            "replaced_user_id": s.replaced_user_id,
+        })
+
+
+def _flush_user_spawns(db: Database, cohort_run_id: str, buffer: list) -> None:
+    """Upsert a row for each just-spawned user with terminate=NULL.
+
+    The same user_id gets re-upserted at termination via
+    ``_flush_users`` — the upsert is keyed on user_id so the row
+    gets completed in place rather than duplicated. Counter fields
+    (sessions_completed / turns_total) are 0 at spawn time;
+    termination later updates them with the final values.
+    """
+    while buffer:
+        s = buffer.pop()
+        db.upsert_user({
+            "user_id": s.user_id,
+            "cohort_run_id": cohort_run_id,
+            "persona_id": s.persona_id,
+            "spawned_at_ms": s.spawned_at_ms,
+            "terminated_at_ms": None,
+            "sessions_target": s.sessions_target,
+            "sessions_completed": 0,
+            "turns_total": 0,
             "pool_size_at_spawn": s.pool_size_at_spawn,
             "replaced_user_id": s.replaced_user_id,
         })

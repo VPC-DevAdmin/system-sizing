@@ -3783,6 +3783,101 @@ def test_read_cpu_util_first_call_returns_nones(tmp_path, monkeypatch) -> None:
     assert state is not None and 0 in state and 1 in state
 
 
+def test_flush_user_spawns_upserts_row_with_null_terminate(tmp_path) -> None:
+    """Spawn-time flush must write a virtual_users row with
+    terminated_at_ms=NULL so the timeline can see alive users.
+    Subsequent termination upsert completes the row in place."""
+    from simulator.database import Database
+    from simulator.runner import _flush_user_spawns, _flush_users
+    from simulator.virtual_user import UserStats
+
+    rd = tmp_path / "run_01"
+    rd.mkdir()
+    db = Database(rd / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="m", cohort_id="chat_heavy",
+        cohort_definition={"name": "x", "persona_weights": {}}, config={},
+    )
+
+    spawn_buf = [UserStats(
+        user_id="u1", persona_id="quick_lookup",
+        spawned_at_ms=1000, sessions_target=1,
+        pool_size_at_spawn=4,
+    )]
+    _flush_user_spawns(db, "crid", spawn_buf)
+    assert spawn_buf == [], "spawn buffer must be drained"
+
+    rows = db.fetchall(
+        "SELECT user_id, spawned_at_ms, terminated_at_ms, turns_total "
+        "FROM virtual_users WHERE user_id = ?", ("u1",),
+    )
+    assert len(rows) == 1
+    assert rows[0]["spawned_at_ms"] == 1000
+    assert rows[0]["terminated_at_ms"] is None, (
+        "alive user must have terminated_at_ms NULL — this is what "
+        "the timeline checks to know the user is still in the pool"
+    )
+    assert rows[0]["turns_total"] == 0
+
+    # Now terminate the same user; the row should update in place.
+    term_stats = UserStats(
+        user_id="u1", persona_id="quick_lookup",
+        spawned_at_ms=1000, sessions_target=1, sessions_completed=1,
+        turns_total=3, terminated_at_ms=5000, pool_size_at_spawn=4,
+    )
+    _flush_users(db, "crid", [term_stats])
+    rows = db.fetchall(
+        "SELECT terminated_at_ms, turns_total FROM virtual_users "
+        "WHERE user_id = ?", ("u1",),
+    )
+    assert rows[0]["terminated_at_ms"] == 5000
+    assert rows[0]["turns_total"] == 3
+    db.close()
+
+
+def test_flush_user_spawns_then_terminate_does_not_clobber(tmp_path) -> None:
+    """The flush order in run_cohort is spawns-then-terminations. If
+    a user's spawn and termination both land in the same flush cycle,
+    the terminate upsert MUST win (terminated_at_ms set, not nulled
+    back). This protects against the future-self trap of swapping
+    the flush order and silently losing terminate timestamps."""
+    from simulator.database import Database
+    from simulator.runner import _flush_user_spawns, _flush_users
+    from simulator.virtual_user import UserStats
+
+    rd = tmp_path / "run_01"
+    rd.mkdir()
+    db = Database(rd / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm", model_id="m", cohort_id="chat_heavy",
+        cohort_definition={"name": "x", "persona_weights": {}}, config={},
+    )
+
+    spawn_stats = UserStats(
+        user_id="u1", persona_id="quick_lookup",
+        spawned_at_ms=1000, sessions_target=1, pool_size_at_spawn=4,
+    )
+    term_stats = UserStats(
+        user_id="u1", persona_id="quick_lookup",
+        spawned_at_ms=1000, sessions_target=1, sessions_completed=1,
+        turns_total=2, terminated_at_ms=4000, pool_size_at_spawn=4,
+    )
+
+    # Production order: spawns first, then terminations.
+    _flush_user_spawns(db, "crid", [spawn_stats])
+    _flush_users(db, "crid", [term_stats])
+    row = db.fetchall(
+        "SELECT terminated_at_ms FROM virtual_users WHERE user_id = ?",
+        ("u1",),
+    )[0]
+    assert row["terminated_at_ms"] == 4000, (
+        "production flush order (spawns first) must end with terminate set"
+    )
+    db.close()
+
+
 def test_telemetry_schema_includes_cpu_util_bound_avg(tmp_path) -> None:
     """Idempotent migration ensures legacy DBs get the new column;
     fresh DBs pick it up from the CREATE TABLE."""

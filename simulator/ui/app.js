@@ -41,15 +41,22 @@ function percentile(sorted, p) {
 /* ── Chart.js theming ─────────────────────────────────────────── */
 
 const css = getComputedStyle(document.documentElement);
+const cvar = (name) => css.getPropertyValue(name).trim();
 const C = {
-  text: css.getPropertyValue("--text").trim(),
-  muted: css.getPropertyValue("--muted").trim(),
-  line: css.getPropertyValue("--line").trim(),
-  accent: css.getPropertyValue("--accent").trim(),
-  ok: css.getPropertyValue("--ok").trim(),
-  warn: css.getPropertyValue("--warn").trim(),
-  fail: css.getPropertyValue("--fail").trim(),
+  text: cvar("--text"),
+  muted: cvar("--muted"),
+  line: cvar("--stroke"),
+  accent: cvar("--accent"),
+  gold: cvar("--gold"),
+  teal: cvar("--teal"),
+  blue: cvar("--blue"),
+  purple: cvar("--purple"),
+  ok: cvar("--ok"),
+  warn: cvar("--warn"),
+  fail: cvar("--fail"),
 };
+/* Soft area fill for a hex series color. */
+const fill = (hex, alpha = "2e") => hex + alpha;
 Chart.defaults.color = C.muted;
 Chart.defaults.borderColor = C.line;
 Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
@@ -58,8 +65,8 @@ Chart.defaults.plugins.legend.labels.boxWidth = 12;
 Chart.defaults.elements.point.radius = 0;
 Chart.defaults.elements.line.borderWidth = 2;
 
-const PALETTE = [C.accent, C.ok, C.warn, C.fail, "#b07ce8", "#5bc8c8",
-                 "#e88a5c", "#8fa8ff"];
+const PALETTE = [C.gold, C.teal, C.blue, C.purple, C.accent, "#e88a5c",
+                 "#8fa8ff", "#5bc8c8"];
 
 /* Vertical landing-zone markers drawn onto the knee chart. */
 const zoneLinesPlugin = {
@@ -292,22 +299,26 @@ const Live = {
 
   init() {
     this.charts.pool = makeLiveChart("#chart-pool", [
-      { label: "pool size", data: [], borderColor: C.muted, stepped: true },
-      { label: "in flight", data: [], borderColor: C.accent, fill: true,
-        backgroundColor: C.accent + "22" },
+      { label: "pool size", data: [], borderColor: C.muted, stepped: true,
+        borderDash: [5, 4] },
+      { label: "in flight", data: [], borderColor: C.gold, fill: true,
+        backgroundColor: fill(C.gold) },
     ]);
     this.charts.ttft = makeLiveChart("#chart-ttft", [
-      { label: "p50", data: [], borderColor: C.accent },
-      { label: "p95", data: [], borderColor: C.warn },
+      { label: "p50", data: [], borderColor: C.blue, fill: true,
+        backgroundColor: fill(C.blue, "24") },
+      { label: "p95", data: [], borderColor: C.gold },
     ]);
     this.charts.tpot = makeLiveChart("#chart-tpot", [
-      { label: "p50", data: [], borderColor: C.accent },
-      { label: "p95", data: [], borderColor: C.warn },
+      { label: "p50", data: [], borderColor: C.teal, fill: true,
+        backgroundColor: fill(C.teal, "24") },
+      { label: "p95", data: [], borderColor: C.gold },
     ]);
     this.charts.host = makeLiveChart("#chart-host", [
-      { label: "KV cache %", data: [], borderColor: C.accent },
-      { label: "CPU bound-set %", data: [], borderColor: C.ok },
-      { label: "GPU SM %", data: [], borderColor: C.warn },
+      { label: "KV cache %", data: [], borderColor: C.gold, fill: true,
+        backgroundColor: fill(C.gold, "1f") },
+      { label: "CPU bound-set %", data: [], borderColor: C.teal },
+      { label: "GPU SM %", data: [], borderColor: C.purple },
     ], { suggestedMax: 100 });
     this.connect();
   },
@@ -533,6 +544,7 @@ const Results = {
       },
       options: {
         maintainAspectRatio: false,
+        animation: { duration: 450, easing: "easeOutQuart" },
         zoneLines: [
           { value: c.capacity_pool_size, color: C.ok, label: "capacity" },
           { value: c.soft_capacity_pool_size, color: C.warn, label: "soft cap" },
@@ -563,15 +575,17 @@ const Results = {
         labels: curve.map(p => p.pool_size),
         datasets: [
           { label: "TTFT p50 (ms)", data: curve.map(p => p.ttft_p50_ms),
-            borderColor: C.accent, pointRadius: 3 },
+            borderColor: C.blue, pointRadius: 3, fill: true,
+            backgroundColor: fill(C.blue, "1c") },
           { label: "TTFT p95 (ms)", data: curve.map(p => p.ttft_p95_ms),
-            borderColor: C.accent, borderDash: [6, 4], pointRadius: 3 },
+            borderColor: C.blue, borderDash: [6, 4], pointRadius: 3 },
           { label: "TPOT p95 (ms)", data: curve.map(p => p.tpot_p95_ms),
             borderColor: C.warn, yAxisID: "y2", pointRadius: 3 },
         ],
       },
       options: {
         maintainAspectRatio: false,
+        animation: { duration: 450, easing: "easeOutQuart" },
         scales: {
           x: { title: { display: true, text: "pool size" } },
           y: { beginAtZero: true, title: { display: true, text: "TTFT ms" } },
@@ -951,8 +965,11 @@ const Models = {
 
   init() {
     $("#models-refresh").addEventListener("click", () => this.refresh());
-    document.querySelector('#tabs button[data-view="optimizer"]')
+    document.querySelector('#tabs button[data-view="prepare"]')
       .addEventListener("click", () => this.refresh());
+    $("#goto-optimize").addEventListener("click", () =>
+      document.querySelector('#tabs button[data-view="optimizer"]').click());
+    this.refresh();
   },
 
   async refresh() {

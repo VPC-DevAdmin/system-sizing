@@ -12,22 +12,116 @@
 <header>
   <div class="brand">
     <span class="logo">capsim</span>
-    <span class="sub">AI sizing &amp; capacity engine</span>
+    <span class="sub">Size &middot; Optimize &middot; Measure</span>
   </div>
   <nav id="tabs">
-    <button data-view="control" class="active">Run control</button>
-    <button data-view="live">Live telemetry</button>
+    <button data-view="prepare" class="active">Prepare</button>
+    <button data-view="optimizer">Optimize</button>
+    <button data-view="control">Benchmark</button>
     <button data-view="results">Results</button>
-    <button data-view="optimizer">Optimizer</button>
-    <button data-view="personas">Personas</button>
+    <button data-view="personas">Workloads</button>
   </nav>
   <div id="status-pill" class="pill idle">idle</div>
 </header>
 
-<!-- ── Run control ─────────────────────────────────────────────── -->
-<main id="view-control" class="view active">
+<!-- ── 1 · Prepare ─────────────────────────────────────────────── -->
+<main id="view-prepare" class="view active">
+  <div class="steps-grid">
+    <section class="panel">
+      <div class="step-head"><span class="step-num">1</span>
+        <div><div class="t">Validate the host</div>
+          <div class="d">CPU, GPU stack, Docker, disk, telemetry permissions, network —
+            with the exact fix for anything that fails.</div></div>
+        <button id="doctor-btn" class="small" style="margin-left:auto">Run doctor</button>
+      </div>
+      <div id="doctor-out" class="doctor msg">Not run yet. Doctor takes a few seconds and
+        ends with a profile recommendation for this hardware.</div>
+    </section>
+
+    <section class="panel">
+      <div class="step-head"><span class="step-num">2</span>
+        <div><div class="t">Stage model weights</div>
+          <div class="d">Every model the profiles and search spaces reference, and whether
+            its weights are already in the cache the engines mount
+            (<span id="models-cache-dir"></span>). Download before optimizing, so launch
+            timeouts measure engines — not your network.</div></div>
+        <button id="models-refresh" class="small" style="margin-left:auto">Refresh</button>
+      </div>
+      <table id="models-table">
+        <thead><tr><th>Model</th><th>Referenced by</th><th>Status</th><th>Size</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <div class="step-head"><span class="step-num">3</span>
+        <div><div class="t">Find the best launch shape</div>
+          <div class="d">Capacity numbers are only as good as the engine config they were
+            measured on. Sweep the curated registry, or run the guided search over the
+            whole parameter space, then benchmark on the winner.</div></div>
+        <button id="goto-optimize" class="small primary" style="margin-left:auto">Open Optimize</button>
+      </div>
+    </section>
+  </div>
+</main>
+
+<!-- ── 2 · Optimize ────────────────────────────────────────────── -->
+<main id="view-optimizer" class="view">
   <section class="panel">
-    <h2>Start a run</h2>
+    <h2>Engine optimizer</h2>
+    <p class="msg">Sweeps engine launch shapes (KV pool, batch width, chunked prefill,
+    TP vs data-parallel replicas) against representative latency/throughput cells and
+    ranks them — run this on a new host <b>before</b> the first capacity benchmark, then
+    encode the winner in the profile you benchmark with. Results persist to
+    <code>runs/engine_optimizer/</code> and resume if interrupted.</p>
+    <div class="row wrap">
+      <label>Mode
+        <select id="opt-mode">
+          <option value="registry">Registry sweep (curated configs)</option>
+          <option value="search">Guided search (coarse &rarr; refine)</option>
+        </select>
+      </label>
+      <label id="opt-profile-wrap">Profile <select id="opt-profile"></select></label>
+      <label id="opt-space-wrap" hidden>Space <select id="opt-space"></select></label>
+      <label class="check"><input type="checkbox" id="opt-new-run"> Fresh run (don't resume)</label>
+      <button id="opt-start" class="primary">Start optimizer</button>
+      <button id="opt-stop" class="danger" disabled>Stop</button>
+      <span id="opt-msg" class="msg"></span>
+    </div>
+    <p id="opt-search-hint" class="msg" hidden>Guided search samples the space for
+    coverage, ranks candidates by the space's objective (default: summed throughput
+    with p95-latency caps), then refines one-dimension neighbors of the leaders until
+    the budget is spent or improvement flattens. Dimensions, objective and budget live
+    in the space YAML (<code>config/search/</code>).</p>
+    <div id="opt-configs" class="opt-configs"></div>
+  </section>
+
+  <section class="panel" id="opt-search-panel" hidden>
+    <h2 id="opt-search-title">Guided search</h2>
+    <div id="opt-search-best" class="opt-ranking"></div>
+    <table id="opt-search-table">
+      <thead><tr><th>#</th><th>Iter</th><th>Candidate</th><th>Score</th>
+        <th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel" id="opt-results-panel" hidden>
+    <h2 id="opt-results-title">Results</h2>
+    <div id="opt-ranking" class="opt-ranking"></div>
+    <table id="opt-results">
+      <thead><tr><th>Config</th><th>Cell</th><th>n</th><th>err</th><th>t/o</th>
+        <th>TTFT p50</th><th>TTFT p95</th><th>TPOT p50</th><th>TPOT p95</th>
+        <th>out tok/s</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<!-- ── 3 · Benchmark (setup + live telemetry, one place) ───────── -->
+<main id="view-control" class="view">
+  <section class="panel">
+    <h2>Start a capacity benchmark</h2>
     <div class="form-grid">
       <label>Profile
         <select id="profile-select"></select>
@@ -57,48 +151,47 @@
       <button id="stop-btn" class="danger" disabled>Stop run</button>
       <span id="control-msg" class="msg"></span>
     </div>
-    <div id="active-run-box" class="active-run" hidden></div>
+    <div id="active-run-box" class="callout" hidden></div>
   </section>
 
-  <section class="panel">
-    <h2>Host <button id="doctor-btn" class="small">Run doctor</button></h2>
-    <div id="doctor-out" class="doctor">Doctor validates CPU, GPU stack, Docker, disk, telemetry permissions and network. Takes a few seconds.</div>
-  </section>
-
-  <section class="panel">
-    <h2>Runs <button id="runs-refresh" class="small">Refresh</button></h2>
-    <table id="runs-table">
-      <thead><tr><th>Run</th><th>Cohort</th><th>Engine</th><th>Model</th>
-        <th>Steps</th><th>Status</th><th>Started</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
-</main>
-
-<!-- ── Live telemetry ──────────────────────────────────────────── -->
-<main id="view-live" class="view">
   <section class="panel statusbar">
-    <div class="stat"><span class="k">Phase</span><span id="live-phase" class="v">—</span></div>
-    <div class="stat"><span class="k">Pool</span><span id="live-pool" class="v">—</span></div>
-    <div class="stat"><span class="k">In flight</span><span id="live-inflight" class="v">—</span></div>
-    <div class="stat"><span class="k">Completed</span><span id="live-completed" class="v">—</span></div>
-    <div class="stat"><span class="k">Errors</span><span id="live-errors" class="v">—</span></div>
+    <div class="stat"><span class="k">Phase</span><span id="live-phase" class="v">&mdash;</span>
+      <span class="c">ramp &rarr; stabilize &rarr; measure</span></div>
+    <div class="stat"><span class="k">Pool</span><span id="live-pool" class="v">&mdash;</span>
+      <span class="c">concurrent sessions</span></div>
+    <div class="stat"><span class="k">In flight</span><span id="live-inflight" class="v">&mdash;</span>
+      <span class="c">requests at the engine</span></div>
+    <div class="stat"><span class="k">Completed</span><span id="live-completed" class="v">&mdash;</span>
+      <span class="c">turns this run</span></div>
+    <div class="stat"><span class="k">Errors</span><span id="live-errors" class="v">&mdash;</span>
+      <span class="c">timeouts + failures</span></div>
     <div class="stat wide"><span class="k">Step progress</span>
-      <span id="live-progress" class="v">—</span>
+      <span id="live-progress" class="v">&mdash;</span>
       <div class="bar"><div id="live-progress-bar"></div></div>
     </div>
-    <div class="stat"><span class="k">WS</span><span id="ws-state" class="v">connecting…</span></div>
+    <div class="stat"><span class="k">Stream</span><span id="ws-state" class="v">connecting&hellip;</span>
+      <span class="c">live telemetry feed</span></div>
   </section>
 
   <div class="chart-grid">
     <section class="panel"><h2>Pool &amp; in-flight requests</h2>
-      <canvas id="chart-pool"></canvas></section>
-    <section class="panel"><h2>TTFT — rolling p50 / p95 (ms)</h2>
-      <canvas id="chart-ttft"></canvas></section>
-    <section class="panel"><h2>TPOT — rolling p50 / p95 (ms)</h2>
-      <canvas id="chart-tpot"></canvas></section>
-    <section class="panel"><h2>Engine &amp; host</h2>
-      <canvas id="chart-host"></canvas></section>
+      <canvas id="chart-pool"></canvas>
+      <div class="chart-note">Closed-loop load: most of the pool is reading or thinking
+        at any moment, so in-flight sits well below pool size. The gap between the two
+        lines <b>is</b> the workload's duty cycle.</div></section>
+    <section class="panel"><h2>Time to first token &middot; rolling p50 / p95</h2>
+      <canvas id="chart-ttft"></canvas>
+      <div class="chart-note">Computed over the trailing turns of the measuring window.
+        Rising p95 with a flat p50 is the first sign of queueing.</div></section>
+    <section class="panel"><h2>Time per output token &middot; rolling p50 / p95</h2>
+      <canvas id="chart-tpot"></canvas>
+      <div class="chart-note">Decode pacing per token. Degrades when batches widen past
+        the engine's comfort point.</div></section>
+    <section class="panel"><h2>Engine &amp; host utilization</h2>
+      <canvas id="chart-host"></canvas>
+      <div class="chart-note">KV cache is the engine's own gauge; CPU is the bound-set
+        (pinned cores only); GPU is SM utilization averaged across devices. Absent lines
+        mean that collector isn't available on this host.</div></section>
   </div>
 
   <section class="panel">
@@ -112,7 +205,7 @@
   </section>
 </main>
 
-<!-- ── Results ─────────────────────────────────────────────────── -->
+<!-- ── 4 · Results ─────────────────────────────────────────────── -->
 <main id="view-results" class="view">
   <section class="panel">
     <div class="row wrap">
@@ -121,6 +214,7 @@
       <button id="result-load" class="primary small">Load</button>
       <button id="result-export-dl" class="small" disabled>Download export JSON</button>
       <span id="result-msg" class="msg"></span>
+      <button id="runs-refresh" class="small" style="margin-left:auto">Refresh runs</button>
     </div>
   </section>
 
@@ -131,10 +225,15 @@
   </section>
 
   <div class="chart-grid" id="result-charts" hidden>
-    <section class="panel"><h2>Capacity knee — violation rate vs pool size</h2>
-      <canvas id="chart-knee"></canvas></section>
+    <section class="panel"><h2>Capacity knee &middot; violation rate vs pool size</h2>
+      <canvas id="chart-knee"></canvas>
+      <div class="chart-note">The shaded band is the Wilson confidence interval — how
+        sure the measurement is at this sample size. Dashed verticals mark the
+        capacity / soft-cap / fail boundaries. Click a point for the full step detail.</div></section>
     <section class="panel"><h2>Latency vs pool size</h2>
-      <canvas id="chart-latency"></canvas></section>
+      <canvas id="chart-latency"></canvas>
+      <div class="chart-note">How response feel degrades as concurrency grows —
+        TTFT on the left axis, per-token pacing on the right.</div></section>
   </div>
 
   <section class="panel" id="bottleneck-panel" hidden>
@@ -155,81 +254,27 @@
       <button id="compare-clear" class="small">Clear</button>
     </div>
     <canvas id="chart-compare"></canvas>
-  </section>
-</main>
-
-<!-- ── Optimizer ───────────────────────────────────────────────── -->
-<main id="view-optimizer" class="view">
-  <section class="panel">
-    <h2>Engine optimizer</h2>
-    <p class="msg">Sweeps engine launch shapes (KV pool, batch width, chunked prefill,
-    TP vs data-parallel replicas) against representative latency/throughput cells and
-    ranks them — run this on a new host <b>before</b> the first capacity sweep, then
-    encode the winner in the profile you sweep with. Results persist to
-    <code>runs/engine_optimizer/run.json</code> and resume if interrupted.</p>
-    <div class="row wrap">
-      <label>Mode
-        <select id="opt-mode">
-          <option value="registry">Registry sweep (curated configs)</option>
-          <option value="search">Guided search (coarse → refine)</option>
-        </select>
-      </label>
-      <label id="opt-profile-wrap">Profile <select id="opt-profile"></select></label>
-      <label id="opt-space-wrap" hidden>Space <select id="opt-space"></select></label>
-      <label class="check"><input type="checkbox" id="opt-new-run"> Fresh run (don't resume)</label>
-      <button id="opt-start" class="primary">Start optimizer</button>
-      <button id="opt-stop" class="danger" disabled>Stop</button>
-      <span id="opt-msg" class="msg"></span>
-    </div>
-    <p id="opt-search-hint" class="msg" hidden>Guided search samples the space for
-    coverage, ranks candidates by the space's objective (default: summed throughput
-    with p95-latency caps), then refines one-dimension neighbors of the leaders until
-    the budget is spent or improvement flattens. Dimensions, objective and budget live
-    in the space YAML (<code>config/search/</code>).</p>
-    <div id="opt-configs" class="opt-configs"></div>
+    <div class="chart-note">Overlay runs to compare hosts, engines, precisions, or
+      launch shapes on the same axes — the whole point of keeping the export stable.</div>
   </section>
 
   <section class="panel">
-    <h2>Models <button id="models-refresh" class="small">Refresh</button></h2>
-    <p class="msg">Weights referenced by the profiles and search spaces, and whether they
-    are already in the HF cache the engine containers mount (<span id="models-cache-dir"></span>).
-    Download everything you plan to test <b>before</b> starting the optimizer, so launch
-    timeouts measure engines, not your network.</p>
-    <table id="models-table">
-      <thead><tr><th>Model</th><th>Referenced by</th><th>Status</th><th>Size</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
-
-  <section class="panel" id="opt-search-panel" hidden>
-    <h2 id="opt-search-title">Guided search</h2>
-    <div id="opt-search-best" class="opt-ranking"></div>
-    <table id="opt-search-table">
-      <thead><tr><th>#</th><th>Iter</th><th>Candidate</th><th>Score</th>
-        <th>Status</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
-
-  <section class="panel" id="opt-results-panel" hidden>
-    <h2 id="opt-results-title">Results</h2>
-    <div id="opt-ranking" class="opt-ranking"></div>
-    <table id="opt-results">
-      <thead><tr><th>Config</th><th>Cell</th><th>n</th><th>err</th><th>t/o</th>
-        <th>TTFT p50</th><th>TTFT p95</th><th>TPOT p50</th><th>TPOT p95</th>
-        <th>out tok/s</th></tr></thead>
+    <h2>Run history</h2>
+    <table id="runs-table">
+      <thead><tr><th>Run</th><th>Cohort</th><th>Engine</th><th>Model</th>
+        <th>Steps</th><th>Status</th><th>Started</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
 </main>
 
-<!-- ── Personas ────────────────────────────────────────────────── -->
+<!-- ── 5 · Workloads ───────────────────────────────────────────── -->
 <main id="view-personas" class="view">
   <section class="panel">
     <h2>Persona &amp; cohort catalog</h2>
     <p class="msg">The packaged catalog ships with capsim; edits save as overlay files under
     <code>config/personas/</code> and take effect immediately (the next run picks them up).
-    Specs are YAML — distributions as <code>{lognormal: {median, sigma}}</code>,
+    Specs are YAML &mdash; distributions as <code>{lognormal: {median, sigma}}</code>,
     <code>{discrete: {value: weight}}</code>, or <code>{constant: x}</code>.</p>
     <div class="editor-grid">
       <div>

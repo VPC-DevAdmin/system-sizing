@@ -196,3 +196,4 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-si
 .opt-rank-card .s { color: var(--muted); }
 #opt-results td.best { color: var(--ok); font-weight: 600; }
 tr.cfg-first td { border-top: 2px solid var(--line); }
+.dl-tail { font-size: .72rem; max-width: 320px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

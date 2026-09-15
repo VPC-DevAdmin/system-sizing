@@ -91,6 +91,10 @@ class SaveSpecRequest(BaseModel):
     yaml: str
 
 
+class ModelDownloadRequest(BaseModel):
+    model: str
+
+
 class OptimizerStartRequest(BaseModel):
     # mode "registry": sweep a fixed profile of hand-curated configs.
     # mode "search": guided coarse-to-fine over a config/search/ space.
@@ -162,6 +166,7 @@ def create_app(
     app.state.active: Optional[ActiveRun] = None
     app.state.optimizer: Optional[dict] = None       # {proc, profile, started_at, log}
     app.state.optimizer_catalog: Optional[dict] = None
+    app.state.model_downloads: dict = {}             # model -> {proc, log, started_at}
 
     # ── introspection ─────────────────────────────────────────────
 
@@ -402,6 +407,79 @@ def create_app(
             await active.task
         return {"stopped": True}
 
+
+
+    # ── model staging (weights into the shared HF cache) ──────────
+    # The UI's Models panel: which models do profiles/search spaces
+    # reference, are the weights cached where the engine containers
+    # mount, and one-click downloads with tailed progress. Downloads
+    # are HF_HOME-pinned to that same cache.
+
+    @app.get("/api/models")
+    async def models_list() -> dict:
+        from .models import hf_cache_dir, referenced_models
+        entries = await asyncio.to_thread(referenced_models)
+        downloads = {}
+        for model, dl in list(app.state.model_downloads.items()):
+            exit_code = dl["proc"].poll()
+            tail = ""
+            try:
+                text = Path(dl["log"]).read_text(errors="replace")
+                tail = text[-400:]
+            except OSError:
+                pass
+            downloads[model] = {
+                "running": exit_code is None,
+                "exit_code": exit_code,
+                "started_at": dl["started_at"],
+                "log": dl["log"],
+                "log_tail": tail,
+            }
+        return {
+            "cache_dir": str(hf_cache_dir()),
+            "models": entries,
+            "downloads": downloads,
+        }
+
+    @app.post("/api/models/download", status_code=202)
+    async def models_download(req: ModelDownloadRequest) -> dict:
+        from .models import download_command, referenced_models
+        known = {m["model"] for m in await asyncio.to_thread(referenced_models)}
+        if req.model not in known:
+            # Only models the configs actually reference — the service
+            # is not a general download proxy.
+            raise HTTPException(
+                404, f"'{req.model}' is not referenced by any profile "
+                     f"or search space",
+            )
+        existing = app.state.model_downloads.get(req.model)
+        if existing and existing["proc"].poll() is None:
+            raise HTTPException(409, "download already running for this model")
+        argv, extra_env = download_command(req.model)
+        log_dir = runs_base / "model_downloads"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / (
+            req.model.replace("/", "--")
+            + f"_{time.strftime('%Y%m%dT%H%M%S')}.log"
+        )
+        import os as _os
+        log_file = open(log_path, "w")
+        try:
+            proc = subprocess.Popen(
+                argv, stdout=log_file, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+                env={**_os.environ, **extra_env},
+            )
+        except FileNotFoundError as e:
+            log_file.close()
+            raise HTTPException(
+                500, f"hf CLI not found ({e}) — is huggingface_hub "
+                     f"installed in the service environment?",
+            ) from e
+        app.state.model_downloads[req.model] = {
+            "proc": proc, "log": str(log_path), "started_at": time.time(),
+        }
+        return {"accepted": True, "model": req.model, "log": str(log_path)}
 
     # ── engine optimizer (find the best launch shape first) ──────
     # Runs scripts/engine_optimizer.py as a supervised subprocess —

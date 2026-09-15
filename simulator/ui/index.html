@@ -189,6 +189,18 @@
     <div id="opt-configs" class="opt-configs"></div>
   </section>
 
+  <section class="panel">
+    <h2>Models <button id="models-refresh" class="small">Refresh</button></h2>
+    <p class="msg">Weights referenced by the profiles and search spaces, and whether they
+    are already in the HF cache the engine containers mount (<span id="models-cache-dir"></span>).
+    Download everything you plan to test <b>before</b> starting the optimizer, so launch
+    timeouts measure engines, not your network.</p>
+    <table id="models-table">
+      <thead><tr><th>Model</th><th>Referenced by</th><th>Status</th><th>Size</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
   <section class="panel" id="opt-search-panel" hidden>
     <h2 id="opt-search-title">Guided search</h2>
     <div id="opt-search-best" class="opt-ranking"></div>

@@ -944,6 +944,74 @@ const Optimizer = {
   },
 };
 
+/* ══ Model staging ════════════════════════════════════════════── */
+
+const Models = {
+  polling: null,
+
+  init() {
+    $("#models-refresh").addEventListener("click", () => this.refresh());
+    document.querySelector('#tabs button[data-view="optimizer"]')
+      .addEventListener("click", () => this.refresh());
+  },
+
+  async refresh() {
+    let doc;
+    try { doc = await api("/api/models"); } catch { return; }
+    $("#models-cache-dir").textContent = doc.cache_dir;
+    const tbody = $("#models-table tbody");
+    tbody.innerHTML = "";
+    let anyRunning = false;
+    for (const m of doc.models) {
+      const dl = doc.downloads[m.model];
+      const running = !!(dl && dl.running);
+      anyRunning ||= running;
+      let status, action = "";
+      if (running) {
+        const tail = (dl.log_tail || "").trim().split("\n").pop() || "";
+        status = `<span class="status-marginal">downloading…</span>
+                  <div class="msg dl-tail">${tail.slice(-70)}</div>`;
+      } else if (dl && dl.exit_code !== 0 && dl.exit_code !== null) {
+        status = `<span class="status-fail">download failed (${dl.exit_code})</span>`;
+        action = `<button class="small" data-model="${m.model}">Retry</button>`;
+      } else if (m.cached) {
+        status = `<span class="status-pass">cached</span>`;
+      } else if (m.partial) {
+        status = `<span class="status-marginal">partial</span>`;
+        action = `<button class="small" data-model="${m.model}">Resume download</button>`;
+      } else {
+        status = `<span class="msg">not downloaded</span>`;
+        action = `<button class="small primary" data-model="${m.model}">Download</button>`;
+      }
+      tbody.insertAdjacentHTML("beforeend", `<tr>
+        <td>${m.model}</td>
+        <td class="msg">${m.referenced_by.join(", ")}</td>
+        <td>${status}</td>
+        <td>${m.size_gb ? m.size_gb.toFixed(1) + " GB" : "—"}</td>
+        <td>${action}</td></tr>`);
+    }
+    tbody.querySelectorAll("button[data-model]").forEach(btn =>
+      btn.addEventListener("click", () => this.download(btn.dataset.model)));
+    if (anyRunning && !this.polling) {
+      this.polling = setInterval(() => this.refresh(), 3000);
+    } else if (!anyRunning && this.polling) {
+      clearInterval(this.polling);
+      this.polling = null;
+    }
+  },
+
+  async download(model) {
+    try {
+      await api("/api/models/download", {
+        method: "POST", body: JSON.stringify({ model }),
+      });
+    } catch (e) {
+      Optimizer.msg(e.message, "error");
+    }
+    this.refresh();
+  },
+};
+
 /* ══ Persona / cohort editor ══════════════════════════════════── */
 
 const PERSONA_TEMPLATE = `description: "What this archetype does"
@@ -1053,4 +1121,5 @@ Control.init();
 Live.init();
 Results.init();
 Optimizer.init();
+Models.init();
 Editor.init();

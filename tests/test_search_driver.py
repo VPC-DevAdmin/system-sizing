@@ -100,6 +100,9 @@ def test_search_driver_end_to_end_and_resume(
 
     doc = json.loads(out.read_text())
     assert doc["kind"] == "search"
+    # The search path must bind the GPU image — the CPU-image module
+    # default once made every candidate run vLLM on the host CPU.
+    assert optimizer.IMAGE == "vllm/vllm-openai:latest"
     summary = doc["summary"]
     assert summary["evaluated"] <= 14
     assert summary["evaluated"] == len(seen)

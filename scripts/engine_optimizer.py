@@ -2287,6 +2287,27 @@ def _import_search():
     return _search
 
 
+def _acquire_instance_lock(lock_path: Path):
+    """Advisory exclusive lock; refuses to start when another
+    optimizer holds it. Returns the open handle (kept for process
+    lifetime — the lock releases automatically on exit or kill)."""
+    import fcntl
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(
+            f"another engine_optimizer instance holds {lock_path} — two "
+            f"optimizers would fight over the same GPUs and container "
+            f"names. Stop it first (POST /api/optimizer/stop, or kill "
+            f"the process)."
+        ) from None
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
+
+
 def _set_model_globals(model: str, served_name: str) -> None:
     """Per-candidate model binding. Candidates run strictly
     sequentially, so rebinding the module globals the launch/measure
@@ -2341,6 +2362,15 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool) -> None:
 
     search = _import_search()
     space = search.load_space(space_path)
+
+    # The search path never went through PROFILE_DEFAULTS, so IMAGE
+    # kept the module's CPU-image default — every vllm_cuda candidate
+    # launched the CPU image and "ran" vLLM on the Xeon until the
+    # health gate timed out. Bind the engine's image here (env
+    # override still wins, and a space may pin its own).
+    global IMAGE
+    if "OPTIMIZER_IMAGE" not in os.environ and space.engine == "vllm_cuda":
+        IMAGE = getattr(space, "gpu_image", None) or "vllm/vllm-openai:latest"
 
     sstate = None
     if new_run and out_path.exists():
@@ -2676,6 +2706,14 @@ def main() -> None:
     if args.watch:
         watch_dashboard(args.out)
         return
+
+    # Exactly one optimizer per host: two instances fight over the
+    # GPUs and the fixed vllm-s* container names (observed in the
+    # field after a serve restart orphaned a search — the new one's
+    # launches failed on name conflicts while the orphan kept going).
+    # The lock lives beside the output and dies with the process.
+    out_dir = (args.search_out if args.search is not None else args.out).parent
+    _lock = _acquire_instance_lock(out_dir / ".optimizer.lock")  # noqa: F841
 
     if args.search is not None:
         asyncio.run(run_search(args.search, args.search_out, args.new_run))

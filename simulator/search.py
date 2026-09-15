@@ -126,6 +126,10 @@ class SearchSpace:
     # never wastes an evaluation trying to load at tp=1.
     vram_per_gpu_gb: Optional[float] = None
     measurement: Measurement = field(default_factory=Measurement)
+    # Engine container image (vllm_cuda). None -> the driver's default
+    # GPU image. Part of the fingerprint: a different image is a
+    # different engine.
+    gpu_image: Optional[str] = None
 
     @property
     def total_devices(self) -> int:
@@ -146,6 +150,7 @@ class SearchSpace:
             # incomparable numbers — hash them like candidate identity.
             "objective": dataclasses.asdict(self.objective),
             "measurement": dataclasses.asdict(self.measurement),
+            "gpu_image": self.gpu_image,
         }
         return hashlib.sha256(
             json.dumps(doc, sort_keys=True).encode()
@@ -273,6 +278,7 @@ def load_space(path: str | Path) -> SearchSpace:
         source=str(path),
         vram_per_gpu_gb=float(vram) if vram is not None else None,
         measurement=measurement,
+        gpu_image=raw.get("gpu_image") or None,
     )
 
 

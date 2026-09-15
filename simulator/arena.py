@@ -244,6 +244,10 @@ def build_space_doc(
     doc = {
         "name": "arena",
         "engine": "vllm_cuda",
+        # Explicit, not defaulted: the CPU-image field incident showed
+        # what an implicit image costs (every candidate silently ran
+        # vLLM on the Xeon until the health gate timed out).
+        "gpu_image": "vllm/vllm-openai:latest",
         "device_groups": hw["device_groups"],
         "vram_per_gpu_gb": hw["vram_per_gpu_gb"],
         "model_variants": variants,

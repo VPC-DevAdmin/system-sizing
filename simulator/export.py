@@ -440,6 +440,30 @@ def _attribute_bottleneck(
         if kv > 90.0:
             return "kv_cache", evidence
 
+    # ── GPU heuristics (NULL on CPU-only runs → all skipped) ─────────
+    # Ordering: throttling before compute — a throttled GPU also shows
+    # high SM util, but the actionable cause is thermals/power, not
+    # "buy a faster GPU". VRAM-as-KV pressure is already covered by
+    # the kv_cache check above (vLLM preallocates VRAM to
+    # gpu_memory_utilization, so raw used/total is ~constant by design
+    # and carries no signal; KV-pool utilization is the honest one).
+    throttle_frac = agg.get("gpu_throttle_fraction")
+    sm_util = agg.get("gpu_sm_util_pct_avg")
+    if sm_util is not None:
+        evidence["gpu_sm_util_pct_avg"] = sm_util
+    if throttle_frac is not None:
+        evidence["gpu_throttle_fraction"] = throttle_frac
+        if agg.get("gpu_sm_clock_mhz_avg") is not None:
+            evidence["gpu_sm_clock_mhz_avg"] = agg["gpu_sm_clock_mhz_avg"]
+        if agg.get("gpu_power_w_avg") is not None:
+            evidence["gpu_power_w_avg"] = agg["gpu_power_w_avg"]
+        # >20% of window samples with an active slowdown reason means
+        # the clock ceiling, not the workload, sets throughput.
+        if throttle_frac > 0.2:
+            return "gpu_throttled", evidence
+    if sm_util is not None and sm_util > 85.0:
+        return "gpu_compute", evidence
+
     bw_read = agg.get("memory_bw_read_gb_s_avg")
     bw_write = agg.get("memory_bw_write_gb_s_avg")
     if bw_read is not None or bw_write is not None:
@@ -498,7 +522,15 @@ def _attribute_bottleneck(
 
 def _hardware_recommendation(bottleneck: str) -> str:
     return {
-        "kv_cache": "Increase KV cache space (VLLM_CPU_KVCACHE_SPACE) or add RAM.",
+        "kv_cache": "KV pool saturated: on CPU raise VLLM_CPU_KVCACHE_SPACE / add RAM; "
+                     "on GPU raise gpu-memory-utilization, shrink max-model-len, or add "
+                     "VRAM (bigger SKU or tensor parallelism across more GPUs).",
+        "gpu_compute": "GPU compute bound: faster GPU SKU, more GPUs with tensor "
+                        "parallelism, or a quantized (FP8/INT4) model.",
+        "gpu_throttled": "GPU is thermal/power throttling — check cooling and chassis "
+                          "airflow, power caps (nvidia-smi -q -d POWER), and rack inlet "
+                          "temperature. Throughput is set by the clock ceiling, not the "
+                          "workload.",
         "memory_bandwidth": "Memory-bandwidth bound: prefer faster DDR5 / more channels, or scale out.",
         "amx_underutilised": "Matmul dispatch falling back to non-AMX kernels — check ONEDNN_VERBOSE log "
                               "and verify weights are in a layout the AMX kernels accept (BF16 / W8A8).",

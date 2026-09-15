@@ -156,3 +156,58 @@ def test_packaged_schema_exists() -> None:
     assert EXPORT_SCHEMA_PATH.exists()
     parsed = json.loads(EXPORT_SCHEMA_PATH.read_text())
     assert parsed["type"] == "object"
+
+
+def _gpu_measurement(pool: int, status: str, **agg) -> dict:
+    base = {
+        "cohort_run_id": "crid", "step_index": 0,
+        "target_pool_size": pool,
+        "measured_avg_pool_size": float(pool),
+        "measured_avg_in_flight": 4.0,
+        "measurement_started_at": "2026-01-01T00:00:00Z",
+        "measurement_duration_s": 60, "sample_size": 50,
+        "ttft_violation_rate": 0.4, "tpot_violation_rate": 0.1,
+        "combined_violation_rate": 0.4,
+        "violation_rate_ci_lower": 0.3, "violation_rate_ci_upper": 0.5,
+        "capacity_status": status, "target_status": status,
+    }
+    base.update(agg)
+    return base
+
+
+def test_gpu_bottleneck_attribution_compute(tmp_path) -> None:
+    """SM util pegged at the knee → gpu_compute, with the util in
+    evidence (roadmap 1.4)."""
+    from simulator.export import _bottleneck
+
+    knee = _gpu_measurement(64, "fail", gpu_sm_util_pct_avg=96.0,
+                            gpu_throttle_fraction=0.0)
+    label, evidence = _bottleneck([knee])
+    assert label == "gpu_compute"
+    assert evidence["gpu_sm_util_pct_avg"] == 96.0
+
+
+def test_gpu_bottleneck_attribution_throttled_beats_compute(tmp_path) -> None:
+    """A throttled GPU also shows high SM util — the actionable cause
+    is thermals/power, so throttling wins the attribution."""
+    from simulator.export import _bottleneck
+
+    knee = _gpu_measurement(
+        64, "fail",
+        gpu_sm_util_pct_avg=97.0, gpu_throttle_fraction=0.45,
+        gpu_sm_clock_mhz_avg=1100.0, gpu_power_w_avg=310.0,
+    )
+    label, evidence = _bottleneck([knee])
+    assert label == "gpu_throttled"
+    assert evidence["gpu_throttle_fraction"] == 0.45
+    assert evidence["gpu_sm_clock_mhz_avg"] == 1100.0
+
+
+def test_cpu_runs_unaffected_by_gpu_heuristics(tmp_path) -> None:
+    """CPU-only measurements (gpu_* all NULL) fall through to the
+    existing CPU heuristics untouched."""
+    from simulator.export import _bottleneck
+
+    knee = _gpu_measurement(64, "fail", pmu_stall_mem_ratio=0.7)
+    label, _ = _bottleneck([knee])
+    assert label == "memory_bandwidth"

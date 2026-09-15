@@ -1,7 +1,8 @@
 """Export the buyer-facing JSON document.
 
 One ``buyer_page_data.json`` per call, structured for direct consumption
-by [web/index.html](../web/index.html) (or any downstream parser):
+by the capsim UI's results view (or any downstream parser — the
+contract is simulator/export_schema/buyer_page_data.schema.json):
 
     {
       "schema_version": "1.0.0",

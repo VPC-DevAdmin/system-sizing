@@ -1,0 +1,61 @@
+# CI (roadmap Phase 4): lint, the full test suite (including the
+# export-schema contract tests and the mock-engine end-to-end
+# integration runs — real HTTP + SSE + measurement + DB + export, no
+# hardware needed), and a wheel build with a package-data check. The
+# hardware-facing paths (real engines, PMU/RAPL/NVML) are covered by
+# `capsim smoke` on benchmark boxes, not here.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check simulator tests
+      - name: Tests (unit + contract + mock integration)
+        run: pytest tests/ -q
+
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel + sdist
+        run: |
+          pip install build
+          python -m build
+      - name: Wheel carries package data (UI, schema, personas)
+        run: |
+          pip install dist/*.whl
+          python - <<'EOF'
+          from pathlib import Path
+          import simulator
+          root = Path(simulator.__file__).parent
+          for p in ("ui/index.html", "ui/vendor/chart.umd.min.js",
+                    "export_schema/buyer_page_data.schema.json",
+                    "personas_data/default.yaml"):
+              assert (root / p).exists(), f"missing package data: {p}"
+          print("package data ok")
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

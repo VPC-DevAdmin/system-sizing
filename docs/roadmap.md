@@ -218,7 +218,26 @@ in-process ASGI masks it). web/index.html retirement stays in Phase 4.
 
 ---
 
-## Phase 4 — Personas as data + productization polish
+## Phase 4 — Personas as data + productization polish ✅ (2026-09-15)
+
+Shipped: the persona/cohort catalog is YAML (packaged canonical file
+verified equivalent to the old Python literals; config/personas/*.yaml
+overlays; in-place registry reload), edited from a new Personas tab in
+the UI through validating GET/PUT endpoints — a bad save restores the
+previous file and never wedges the registry. CI (GitHub Actions) runs
+ruff + the full suite (contract tests + mock-engine integration) on
+3.11/3.12 plus a wheel build that asserts the UI/schema/personas
+package data made it in; an explicit ruff policy landed with the
+codebase brought to clean. docs/deploy.md carries the landing flow per
+host class. web/index.html and `make web` are retired — the capsim UI
+supersedes them (site/ remains as the downstream Dell narrative).
+Nightly smoke on a real runner remains open until a benchmark box is
+attached to CI.
+
+**Project status:** all four phases complete. Open hardware work: the
+real-box acceptance runs (install → doctor → smoke → ready → sweep) on
+the Xeon CPU and Xeon+GPU hosts, which exercise the engine launchers
+and Linux/NVML collectors that unit tests and the mock cannot.
 
 - Personas/cohorts move from `personas.py` to YAML (`config/personas/`),
   validated on load; UI gains a persona/cohort editor (writes YAML through the

@@ -44,7 +44,7 @@ make dashboard
 
 # After the run finishes:
 make export
-make web                                            # http://localhost:8765
+capsim serve                                        # web UI: http://localhost:8321
 ```
 
 ## Make targets
@@ -68,7 +68,6 @@ The headline workflow is `ready` → `run-cohort` → `dashboard` → `export`. 
 | `make list-runs` | List `run_NN/` directories under `runs/` with their DB counts. |
 | `make dashboard` | Live `rich`-based progress view of the latest run. |
 | `make export [SLIM=true]` | Build `buyer_page_data.json` from `runs/run_NN/run.db`, **landing the JSON inside the same `runs/run_NN/` directory** so all per-run artifacts (DB, engine logs, perf CSVs, exported JSON) stay grouped. Includes per-step rollups (`curve[]`), per-step time series (`curve[i].telemetry_samples`, `curve[i].turns`), and the 1 Hz whole-run heartbeat (`cohort.snapshots`) so a downstream website can drill from the knee chart into the underlying turn-by-turn data without a second round-trip. **`SLIM=true`** produces `buyer_page_data_slim.json` instead — same headline summary, capacity landing zones, per-step rollup, and bottleneck attribution, but without the per-step time-series or whole-run heartbeat. ~99% smaller (35 MB → 100-200 KB) — use for buyer-facing summary distribution. Override the destination with `--output <path>` if needed. |
-| `make web` | Serve the reference buyer page on `http://localhost:8765`. |
 | `make analyze-prefix-cache` | Prefix-cache hit-rate report on the latest `.db`. |
 | `make optimize-engine [ONLY=...] [RUN_NEW=true]` | Iterate a registry of vLLM-CPU launch shapes (dual-replica, chunked prefill, larger KV pool, single-replica, TP=2, …), measure TTFT / TPOT / throughput across representative input/output/concurrency cells (incl. the long-context pain point at c=8 / c=16). **Always nohup'd + auto-tailed** — survives SSH disconnect; Ctrl-C exits the tail without killing the run. Resumes the existing `runs/engine_optimizer/run.json` by default (skips configs already marked `ok` / `launch_failed`), persists after every cell so a crash mid-config loses at most one cell. Pass `RUN_NEW=true` to wipe and start fresh. `ONLY=baseline,kv_xl` runs a subset; `LIST=1` prints the registered configs. Use this on a new host to find the best engine config before kicking off a full sweep. |
 | `make optimize-dashboard` | Read-only live dashboard against the running optimizer. Polls `runs/engine_optimizer/run.json` plus the latest `optimizer_*.log` in the same dir, renders the same layout as the foreground run (current config, phase, log tail, results-so-far). Use from a second SSH session to watch a backgrounded `make optimize-engine` without touching it. |
@@ -111,8 +110,6 @@ simulator/
   frequency.py        # bound-CPU effective frequency, three-tier read
   amx_utilization.py  # oneDNN verbose log -> AMX dispatch fraction
   cpu_binding.py      # parse VLLM_CPU_OMP_THREADS_BIND
-web/
-  index.html          # self-contained Chart.js renderer for buyer_page_data.json
 tests/                # pytest suites
 config/default.yaml
 Makefile

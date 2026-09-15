@@ -6,7 +6,7 @@
 #                   COHORT=chat_heavy
 #   make dashboard
 #   make export
-#   make web
+#   capsim serve      # web UI at http://localhost:8321
 
 # Engine + model are read from CONFIG by default. Set ENGINE=... or
 # MODEL=... on the command line ONLY when you want to override what the
@@ -87,7 +87,7 @@ help:
 	@echo ""
 	@echo "After runs:"
 	@echo "  make export                             Build buyer_page_data.json"
-	@echo "  make web                                Static-serve the buyer page (http://localhost:8765)"
+	@echo "  capsim serve                            Web UI + control-plane service (http://localhost:8321)"
 	@echo "  make analyze-prefix-cache               Prefix-cache hit-rate report"
 	@echo ""
 	@echo "Tuning:"
@@ -365,16 +365,6 @@ list-personas:
 export:
 	$(PY) -m simulator.cli export --input-dir $(RUN_DIR) \
 		$(if $(SLIM),--slim)
-
-.PHONY: web
-web: export
-	@RD=$$(ls -d $(RUN_DIR)/run_* 2>/dev/null | sort | tail -n 1) ; \
-	[ -n "$$RD" ] || RD="$(RUN_DIR)" ; \
-	JSON="$$RD/buyer_page_data.json" ; \
-	if [ ! -f "$$JSON" ]; then echo "No $$JSON yet — did make export succeed?" ; exit 1 ; fi ; \
-	cp -f "$$JSON" web/buyer_page_data.json ; \
-	echo "Reference buyer page at http://localhost:8765/  (source: $$JSON)"
-	@cd web && $(PY) -m http.server 8765
 
 .PHONY: analyze-prefix-cache
 analyze-prefix-cache:

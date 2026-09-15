@@ -187,6 +187,12 @@ _TELEMETRY_SAMPLE_COLUMNS = (
     "freq_mhz_mean",
     "freq_mhz_stddev",
     "freq_mhz_min",
+    # GPU per-second readings (schema v3; absent on legacy DBs and
+    # NULL on CPU-only hosts).
+    "gpu_sm_util_pct",
+    "gpu_vram_used_gb",
+    "gpu_power_w",
+    "gpu_sm_clock_mhz",
 )
 
 # Columns surfaced in the per-step ``turns`` array. ``token_timestamps_json``
@@ -280,6 +286,12 @@ def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
             "AVG(engine_rss_gb) AS engine_rss_gb_avg",
             "AVG(freq_mhz_mean) AS freq_mhz_avg",
         ]
+        if "gpu_sm_util_pct" in tele_present:
+            rollup_cols += [
+                "AVG(gpu_sm_util_pct) AS gpu_sm_util",
+                "AVG(gpu_vram_used_gb) AS gpu_vram_used_gb_avg",
+                "AVG(gpu_power_w) AS gpu_power_w_avg",
+            ]
         tele = conn.execute(
             f"SELECT {', '.join(rollup_cols)} "
             f"FROM measurement_telemetry WHERE measurement_id = ?",

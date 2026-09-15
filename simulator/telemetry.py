@@ -169,6 +169,13 @@ class _IntervalSample:
     freq_mhz_mean: Optional[float] = None
     freq_mhz_stddev: Optional[float] = None
     freq_mhz_min: Optional[float] = None
+    # GPU readings (collectors/gpu.py): util/clock averaged across
+    # devices, VRAM/power summed. None on CPU-only hosts.
+    gpu_sm_util_pct: Optional[float] = None
+    gpu_vram_used_gb: Optional[float] = None
+    gpu_power_w: Optional[float] = None
+    gpu_sm_clock_mhz: Optional[float] = None
+    gpu_throttled: Optional[bool] = None  # window aggregate only, no DB column
 
 
 class MeasurementTelemetry:
@@ -190,14 +197,26 @@ class MeasurementTelemetry:
         bound_cpus: set[int] | None = None,
         engine_pid: int | None = None,
         artifacts_dir: str | Path = "runs",
+        # False for remote-endpoint targets: host-local collectors
+        # (PMU, IMC bandwidth, RAPL, frequency, /proc CPU+memory,
+        # engine RSS, local GPUs) would measure the CLIENT box, not
+        # the system under test — actively misleading, so they're
+        # skipped and reported as such. Engine /metrics scraping stays
+        # on: the remote endpoint's metrics ARE the system under test.
+        host_telemetry: bool = True,
     ):
         self.cfg = telemetry_config
         self.engine = engine
         self.bound_cpus = bound_cpus or None
         self.engine_pid = engine_pid
         self.artifacts_dir = Path(artifacts_dir)
+        self.host_telemetry = host_telemetry
 
         self._freq = FrequencyCollector(cpu_filter=self.bound_cpus)
+        self._gpu = None
+        if host_telemetry and getattr(telemetry_config, "enable_gpu", True):
+            from .collectors import GpuCollector
+            self._gpu = GpuCollector()
         self._perf: PerfStatCollector | None = None
         self._bandwidth: BandwidthCollector | None = None
         self._power: PowerProbe | None = None
@@ -205,6 +224,10 @@ class MeasurementTelemetry:
         self._samples: list[_IntervalSample] = []
         self._stopped = False
         self._measurement_id: int | None = None
+        # Latest total VRAM seen (GB, summed across devices) — totals
+        # don't vary per second so they're kept out of the per-second
+        # rows and land once in the window aggregate.
+        self._gpu_vram_total_gb: float | None = None
         # Per-collector status accumulated across measurement windows
         # ({name: "ok" | "no_data" | "disabled" | collector-specific
         # error string}). Once a collector reports "ok" in any window
@@ -219,14 +242,14 @@ class MeasurementTelemetry:
         self._stopped = False
 
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        if self.cfg.enable_pmu:
+        if self.host_telemetry and self.cfg.enable_pmu:
             perf_log = self.artifacts_dir / f"perf_m{measurement_id}.csv"
             self._perf = PerfStatCollector(raw_output_path=perf_log)
             self._perf.start()
-        if self.cfg.enable_memory_bandwidth:
+        if self.host_telemetry and self.cfg.enable_memory_bandwidth:
             self._bandwidth = BandwidthCollector(interval_ms=1000)
             self._bandwidth.start()
-        if getattr(self.cfg, "enable_power", True):
+        if self.host_telemetry and getattr(self.cfg, "enable_power", True):
             self._power = PowerProbe()
             self._power.start()
 
@@ -270,6 +293,24 @@ class MeasurementTelemetry:
             except Exception as e:
                 log.warning("power.stop() failed: %s", e)
 
+        # GPU window aggregates from our own per-second samples.
+        if self._gpu is not None:
+            from .collectors import GpuSample, aggregate_gpu_samples
+            gpu_samples = [
+                GpuSample(
+                    sm_util_pct=s.gpu_sm_util_pct,
+                    vram_used_gb=s.gpu_vram_used_gb,
+                    vram_total_gb=self._gpu_vram_total_gb,
+                    power_w=s.gpu_power_w,
+                    sm_clock_mhz=s.gpu_sm_clock_mhz,
+                    throttled=s.gpu_throttled,
+                )
+                for s in self._samples
+                if s.gpu_sm_util_pct is not None
+                or s.gpu_vram_used_gb is not None
+            ]
+            agg.update(aggregate_gpu_samples(gpu_samples))
+
         # Frequency aggregates from our own per-second samples.
         freq_means = [s.freq_mhz_mean for s in self._samples if s.freq_mhz_mean is not None]
         freq_stds = [s.freq_mhz_stddev for s in self._samples if s.freq_mhz_stddev is not None]
@@ -293,6 +334,23 @@ class MeasurementTelemetry:
             return "ok" if any(
                 getattr(s, attr) is not None for s in self._samples
             ) else "no_data"
+
+        if not self.host_telemetry:
+            # Remote target: every host-local collector is skipped by
+            # design; only engine metrics reflect the system under test.
+            window = {
+                name: "skipped_remote_target"
+                for name in ("pmu", "memory_bandwidth", "power", "frequency",
+                             "cpu_util", "memory", "engine_rss", "gpu")
+            }
+            window["engine_metrics"] = (
+                "disabled" if not self.cfg.enable_engine_metrics
+                else _sampled("kv_cache_used_pct")
+            )
+            for name, status in window.items():
+                if self.collector_statuses.get(name) != "ok":
+                    self.collector_statuses[name] = status
+            return
 
         window: dict[str, str] = {
             # PMU status: ``_parse`` puts it on the agg dict under
@@ -326,6 +384,11 @@ class MeasurementTelemetry:
                 if (not _HAS_PSUTIL or self.engine_pid is None)
                 else _sampled("engine_rss_gb")
             ),
+            "gpu": (
+                "disabled" if self._gpu is None
+                else ("not_available" if not self._gpu.is_available()
+                      else _sampled("gpu_sm_util_pct"))
+            ),
         }
         for name, status in window.items():
             if self.collector_statuses.get(name) != "ok":
@@ -350,23 +413,37 @@ class MeasurementTelemetry:
                     if "prefix_cache_hits" in m:
                         sample.prefix_cache_hits = int(m["prefix_cache_hits"])
 
-                # CPU util via /proc/stat — both views from a single
-                # per-CPU read so the two metrics share an interval.
-                host_util, bound_util, last_cpu = _read_cpu_util(
-                    last_cpu, bound_cpus=self.bound_cpus,
-                )
-                sample.cpu_util_avg = host_util
-                sample.cpu_util_bound_avg = bound_util
+                if self.host_telemetry:
+                    # CPU util via /proc/stat — both views from a single
+                    # per-CPU read so the two metrics share an interval.
+                    host_util, bound_util, last_cpu = _read_cpu_util(
+                        last_cpu, bound_cpus=self.bound_cpus,
+                    )
+                    sample.cpu_util_avg = host_util
+                    sample.cpu_util_bound_avg = bound_util
 
-                # Memory used (system + engine RSS)
-                sample.memory_used_gb = _read_memory_used_gb()
-                sample.engine_rss_gb = engine_rss_gb(self.engine_pid)
+                    # Memory used (system + engine RSS)
+                    sample.memory_used_gb = _read_memory_used_gb()
+                    sample.engine_rss_gb = engine_rss_gb(self.engine_pid)
 
-                # Frequency
-                mean_mhz, std_mhz, min_mhz = self._freq.sample()
-                sample.freq_mhz_mean = mean_mhz
-                sample.freq_mhz_stddev = std_mhz
-                sample.freq_mhz_min = min_mhz
+                    # Frequency
+                    mean_mhz, std_mhz, min_mhz = self._freq.sample()
+                    sample.freq_mhz_mean = mean_mhz
+                    sample.freq_mhz_stddev = std_mhz
+                    sample.freq_mhz_min = min_mhz
+
+                    # GPU (NVML / nvidia-smi; None on CPU-only hosts)
+                    if self._gpu is not None:
+                        gs = await asyncio.to_thread(self._gpu.sample)
+                        if gs is not None:
+                            sample.gpu_sm_util_pct = gs.sm_util_pct
+                            sample.gpu_vram_used_gb = gs.vram_used_gb
+                            sample.gpu_power_w = gs.power_w
+                            sample.gpu_sm_clock_mhz = gs.sm_clock_mhz
+                            sample.gpu_throttled = gs.throttled
+                            self._gpu_vram_total_gb = (
+                                gs.vram_total_gb or self._gpu_vram_total_gb
+                            )
 
                 self._samples.append(sample)
                 await asyncio.sleep(1.0)
@@ -388,6 +465,10 @@ class MeasurementTelemetry:
             "freq_mhz_mean": s.freq_mhz_mean,
             "freq_mhz_stddev": s.freq_mhz_stddev,
             "freq_mhz_min": s.freq_mhz_min,
+            "gpu_sm_util_pct": s.gpu_sm_util_pct,
+            "gpu_vram_used_gb": s.gpu_vram_used_gb,
+            "gpu_power_w": s.gpu_power_w,
+            "gpu_sm_clock_mhz": s.gpu_sm_clock_mhz,
         }
 
 

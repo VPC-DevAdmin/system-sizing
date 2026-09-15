@@ -22,7 +22,7 @@ from typing import Any, Iterable
 # The version is stamped into SQLite's ``PRAGMA user_version``; DBs from
 # before versioning existed read as 0 and get every migration (each one
 # is idempotent, so a partially-lifted legacy DB is fine too).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cohort_run (
@@ -125,7 +125,22 @@ CREATE TABLE IF NOT EXISTS cohort_measurements (
     effective_freq_ghz_min REAL,
     onednn_amx_time_fraction REAL,
     onednn_matmul_dispatches_amx INTEGER,
-    onednn_matmul_dispatches_non_amx INTEGER
+    onednn_matmul_dispatches_non_amx INTEGER,
+    -- GPU window aggregates (NVML / nvidia-smi collector). NULL on
+    -- CPU-only hosts. Util and clock are averaged across devices,
+    -- VRAM and power are summed; throttle_fraction is the share of
+    -- 1 Hz samples where any device reported an active thermal/power
+    -- slowdown reason.
+    gpu_sm_util_pct_avg REAL,
+    gpu_sm_util_pct_peak REAL,
+    gpu_vram_used_gb_avg REAL,
+    gpu_vram_used_gb_peak REAL,
+    gpu_vram_total_gb REAL,
+    gpu_power_w_avg REAL,
+    gpu_power_w_peak REAL,
+    gpu_sm_clock_mhz_avg REAL,
+    gpu_sm_clock_mhz_min REAL,
+    gpu_throttle_fraction REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_measurements_run ON cohort_measurements(cohort_run_id);
@@ -213,7 +228,13 @@ CREATE TABLE IF NOT EXISTS measurement_telemetry (
     engine_rss_gb REAL,
     freq_mhz_mean REAL,
     freq_mhz_stddev REAL,
-    freq_mhz_min REAL
+    freq_mhz_min REAL,
+    -- Per-second GPU readings (NULL on CPU-only hosts): util/clock
+    -- averaged across devices, VRAM/power summed. See collectors/gpu.py.
+    gpu_sm_util_pct REAL,
+    gpu_vram_used_gb REAL,
+    gpu_power_w REAL,
+    gpu_sm_clock_mhz REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_telemetry_measurement ON measurement_telemetry(measurement_id);
@@ -263,6 +284,17 @@ _AGGREGATE_COLUMNS: list[tuple[str, str]] = [
     ("onednn_amx_time_fraction", "REAL"),
     ("onednn_matmul_dispatches_amx", "INTEGER"),
     ("onednn_matmul_dispatches_non_amx", "INTEGER"),
+    # GPU window aggregates (schema v3).
+    ("gpu_sm_util_pct_avg", "REAL"),
+    ("gpu_sm_util_pct_peak", "REAL"),
+    ("gpu_vram_used_gb_avg", "REAL"),
+    ("gpu_vram_used_gb_peak", "REAL"),
+    ("gpu_vram_total_gb", "REAL"),
+    ("gpu_power_w_avg", "REAL"),
+    ("gpu_power_w_peak", "REAL"),
+    ("gpu_sm_clock_mhz_avg", "REAL"),
+    ("gpu_sm_clock_mhz_min", "REAL"),
+    ("gpu_throttle_fraction", "REAL"),
 ]
 AGGREGATE_COLUMN_NAMES: frozenset[str] = frozenset(c for c, _ in _AGGREGATE_COLUMNS)
 
@@ -338,6 +370,21 @@ def _migration_2_collectors_json(conn: sqlite3.Connection) -> None:
     _ensure_columns(conn, "cohort_run", [("collectors_json", "TEXT")])
 
 
+def _migration_3_gpu_telemetry(conn: sqlite3.Connection) -> None:
+    """GPU collector columns (roadmap 1.2): per-second readings on
+    measurement_telemetry, window aggregates on cohort_measurements
+    (the aggregate list already carries the gpu_* columns, and the
+    ensure is idempotent for the pre-existing ones)."""
+    _ensure_columns(
+        conn, "measurement_telemetry",
+        [("gpu_sm_util_pct", "REAL"),
+         ("gpu_vram_used_gb", "REAL"),
+         ("gpu_power_w", "REAL"),
+         ("gpu_sm_clock_mhz", "REAL")],
+    )
+    _ensure_columns(conn, "cohort_measurements", _AGGREGATE_COLUMNS)
+
+
 def _migrate_legacy_aggregate(conn: sqlite3.Connection) -> None:
     """Copy legacy ``measurement_aggregate`` rows onto
     ``cohort_measurements`` and drop the table.
@@ -373,6 +420,7 @@ def _migrate_legacy_aggregate(conn: sqlite3.Connection) -> None:
 MIGRATIONS: list[tuple[int, str, Any]] = [
     (1, "consolidate pre-versioning column lifts", _migration_1_pre_versioning_lifts),
     (2, "cohort_run.collectors_json", _migration_2_collectors_json),
+    (3, "gpu telemetry columns", _migration_3_gpu_telemetry),
 ]
 assert [v for v, _, _ in MIGRATIONS] == list(range(1, SCHEMA_VERSION + 1)), (
     "MIGRATIONS must be contiguous 1..SCHEMA_VERSION"

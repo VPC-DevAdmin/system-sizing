@@ -218,6 +218,9 @@ class TelemetryConfig:
     enable_power: bool = True
     enable_engine_metrics: bool = True
     enable_amx_utilization: bool = True
+    # GPU collector (NVML / nvidia-smi). Auto-skips on hosts without
+    # an NVIDIA driver, so leaving this True on CPU-only boxes is free.
+    enable_gpu: bool = True
     perf_events: list[str] = field(default_factory=lambda: [
         "cycles",
         "instructions",

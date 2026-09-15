@@ -34,6 +34,10 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # ── uv ───────────────────────────────────────────────────────────────
+# Remember the PATH the user's shell actually has: we prepend uv's bin
+# dir below so THIS script can proceed, but the "is capsim reachable"
+# check at the end must answer for the interactive shell, not for us.
+PRE_INSTALL_PATH="$PATH"
 if ! command -v uv >/dev/null 2>&1; then
   say "Installing uv (per-user, no sudo)"
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -47,9 +51,14 @@ fi
 say "Installing capsim from $REPO_DIR"
 uv tool install --force --python 3.12 "$REPO_DIR"
 
-if ! command -v capsim >/dev/null 2>&1; then
+# Check reachability against the PATH the user's shell had BEFORE this
+# script prepended uv's bin dir — otherwise the warning never fires
+# even though `capsim` will be "command not found" at their prompt.
+if ! PATH="$PRE_INSTALL_PATH" command -v capsim >/dev/null 2>&1; then
   uv tool update-shell || true
-  warn "capsim not on PATH yet — open a new shell, or add \$HOME/.local/bin to PATH"
+  warn "capsim is installed but not on your current shell's PATH."
+  warn "Run this now (future logins are already fixed by update-shell):"
+  warn '    export PATH="$HOME/.local/bin:$PATH"'
 fi
 
 say "Installed. Next steps (run from $REPO_DIR so the config/ dir is available):"

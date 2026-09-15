@@ -13,6 +13,7 @@ scripting; the CLI exits non-zero when any check fails.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -175,27 +176,123 @@ def _check_gpu(report: DoctorReport, docker_ok: bool) -> bool:
     return True
 
 
-def _check_disk(report: DoctorReport) -> None:
-    # Models are 30-60 GB plus Docker images: warn under 150 GB free,
-    # fail under 30 GB. Checks the largest-free of the common roots.
-    candidates = [Path("/data"), Path.home(), Path("/var/lib/docker")]
-    best: tuple[Path, int] | None = None
-    for c in candidates:
-        if c.exists():
-            free = shutil.disk_usage(c).free
-            if best is None or free > best[1]:
-                best = (c, free)
-    if best is None:
-        report.add("disk", WARN, "could not stat any known volume")
+def _nearest_existing(path: Path) -> Path:
+    """Walk up until a path exists — free space of the filesystem a
+    not-yet-created directory WILL land on."""
+    p = path
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    return p
+
+
+def parse_lsblk_unmounted(doc: dict, min_gb: float = 400.0) -> list[tuple[str, float]]:
+    """Large block devices with no mountpoint anywhere in their tree —
+    the 'this lab box has a data NVMe nobody mounted' case. Pure
+    parser over ``lsblk -J -b -o NAME,SIZE,TYPE,MOUNTPOINT`` output."""
+
+    def mounted(node: dict) -> bool:
+        if node.get("mountpoint") or node.get("mountpoints", [None]) != [None] \
+                and any(node.get("mountpoints") or []):
+            return True
+        return any(mounted(c) for c in node.get("children") or [])
+
+    out: list[tuple[str, float]] = []
+    for dev in doc.get("blockdevices") or []:
+        if dev.get("type") != "disk":
+            continue
+        size_gb = float(dev.get("size") or 0) / 1e9
+        if size_gb >= min_gb and not mounted(dev):
+            out.append((str(dev.get("name")), size_gb))
+    return out
+
+
+def _check_disk(report: DoctorReport, docker_ok: bool = False) -> None:
+    """Free space where the tool will ACTUALLY write — Docker's real
+    storage root (asked of the daemon, honoring data-root moves), the
+    HF cache the engine containers mount, and /data/ml when staged
+    models live there — not just whichever common path is largest.
+    Then two hints boot-disk-only checks can't give: a bigger mounted
+    data filesystem worth pointing the caches at, and large unmounted
+    disks. Models are 30-60 GB each plus ~20 GB of engine images:
+    fail under 30 GB on any consumer, warn under 150 GB.
+    """
+    from .models import hf_cache_dir
+
+    consumers: dict[str, Path] = {}
+    if docker_ok:
+        rc, out = _run(["docker", "info", "--format", "{{.DockerRootDir}}"])
+        if rc == 0 and out.strip():
+            consumers["docker"] = Path(out.strip().splitlines()[-1])
+    consumers["hf-cache"] = hf_cache_dir()
+    if Path("/data/ml").exists():
+        consumers["/data/ml"] = Path("/data/ml")
+
+    details: list[str] = []
+    status = OK
+    consumer_free: list[float] = []
+    seen_dev: set = set()
+    for name, path in consumers.items():
+        probe = _nearest_existing(path)
+        try:
+            usage = shutil.disk_usage(probe)
+            dev = probe.stat().st_dev
+        except OSError:
+            continue
+        free_gb = usage.free / 1e9
+        consumer_free.append(free_gb)
+        same = " (same filesystem)" if dev in seen_dev else ""
+        seen_dev.add(dev)
+        details.append(f"{name}: {free_gb:.0f} GB free at {probe}{same}")
+        if free_gb < 30:
+            status = FAIL
+        elif free_gb < 150 and status != FAIL:
+            status = WARN
+    if not details:
+        report.add("disk", WARN, "could not stat any storage consumer path")
         return
-    path, free = best
-    free_gb = free / 1e9
-    if free_gb < 30:
-        report.add("disk", FAIL, f"only {free_gb:.0f} GB free at {path} — models alone need 30-60 GB")
-    elif free_gb < 150:
-        report.add("disk", WARN, f"{free_gb:.0f} GB free at {path} — enough for one model, tight for several")
-    else:
-        report.add("disk", OK, f"{free_gb:.0f} GB free at {path}")
+
+    hints: list[str] = []
+    # A mounted filesystem much bigger than where the caches sit.
+    try:
+        import psutil
+        best: tuple[str, float] | None = None
+        for part in psutil.disk_partitions(all=False):
+            mp = part.mountpoint
+            if part.fstype in ("tmpfs", "devtmpfs", "squashfs", "overlay", "vfat") \
+                    or mp.startswith(("/boot", "/snap", "/System", "/private/var/vm")):
+                continue
+            try:
+                free_gb = shutil.disk_usage(mp).free / 1e9
+            except OSError:
+                continue
+            if best is None or free_gb > best[1]:
+                best = (mp, free_gb)
+        if best and consumer_free and best[1] > 2 * max(consumer_free) \
+                and best[1] >= 200:
+            hints.append(
+                f"{best[0]} has {best[1]:.0f} GB free — point the caches "
+                f"there (OPTIMIZER_HF_CACHE=<dir>; docker daemon "
+                f"'data-root'; or mount/symlink /data/ml)"
+            )
+    except ImportError:
+        pass
+    # Unmounted large disks (Linux only; best effort).
+    rc, out = _run(["lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT"])
+    if rc == 0 and out.strip():
+        try:
+            unmounted = parse_lsblk_unmounted(json.loads(out))
+        except (ValueError, KeyError):
+            unmounted = []
+        if unmounted:
+            devs = ", ".join(f"{n} ({g / 1000:.1f} TB)" if g >= 1000
+                             else f"{n} ({g:.0f} GB)" for n, g in unmounted)
+            hints.append(
+                f"UNMOUNTED disk(s) present: {devs} — format and mount "
+                f"(e.g. at /data), then point the caches there"
+            )
+            if status == OK:
+                status = WARN
+    report.add("disk", status, "; ".join(details + hints))
 
 
 def _check_perf(report: DoctorReport) -> None:
@@ -305,7 +402,7 @@ def run_doctor(config_dir: Path = Path("config")) -> DoctorReport:
     _check_numa(report)
     docker_ok = _check_docker(report)
     gpu = _check_gpu(report, docker_ok)
-    _check_disk(report)
+    _check_disk(report, docker_ok)
     _check_perf(report)
     _check_rapl(report)
     _check_hf(report)

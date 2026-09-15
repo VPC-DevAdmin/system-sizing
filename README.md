@@ -1,6 +1,24 @@
-# Persona Capacity Simulator
+# capsim — Persona Capacity Simulator
 
-Drives a single, long-running LLM inference engine (vLLM or SGLang) with realistic persona-based workloads to find the per-cohort capacity knee, with telemetry-attributed bottleneck analysis.
+Drives a single, long-running LLM inference engine (vLLM or SGLang) with realistic persona-based workloads to find the per-cohort capacity knee, with telemetry-attributed bottleneck analysis. Roadmap to a general AI sizing & capacity engine with its own UI: [docs/roadmap.md](docs/roadmap.md).
+
+## Landing on a fresh host
+
+Three commands from bare box to verified pipeline — prerequisites are just Python 3.10+, Docker, and git:
+
+```bash
+git clone <repo> && cd system-sizing && ./install.sh   # installs uv + capsim (isolated, no sudo)
+capsim doctor                                          # validate host: CPU/GPU/docker/disk/telemetry perms/HF
+capsim smoke --config config/<recommended>.yaml        # ~10 min end-to-end proof with a tiny model
+```
+
+`capsim doctor` prints a pass/warn/fail table (and `doctor.json` for scripting), including GPU stack checks (nvidia-smi + container toolkit) on Xeon+NVIDIA boxes, and recommends candidate configs for the detected hardware. `capsim smoke` launches the real engine with a ~1.5 GB stand-in model, runs 2 virtual users through a short measured window, exports, and validates the export against the schema contract — if smoke passes, the whole pipeline works on this host. Then commit to the full model:
+
+```bash
+capsim ready --config config/<recommended>.yaml        # full model download + image build/pull
+```
+
+`capsim` and `python -m simulator.cli` are the same CLI (the `simulator` entry point remains as a deprecated alias); the Make targets below wrap it.
 
 ## Quick start
 
@@ -24,6 +42,8 @@ The headline workflow is `ready` → `run-cohort` → `dashboard` → `export`. 
 | Target | What it does |
 |---|---|
 | `make ready CONFIG=...` | Idempotent: pip install, build engine docker image (SGLang only) if missing, download model if missing, validate hardware. |
+| `make doctor` | Full host validation — CPU/NUMA/docker/GPU stack/disk/telemetry permissions/HF reachability as a pass/warn/fail table plus `doctor.json`. Run first on any fresh box. |
+| `make smoke CONFIG=...` | End-to-end pipeline proof: real engine + tiny model (~1.5 GB), 2 virtual users, short measured window, export validated against the schema contract. ~10 min on a fresh box. |
 | `make run-persona CONFIG=... PERSONA=...` | Run one **persona** (a single user archetype) end-to-end. |
 | `make run-cohort CONFIG=... COHORT=...` | Run one **cohort** (a team mix of personas) end-to-end. |
 | `make run-sweep CONFIG=... [SWEEP_TYPE=...] [RUN_NEW=true]` | Sweep multiple workloads. **Always nohup'd, log-teed, and auto-tailed** — the sweep + its engine containers survive SSH disconnect; Ctrl-C only exits the tail. The terminal prints the run dir + log path on launch and starts following the log live; reattach later with `make tail-log`, stop with `make stop-bg`. `SWEEP_TYPE` accepts `all` (default — every persona + every cohort), `personas`, `cohorts`, or a comma-separated list of persona/cohort ids. **Resumes the latest `runs/run_NN/` by default** — workloads with `final_status='ok'` are skipped, so an interrupted sweep auto-continues. Pass `RUN_NEW=true` to cut a fresh `run_NN+1` dir (use this when config or hardware has changed and the prior run's data should NOT be merged with the new one). |

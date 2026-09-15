@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 
@@ -586,6 +587,183 @@ def _ensure_model(cfg) -> None:
                "--local-dir", str(host_dir)]
     subprocess.run(cmd, env=env, check=True)
     typer.echo(f"==> Downloaded to {host_dir}")
+
+
+@app.command("doctor")
+def doctor_cmd(
+    output: Path = typer.Option(
+        Path("doctor.json"), "--output", "-o",
+        help="Where to write the machine-readable report.",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Full host validation for a fresh benchmark box.
+
+    Checks CPU capabilities, NUMA, Docker, GPU stack (nvidia-smi +
+    container toolkit), disk space, telemetry permissions (PMU, RAPL —
+    warn-only, collectors degrade gracefully), and Hugging Face
+    reachability. Prints a pass/warn/fail table, recommends candidate
+    configs for the detected hardware, writes ``doctor.json``, and
+    exits non-zero when any check fails.
+
+    Landing flow on a new host: install → ``capsim doctor`` →
+    ``capsim smoke`` → ``capsim ready --config <recommended>``.
+    """
+    import sys
+
+    from rich.console import Console
+    from rich.table import Table
+
+    from .doctor import run_doctor
+
+    _setup_logging(verbose)
+    report = run_doctor()
+
+    styles = {"ok": "green", "warn": "yellow", "fail": "red", "skip": "dim"}
+    table = Table(title="capsim doctor")
+    table.add_column("check")
+    table.add_column("status")
+    table.add_column("detail", overflow="fold")
+    for c in report.checks:
+        table.add_row(c.name, f"[{styles[c.status]}]{c.status}[/]", c.detail)
+    Console().print(table)
+
+    output.write_text(json.dumps(report.to_dict(), indent=2))
+    typer.echo(f"Report written to {output}")
+    if report.failed:
+        typer.echo("doctor: FAIL — fix the failing checks above before running benchmarks", err=True)
+        sys.exit(1)
+    typer.echo("doctor: host looks usable" + (
+        f" — try: capsim smoke --config {report.recommended_configs[0]}"
+        if report.recommended_configs else ""
+    ))
+
+
+@app.command("smoke")
+def smoke_cmd(
+    config: Path = typer.Option(
+        ..., "--config", "-c",
+        help="Config whose engine/hardware shape to smoke-test.",
+    ),
+    model: str = typer.Option(
+        "Qwen/Qwen3-0.6B", "--model",
+        help="Tiny stand-in model (~1.5 GB) — proves the pipeline "
+             "before committing to a 30B download.",
+    ),
+    run_dir: Path = typer.Option(
+        Path("runs/smoke"), "--run-dir",
+        help="Isolated base directory for smoke artifacts (kept out of "
+             "the real runs/ history).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """End-to-end micro-benchmark: launch the real engine with a tiny
+    model, run 2 virtual users through a short measured window, export,
+    and validate the export against the schema contract.
+
+    Passing smoke means the whole pipeline works on this host — engine
+    launch, streaming, telemetry capture, DB write, export contract.
+    Takes ~10 minutes on a fresh box (dominated by the model download
+    and engine start), a couple of minutes when re-run.
+    """
+    import sys
+
+    _setup_logging(verbose)
+    cfg = load_config(config)
+    apply_cli_overrides(cfg, model=model)
+
+    # Point any pre-staged-weights path at a smoke-specific dir under
+    # the same container mount so the big model's dir is untouched and
+    # _ensure_model downloads the tiny model to the right host path.
+    if cfg.engine.model_local_path:
+        container_root = "/" + cfg.engine.model_local_path.lstrip("/").split("/")[0]
+        cfg.engine.model_local_path = (
+            f"{container_root}/smoke/{model.split('/')[-1]}"
+        )
+
+    # Shrink the run: one pool size, few samples, short windows.
+    sim = cfg.simulation
+    sim.target_samples_per_step = 8
+    sim.warmup_min_duration_s = 5
+    sim.warmup_max_duration_s = 30
+    sim.convergence_window_s = 10
+    sim.measurement_timeout_s = 240
+    sim.max_total_duration_minutes = 15
+    sim.request_timeout_s = 120
+    cfg.output.db_directory = str(run_dir)
+
+    gates: list[tuple[str, bool, str]] = []
+
+    def gate(name: str, passed: bool, detail: str) -> None:
+        gates.append((name, passed, detail))
+        typer.echo(f"  [{'PASS' if passed else 'FAIL'}] {name}: {detail}")
+
+    typer.echo(f"==> smoke: engine={cfg.engine.type} model={model}")
+    _ensure_model(cfg)
+
+    from .preflight import PreflightError, preflight_check
+    try:
+        preflight_check(cfg.engine.hardware_requirements)
+    except PreflightError as e:
+        typer.echo(str(e), err=True)
+        sys.exit(2)
+
+    from .runner import run_cohort
+    db_path = None
+    try:
+        db_path = asyncio.run(run_cohort(
+            cfg, cohort_from_persona("quick_lookup"),
+            fixed_grid_pool_sizes=[2],
+            new_run=True,
+        ))
+    except Exception as e:  # noqa: BLE001
+        gate("engine + run", False, f"{type(e).__name__}: {e}")
+
+    typer.echo("==> smoke gates")
+    if db_path is not None:
+        from .database import Database
+        db = Database(db_path)
+        row = db.fetchone(
+            "SELECT final_status, collectors_json FROM cohort_run "
+            "ORDER BY started_at DESC LIMIT 1"
+        )
+        samples = db.fetchone(
+            "SELECT COALESCE(SUM(sample_size), 0) AS n FROM cohort_measurements"
+        )
+        db.close()
+        status = row["final_status"] if row else None
+        gate("engine + run", status == "ok", f"final_status={status}")
+        gate(
+            "streaming samples", (samples["n"] or 0) > 0,
+            f"{samples['n']} turn(s) measured",
+        )
+        collectors = {}
+        if row and row["collectors_json"]:
+            collectors = json.loads(row["collectors_json"])
+        ok_collectors = sorted(k for k, v in collectors.items() if v == "ok")
+        # Warn-only: a box without perf/RAPL access still passes smoke.
+        typer.echo(
+            f"  [INFO] telemetry collectors ok: "
+            f"{', '.join(ok_collectors) or 'none'} "
+            f"(statuses: {collectors or 'n/a'})"
+        )
+
+        from .export import export_dir, validate_export
+        doc, out_path = export_dir(run_dir)
+        errors = validate_export(doc)
+        gate(
+            "export contract", not errors,
+            f"{out_path}" if not errors else "; ".join(errors[:3]),
+        )
+
+    failed = [name for name, passed, _ in gates if not passed]
+    if failed:
+        typer.echo(f"smoke: FAIL ({', '.join(failed)})", err=True)
+        sys.exit(1)
+    typer.echo(
+        "smoke: PASS — pipeline verified end-to-end. Next: "
+        f"capsim ready --config {config} (full model), then run a sweep."
+    )
 
 
 @app.command("preflight")

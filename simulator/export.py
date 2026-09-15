@@ -68,11 +68,31 @@ from .prefix_cache import (
 )
 
 # Version of the export document's shape (semver). The contract is
-# docs/export_schema/buyer_page_data.schema.json — every change to the
-# document's structure needs a version bump there and here, plus a
+# simulator/export_schema/buyer_page_data.schema.json (shipped in the
+# package so an installed capsim can self-validate) — every change to
+# the document's structure needs a version bump there and here, plus a
 # green run of the schema-validation tests. Patch = additive optional
 # fields; minor = additive required fields; major = anything breaking.
 EXPORT_SCHEMA_VERSION = "1.0.0"
+
+EXPORT_SCHEMA_PATH = Path(__file__).parent / "export_schema" / "buyer_page_data.schema.json"
+
+
+def validate_export(doc: dict) -> list[str]:
+    """Validate an export document against the packaged JSON Schema.
+
+    Returns a list of human-readable problems — empty means valid.
+    Used by ``capsim smoke`` as its export gate and by the contract
+    tests; downstream consumers can call it too.
+    """
+    import jsonschema
+
+    schema = json.loads(EXPORT_SCHEMA_PATH.read_text())
+    validator = jsonschema.validators.validator_for(schema)(schema)
+    return [
+        f"{'/'.join(str(p) for p in err.absolute_path) or '<root>'}: {err.message}"
+        for err in validator.iter_errors(doc)
+    ]
 
 
 def _read_prefix_cache_report(

@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "persona-capacity-simulator"
-version = "0.1.0"
-description = "Persona-based capacity simulator for LLM inference engines"
+name = "capsim"
+version = "0.2.0"
+description = "AI sizing and capacity engine — persona-based capacity benchmarking for LLM inference systems"
 requires-python = ">=3.10"
 dependencies = [
     "openai>=1.40",
@@ -22,13 +22,21 @@ dependencies = [
     # hf_transfer the download falls back to plain HTTP and is much
     # slower for multi-GB shards.
     "huggingface_hub[cli,hf_transfer]>=0.24",
+    # Export-contract validation (capsim smoke gate + validate_export).
+    "jsonschema>=4.21",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6", "jsonschema>=4.21"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
+capsim = "simulator.cli:app"
+# Deprecated alias — kept for one release so existing muscle memory and
+# scripts keep working; prefer ``capsim``.
 simulator = "simulator.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["simulator*"]
+
+[tool.setuptools.package-data]
+simulator = ["export_schema/*.json"]

@@ -61,6 +61,8 @@ help:
 	@echo ""
 	@echo "Setup:"
 	@echo "  make ready CONFIG=...        Install deps, build engine image, download model, preflight"
+	@echo "  make doctor                  Full host validation (CPU/GPU/docker/disk/telemetry/HF)"
+	@echo "  make smoke CONFIG=...        End-to-end pipeline proof with a tiny model (~10 min)"
 	@echo ""
 	@echo "Run:"
 	@echo "  make run-persona CONFIG=... PERSONA=... Run one persona (a single user archetype)"
@@ -387,6 +389,17 @@ analyze-prefix-cache:
 .PHONY: preflight
 preflight:
 	$(PY) -m simulator.cli preflight --config $(CONFIG)
+
+# Full host validation (CPU/GPU/docker/disk/telemetry perms/HF).
+# Part of the landing flow: install.sh -> doctor -> smoke -> ready.
+.PHONY: doctor
+doctor:
+	$(PY) -m simulator.cli doctor
+
+# End-to-end pipeline proof with a tiny model (~10 min on a fresh box).
+.PHONY: smoke
+smoke:
+	$(PY) -m simulator.cli smoke --config $(CONFIG)
 
 .PHONY: launch-engine
 launch-engine:

@@ -1,7 +1,7 @@
 """Export-contract validation (roadmap 0.1).
 
 The export document is a versioned public contract:
-``docs/export_schema/buyer_page_data.schema.json`` is the schema,
+``simulator/export_schema/buyer_page_data.schema.json`` is the schema,
 ``EXPORT_SCHEMA_VERSION`` in ``simulator/export.py`` is the stamp. Any
 structural change to the export must bump the version and keep these
 tests green — they build a representative run.db through the real
@@ -19,24 +19,17 @@ import pytest
 jsonschema = pytest.importorskip("jsonschema")
 
 from simulator.database import Database
-from simulator.export import EXPORT_SCHEMA_VERSION, export_dir
-
-SCHEMA_PATH = (
-    Path(__file__).parent.parent
-    / "docs" / "export_schema" / "buyer_page_data.schema.json"
+from simulator.export import (
+    EXPORT_SCHEMA_PATH,
+    EXPORT_SCHEMA_VERSION,
+    export_dir,
+    validate_export,
 )
 
 
-@pytest.fixture(scope="module")
-def schema() -> dict:
-    return json.loads(SCHEMA_PATH.read_text())
-
-
-def _validate(doc: dict, schema: dict) -> None:
-    jsonschema.validate(
-        doc, schema,
-        cls=jsonschema.validators.validator_for(schema),
-    )
+def _validate(doc: dict) -> None:
+    errors = validate_export(doc)
+    assert not errors, "export does not match contract:\n" + "\n".join(errors)
 
 
 def _build_run_db(tmp_path: Path) -> Path:
@@ -109,14 +102,14 @@ def _build_run_db(tmp_path: Path) -> Path:
     return run_dir
 
 
-def test_full_export_validates(tmp_path, schema) -> None:
+def test_full_export_validates(tmp_path) -> None:
     _build_run_db(tmp_path)
     doc, out_path = export_dir(tmp_path)
-    _validate(doc, schema)
+    _validate(doc)
     assert doc["schema_version"] == EXPORT_SCHEMA_VERSION
     # The written file must be byte-identical in structure to the
     # returned doc — downstream consumers read the file.
-    _validate(json.loads(out_path.read_text()), schema)
+    _validate(json.loads(out_path.read_text()))
     cohort = doc["cohorts"][0]
     assert cohort["collectors"]["pmu"] == "ok"
     assert cohort["collectors"]["memory_bandwidth"] == "perf_uncore_unavailable"
@@ -125,10 +118,10 @@ def test_full_export_validates(tmp_path, schema) -> None:
     assert "turns" in cohort["curve"][0]
 
 
-def test_slim_export_validates(tmp_path, schema) -> None:
+def test_slim_export_validates(tmp_path) -> None:
     _build_run_db(tmp_path)
     doc, _ = export_dir(tmp_path, slim=True)
-    _validate(doc, schema)
+    _validate(doc)
     assert doc["meta"]["slim"] is True
     cohort = doc["cohorts"][0]
     # Slim drops the heavy per-step time-series fields entirely.
@@ -137,7 +130,7 @@ def test_slim_export_validates(tmp_path, schema) -> None:
     assert "timeline" not in cohort["curve"][0]
 
 
-def test_legacy_db_export_validates(tmp_path, schema) -> None:
+def test_legacy_db_export_validates(tmp_path) -> None:
     """A run from before collectors_json existed exports with
     collectors=None and still validates — the contract's nullable
     fields are the read-only legacy-tolerance story."""
@@ -148,10 +141,18 @@ def test_legacy_db_export_validates(tmp_path, schema) -> None:
     conn.commit()
     conn.close()
     doc, _ = export_dir(tmp_path)
-    _validate(doc, schema)
+    _validate(doc)
     assert doc["cohorts"][0]["collectors"] is None
 
 
 def test_schema_version_is_semver() -> None:
     parts = EXPORT_SCHEMA_VERSION.split(".")
     assert len(parts) == 3 and all(p.isdigit() for p in parts)
+
+
+def test_packaged_schema_exists() -> None:
+    """The schema ships inside the package so an installed capsim can
+    self-validate (smoke gate) without the repo checkout."""
+    assert EXPORT_SCHEMA_PATH.exists()
+    parsed = json.loads(EXPORT_SCHEMA_PATH.read_text())
+    assert parsed["type"] == "object"

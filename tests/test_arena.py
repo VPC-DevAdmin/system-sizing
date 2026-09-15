@@ -73,7 +73,10 @@ def test_build_space_defaults_to_everything_feasible(xe7740) -> None:
         "small-30b-bf16", "small-30b-fp8", "dense-32b-bf16"}
     assert doc["vram_per_gpu_gb"] == 96.0
     assert doc["dimensions"]["tp"] == [1, 2, 4]
-    assert doc["search"] == {"budget": 60}
+    assert doc["search"]["budget"] == 60
+    # The coverage stage takes what refinement doesn't (24), floors
+    # at 8, so a bigger budget widens the screen.
+    assert doc["search"]["initial_samples"] == 36
     # min_vram + moe ride into the variants for validate/normalize.
     assert doc["model_variants"]["small-30b-bf16"]["moe"] is True
     assert doc["model_variants"]["dense-32b-bf16"]["moe"] is False
@@ -236,3 +239,29 @@ def test_catalog_carries_series_params_specialty(tmp_path) -> None:
     from simulator.arena import size_class
     assert size_class(q["params_b"]) == \
         size_class(by_id["Qwen/Qwen3-32B"]["params_b"])
+
+
+def test_recommend_search_math(xe7740) -> None:
+    from simulator.arena import build_space_doc, recommend_search
+    # 2 values ×3 dims: OFAT floor = 3·1+1 = 4; coverage padded to
+    # max(2·2, ceil(1.25·4)) = 5; +24 refinement.
+    rec = recommend_search({"a": [1, 2], "b": ["x", "y"], "c": [0, 1],
+                            "fixed": [1]})
+    assert rec["ofat_min"] == 4
+    assert rec["recommended"] == 5 + 24
+    assert rec["screening"] < rec["recommended"] < rec["thorough"]
+
+    # No explicit budget → the space is sized to the recommendation.
+    doc = build_space_doc({}, CATALOG)
+    rec2 = recommend_search(doc["dimensions"])
+    assert doc["search"]["budget"] == rec2["recommended"]
+
+
+def test_summarize_carries_recommendation_tiers(xe7740) -> None:
+    from simulator.arena import build_space_doc, summarize_space_doc
+    s = summarize_space_doc(build_space_doc({}, CATALOG))
+    rec = s["recommendation"]
+    names = [t["name"] for t in rec["tiers"]]
+    assert names == ["screening", "recommended", "thorough"]
+    assert all(t["hours"] > 0 for t in rec["tiers"])
+    assert rec["tiers"][0]["budget"] < rec["tiers"][2]["budget"]

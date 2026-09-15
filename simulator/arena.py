@@ -28,6 +28,7 @@ Device groups (PCIe/NUMA domains) can't be reliably auto-detected, so
 
 from __future__ import annotations
 
+import math
 import subprocess
 from itertools import product
 from pathlib import Path
@@ -253,9 +254,59 @@ def build_space_doc(
         # ladder with SLA early-exit, scored at the best rung.
         "measurement": {"input_tokens": 512, "output_tokens": 256,
                         "ladder": [8, 32, 128, 512]},
-        "search": {"budget": int(budget)} if budget else {},
+    }
+    # Search params sized to the chosen budget (default: the
+    # statistical recommendation): the coverage stage takes what the
+    # refinement allowance doesn't, so a bigger budget widens the
+    # screen instead of just adding refinement rounds.
+    rec = recommend_search(doc["dimensions"])
+    b = int(budget) if budget else rec["recommended"]
+    doc["search"] = {
+        "budget": b,
+        "initial_samples": max(8, min(b - 8, b - rec["refinement_stage"],
+                                      rec["coverage_stage"] * 2)),
+        "top_k": 3,
+        "neighbors_per_iteration": 8,
+        "max_iterations": 4,
     }
     return doc
+
+
+def recommend_search(dimensions: dict[str, list]) -> dict:
+    """Statistically-grounded budget recommendation for a space.
+
+    The floor is the one-factor-at-a-time bound: Σ(|values|-1)+1 —
+    the smallest design where every value of every dimension is
+    measured at least once against a baseline. Screening designs pad
+    that ~25% so values are seen in more than one context (the greedy
+    coverage sampler spreads them across combinations), with a floor
+    of 2× the widest dimension so every model appears at least twice.
+    Refinement then needs its own allowance: 3 rounds × 8 one-knob
+    neighbors of the leaders. Beyond ~2× the recommendation the
+    search usually stops itself first (<3% improvement per round).
+    """
+    cards = {d: len(v) for d, v in dimensions.items() if len(v) > 1}
+    max_v = max(cards.values(), default=1)
+    ofat = sum(v - 1 for v in cards.values()) + 1
+    coverage = max(2 * max_v, math.ceil(1.25 * ofat))
+    refinement = 24
+    rec = coverage + refinement
+    return {
+        "dimensions": len(cards),
+        "ofat_min": ofat,
+        "coverage_stage": coverage,
+        "refinement_stage": refinement,
+        "recommended": rec,
+        "screening": max(ofat + 8, math.ceil(rec * 0.6)),
+        "thorough": rec * 2,
+    }
+
+
+def _estimate_hours(budget: int, total_combos: int, n_models: int,
+                    max_iterations: int) -> float:
+    evals = min(budget, total_combos)
+    cold = min(evals, n_models * (max_iterations + 1))
+    return round((evals * 9 + cold * 4) / 60, 1)
 
 
 def summarize_space_doc(doc: dict) -> dict:
@@ -292,7 +343,21 @@ def summarize_space_doc(doc: dict) -> dict:
             batch_mult *= len(dims[d])
     budget = space.search.budget
     n_models = len(space.model_variants)
+    total = len(shapes) * batch_mult
+    rec = recommend_search(space.dimensions)
+    tiers = [
+        {"name": "screening", "budget": rec["screening"],
+         "hours": _estimate_hours(rec["screening"], total, n_models,
+                                  space.search.max_iterations)},
+        {"name": "recommended", "budget": rec["recommended"],
+         "hours": _estimate_hours(rec["recommended"], total, n_models,
+                                  space.search.max_iterations)},
+        {"name": "thorough", "budget": rec["thorough"],
+         "hours": _estimate_hours(rec["thorough"], total, n_models,
+                                  space.search.max_iterations)},
+    ]
     return {
+        "recommendation": {**rec, "tiers": tiers},
         "ladder": list(space.measurement.ladder),
         "measurement_tokens": [space.measurement.input_tokens,
                                space.measurement.output_tokens],
@@ -308,9 +373,7 @@ def summarize_space_doc(doc: dict) -> dict:
         # Rough wall clock: ~9 min per evaluation (relaunch + ladder
         # climb with early exit), plus ~4 min extra per cold model
         # swap. An estimate for planning, not a promise.
-        "estimated_hours": round(
-            (min(budget, len(shapes) * batch_mult) * 9
-             + min(budget, n_models * (space.search.max_iterations + 1)) * 4)
-            / 60, 1),
+        "estimated_hours": _estimate_hours(
+            budget, total, n_models, space.search.max_iterations),
         "space_hash": space.space_hash(),
     }

@@ -731,11 +731,15 @@ const Optimizer = {
   // operator subtracts. Only what's unchecked is tracked.
   arenaOff: { models: new Set(), dims: {} },
   previewTimer: null,
+  budgetTouched: false,
 
   init() {
     $("#opt-start").addEventListener("click", () => this.start());
     $("#opt-stop").addEventListener("click", () => this.stop());
-    $("#opt-budget").addEventListener("change", () => this.schedulePreview());
+    $("#opt-budget").addEventListener("input", () => {
+      this.budgetTouched = true;      // the operator took the dial
+      this.schedulePreview();
+    });
     document.querySelector('#tabs button[data-view="optimizer"]')
       .addEventListener("click", () => { this.refresh(); this.loadArena(); });
     this.loadArena().then(() => this.refresh());
@@ -1080,27 +1084,53 @@ const Optimizer = {
       out.innerHTML = `<span class="status-fail">${e.message}</span>`;
       return;
     }
-    // Budget in context, right next to the input: what fraction of
-    // the CURRENT arena would actually be measured.
+    // Recommended coverage for THIS arena, from the design-of-
+    // experiments floor (every knob value measured ≥ once, padded,
+    // plus a refinement allowance). The input starts at the
+    // recommendation and re-tracks it as the arena changes, until
+    // the operator dials it themselves.
+    const rec = p.recommendation;
+    const input = $("#opt-budget");
+    if (rec && !this.budgetTouched
+        && +input.value !== rec.recommended) {
+      input.value = rec.recommended;
+      this.schedulePreview();      // re-quote hours at the new budget
+      return;
+    }
+    const presets = $("#opt-budget-presets");
+    if (presets && rec) {
+      const label = { screening: "Screening", recommended: "Recommended",
+                      thorough: "Thorough" };
+      presets.innerHTML = rec.tiers.map(t =>
+        `<button class="small ${+input.value === t.budget ? "primary" : ""}"
+           data-budget-tier="${t.budget}">${label[t.name]}
+           ${t.budget} · ~${t.hours}h</button>`).join(" ");
+      presets.querySelectorAll("button[data-budget-tier]").forEach(btn =>
+        btn.addEventListener("click", () => {
+          input.value = btn.dataset.budgetTier;
+          this.budgetTouched = true;
+          this.schedulePreview();
+        }));
+    }
     const ctx = $("#opt-budget-context");
     if (ctx) {
       const total = p.total_combinations || 1;
       const pct = (Math.min(p.budget, total) / total) * 100;
       const pctText = pct >= 99.5 ? "the whole arena"
-        : `${pct < 1 ? "<1" : pct.toFixed(pct < 10 ? 1 : 0)}% of the
-           ${total.toLocaleString()}-combination arena`;
-      ctx.innerHTML = `= ${pctText} measured directly · ~${p.estimated_hours} h
-        <span title="The first pass covers every value of every dimension;
-        the rest refines around the leaders — so effective coverage is far
-        higher than the raw percentage.">ⓘ</span>`;
+        : `${pct < 1 ? "<1" : pct.toFixed(pct < 10 ? 1 : 0)}% of
+           ${total.toLocaleString()} combinations`;
+      ctx.innerHTML = `= ${pctText} · ~${p.estimated_hours} h`;
     }
-    const nModels = p.models ?? 1;
-    const floor = nModels * 6;
-    const budgetHint = p.budget < floor
-      ? `<span class="status-marginal">With ${nModels} models in play,
-         ${p.budget} evaluations is thin (&lt;6 per model) — consider a
-         budget near ${floor}, or prune models.</span><br>`
-      : "";
+    const budgetHint = rec ? `<span class="msg">Sizing: the floor for this
+      arena is ${rec.ofat_min} evaluations (every value of all
+      ${rec.dimensions} dimensions measured at least once);
+      ${rec.recommended} adds interaction coverage plus
+      ${rec.refinement_stage} refinement runs around the leaders.
+      <b>Dialing down</b> toward ${rec.screening} screens faster but risks
+      missing effects that only appear in combination (e.g. FP8 KV paying
+      off only at wide batch). <b>Dialing up</b> past ${rec.thorough} mostly
+      buys fine adjustment — the search stops itself once a round improves
+      the best by &lt;3%.</span><br>` : "";
     out.innerHTML = `<b>${p.launch_shapes}</b> feasible launch shapes ·
       <b>${p.total_combinations.toLocaleString()}</b> total combinations with
       batch/KV knobs. The search MEASURES <b>${p.budget}</b> of them — each

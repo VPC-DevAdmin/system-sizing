@@ -103,8 +103,9 @@
     <code>runs/engine_optimizer/</code> and resumes if interrupted.</p>
     <div class="row wrap">
       <label>Budget (evaluations)
-        <input id="opt-budget" type="number" min="4" max="500" value="48"
+        <input id="opt-budget" type="number" min="4" max="500"
           style="width:70px"></label>
+      <span id="opt-budget-presets" style="align-self:end"></span>
       <span id="opt-budget-context" class="msg" style="align-self:end"></span>
       <label class="check"><input type="checkbox" id="opt-new-run"> Fresh run (don't resume)</label>
       <button id="opt-start" class="primary">Start search</button>

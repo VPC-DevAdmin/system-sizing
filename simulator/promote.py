@@ -82,9 +82,12 @@ def _write_profile(
     provenance: list[str],
     warnings: list[str],
     out_dir: Path,
+    # dp>1 winners: one GPU-id list per replica → the multi-replica
+    # engine benchmarks the WHOLE BOX instead of one pinned replica.
+    replica_devices: Optional[list[list[int]]] = None,
 ) -> tuple[str, Path]:
     engine: dict[str, Any] = {
-        "type": "vllm_cuda",
+        "type": "vllm_cuda_multi" if replica_devices else "vllm_cuda",
         "model_id": model_id,
         "gpu_image": DEFAULT_GPU_IMAGE,
         "max_model_len": engine_fields.pop("max_model_len", 16384),
@@ -95,7 +98,9 @@ def _write_profile(
         "startup_timeout_s": 1800,
     }
     engine.update(engine_fields)          # e.g. quantization_kind
-    if gpu_device_ids:
+    if replica_devices:
+        engine["replica_devices"] = [list(g) for g in replica_devices]
+    elif gpu_device_ids:
         engine["gpu_device_ids"] = gpu_device_ids
     if extra_flags:
         engine["vllm_extra_flags"] = [str(f) for f in extra_flags]
@@ -157,12 +162,12 @@ def promote_search_winner(
 
     replicas = summary["replica_devices"]
     warnings = []
-    if len(replicas) > 1:
+    multi = len(replicas) > 1
+    if multi:
         warnings.append(
-            f"winner is dp={len(replicas)} (replicas on {replicas}); the "
-            f"benchmark engine drives ONE server — promoted pinned to "
-            f"replica 0 ({replicas[0]}). Whole-box dp needs the "
-            f"multi-replica engine."
+            f"dp={len(replicas)} winner — promoted as vllm_cuda_multi: "
+            f"the benchmark drives ALL {len(replicas)} replicas with "
+            f"sticky per-user routing (whole-box capacity, measured)."
         )
     score = best.get("score")
     result = _write_profile(
@@ -170,7 +175,8 @@ def promote_search_winner(
         model_id=str(summary["model"]),
         engine_fields=fields,
         extra_flags=leftover,
-        gpu_device_ids=replicas[0],
+        gpu_device_ids=None if multi else replicas[0],
+        replica_devices=replicas if multi else None,
         provenance=[
             f"source: guided search '{search_doc.get('space')}' "
             f"({search_doc.get('generated_at', '')[:19]})",
@@ -214,13 +220,21 @@ def promote_registry_winner(
         )
     fields, leftover = parse_engine_args(list(cat_entry["replica_args"]))
     replica_gpus = [g for g in (cat_entry.get("replica_gpus") or [])]
+    multi_devices = None
     warnings = []
     if len(replica_gpus) > 1:
-        warnings.append(
-            f"'{config_name}' runs {len(replica_gpus)} replicas; the "
-            f"benchmark engine drives ONE server — promoted pinned to "
-            f"replica 0 ({replica_gpus[0]})."
-        )
+        parsed = [_parse_gpus(g) for g in replica_gpus]
+        if all(parsed):
+            multi_devices = parsed
+            warnings.append(
+                f"'{config_name}' runs {len(replica_gpus)} replicas — "
+                f"promoted as vllm_cuda_multi (whole-box, sticky-routed)."
+            )
+        else:
+            warnings.append(
+                f"'{config_name}' runs {len(replica_gpus)} replicas with "
+                f"unparseable GPU pins — promoted pinned to replica 0."
+            )
     model = results_doc.get("model") or (
         catalog.get("profile_defaults", {}).get(reg_profile, {}).get("model")
     )
@@ -231,7 +245,10 @@ def promote_registry_winner(
         model_id=str(model),
         engine_fields=fields,
         extra_flags=leftover,
-        gpu_device_ids=_parse_gpus(replica_gpus[0]) if replica_gpus else None,
+        gpu_device_ids=(None if multi_devices
+                        else _parse_gpus(replica_gpus[0]) if replica_gpus
+                        else None),
+        replica_devices=multi_devices,
         provenance=[
             f"source: registry sweep '{reg_profile}' "
             f"({results_doc.get('generated_at', '')[:19]})",

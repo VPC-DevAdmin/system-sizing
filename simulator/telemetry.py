@@ -484,9 +484,17 @@ class MeasurementTelemetry:
                     sample.cpu_util_avg = host_util
                     sample.cpu_util_bound_avg = bound_util
 
-                    # Memory used (system + engine RSS)
+                    # Memory used (system + engine RSS). Multi-replica
+                    # engines expose ``pids`` — sum the whole set, or
+                    # replica 0's tree understates by the replica count.
                     sample.memory_used_gb = _read_memory_used_gb()
-                    sample.engine_rss_gb = engine_rss_gb(self.engine_pid)
+                    pids = getattr(self.engine, "pids", None)
+                    if pids:
+                        parts = [engine_rss_gb(p) for p in pids]
+                        parts = [p for p in parts if p is not None]
+                        sample.engine_rss_gb = sum(parts) if parts else None
+                    else:
+                        sample.engine_rss_gb = engine_rss_gb(self.engine_pid)
 
                     # Frequency
                     mean_mhz, std_mhz, min_mhz = self._freq.sample()

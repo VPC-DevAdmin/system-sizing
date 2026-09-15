@@ -1,0 +1,121 @@
+"""vllm_cuda_multi: whole-box N-replica CUDA engine — command
+construction, routing surface, metric aggregation, promote output."""
+
+from __future__ import annotations
+
+import pytest
+
+from simulator.config import EngineConfig
+from simulator.engines.vllm_cuda_multi import (
+    VllmCudaMultiEngine,
+    aggregate_replica_metrics,
+    gpus_arg_for,
+)
+
+
+def _cfg(**kw) -> EngineConfig:
+    base = dict(type="vllm_cuda_multi", model_id="org/M", port=9100,
+                replica_devices=[[0], [4], [1], [5]])
+    base.update(kw)
+    return EngineConfig(**base)
+
+
+def test_gpus_arg_quoting() -> None:
+    assert gpus_arg_for([3]) == "device=3"
+    # Docker parses the value as CSV — multi-device needs embedded quotes.
+    assert gpus_arg_for([0, 1]) == '"device=0,1"'
+
+
+def test_replica_commands_and_urls() -> None:
+    eng = VllmCudaMultiEngine(_cfg())
+    assert eng.replica_urls == [
+        "http://127.0.0.1:9100/v1", "http://127.0.0.1:9101/v1",
+        "http://127.0.0.1:9102/v1", "http://127.0.0.1:9103/v1",
+    ]
+    cmd = eng.build_replica_command(2, [1], "vllm-r2-x")
+    joined = " ".join(cmd)
+    assert "--gpus device=1" in joined
+    assert "--ipc=host" in joined
+    assert "--port 9102" in joined                     # port + index
+    assert "--tensor-parallel-size 1" in joined
+    assert "/root/.cache/huggingface" in joined        # cache mounted
+
+    # A TP2 replica: quoted device pair, tp from the group width.
+    eng = VllmCudaMultiEngine(_cfg(replica_devices=[[0, 1], [2, 3]]))
+    cmd = eng.build_replica_command(1, [2, 3], "vllm-r1-x")
+    assert '"device=2,3"' in cmd
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "2"
+
+
+def test_launch_refuses_bad_shapes(monkeypatch) -> None:
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/docker")
+    # A GPU assigned to two replicas is a silent perf lie — refuse.
+    eng = VllmCudaMultiEngine(_cfg(replica_devices=[[0], [0]]))
+    with pytest.raises(RuntimeError, match="twice"):
+        eng.launch()
+    eng = VllmCudaMultiEngine(_cfg(replica_devices=None))
+    with pytest.raises(RuntimeError, match="replica_devices"):
+        eng.launch()
+
+
+def test_aggregate_replica_metrics() -> None:
+    a = {"num_running": 10, "queue_depth": 2, "kv_cache_used_pct": 40.0,
+         "prompt_tokens_total": 1000, "generation_tokens_total": 500,
+         "prefix_cache_hits": 80, "prefix_cache_queries": 100,
+         "preemptions_total": 1}
+    b = {"num_running": 12, "queue_depth": 0, "kv_cache_used_pct": 60.0,
+         "prompt_tokens_total": 3000, "generation_tokens_total": 1500,
+         "prefix_cache_hits": 40, "prefix_cache_queries": 100}
+    agg = aggregate_replica_metrics([a, b])
+    assert agg["num_running"] == 22                  # counters summed
+    assert agg["prompt_tokens_total"] == 4000        # token rates feed
+    assert agg["generation_tokens_total"] == 2000
+    assert agg["preemptions_total"] == 1
+    assert agg["kv_cache_used_pct"] == 50.0          # gauges averaged
+    assert agg["prefix_cache_hit_rate"] == pytest.approx(0.6)
+    assert aggregate_replica_metrics([]) == {}
+
+
+def test_promoted_multi_profile_round_trips(tmp_path) -> None:
+    """A dp>1 search winner promotes to a vllm_cuda_multi profile that
+    the real config loader and engine registry accept."""
+    import textwrap
+
+    from simulator.config import load_config
+    from simulator.engines import make_engine
+    from simulator.promote import promote_search_winner
+    from simulator.search import load_space
+
+    space_path = tmp_path / "space.yaml"
+    space_path.write_text(textwrap.dedent("""\
+        name: whole-box
+        engine: vllm_cuda
+        device_groups: [[0, 1, 2, 3], [4, 5, 6, 7]]
+        model_variants:
+          bf16: {model: org/M-30B, served_name: m}
+        dimensions:
+          tp: [1]
+          dp: [8]
+          placement: [spread]
+    """))
+    space = load_space(space_path)
+    doc = {
+        "space": "whole-box", "space_file": str(space_path),
+        "space_hash": space.space_hash(),
+        "generated_at": "2026-09-15T21:00:00+00:00",
+        "summary": {"best": {"key": "k", "score": 9250.0, "params": {
+            "model_variant": "bf16", "tp": 1, "dp": 8,
+            "placement": "spread"}}},
+    }
+    out = promote_search_winner(doc, out_dir=tmp_path / "profiles")
+    assert out["warnings"] and "whole-box" in out["warnings"][0]
+
+    cfg = load_config(out["path"])
+    assert cfg.engine.type == "vllm_cuda_multi"
+    assert len(cfg.engine.replica_devices) == 8
+    assert sorted(d for g in cfg.engine.replica_devices for d in g) \
+        == list(range(8))
+    eng = make_engine(cfg.engine.type, cfg.engine)
+    assert isinstance(eng, VllmCudaMultiEngine)
+    assert len(eng.replica_urls) == 8

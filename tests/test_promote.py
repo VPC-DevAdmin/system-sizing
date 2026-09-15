@@ -92,7 +92,7 @@ def test_promote_search_winner_writes_valid_profile(tmp_path) -> None:
     assert cfg.engine.tensor_parallel_size == 2
 
 
-def test_promote_search_dp_winner_warns_and_pins_replica0(tmp_path) -> None:
+def test_promote_search_dp_winner_emits_multi_engine(tmp_path) -> None:
     space_path = tmp_path / "space.yaml"
     space_path.write_text(SPACE_YAML)
     doc = _search_doc(space_path, {
@@ -101,9 +101,14 @@ def test_promote_search_dp_winner_warns_and_pins_replica0(tmp_path) -> None:
         "placement": "spread",
     })
     out = promote_search_winner(doc, out_dir=tmp_path / "profiles")
-    assert out["warnings"] and "dp=2" in out["warnings"][0]
+    assert out["warnings"] and "whole-box" in out["warnings"][0]
     eng = yaml.safe_load(Path(out["path"]).read_text())["engine"]
-    assert eng["gpu_device_ids"] == [0, 1]          # replica 0 only
+    # dp>1 promotes the WHOLE shape: multi-replica engine, every
+    # replica's devices — not a pin to replica 0.
+    assert eng["type"] == "vllm_cuda_multi"
+    assert len(eng["replica_devices"]) == 2
+    assert eng["replica_devices"][0] == [0, 1]      # spread: one per domain
+    assert "gpu_device_ids" not in eng
 
 
 def test_promote_search_refuses_stale_or_empty(tmp_path) -> None:
@@ -153,12 +158,13 @@ def test_promote_registry_winner(tmp_path) -> None:
     assert eng["gpu_device_ids"] == [0, 1]
     assert out["warnings"] == []
 
-    # Multi-replica config warns and pins replica 0.
+    # Multi-replica config promotes as the whole-box engine.
     out = promote_registry_winner(CATALOG, RESULTS, "dp2",
                                   out_dir=tmp_path / "profiles")
-    assert out["warnings"] and "replica 0" in out["warnings"][0]
+    assert out["warnings"] and "whole-box" in out["warnings"][0]
     eng = yaml.safe_load(Path(out["path"]).read_text())["engine"]
-    assert eng["gpu_device_ids"] == [0]
+    assert eng["type"] == "vllm_cuda_multi"
+    assert eng["replica_devices"] == [[0], [1]]
 
     with pytest.raises(PromoteError, match="did not complete"):
         promote_registry_winner(CATALOG, RESULTS, "broken",

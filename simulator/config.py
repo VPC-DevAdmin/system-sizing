@@ -127,6 +127,10 @@ class EngineConfig:
     gpu_memory_utilization: float = 0.90
     # Restrict to specific devices (e.g. [0, 1]); None = all GPUs.
     gpu_device_ids: list[int] | None = None
+    # vllm_cuda_multi: one GPU-id list PER REPLICA — the optimizer's
+    # placement output verbatim (dp8: [[0],[4],[1],[5],[2],[6],[3],[7]];
+    # tp2×4: [[0,1],[2,3],[4,5],[6,7]]). Replica i serves on port+i.
+    replica_devices: list | None = None
 
     # ── remote: endpoint-only target (roadmap 1.1) ────────────────────
     # Benchmarks an OpenAI-compatible endpoint the simulator doesn't

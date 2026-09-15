@@ -33,6 +33,7 @@ different set of weights.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import random
@@ -81,6 +82,24 @@ class Objective:
 
 
 @dataclass
+class Measurement:
+    """How each candidate is measured: one workload shape climbed
+    over a concurrency ladder with SLA early-exit.
+
+    Fixed-concurrency cells rank configs at an arbitrary point on
+    their throughput curves — dp2 and tp2 can tie at concurrency 32
+    (neither saturated) while dp2 wins 2× at 256. The ladder finds
+    each config's own SLA-capacity and scores THAT, which is what the
+    capacity benchmark ultimately cares about. Climbing stops at the
+    first rung that blows the objective's p95 caps — higher rungs are
+    strictly worse for latency, so they can't produce a better
+    SLA-passing point."""
+    input_tokens: int = 512
+    output_tokens: int = 256
+    ladder: list[int] = field(default_factory=lambda: [8, 32, 128, 512])
+
+
+@dataclass
 class SearchParams:
     seed: int = 42
     initial_samples: int = 12
@@ -106,6 +125,7 @@ class SearchSpace:
     # tp × vram covers the variant's min_vram_gb — so a 235B model
     # never wastes an evaluation trying to load at tp=1.
     vram_per_gpu_gb: Optional[float] = None
+    measurement: Measurement = field(default_factory=Measurement)
 
     @property
     def total_devices(self) -> int:
@@ -121,6 +141,11 @@ class SearchSpace:
             "model_variants": self.model_variants,
             "dimensions": self.dimensions,
             "vram_per_gpu_gb": self.vram_per_gpu_gb,
+            # Objective + measurement change what scores MEAN, so a
+            # resumed state with different ones would silently mix
+            # incomparable numbers — hash them like candidate identity.
+            "objective": dataclasses.asdict(self.objective),
+            "measurement": dataclasses.asdict(self.measurement),
         }
         return hashlib.sha256(
             json.dumps(doc, sort_keys=True).encode()
@@ -228,6 +253,13 @@ def load_space(path: str | Path) -> SearchSpace:
     if objective.kind not in ("sla_throughput", "throughput", "latency"):
         raise SearchSpaceError(f"{path}: objective.kind '{objective.kind}' unknown")
     search = SearchParams(**(raw.get("search") or {}))
+    measurement = Measurement(**(raw.get("measurement") or {}))
+    if not measurement.ladder or \
+            sorted(measurement.ladder) != list(measurement.ladder):
+        raise SearchSpaceError(
+            f"{path}: measurement.ladder must be an ascending "
+            f"concurrency list"
+        )
 
     vram = raw.get("vram_per_gpu_gb")
     return SearchSpace(
@@ -240,6 +272,7 @@ def load_space(path: str | Path) -> SearchSpace:
         search=search,
         source=str(path),
         vram_per_gpu_gb=float(vram) if vram is not None else None,
+        measurement=measurement,
     )
 
 
@@ -484,6 +517,65 @@ def _restart_order(batch: list[dict], space: SearchSpace) -> list[dict]:
     ))
 
 
+def _rung_contribution(cell: dict, objective: Objective) -> Optional[float]:
+    """One ladder rung's scored throughput: output tok/s × completion
+    fraction, × penalty when its p95s blow the caps."""
+    tps = cell.get("throughput_out_tok_s")
+    if tps is None:
+        return None
+    contribution = float(tps)
+    attempts = (cell.get("samples") or 0) + (cell.get("errors") or 0) \
+        + (cell.get("timeouts") or 0)
+    if attempts:
+        contribution *= (cell.get("samples") or 0) / attempts
+    if objective.kind == "sla_throughput" and not rung_sla_ok(cell, objective):
+        contribution *= objective.penalty
+    return contribution
+
+
+def rung_sla_ok(cell: dict, objective: Objective) -> bool:
+    ttft = cell.get("ttft_p95_ms")
+    tpot = cell.get("tpot_p95_ms")
+    return not ((ttft is not None and ttft > objective.ttft_p95_cap_ms) or
+                (tpot is not None and tpot > objective.tpot_p95_cap_ms))
+
+
+def score_ladder(cells: list[dict], objective: Objective) -> Optional[float]:
+    """Reduce a candidate's ladder rungs to one scalar: the BEST rung,
+    not the sum — every rung is the same workload at a different
+    concurrency, so summing would reward ladder length, while the max
+    is the config's demonstrated (SLA-penalized) capacity. ``latency``
+    objectives score the gentlest rung's TTFT instead."""
+    if not cells:
+        return None
+    if objective.kind == "latency":
+        vals = [c["ttft_p95_ms"] for c in cells
+                if c.get("ttft_p95_ms") is not None]
+        return -min(vals) if vals else None
+    scores = [s for c in cells
+              if (s := _rung_contribution(c, objective)) is not None]
+    return max(scores) if scores else None
+
+
+def best_rung(cells: list[dict], objective: Objective) -> Optional[dict]:
+    """The rung the score came from — the operator-facing 'this shape
+    delivers N tok/s at concurrency C inside SLA' statement."""
+    best, best_score = None, None
+    for c in cells:
+        s = _rung_contribution(c, objective)
+        if s is not None and (best_score is None or s > best_score):
+            best, best_score = c, s
+    if best is None:
+        return None
+    return {
+        "cell_name": best.get("cell_name"),
+        "throughput_out_tok_s": best.get("throughput_out_tok_s"),
+        "ttft_p95_ms": best.get("ttft_p95_ms"),
+        "tpot_p95_ms": best.get("tpot_p95_ms"),
+        "sla_ok": rung_sla_ok(best, objective),
+    }
+
+
 # ── Search state machine ─────────────────────────────────────────────
 
 
@@ -645,10 +737,14 @@ def list_spaces(directory: str | Path = Path("config/search")) -> dict[str, str]
     return {p.stem: str(p) for p in sorted(d.glob("*.yaml"))}
 
 
-def summarize(state: SearchState) -> dict:
+def summarize(state: SearchState, space: Optional[SearchSpace] = None) -> dict:
     """Compact JSON summary for the UI/CLI: ranking + per-iteration
-    best-so-far progression."""
+    best-so-far progression. With ``space``, each ranked entry also
+    carries its best ladder rung (where the score was demonstrated)."""
     ranked = state.ranked()
+
+    def _rung(e: Evaluation) -> Optional[dict]:
+        return best_rung(e.cells, space.objective) if space else None
     progression = []
     for it in state.iterations:
         b = state.best_score_through(it["index"])
@@ -666,12 +762,14 @@ def summarize(state: SearchState) -> dict:
         "best": (
             {"key": ranked[0][0], "params": ranked[0][1].params,
              "score": ranked[0][1].score,
-             "config_name": ranked[0][1].config_name}
+             "config_name": ranked[0][1].config_name,
+             "best_rung": _rung(ranked[0][1])}
             if ranked else None
         ),
         "top": [
             {"key": k, "params": e.params, "score": e.score,
-             "iteration": e.iteration, "config_name": e.config_name}
+             "iteration": e.iteration, "config_name": e.config_name,
+             "best_rung": _rung(e)}
             for k, e in ranked[:10]
         ],
     }

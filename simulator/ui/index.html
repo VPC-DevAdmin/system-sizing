@@ -83,8 +83,8 @@
       <div class="step-head"><span class="step-num">4</span>
         <div><div class="t">Find the best launch shape</div>
           <div class="d">Capacity numbers are only as good as the engine config they were
-            measured on. Sweep the curated registry, or run the guided search over the
-            whole parameter space, then benchmark on the winner.</div></div>
+            measured on. Build the arena, search it, and save the winner as the
+            optimized launch — then benchmark with it.</div></div>
         <button id="goto-optimize" class="small primary" style="margin-left:auto">Open Optimize</button>
       </div>
     </section>
@@ -94,43 +94,23 @@
 <!-- ── 2 · Optimize ────────────────────────────────────────────── -->
 <main id="view-optimizer" class="view">
   <section class="panel">
-    <h2>Engine optimizer</h2>
-    <p class="msg">Finds the launch shape (model, precision, TP/DP, placement, batch
-    limits) that maximizes performance on <b>this</b> hardware — run it before the
-    first capacity benchmark, then promote the winner into the profile you benchmark
-    with. Results persist to <code>runs/engine_optimizer/</code> and resume if
-    interrupted.</p>
+    <h2>Build the test arena</h2>
+    <p class="msg">Everything this host can run is in play by default — every model,
+    precision, and launch dimension. Uncheck to prune. The guided search covers the
+    arena, refines around the leaders, and scores each candidate on a concurrency
+    ladder at its own best SLA-passing point. When it finishes, save the winner as
+    the <b>optimized launch</b> and benchmark with it. Progress persists to
+    <code>runs/engine_optimizer/</code> and resumes if interrupted.</p>
     <div class="row wrap">
-      <label>Mode
-        <select id="opt-mode">
-          <option value="arena">Full arena &mdash; this host (recommended)</option>
-          <option value="search">YAML search space</option>
-          <option value="registry">Quick sweep &mdash; one-knob probes</option>
-        </select>
-      </label>
-      <label id="opt-profile-wrap" hidden>Curated set <select id="opt-profile"></select></label>
-      <label id="opt-space-wrap" hidden>Search space <select id="opt-space"></select></label>
-      <label id="opt-budget-wrap">Budget
+      <label>Budget (evaluations)
         <input id="opt-budget" type="number" min="4" max="500" value="48"
           style="width:70px"></label>
       <label class="check"><input type="checkbox" id="opt-new-run"> Fresh run (don't resume)</label>
-      <button id="opt-start" class="primary">Start optimizer</button>
+      <button id="opt-start" class="primary">Start search</button>
       <button id="opt-stop" class="danger" disabled>Stop</button>
       <span id="opt-msg" class="msg"></span>
     </div>
     <div id="opt-arena"></div>
-    <div id="opt-space-detail" class="callout" hidden></div>
-    <p id="opt-search-hint" class="msg" hidden>Guided search covers the space first
-    (every model, precision and shape represented), ranks candidates by the space's
-    objective (default: summed throughput with p95-latency caps), then refines
-    one-dimension neighbors of the leaders until improvement flattens or the budget is
-    spent. Spaces are YAML in <code>config/search/</code>; spaces with
-    <code>catalog_families</code> pick up newly added models automatically.</p>
-    <p id="opt-registry-hint" class="msg" hidden>The quick sweep runs a handful of
-    hand-curated configs that each change <b>one knob</b> off a sane baseline —
-    about an hour on a fresh host, and it answers the big directional questions
-    (TP&nbsp;vs&nbsp;DP, batch width) before you commit a night to the guided search.</p>
-    <div id="opt-configs" class="opt-configs" hidden></div>
   </section>
 
   <section class="panel" id="opt-search-panel" hidden>
@@ -138,7 +118,7 @@
     <div id="opt-search-best" class="opt-ranking"></div>
     <table id="opt-search-table">
       <thead><tr><th>#</th><th>Iter</th><th>Candidate</th><th>Score</th>
-        <th>Status</th></tr></thead>
+        <th>Best rung</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>

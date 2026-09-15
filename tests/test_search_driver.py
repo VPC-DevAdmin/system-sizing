@@ -58,7 +58,11 @@ search:
 def _stub_run_config(optimizer, seen):
     """Fake evaluator: fp8 + tp2 is the sweet spot; records what the
     driver bound per candidate."""
-    async def fake_run_config(cfg, state, prompts, save):
+    async def fake_run_config(cfg, state, prompts, save,
+                              cells=None, early_stop=None):
+        # The driver now passes its ladder cells + SLA early-stop.
+        assert cells and cells[0].name.startswith("ladder_c")
+        assert callable(early_stop)
         seen.append({
             "name": cfg.name,
             "model": optimizer.MODEL_PATH,
@@ -72,7 +76,7 @@ def _stub_run_config(optimizer, seen):
             tps *= 1.3
         tps *= len(cfg.replicas)
         cell = optimizer.CellResult(
-            cell_name="c", samples=8, errors=0, timeouts=0,
+            cell_name="ladder_c0032", samples=8, errors=0, timeouts=0,
             ttft_p50_ms=100.0, ttft_p95_ms=200.0,
             tpot_p50_ms=8.0, tpot_p95_ms=10.0,
             throughput_out_tok_s=tps,
@@ -129,7 +133,8 @@ def test_search_driver_end_to_end_and_resume(
 def test_search_driver_survives_launch_failures(
     optimizer, space_file, tmp_path, monkeypatch,
 ) -> None:
-    async def failing_run_config(cfg, state, prompts, save):
+    async def failing_run_config(cfg, state, prompts, save,
+                                 cells=None, early_stop=None):
         return optimizer.ConfigResult(
             name=cfg.name, description=cfg.description,
             status="launch_failed", failure_reason="no CUDA here",

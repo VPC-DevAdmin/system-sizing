@@ -1883,10 +1883,17 @@ def _fmt_ttft_with_timeouts(c: CellResult | None) -> str:
 async def run_config(
     cfg: EngineConfig, state: OptimizerState, prompts: dict[str, list[str]],
     save: Callable[[], None],
+    cells: Optional[list[TestCell]] = None,
+    early_stop: Optional[Callable[[CellResult], bool]] = None,
 ) -> ConfigResult:
     """Run one config end-to-end. ``save`` is invoked after every
     cell so a mid-config crash leaves up-to-date partial data on
-    disk and the resume path can pick up at the next config."""
+    disk and the resume path can pick up at the next config.
+
+    ``cells`` overrides the registry's TEST_CELLS (the search's
+    concurrency ladder passes its rungs); ``early_stop`` is consulted
+    after each cell — return True to stop climbing (SLA already blown
+    at this rung, higher ones are strictly worse for latency)."""
     state.append_log(f"== {cfg.name} ==")
     state.append_log(cfg.description)
 
@@ -1950,7 +1957,7 @@ async def run_config(
         )
     state.append_log("warmup done")
     cell_results: list[CellResult] = []
-    for cell in TEST_CELLS:
+    for cell in (cells if cells is not None else TEST_CELLS):
         cr = await measure_cell(cfg, cell, prompts[cell.name], state)
         cell_results.append(cr)
         state.push_cell_result(cr)
@@ -1975,6 +1982,12 @@ async def run_config(
             cells=list(cell_results),
         ))
         save()
+        if early_stop is not None and early_stop(cr):
+            state.append_log(
+                f"{cell.name}: SLA blown at this rung — stopping the "
+                f"climb (higher concurrency is strictly worse for p95s)"
+            )
+            break
     cleanup_containers(state)
     final = ConfigResult(
         name=cfg.name, description=cfg.description, status="ok",
@@ -2316,8 +2329,9 @@ def _save_search(out_path: Path, sstate, space, search_mod) -> None:
         "space_file": space.source,
         "space_hash": space.space_hash(),
         "objective": dataclasses.asdict(space.objective),
+        "measurement": dataclasses.asdict(space.measurement),
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "summary": search_mod.summarize(sstate),
+        "summary": search_mod.summarize(sstate, space),
         "state": sstate.to_dict(),
     }, indent=2))
 
@@ -2347,11 +2361,36 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool) -> None:
         sstate = search.SearchState(space_hash=space.space_hash())
 
     rng = _random.Random(space.search.seed)
-    prompts = make_prompts(TEST_CELLS)
+    # The measurement ladder: one workload shape, climbed over
+    # concurrency with SLA early-exit — each candidate is scored at
+    # ITS OWN best SLA-passing rung, not at an arbitrary fixed
+    # concurrency that under-saturates wide configs.
+    m = space.measurement
+    ladder_cells = [
+        TestCell(
+            f"ladder_c{c:04d}", input_tokens=m.input_tokens,
+            output_tokens=m.output_tokens, concurrency=c,
+            # Wall time grows with rung width; the tier policy still
+            # kills stalled requests individually.
+            hard_timeout_s=max(600.0, m.output_tokens * 0.5 + c * 2.0),
+        )
+        for c in m.ladder
+    ]
+
+    def climb_stop(cr: CellResult) -> bool:
+        if space.objective.kind != "sla_throughput":
+            return False
+        cell = dataclasses.asdict(cr)
+        attempts = cr.samples + cr.errors + cr.timeouts
+        broken = attempts > 0 and cr.samples < attempts / 2
+        return broken or not search.rung_sla_ok(cell, space.objective)
+
+    prompts = make_prompts(ladder_cells)
     state_ui = OptimizerState(total_configs=space.search.budget,
                               print_to_stdout=True)
     print(f"Guided search: space={space.name} objective="
           f"{space.objective.kind} budget={space.search.budget} "
+          f"ladder={m.ladder} ({m.input_tokens}in/{m.output_tokens}out) "
           f"-> {out_path}")
 
     eval_index = len(sstate.evaluated)
@@ -2370,9 +2409,10 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool) -> None:
             result = await run_config(
                 cfg, state_ui, prompts,
                 save=lambda: None,     # search persists its own state
+                cells=ladder_cells, early_stop=climb_stop,
             )
             cells = [dataclasses.asdict(c) for c in result.cells]
-            score = (search.score_cells(cells, space.objective)
+            score = (search.score_ladder(cells, space.objective)
                      if result.status == "ok" else None)
             search.record_evaluation(
                 sstate, space, params,
@@ -2386,7 +2426,7 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool) -> None:
             eval_index += 1
 
     _save_search(out_path, sstate, space, search)
-    summary = search.summarize(sstate)
+    summary = search.summarize(sstate, space)
     print(f"\nEvaluated {summary['evaluated']} candidates "
           f"({summary['failed']} failed). Top:")
     for i, entry in enumerate(summary["top"][:5]):

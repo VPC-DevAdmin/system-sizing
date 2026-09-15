@@ -725,8 +725,6 @@ const Results = {
 /* ══ Engine optimizer ═════════════════════════════════════════── */
 
 const Optimizer = {
-  catalog: null,
-  spaceDetails: {},
   polling: null,
   arena: null,                  // /api/arena document
   // Deselections — the arena default is EVERYTHING in play, the
@@ -737,27 +735,10 @@ const Optimizer = {
   init() {
     $("#opt-start").addEventListener("click", () => this.start());
     $("#opt-stop").addEventListener("click", () => this.stop());
-    $("#opt-profile").addEventListener("change", () => this.renderConfigs());
-    $("#opt-mode").addEventListener("change", () => this.renderMode());
-    $("#opt-space").addEventListener("change", () => this.renderSpaceDetail());
     $("#opt-budget").addEventListener("change", () => this.schedulePreview());
     document.querySelector('#tabs button[data-view="optimizer"]')
-      .addEventListener("click", () => this.refresh());
-    this.renderMode();
-  },
-
-  renderMode() {
-    const mode = $("#opt-mode").value;
-    $("#opt-profile-wrap").hidden = mode !== "registry";
-    $("#opt-space-wrap").hidden = mode !== "search";
-    $("#opt-budget-wrap").hidden = mode !== "arena";
-    $("#opt-arena").hidden = mode !== "arena";
-    $("#opt-search-hint").hidden = mode !== "search";
-    $("#opt-registry-hint").hidden = mode !== "registry";
-    $("#opt-configs").hidden = mode !== "registry";
-    $("#opt-space-detail").hidden = mode !== "search";
-    if (mode === "search") this.renderSpaceDetail();
-    if (mode === "arena") this.loadArena();
+      .addEventListener("click", () => { this.refresh(); this.loadArena(); });
+    this.loadArena();
   },
 
   /* ── Arena: the full feasible space, subtract to narrow ──────── */
@@ -865,34 +846,15 @@ const Optimizer = {
       <b>${p.total_combinations.toLocaleString()}</b> total combinations with
       batch/KV knobs — the search evaluates <b>${p.budget}</b> of them
       (coverage first, then refinement).<br>
+      <span class="msg">Scoring: each candidate climbs a concurrency ladder
+      (${(p.ladder ?? []).join(" → ")}) at
+      ${(p.measurement_tokens ?? []).join("in/")}out tokens, stopping when the
+      SLA breaks — scored at its own best SLA-passing point, so wide DP shapes
+      aren't judged under-saturated.</span><br>
       <span class="msg">Cost model: every evaluation restarts the engine
       (~${p.estimated_engine_restarts} restarts), but batches are ordered by
       model so cold weight loads stay near ${p.estimated_cold_weight_loads}
       (~one per model per iteration) — the rest relaunch on hot weights.</span>`;
-  },
-
-  /* What would this search actually cover? Models, dimension sizes,
-   * devices and budget — so picking a space is an informed choice,
-   * not a filename guess. */
-  renderSpaceDetail() {
-    const box = $("#opt-space-detail");
-    const d = this.spaceDetails[$("#opt-space").value];
-    if (!d) { box.hidden = true; return; }
-    box.hidden = $("#opt-mode").value !== "search";
-    if (d.error) {
-      box.innerHTML = `<span class="status-fail">space broken:</span> ${d.error}`;
-      return;
-    }
-    const models = Object.entries(d.models ?? {});
-    const dims = Object.entries(d.dimensions ?? {})
-      .map(([k, n]) => `${k}&thinsp;×${n}`).join(" · ");
-    box.innerHTML = `
-      <b>${models.length} model variant(s)</b> — ${models.map(([v, m]) =>
-        `<code title="${m}">${v}</code>`).join(", ")}<br>
-      <span class="msg">dimensions: ${dims} · ${d.devices} GPUs in
-      ${(d.device_groups ?? []).length} domain(s) · objective
-      ${d.objective} · ${d.initial_samples} coverage samples,
-      budget ${d.budget} evaluations</span>`;
   },
 
   msg(text, cls = "") {
@@ -909,23 +871,6 @@ const Optimizer = {
       this.msg(e.message, "error");
       return;
     }
-    if (!this.catalog) {
-      this.catalog = status.catalog;
-      const sel = $("#opt-profile");
-      sel.innerHTML = "";
-      for (const name of Object.keys(status.catalog.profiles)) {
-        sel.append(new Option(name, name, false, name === "nvidia_qwen3"));
-      }
-      this.renderConfigs();
-    }
-    const spaceSel = $("#opt-space");
-    const prevSpace = spaceSel.value;
-    spaceSel.innerHTML = "";
-    for (const name of Object.keys(status.spaces ?? {})) {
-      spaceSel.append(new Option(name, name, false, name === prevSpace));
-    }
-    this.spaceDetails = status.space_details ?? {};
-    this.renderSpaceDetail();
     $("#opt-start").disabled = status.running;
     $("#opt-stop").disabled = !status.running;
     if (status.running) {
@@ -959,23 +904,37 @@ const Optimizer = {
        <span class="s"> ${it.kind}, ${it.candidates} cand · best ${
          it.best_score_so_far == null ? "—" : it.best_score_so_far.toFixed(0)}</span></div>`
     ).join("");
+    // "delivers N tok/s at concurrency C inside SLA" — the rung the
+    // score was demonstrated at, when the summary carries it.
+    const rungText = r => {
+      if (!r) return "";
+      const c = (r.cell_name || "").replace("ladder_c", "").replace(/^0+/, "");
+      return ` — ${(r.throughput_out_tok_s ?? 0).toFixed(0)} tok/s at
+        concurrency ${c || "?"} ${r.sla_ok ? "inside SLA"
+          : '<span class="status-marginal">over SLA caps</span>'}`;
+    };
     const best = s.best ? `
       <div class="opt-rank-card winner"><span class="n">BEST ${
         s.best.score.toFixed(0)}</span>
-       <span class="s"> ${s.best.key.replaceAll("|", " · ")}</span>
+       <span class="s"> ${s.best.key.replaceAll("|", " · ")}${
+         rungText(s.best.best_rung)}</span>
        <button class="small primary" id="opt-promote-search"
-         style="margin-left:12px">Use for benchmark</button></div>` : "";
+         style="margin-left:12px">Save as optimized launch</button></div>` : "";
     $("#opt-search-best").innerHTML = best + prog;
     $("#opt-promote-search")?.addEventListener("click", () =>
       this.promote("search"));
     const tbody = $("#opt-search-table tbody");
     tbody.innerHTML = "";
     (s.top ?? []).forEach((e, i) => {
+      const r = e.best_rung;
+      const at = r ? `${(r.throughput_out_tok_s ?? 0).toFixed(0)} tok/s @ c${
+        (r.cell_name || "").replace("ladder_c", "").replace(/^0+/, "")}${
+        r.sla_ok ? "" : " (over SLA)"}` : "—";
       tbody.insertAdjacentHTML("beforeend", `<tr>
         <td>${i + 1}</td><td>${e.iteration}</td>
         <td>${e.key.replaceAll("|", " · ")}</td>
         <td>${e.score == null ? "—" : e.score.toFixed(1)}</td>
-        <td class="status-pass">ok</td></tr>`);
+        <td>${at}</td></tr>`);
     });
     const failed = s.failed ?? 0;
     if (failed) {
@@ -985,37 +944,12 @@ const Optimizer = {
     }
   },
 
-  renderConfigs() {
-    if (!this.catalog) return;
-    const configs = this.catalog.profiles[$("#opt-profile").value] ?? [];
-    $("#opt-configs").innerHTML = configs.map(c => `
-      <label class="opt-config">
-        <input type="checkbox" data-cfg="${c.name}" checked>
-        <span><b>${c.name}</b><span class="d"> — ${c.description}</span></span>
-      </label>`).join("");
-  },
-
   async start() {
-    const mode = $("#opt-mode").value;
-    let body;
-    if (mode === "arena") {
-      const sel = this.arenaSelection();
-      if (!sel.models.length) { this.msg("every model is unchecked", "error"); return; }
-      body = { mode, arena: sel, budget: +$("#opt-budget").value || null,
-               new_run: $("#opt-new-run").checked };
-    } else if (mode === "search") {
-      if (!$("#opt-space").value) { this.msg("no search space selected", "error"); return; }
-      body = { mode, space: $("#opt-space").value,
-               new_run: $("#opt-new-run").checked };
-    } else {
-      const only = [...document.querySelectorAll("#opt-configs input:checked")]
-        .map(el => el.dataset.cfg);
-      if (!only.length) { this.msg("select at least one config", "error"); return; }
-      const all = document.querySelectorAll("#opt-configs input").length;
-      body = { mode, profile: $("#opt-profile").value,
-               only: only.length === all ? null : only,
-               new_run: $("#opt-new-run").checked };
-    }
+    const sel = this.arenaSelection();
+    if (!sel.models.length) { this.msg("every model is unchecked", "error"); return; }
+    const body = { mode: "arena", arena: sel,
+                   budget: +$("#opt-budget").value || null,
+                   new_run: $("#opt-new-run").checked };
     try {
       await api("/api/optimizer/start", {
         method: "POST",
@@ -1079,7 +1013,7 @@ const Optimizer = {
         <span class="n">#${i + 1} ${r.name}</span>
         <span class="s"> mean rank ${r.score === Infinity ? "—" : r.score.toFixed(1)}</span>
         ${i === 0 ? `<button class="small primary" id="opt-promote-registry"
-          data-cfg="${r.name}" style="margin-left:12px">Use for benchmark</button>` : ""}
+          data-cfg="${r.name}" style="margin-left:12px">Save as optimized launch</button>` : ""}
       </div>`).join("")
       + results.configs.filter(c => c.status !== "ok").map(c => `
       <div class="opt-rank-card">
@@ -1136,7 +1070,7 @@ const Optimizer = {
       return;
     }
     const warn = (r.warnings ?? []).length ? ` — NOTE: ${r.warnings[0]}` : "";
-    this.msg(`profile "${r.profile}" written (${r.path})${warn}`, "ok");
+    this.msg(`optimized launch saved as profile "${r.profile}" (${r.path})${warn}`, "ok");
     await Control.loadCatalogs();
     const sel = $("#profile-select");
     if ([...sel.options].some(o => o.value === r.profile)) sel.value = r.profile;

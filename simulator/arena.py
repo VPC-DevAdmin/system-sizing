@@ -225,6 +225,11 @@ def build_space_doc(
         "model_variants": variants,
         "dimensions": {"model_variant": list(variants), **dims},
         "objective": {"kind": "sla_throughput"},
+        # Explicit so the generated YAML self-documents how candidates
+        # are scored: one workload shape climbed over a concurrency
+        # ladder with SLA early-exit, scored at the best rung.
+        "measurement": {"input_tokens": 512, "output_tokens": 256,
+                        "ladder": [8, 32, 128, 512]},
         "search": {"budget": int(budget)} if budget else {},
     }
     return doc
@@ -265,6 +270,9 @@ def summarize_space_doc(doc: dict) -> dict:
     budget = space.search.budget
     n_models = len(space.model_variants)
     return {
+        "ladder": list(space.measurement.ladder),
+        "measurement_tokens": [space.measurement.input_tokens,
+                               space.measurement.output_tokens],
         "launch_shapes": len(shapes),
         "total_combinations": len(shapes) * batch_mult,
         "budget": budget,

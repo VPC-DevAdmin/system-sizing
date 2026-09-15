@@ -83,10 +83,23 @@ capsim ready --profile xeon-gpu-qwen3-30b  # full model download + image pull
 
 ---
 
-## Phase 1 — Target generalization + Xeon/NVIDIA GPU support
+## Phase 1 — Target generalization + Xeon/NVIDIA GPU support ✅ (2026-09-15)
 
 Goal: the same persona/knee methodology runs against CPU engines, local GPU
 engines, and (cheaply, as a byproduct) remote OpenAI-compatible endpoints.
+
+Shipped as planned, with notes: the target concept is expressed through
+`engine.type` (`vllm_cuda` for GPU local-docker, `remote` for endpoint-only)
+rather than a separate config axis — one selector, no overlap. The collector
+"plugin interface" is the new `simulator/collectors/` package (GpuCollector
+first); the pre-existing CPU collectors already behave like plugins and were
+left in place rather than mechanically wrapped. VRAM-bound attribution rides
+the existing kv_cache check (vLLM preallocates VRAM to gpu-memory-utilization,
+so raw used/total carries no signal); `gpu_compute` and `gpu_throttled` are
+new labels. Profiles resolve from `config/profiles/` with plain `config/`
+stems accepted, so the legacy configs are profiles already. The full-curve
+deliverable check (install → doctor → smoke → ready → sweep on a real
+Xeon+GPU box) still needs a run on actual hardware.
 
 ### 1.1 Target abstraction
 - Config gains a `target` concept:

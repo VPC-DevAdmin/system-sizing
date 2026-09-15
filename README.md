@@ -9,16 +9,26 @@ Three commands from bare box to verified pipeline — prerequisites are just Pyt
 ```bash
 git clone <repo> && cd system-sizing && ./install.sh   # installs uv + capsim (isolated, no sudo)
 capsim doctor                                          # validate host: CPU/GPU/docker/disk/telemetry perms/HF
-capsim smoke --config config/<recommended>.yaml        # ~10 min end-to-end proof with a tiny model
+capsim smoke --profile <recommended>                   # ~10 min end-to-end proof with a tiny model
 ```
 
-`capsim doctor` prints a pass/warn/fail table (and `doctor.json` for scripting), including GPU stack checks (nvidia-smi + container toolkit) on Xeon+NVIDIA boxes, and recommends candidate configs for the detected hardware. `capsim smoke` launches the real engine with a ~1.5 GB stand-in model, runs 2 virtual users through a short measured window, exports, and validates the export against the schema contract — if smoke passes, the whole pipeline works on this host. Then commit to the full model:
+`capsim doctor` prints a pass/warn/fail table (and `doctor.json` for scripting), including GPU stack checks (nvidia-smi + container toolkit) on Xeon+NVIDIA boxes, and recommends candidate **profiles** for the detected hardware. `capsim smoke` launches the real engine with a ~1.5 GB stand-in model, runs 2 virtual users through a short measured window, exports, and validates the export against the schema contract — if smoke passes, the whole pipeline works on this host. Then commit to the full model:
 
 ```bash
-capsim ready --config config/<recommended>.yaml        # full model download + image build/pull
+capsim ready --profile <recommended>                   # full model download + image build/pull
 ```
 
 `capsim` and `python -m simulator.cli` are the same CLI (the `simulator` entry point remains as a deprecated alias); the Make targets below wrap it.
+
+## Targets and profiles
+
+The same persona/knee methodology runs against three target kinds, selected by `engine.type` in the config:
+
+- **CPU local-docker** (`vllm`, `sglang`, `vllm_dual_socket`) — the original path, full host telemetry (PMU, IMC bandwidth, RAPL power, frequency, AMX).
+- **GPU local-docker** (`vllm_cuda`) — upstream `vllm/vllm-openai` CUDA image with `--gpus`, for Xeon+NVIDIA hosts. The GPU collector (NVML, nvidia-smi fallback) samples SM util / VRAM / power / clocks / throttle state at 1 Hz alongside the host CPU collectors, and bottleneck attribution gains `gpu_compute` and `gpu_throttled` labels.
+- **Remote endpoint** (`remote`) — benchmark an OpenAI-compatible endpoint you don't own; host telemetry is skipped (it would measure the client box, and the export records that), the endpoint's `/metrics` is scraped when configured. See the [remote-endpoint template](config/profiles/remote-endpoint.yaml).
+
+A **profile** is a curated named config for one host class. `capsim list-profiles` shows what's available; every command accepts `--profile <name>` in place of `--config <path>`. Curated profiles live in [config/profiles/](config/profiles/) (e.g. `xeon-gpu-qwen3-30b`); the pre-existing `config/*.yaml` files are addressable by stem too. The export's per-cohort `collectors` block records which telemetry sources actually ran, so downstream consumers know what evidence backs each bottleneck claim.
 
 ## Quick start
 

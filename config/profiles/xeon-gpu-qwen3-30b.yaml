@@ -1,0 +1,60 @@
+# Profile: Xeon + NVIDIA GPU host, Qwen3-30B-A3B BF16 on CUDA vLLM.
+#
+# The GPU counterpart to the CPU Qwen3-30B configs — same model, same
+# personas/cohorts, so capacity numbers are directly comparable across
+# the CPU and GPU host classes.
+#
+# Sizing: BF16 30B weights are ~60 GB resident. At TP=1 that needs one
+# 80 GB-class device (A100-80G / H100 / H200); min_vram_gb below
+# enforces it. For 2× 48 GB (L40S) or 2× 40 GB (A100-40G) hosts, set
+#   tensor_parallel_size: 2
+#   min_vram_gb: 40
+# and leave everything else alone — vLLM splits weights and KV across
+# the pair.
+#
+# Landing flow:
+#   capsim doctor                                   # verifies GPU + toolkit
+#   capsim smoke --profile xeon-gpu-qwen3-30b       # tiny-model pipeline proof
+#   capsim ready --profile xeon-gpu-qwen3-30b       # pulls image (weights come
+#                                                   # from the HF cache mount at
+#                                                   # first engine start)
+#   capsim run --cohort chat_heavy --profile xeon-gpu-qwen3-30b
+
+engine:
+  type: vllm_cuda
+  model_id: Qwen/Qwen3-30B-A3B-Instruct-2507
+  gpu_image: vllm/vllm-openai:latest
+
+  max_model_len: 16384
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.90
+  # gpu_device_ids: [0]              # uncomment to pin specific devices
+
+  port: 9100
+  host: 127.0.0.1
+  startup_timeout_s: 1800            # first start downloads ~60 GB of weights
+
+  # HF cache shared with the CPU engines so weights download once.
+  docker_volumes:
+    /data/ml/huggingface: /root/.cache/huggingface
+
+  hardware_requirements:
+    requires_gpu: true
+    min_gpus: 1
+    min_vram_gb: 70
+    notes: >-
+      BF16 30B at TP=1 needs an 80 GB-class device. For 2x 40-48 GB
+      GPUs set tensor_parallel_size: 2 and min_vram_gb: 40.
+
+telemetry:
+  # Host CPU collectors stay on (the Xeon side of a GPU box is still
+  # interesting — tokenization, scheduling, HtoD staging); the GPU
+  # collector picks up SM util / VRAM / power / clocks / throttling.
+  enable_pmu: true
+  enable_memory_bandwidth: true
+  enable_power: true
+  enable_engine_metrics: true
+  enable_gpu: true
+
+output:
+  db_directory: runs

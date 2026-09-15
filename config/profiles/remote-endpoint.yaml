@@ -1,0 +1,44 @@
+# Profile TEMPLATE: benchmark an OpenAI-compatible endpoint the
+# simulator does not launch or own (a vLLM/SGLang box elsewhere, a
+# gateway, a hosted API). Copy this file, fill in endpoint_url and
+# model_id, and run:
+#
+#   capsim run --cohort chat_heavy --config config/profiles/my-endpoint.yaml
+#
+# What's different from a local target:
+#   * No engine lifecycle — the run only verifies the endpoint answers
+#     and never stops it.
+#   * No host telemetry — PMU/bandwidth/power/frequency/CPU/GPU
+#     collectors would measure THIS client box, not the system under
+#     test, so they're skipped and recorded as skipped_remote_target
+#     in the export's collectors block. Bottleneck attribution
+#     degrades to prefill/decode classification from client-observed
+#     latencies, plus KV/queue evidence when endpoint_metrics_url is
+#     set.
+#   * Capacity numbers include network latency between this client and
+#     the endpoint — run the client close to the system under test.
+
+engine:
+  type: remote
+  # OpenAI-compatible base URL, INCLUDING the /v1 suffix.
+  endpoint_url: http://CHANGE-ME:8000/v1
+  # endpoint_api_key: sk-...
+  # Prometheus metrics endpoint, when the engine exposes one — enables
+  # KV-cache / queue-depth evidence in the export:
+  # endpoint_metrics_url: http://CHANGE-ME:8000/metrics
+
+  # Model name the endpoint serves under (sent in every request) —
+  # also used to load the tokenizer for corpus generation, so use the
+  # real HF id where possible.
+  model_id: Qwen/Qwen3-30B-A3B-Instruct-2507
+
+  startup_timeout_s: 60              # just the endpoint-answering gate
+
+simulation:
+  # Remote endpoints often sit behind per-client rate limits; start
+  # lower than the local-host default and raise once a clean run
+  # confirms headroom.
+  max_pool_size: 256
+
+output:
+  db_directory: runs

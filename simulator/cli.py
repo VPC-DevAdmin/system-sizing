@@ -57,6 +57,35 @@ def _parse_pool_sizes(arg: str | None) -> list[int] | None:
     return sizes
 
 
+_PROFILE_HELP = (
+    "Named hardware profile (curated config from config/profiles/, "
+    "with plain config/ stems accepted too). Mutually exclusive with "
+    "--config. ``capsim list-profiles`` shows what's available."
+)
+
+
+def _config_from_options(
+    config: Path | None, profile: str | None,
+    default: Path | None = None,
+) -> Path:
+    """Resolve the --config/--profile pair to a config path."""
+    if config is not None and profile is not None:
+        raise typer.BadParameter(
+            "--config and --profile are mutually exclusive"
+        )
+    if profile is not None:
+        from .config import resolve_profile
+        try:
+            return resolve_profile(profile)
+        except FileNotFoundError as e:
+            raise typer.BadParameter(str(e)) from e
+    if config is not None:
+        return config
+    if default is not None:
+        return default
+    raise typer.BadParameter("pass --config <path> or --profile <name>")
+
+
 _POOL_SIZES_HELP = (
     "Override the default fixed grid (powers of 2 from 4 to 256) "
     "with a comma-separated list of pool sizes (e.g. "
@@ -96,7 +125,8 @@ def _resolve_stepper_args(
 @app.command()
 def run(
     cohort: str = typer.Option(..., help="Cohort (team mix) id"),
-    config: Path = typer.Option(Path("config/default.yaml"), help="Config file"),
+    config: Path = typer.Option(None, help="Config file"),
+    profile: str = typer.Option(None, "--profile", help=_PROFILE_HELP),
     engine: str = typer.Option(None, help="Override engine.type from CONFIG (vllm | sglang)"),
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
     pool_sizes: str = typer.Option(None, "--pool-sizes", help=_POOL_SIZES_HELP),
@@ -105,7 +135,7 @@ def run(
 ):
     """Run a single cohort (team mix) end-to-end."""
     _setup_logging(verbose)
-    cfg = load_config(config)
+    cfg = load_config(_config_from_options(config, profile, Path("config/default.yaml")))
     apply_cli_overrides(cfg, engine=engine, model=model)
     if cohort not in COHORTS:
         raise typer.BadParameter(f"Unknown cohort '{cohort}'. Known: {sorted(COHORTS)}")
@@ -123,7 +153,8 @@ def run(
 @app.command("run-persona")
 def run_persona_cmd(
     persona: str = typer.Option(..., help="Persona id (single user archetype)"),
-    config: Path = typer.Option(Path("config/default.yaml"), help="Config file"),
+    config: Path = typer.Option(None, help="Config file"),
+    profile: str = typer.Option(None, "--profile", help=_PROFILE_HELP),
     engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
     pool_sizes: str = typer.Option(None, "--pool-sizes", help=_POOL_SIZES_HELP),
@@ -137,7 +168,7 @@ def run_persona_cmd(
     underperforms, you can compare against the code_assist persona run
     to see whether the mix itself is producing interference."""
     _setup_logging(verbose)
-    cfg = load_config(config)
+    cfg = load_config(_config_from_options(config, profile, Path("config/default.yaml")))
     apply_cli_overrides(cfg, engine=engine, model=model)
     if persona not in PERSONAS:
         raise typer.BadParameter(
@@ -156,7 +187,8 @@ def run_persona_cmd(
 
 @app.command()
 def sweep(
-    config: Path = typer.Option(Path("config/default.yaml")),
+    config: Path = typer.Option(None),
+    profile: str = typer.Option(None, "--profile", help=_PROFILE_HELP),
     engine: str = typer.Option(None, help="Override engine.type from CONFIG"),
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
     type: str = typer.Option(
@@ -192,7 +224,7 @@ def sweep(
     pick up where they left off automatically. Pass ``--new-run`` to
     cut a fresh ``run_NN+1`` directory."""
     _setup_logging(verbose)
-    cfg = load_config(config)
+    cfg = load_config(_config_from_options(config, profile, Path("config/default.yaml")))
     apply_cli_overrides(cfg, engine=engine, model=model)
     try:
         persona_ids, cohort_ids = resolve_workload_group(type)
@@ -376,6 +408,24 @@ def export_cmd(
     )
 
 
+@app.command("list-profiles")
+def list_profiles_cmd():
+    """List available hardware profiles (curated config/profiles/ plus
+    plain config/ stems). Pass a name to --profile on ready / smoke /
+    run / run-persona / sweep."""
+    from .config import list_profiles
+    profiles = list_profiles()
+    if not profiles:
+        typer.echo(
+            "No profiles found — run from the repo root (profiles live "
+            "in config/profiles/ and config/)."
+        )
+        raise typer.Exit(1)
+    typer.echo("Profiles (--profile <name>):\n")
+    for name, path in profiles.items():
+        typer.echo(f"  {name:<40} {path}")
+
+
 @app.command("list-cohorts")
 def list_cohorts():
     """List available team-mix cohorts."""
@@ -419,7 +469,8 @@ def list_personas():
 
 @app.command("ready")
 def ready_cmd(
-    config: Path = typer.Option(..., "--config", "-c", help="Config file"),
+    config: Path = typer.Option(None, "--config", "-c", help="Config file"),
+    profile: str = typer.Option(None, "--profile", help=_PROFILE_HELP),
     skip_build: bool = typer.Option(False, "--skip-build", help="Skip docker image build"),
     skip_download: bool = typer.Option(False, "--skip-download", help="Skip model download"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -439,6 +490,7 @@ def ready_cmd(
     import sys
 
     _setup_logging(verbose)
+    config = _config_from_options(config, profile)
     cfg = load_config(config)
 
     typer.echo(f"==> Preparing for {config}")
@@ -636,7 +688,7 @@ def doctor_cmd(
         typer.echo("doctor: FAIL — fix the failing checks above before running benchmarks", err=True)
         sys.exit(1)
     typer.echo("doctor: host looks usable" + (
-        f" — try: capsim smoke --config {report.recommended_configs[0]}"
+        f" — try: capsim smoke --profile {report.recommended_configs[0]}"
         if report.recommended_configs else ""
     ))
 
@@ -644,9 +696,10 @@ def doctor_cmd(
 @app.command("smoke")
 def smoke_cmd(
     config: Path = typer.Option(
-        ..., "--config", "-c",
+        None, "--config", "-c",
         help="Config whose engine/hardware shape to smoke-test.",
     ),
+    profile: str = typer.Option(None, "--profile", help=_PROFILE_HELP),
     model: str = typer.Option(
         "Qwen/Qwen3-0.6B", "--model",
         help="Tiny stand-in model (~1.5 GB) — proves the pipeline "
@@ -671,6 +724,7 @@ def smoke_cmd(
     import sys
 
     _setup_logging(verbose)
+    config = _config_from_options(config, profile)
     cfg = load_config(config)
     apply_cli_overrides(cfg, model=model)
 

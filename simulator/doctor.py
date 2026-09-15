@@ -264,32 +264,40 @@ def _recommend_configs(
     report: DoctorReport, info: HardwareInfo, gpu: bool,
     config_dir: Path,
 ) -> None:
-    """Map detected hardware to candidate config files. Curated
-    hardware profiles proper arrive with roadmap 1.3 — until then the
-    existing per-host configs stand in."""
-    if not config_dir.exists():
+    """Map detected hardware to candidate profiles (roadmap 1.3).
+
+    Naming convention does the matching: profile/config stems carry
+    their host class ("-gpu-" / "xeon" / "r7735"). GPU beats CPU when
+    both apply — the GPU is why the box exists."""
+    from .config import list_profiles
+
+    profiles = list_profiles()   # name -> path; profiles/ wins over config/
+    if not profiles:
         return
-    names = sorted(p.name for p in config_dir.glob("*.yaml"))
-    if info.vendor == "intel":
-        picks = [n for n in names if n.startswith("xeon_")]
-    elif info.vendor == "amd":
-        picks = [n for n in names if n.startswith("r7735_")]
-    else:
-        picks = []
-    report.recommended_configs = [f"config/{n}" for n in picks]
+
+    def _stems(pred) -> list[str]:
+        return sorted(n for n in profiles if pred(n))
+
+    picks: list[str] = []
     if gpu:
-        report.add(
-            "profile", WARN,
-            "GPU detected but GPU engine profiles land in roadmap "
-            "Phase 1 — current configs are CPU-only",
-        )
-    elif picks:
+        picks = _stems(lambda n: "-gpu-" in n or n.startswith("gpu-"))
+    if not picks and info.vendor == "intel":
+        picks = _stems(lambda n: n.startswith("xeon"))
+    if not picks and info.vendor == "amd":
+        picks = _stems(lambda n: n.startswith("r7735"))
+    report.recommended_configs = picks
+    if picks:
         report.add(
             "profile", OK,
-            "candidate configs for this host: " + ", ".join(report.recommended_configs),
+            "candidate profiles for this host (--profile <name>): "
+            + ", ".join(picks),
         )
-    elif info.vendor:
-        report.add("profile", WARN, f"no bundled config targets vendor '{info.vendor}'")
+    elif gpu or info.vendor:
+        report.add(
+            "profile", WARN,
+            f"no bundled profile matches this host "
+            f"(vendor={info.vendor}, gpu={gpu}) — see capsim list-profiles",
+        )
 
 
 def run_doctor(config_dir: Path = Path("config")) -> DoctorReport:

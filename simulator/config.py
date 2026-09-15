@@ -308,6 +308,38 @@ def load_config(path: str | Path | None) -> Config:
     return cfg
 
 
+# ── Hardware profiles (roadmap 1.3) ──────────────────────────────────
+# A profile is a curated, named config: engine + model + binding +
+# hardware requirements for one host class. ``config/profiles/`` holds
+# the curated set; plain ``config/`` files are addressable by stem too
+# (the pre-profile configs ARE profiles for their hosts), with
+# profiles/ winning on a name collision.
+
+PROFILE_DIRS: tuple[Path, ...] = (Path("config/profiles"), Path("config"))
+
+
+def list_profiles() -> dict[str, Path]:
+    """Available profile names → config path (first hit wins)."""
+    out: dict[str, Path] = {}
+    for d in PROFILE_DIRS:
+        if not d.exists():
+            continue
+        for p in sorted(d.glob("*.yaml")):
+            out.setdefault(p.stem, p)
+    return out
+
+
+def resolve_profile(name: str) -> Path:
+    """Resolve a profile name to its config path, or raise with the
+    available names (run from the repo root — profiles are repo files,
+    not package data)."""
+    profiles = list_profiles()
+    if name in profiles:
+        return profiles[name]
+    available = ", ".join(sorted(profiles)) or "(none found — run from the repo root)"
+    raise FileNotFoundError(f"Unknown profile '{name}'. Available: {available}")
+
+
 def apply_cli_overrides(
     cfg: Config,
     *,

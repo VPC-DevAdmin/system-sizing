@@ -151,3 +151,43 @@ def test_remote_target_skips_host_collectors() -> None:
     assert statuses["pmu"] == "skipped_remote_target"
     assert statuses["gpu"] == "skipped_remote_target"
     assert "engine_metrics" in statuses
+
+
+# ── profiles (roadmap 1.3) ────────────────────────────────────────────
+
+
+def test_profiles_resolve_and_load(monkeypatch) -> None:
+    """Curated profiles resolve by name and load as valid configs;
+    plain config/ stems are addressable as profiles too."""
+    from pathlib import Path
+
+    from simulator.config import list_profiles, load_config, resolve_profile
+
+    # Run from the repo root, like the CLI docs instruct.
+    monkeypatch.chdir(Path(__file__).parent.parent)
+    profiles = list_profiles()
+    assert "xeon-gpu-qwen3-30b" in profiles
+    assert "remote-endpoint" in profiles
+    # Pre-profile configs are profiles for their hosts.
+    assert "xeon_vllm_gpt_oss" in profiles
+
+    cfg = load_config(resolve_profile("xeon-gpu-qwen3-30b"))
+    assert cfg.engine.type == "vllm_cuda"
+    assert cfg.engine.hardware_requirements.requires_gpu is True
+    assert cfg.engine.hardware_requirements.min_vram_gb == 70
+
+    remote = load_config(resolve_profile("remote-endpoint"))
+    assert remote.engine.type == "remote"
+    assert remote.engine.endpoint_url.startswith("http://CHANGE-ME")
+
+
+def test_unknown_profile_lists_available(monkeypatch) -> None:
+    from pathlib import Path
+
+    import pytest
+
+    from simulator.config import resolve_profile
+
+    monkeypatch.chdir(Path(__file__).parent.parent)
+    with pytest.raises(FileNotFoundError, match="xeon-gpu-qwen3-30b"):
+        resolve_profile("no-such-profile")

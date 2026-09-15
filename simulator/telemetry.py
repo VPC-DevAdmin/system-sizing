@@ -205,6 +205,13 @@ class MeasurementTelemetry:
         self._samples: list[_IntervalSample] = []
         self._stopped = False
         self._measurement_id: int | None = None
+        # Per-collector status accumulated across measurement windows
+        # ({name: "ok" | "no_data" | "disabled" | collector-specific
+        # error string}). Once a collector reports "ok" in any window
+        # it stays "ok" — persisted onto cohort_run.collectors_json at
+        # end of run so the export can say what evidence backs the
+        # bottleneck attribution.
+        self.collector_statuses: dict[str, str] = {}
 
     def start(self, measurement_id: int) -> None:
         self._measurement_id = measurement_id
@@ -275,7 +282,54 @@ class MeasurementTelemetry:
             agg["effective_freq_ghz_min"] = min(freq_mins) / 1000.0
 
         rows = [self._sample_to_row(s) for s in self._samples]
+        self._record_statuses(agg)
         return (self._measurement_id or -1), rows, agg
+
+    def _record_statuses(self, agg: dict) -> None:
+        """Fold this window's collector outcomes into
+        ``collector_statuses``. Never downgrades an "ok"."""
+
+        def _sampled(attr: str) -> str:
+            return "ok" if any(
+                getattr(s, attr) is not None for s in self._samples
+            ) else "no_data"
+
+        window: dict[str, str] = {
+            # PMU status: ``_parse`` puts it on the agg dict under
+            # "status" ("ok" when events aggregated); the collector
+            # object's own attribute can still read "running" after
+            # stop, so prefer the parsed result.
+            "pmu": (
+                "disabled" if not self.cfg.enable_pmu
+                else str(
+                    agg.get("status")
+                    or (self._perf.status if self._perf is not None else "no_data")
+                )
+            ),
+            "memory_bandwidth": (
+                "disabled" if not self.cfg.enable_memory_bandwidth
+                else str(agg.get("bandwidth_status") or "no_data")
+            ),
+            "power": (
+                "disabled" if not getattr(self.cfg, "enable_power", True)
+                else str(agg.get("power_status") or "no_data")
+            ),
+            "engine_metrics": (
+                "disabled" if not self.cfg.enable_engine_metrics
+                else _sampled("kv_cache_used_pct")
+            ),
+            "frequency": _sampled("freq_mhz_mean"),
+            "cpu_util": _sampled("cpu_util_avg"),
+            "memory": _sampled("memory_used_gb"),
+            "engine_rss": (
+                "not_available"
+                if (not _HAS_PSUTIL or self.engine_pid is None)
+                else _sampled("engine_rss_gb")
+            ),
+        }
+        for name, status in window.items():
+            if self.collector_statuses.get(name) != "ok":
+                self.collector_statuses[name] = status
 
     async def _loop(self) -> None:
         last_cpu: dict[int, tuple[int, int]] | None = None

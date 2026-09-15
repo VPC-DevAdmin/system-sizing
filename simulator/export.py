@@ -4,6 +4,7 @@ One ``buyer_page_data.json`` per call, structured for direct consumption
 by [web/index.html](../web/index.html) (or any downstream parser):
 
     {
+      "schema_version": "1.0.0",
       "meta": {generated_at, engines, models, source_dir, cohort_count},
       "cohorts": [
         {
@@ -65,6 +66,13 @@ from .prefix_cache import (
     analyse_rows,
     read_turn_rows_with_step,
 )
+
+# Version of the export document's shape (semver). The contract is
+# docs/export_schema/buyer_page_data.schema.json — every change to the
+# document's structure needs a version bump there and here, plus a
+# green run of the schema-validation tests. Patch = additive optional
+# fields; minor = additive required fields; major = anything breaking.
+EXPORT_SCHEMA_VERSION = "1.0.0"
 
 
 def _read_prefix_cache_report(
@@ -781,6 +789,22 @@ def _summarise_cohort(
     else:
         coverage = "single_point"
 
+    # Telemetry-collector status summary ({name: "ok" | "no_data" |
+    # "disabled" | error string}) recorded at end of run. Tells the
+    # consumer which evidence streams back the bottleneck attribution
+    # (e.g. bandwidth attribution is meaningless if the bandwidth
+    # collector reported perf_uncore_unavailable). None on legacy DBs
+    # from before the column existed.
+    collectors: dict | None = None
+    raw_collectors = run.get("collectors_json")
+    if raw_collectors:
+        try:
+            parsed = json.loads(raw_collectors)
+            if isinstance(parsed, dict):
+                collectors = parsed
+        except (TypeError, ValueError):
+            pass
+
     cohort_def = json.loads(run["cohort_definition_json"])
     # Two parallel bottleneck attributions — what limits SLA capacity
     # vs what limits premium-quality capacity. They can differ; if
@@ -861,6 +885,7 @@ def _summarise_cohort(
         "target_bottleneck": target_bottleneck,        # what limits quality capacity
         "target_bottleneck_evidence": target_evidence,
         "hardware_recommendation": _hardware_recommendation(bottleneck),
+        "collectors": collectors,
         "prefix_cache": prefix_cache,
         # Throughput at the SLA-bound capacity pool — the headline
         # buyer-page question "how many tokens/sec does this hardware
@@ -980,6 +1005,7 @@ def export_dir(
             cohorts.append(_summarise_cohort(run, prefix_cache, slim=slim))
 
     doc = {
+        "schema_version": EXPORT_SCHEMA_VERSION,
         "meta": {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "engines": sorted(engine_seen),

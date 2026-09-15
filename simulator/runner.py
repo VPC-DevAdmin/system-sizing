@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import sqlite3
 import time
@@ -403,6 +404,17 @@ async def run_cohort(
                 })
         except Exception as e:  # noqa: BLE001
             log.debug("end-of-run metrics scrape failed: %s", e)
+        # Persist which telemetry collectors actually produced data —
+        # the export echoes this so downstream consumers know what
+        # evidence backs the bottleneck attribution. Empty when no
+        # measurement window ever ran (e.g. immediate failure).
+        if telemetry.collector_statuses:
+            try:
+                db.update_cohort_run(cohort_run_id, {
+                    "collectors_json": json.dumps(telemetry.collector_statuses),
+                })
+            except Exception as e:  # noqa: BLE001
+                log.debug("collector-status persist failed: %s", e)
         await pool.stop()
         _flush_user_spawns(db, cohort_run_id, user_spawn_buffer)
         _flush_users(db, cohort_run_id, user_termination_buffer)

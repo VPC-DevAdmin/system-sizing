@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/system-sizing/export-schema/buyer_page_data.schema.json",
+  "title": "Persona Capacity Simulator export (buyer_page_data / buyer_page_data_slim)",
+  "description": "Contract for the JSON produced by `simulator export`. One schema covers both the full and slim documents: slim omits the per-step time-series fields (curve[i].telemetry_samples / turns / timeline), which are optional here. The document's schema_version must equal EXPORT_SCHEMA_VERSION in simulator/export.py; structural changes bump both. Consumers should tolerate unknown additional fields (additive optional fields are a patch bump).",
+  "type": "object",
+  "required": ["schema_version", "meta", "cohorts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "meta": {
+      "type": "object",
+      "required": [
+        "generated_at",
+        "engines",
+        "models",
+        "source_dir",
+        "cohort_count",
+        "slim",
+        "engine_config"
+      ],
+      "properties": {
+        "generated_at": { "type": "string" },
+        "engines": { "type": "array", "items": { "type": "string" } },
+        "models": { "type": "array", "items": { "type": "string" } },
+        "source_dir": { "type": "string" },
+        "cohort_count": { "type": "integer", "minimum": 0 },
+        "slim": { "type": "boolean" },
+        "engine_config": { "type": ["object", "null"] }
+      }
+    },
+    "cohorts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/cohort" }
+    }
+  },
+  "$defs": {
+    "nullableNumber": { "type": ["number", "null"] },
+    "nullableInteger": { "type": ["integer", "null"] },
+    "cohort": {
+      "type": "object",
+      "required": [
+        "id",
+        "cohort_run_id",
+        "name",
+        "description",
+        "category",
+        "persona_weights",
+        "engine",
+        "model",
+        "started_at",
+        "completed_at",
+        "final_status",
+        "capacity_pool_size",
+        "soft_capacity_pool_size",
+        "fail_pool_size",
+        "target_capacity_pool_size",
+        "target_soft_capacity_pool_size",
+        "target_fail_pool_size",
+        "headroom_pool_size",
+        "cliff_pool_size",
+        "deployment_band_shape",
+        "measurement_coverage",
+        "capacity_landing_zones",
+        "curve",
+        "bottleneck",
+        "bottleneck_evidence",
+        "target_bottleneck",
+        "target_bottleneck_evidence",
+        "hardware_recommendation",
+        "collectors",
+        "prefix_cache",
+        "capacity_throughput"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "cohort_run_id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "persona_weights": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        },
+        "engine": { "type": "string" },
+        "model": { "type": "string" },
+        "started_at": { "type": "string" },
+        "completed_at": { "type": ["string", "null"] },
+        "final_status": { "type": ["string", "null"] },
+        "capacity_pool_size": { "$ref": "#/$defs/nullableInteger" },
+        "soft_capacity_pool_size": { "$ref": "#/$defs/nullableInteger" },
+        "fail_pool_size": { "$ref": "#/$defs/nullableInteger" },
+        "target_capacity_pool_size": { "$ref": "#/$defs/nullableInteger" },
+        "target_soft_capacity_pool_size": { "$ref": "#/$defs/nullableInteger" },
+        "target_fail_pool_size": { "$ref": "#/$defs/nullableInteger" },
+        "headroom_pool_size": { "$ref": "#/$defs/nullableInteger" },
+        "cliff_pool_size": { "$ref": "#/$defs/nullableInteger" },
+        "deployment_band_shape": {
+          "enum": ["graceful", "moderate", "sharp", "unbounded", "unmeasured"]
+        },
+        "measurement_coverage": {
+          "enum": ["full_curve", "downward_search", "single_point", "capped"]
+        },
+        "capacity_landing_zones": {
+          "type": "object",
+          "required": ["fast", "acceptable", "degraded"],
+          "properties": {
+            "fast": { "type": "string" },
+            "acceptable": { "type": "string" },
+            "degraded": { "type": "string" }
+          }
+        },
+        "curve": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/curveEntry" }
+        },
+        "bottleneck": { "type": "string" },
+        "bottleneck_evidence": { "type": "object" },
+        "target_bottleneck": { "type": "string" },
+        "target_bottleneck_evidence": { "type": "object" },
+        "hardware_recommendation": { "type": "string" },
+        "collectors": {
+          "type": ["object", "null"],
+          "description": "Telemetry-collector status summary recorded at end of run ({collector_name: 'ok' | 'no_data' | 'disabled' | collector-specific error}). null on runs from before the collectors_json column existed.",
+          "additionalProperties": { "type": "string" }
+        },
+        "prefix_cache": { "type": ["object", "null"] },
+        "capacity_throughput": { "type": ["object", "null"] }
+      }
+    },
+    "curveEntry": {
+      "type": "object",
+      "required": [
+        "step_index",
+        "pool_size",
+        "sample_size",
+        "violation_rate",
+        "ttft_violation_rate",
+        "tpot_violation_rate",
+        "ci_lower",
+        "ci_upper",
+        "status",
+        "prompt_tokens",
+        "content_tokens",
+        "reasoning_tokens",
+        "total_visible_output_tokens"
+      ],
+      "properties": {
+        "step_index": { "type": "integer" },
+        "pool_size": { "type": "integer" },
+        "sample_size": { "type": "integer" },
+        "violation_rate": { "type": "number" },
+        "ttft_violation_rate": { "type": "number" },
+        "tpot_violation_rate": { "type": "number" },
+        "target_miss_rate": { "$ref": "#/$defs/nullableNumber" },
+        "ttft_target_miss_rate": { "$ref": "#/$defs/nullableNumber" },
+        "tpot_target_miss_rate": { "$ref": "#/$defs/nullableNumber" },
+        "ci_lower": { "type": "number" },
+        "ci_upper": { "type": "number" },
+        "ttft_p50_ms": { "$ref": "#/$defs/nullableNumber" },
+        "ttft_p95_ms": { "$ref": "#/$defs/nullableNumber" },
+        "tpot_p50_ms": { "$ref": "#/$defs/nullableNumber" },
+        "tpot_p95_ms": { "$ref": "#/$defs/nullableNumber" },
+        "ttfct_p50_ms": { "$ref": "#/$defs/nullableNumber" },
+        "ttfct_p95_ms": { "$ref": "#/$defs/nullableNumber" },
+        "avg_reasoning_tokens": { "$ref": "#/$defs/nullableNumber" },
+        "kv_cache_used_pct": { "$ref": "#/$defs/nullableNumber" },
+        "status": { "type": "string" },
+        "target_status": { "type": ["string", "null"] },
+        "measurement_started_at": { "type": ["string", "null"] },
+        "measurement_duration_s": { "$ref": "#/$defs/nullableNumber" },
+        "prompt_tokens": { "type": "integer" },
+        "content_tokens": { "type": "integer" },
+        "reasoning_tokens": { "type": "integer" },
+        "total_visible_output_tokens": { "type": "integer" },
+        "prompt_tok_per_s": { "$ref": "#/$defs/nullableNumber" },
+        "content_tok_per_s": { "$ref": "#/$defs/nullableNumber" },
+        "visible_output_tok_per_s": { "$ref": "#/$defs/nullableNumber" },
+        "telemetry_samples": {
+          "type": "array",
+          "description": "Full export only (absent in slim): per-second within-window samples.",
+          "items": { "type": "object" }
+        },
+        "turns": {
+          "type": "array",
+          "description": "Full export only (absent in slim): per-turn events captured in the window.",
+          "items": { "type": "object" }
+        },
+        "timeline": {
+          "type": "object",
+          "description": "Full export only (absent in slim): per-second phase-distribution timeline."
+        }
+      }
+    }
+  }
+}

@@ -732,6 +732,16 @@ def create_app(
                 search_results = json.loads(_search_out.read_text())
             except (OSError, json.JSONDecodeError):
                 search_results = None
+        # The arena selection the current/last search was built from —
+        # the UI restores its cards from this and defaults to resume.
+        arena_space = None
+        arena_space_path = _opt_out.parent / "arena_space.yaml"
+        if arena_space_path.exists():
+            import yaml as _yaml
+            try:
+                arena_space = _yaml.safe_load(arena_space_path.read_text())
+            except (OSError, _yaml.YAMLError):
+                arena_space = None
         from .search import SearchSpaceError, list_spaces, load_space
         spaces = list_spaces()
 
@@ -753,6 +763,7 @@ def create_app(
             "space_details": await asyncio.to_thread(_details),
             "search_results": search_results,
             "search_out_path": str(_search_out),
+            "arena_space": arena_space,
         }
         if opt:
             out["active"] = {

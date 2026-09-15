@@ -85,9 +85,16 @@ def _normalize_entry(raw: dict, source: str) -> dict:
             f"{source}: '{model_id}' quant '{quant}' unknown — "
             f"known: {KNOWN_QUANTS}"
         )
+    name = model_id.split("/")[-1]
     return {
         "id": model_id,
         "family": str(raw.get("family") or infer_family(model_id)),
+        # Vendor family line as an operator says it ("Qwen3") — the
+        # UI's family dropdown groups by this.
+        "series": str(raw.get("series") or infer_family(model_id).split("-")[0]),
+        "params_b": raw.get("params_b"),
+        "specialty": str(raw.get("specialty")
+                         or ("coder" if "coder" in name.lower() else "instruct")),
         "quant": quant,
         "approx_size_gb": raw.get("approx_size_gb"),
         "min_vram_gb": raw.get("min_vram_gb"),

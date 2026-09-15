@@ -738,10 +738,13 @@ const Optimizer = {
     $("#opt-budget").addEventListener("change", () => this.schedulePreview());
     document.querySelector('#tabs button[data-view="optimizer"]')
       .addEventListener("click", () => { this.refresh(); this.loadArena(); });
-    this.loadArena();
+    this.loadArena().then(() => this.refresh());
   },
 
-  /* ── Arena: the full feasible space, subtract to narrow ──────── */
+  /* ── Arena: dropdowns + cards, everything in play by default ─── */
+
+  filters: { series: "all", size: "all" },
+  restored: false,
 
   async loadArena() {
     if (!this.arena) {
@@ -752,16 +755,115 @@ const Optimizer = {
     this.schedulePreview();
   },
 
+  /* The cards. Filter cards prune MODELS by an attribute; dim cards
+   * prune a launch DIMENSION. Each carries a narrative so the page
+   * teaches what the knob does instead of assuming vLLM fluency. */
+  cards() {
+    const dims = this.arena?.dimensions ?? {};
+    return [
+      { key: "sparsity", kind: "filter", title: "Model sparsity",
+        options: [["moe", "MoE"], ["dense", "Dense"]],
+        of: m => (m.moe ? "moe" : "dense"),
+        text: `MoE models activate a few experts per token — big-model
+          quality at small-model compute, and the reason a 30B MoE can
+          outrun a dense 32B. Dense models use every parameter every
+          token. Testing both answers which architecture wins on this
+          box.` },
+      { key: "specialty", kind: "filter", title: "Model specialty",
+        options: [["instruct", "General instruct"], ["coder", "Coder"]],
+        of: m => m.specialty || "instruct",
+        text: `Code-tuned models share the base model's launch behavior
+          but serve different workloads. Keep coder variants when the
+          production traffic includes coding assistants.` },
+      { key: "quant", kind: "filter", title: "Weight precision",
+        options: (this.arena?.models ?? []).filter(m => m.feasible)
+          .map(m => m.quant).filter((v, i, s) => s.indexOf(v) === i)
+          .map(q => [q, q]),
+        of: m => m.quant,
+        text: `Precision is a different artifact, not a flag: FP8 weights
+          halve memory and bandwidth for a small quality cost, which can
+          double the replicas that fit. bf16 is the reference.` },
+      { key: "tp", kind: "dim", title: "Tensor parallelism",
+        options: (dims.tp ?? []).map(v => [String(v), String(v)]),
+        text: `How many GPUs share ONE replica's weights. Required when a
+          model doesn't fit one card; costs an all-reduce per layer over
+          PCIe on this box. TP peers never span PCIe/NUMA domains.` },
+      { key: "dp", kind: "dim", title: "Data parallelism",
+        options: (dims.dp ?? []).map(v => [String(v), String(v)]),
+        text: `Independent replicas behind round-robin. No inter-GPU
+          chatter — usually the throughput winner when the model fits a
+          single card. tp × dp is capped by the ${this.arena?.hardware?.count ?? "?"}
+          GPUs.` },
+      { key: "max_num_seqs", kind: "dim", title: "Batch width",
+        options: (dims.max_num_seqs ?? []).map(v => [String(v), String(v)]),
+        text: `Max concurrent sequences per replica. Wider batches raise
+          throughput until they poison per-token latency — the SLA caps
+          decide where that line is.` },
+      { key: "max_num_batched_tokens", kind: "dim", title: "Prefill chunk",
+        options: (dims.max_num_batched_tokens ?? []).map(v => [String(v), String(v)]),
+        text: `Tokens the scheduler may batch per step. Smaller chunks
+          keep decode latency steady while long prompts prefill;
+          "default" lets vLLM choose.` },
+      { key: "kv_cache_dtype", kind: "dim", title: "KV cache precision",
+        options: (dims.kv_cache_dtype ?? []).map(v => [String(v), String(v)]),
+        text: `FP8 KV cache halves cache memory and bandwidth — roughly
+          double the concurrent context — for a small accuracy cost.
+          One of the highest-leverage knobs on Blackwell.` },
+      { key: "expert_parallel", kind: "dim", title: "Expert parallelism",
+        options: (dims.expert_parallel ?? []).map(v => [String(v), String(v)]),
+        text: `Splits an MoE model's experts across the TP group instead
+          of sharding every expert. Only meaningful for MoE models at
+          tp > 1 — other candidates ignore it automatically.` },
+      { key: "placement", kind: "dim", title: "GPU placement",
+        options: (dims.placement ?? []).map(v => [String(v), String(v)]),
+        text: `pack keeps TP peers inside one PCIe/NUMA domain (fast
+          peer transfers); spread deals replicas across domains
+          (balanced host bandwidth).` },
+    ].filter(c => c.options.length > 1);
+  },
+
+  cardOff: {},          // card key -> Set of deselected option values
+
+  eligibleModels() {
+    const f = this.filters;
+    return (this.arena?.models ?? []).filter(m => m.feasible
+      && (f.series === "all" || m.series === f.series)
+      && (f.size === "all" || m.size_class === f.size)
+      && !(this.cardOff.sparsity?.has(m.moe ? "moe" : "dense"))
+      && !(this.cardOff.specialty?.has(m.specialty || "instruct"))
+      && !(this.cardOff.quant?.has(m.quant)));
+  },
+
   arenaSelection() {
-    const models = this.arena.models
-      .filter(m => m.feasible && !this.arenaOff.models.has(m.id))
-      .map(m => m.id);
+    const models = this.eligibleModels()
+      .filter(m => !this.arenaOff.models.has(m.id)).map(m => m.id);
     const dims = {};
     for (const [dim, vals] of Object.entries(this.arena.dimensions)) {
-      const off = this.arenaOff.dims[dim];
+      const off = this.cardOff[dim];
       if (off?.size) dims[dim] = vals.filter(v => !off.has(String(v)));
     }
     return { models, dims };
+  },
+
+  /* Restore the last search's selection so reopening the page shows
+   * what a resume would actually continue. */
+  restoreFrom(doc) {
+    if (this.restored || !doc || !this.arena) return;
+    this.restored = true;
+    const wanted = new Set(Object.values(doc.model_variants ?? {})
+      .map(v => v.model));
+    for (const m of this.arena.models) {
+      if (m.feasible && !wanted.has(m.id)) this.arenaOff.models.add(m.id);
+    }
+    for (const [dim, vals] of Object.entries(this.arena.dimensions)) {
+      const kept = (doc.dimensions ?? {})[dim];
+      if (!kept) continue;
+      const keptSet = new Set(kept.map(String));
+      const off = vals.map(String).filter(v => !keptSet.has(v));
+      if (off.length) this.cardOff[dim] = new Set(off);
+    }
+    this.renderArena();
+    this.schedulePreview();
   },
 
   renderArena() {
@@ -775,52 +877,137 @@ const Optimizer = {
         <code>config/arena.yaml</code> for planning).</div>`;
       return;
     }
-    const gb = v => (v == null ? "?" : `${v}`);
-    const modelChip = m => {
-      const off = this.arenaOff.models.has(m.id);
-      if (!m.feasible) {
-        return `<span class="arena-chip infeasible" title="needs ${m.min_vram_gb} GB
-          — largest domain here provides less">
-          ${m.id} <span class="sub">${m.quant} · won't fit</span></span>`;
-      }
-      return `<label class="arena-chip ${off ? "off" : ""}">
-        <input type="checkbox" data-arena-model="${m.id}" ${off ? "" : "checked"}>
-        ${m.id} <span class="sub">${m.quant}${m.moe ? " · MoE" : ""}
-        · ~${gb(m.approx_size_gb)} GB · tp ${m.feasible_tps.join("/")}</span></label>`;
+    const uniq = arr => [...new Set(arr)];
+    const seriesOpts = uniq(a.models.filter(m => m.feasible).map(m => m.series))
+      .sort();
+    const sizeOpts = uniq(a.models.filter(m => m.feasible).map(m => m.size_class));
+    const eligible = this.eligibleModels();
+    const inPlay = eligible.filter(m => !this.arenaOff.models.has(m.id));
+
+    const cardHtml = c => {
+      const off = this.cardOff[c.key] ?? new Set();
+      const on = c.options.filter(([v]) => !off.has(v));
+      const summary = on.length === c.options.length
+        ? `All: ${on.map(([, l]) => l).join(" · ")}`
+        : on.length ? on.map(([, l]) => l).join(" · ")
+        : '<span class="status-fail">nothing selected</span>';
+      return `<div class="arena-card" data-card="${c.key}">
+        <div class="ac-head"><span class="ac-title">${c.title}</span>
+          <button class="ac-edit" data-edit="${c.key}" title="edit">✎ edit</button></div>
+        <div class="ac-sel">${summary}</div>
+        <div class="ac-text msg">${c.text}</div>
+        <div class="card-pop" data-pop="${c.key}" hidden>
+          ${c.options.map(([v, l]) => `<label class="pop-row">
+            <input type="checkbox" data-card-opt="${c.key}" data-val="${v}"
+              ${off.has(v) ? "" : "checked"}> ${l}</label>`).join("")}
+        </div></div>`;
     };
-    const dimRow = (dim, vals) => `
-      <div class="arena-row"><div class="rt">${dim.replaceAll("_", " ")}</div>
-        <div class="arena-chips">${vals.map(v => {
-          const off = this.arenaOff.dims[dim]?.has(String(v));
-          return `<label class="arena-chip ${off ? "off" : ""}">
-            <input type="checkbox" data-arena-dim="${dim}" data-val="${v}"
-              ${off ? "" : "checked"}> ${v}</label>`;
-        }).join("")}</div></div>`;
+
+    const modelsCard = `<div class="arena-card" data-card="models">
+      <div class="ac-head"><span class="ac-title">Models in play</span>
+        <button class="ac-edit" data-edit="models" title="edit">✎ edit</button></div>
+      <div class="ac-sel">${inPlay.length} of ${eligible.length} eligible
+        ${eligible.length < a.models.length
+          ? `<span class="msg">(${a.models.length - eligible.length} filtered
+             or won't fit)</span>` : ""}</div>
+      <div class="ac-text msg">${inPlay.map(m =>
+        `${m.id.split("/")[1]} <i>(${m.quant})</i>`).join(", ") || "—"}</div>
+      <div class="card-pop" data-pop="models" hidden>
+        ${eligible.map(m => `<label class="pop-row">
+          <input type="checkbox" data-model-opt="${m.id}"
+            ${this.arenaOff.models.has(m.id) ? "" : "checked"}>
+          ${m.id} <i>(${m.quant} · ~${m.approx_size_gb ?? "?"} GB
+          · tp ${m.feasible_tps.join("/")})</i></label>`).join("")}
+      </div></div>`;
+
     box.innerHTML = `
-      <div class="arena-row"><div class="rt">Hardware</div>
-        <span class="msg">${hw.count} GPUs · ${gb(hw.vram_per_gpu_gb)} GB each ·
-        ${hw.device_groups.length} PCIe/NUMA domain(s)
-        (${hw.source}) · gpu_memory_utilization fixed at
-        ${a.fixed.gpu_memory_utilization}</span></div>
-      <div class="arena-row"><div class="rt">Models &amp; precisions
-        (${a.models.filter(m => m.feasible).length} runnable)</div>
-        <div class="arena-chips">${a.models.map(modelChip).join("")}</div></div>
-      ${Object.entries(a.dimensions).map(([d, v]) => dimRow(d, v)).join("")}
+      <div class="row wrap" style="margin-top:14px">
+        <label>Model family
+          <select id="arena-series">
+            <option value="all">All families</option>
+            ${seriesOpts.map(s => `<option value="${s}"
+              ${this.filters.series === s ? "selected" : ""}>${s}</option>`).join("")}
+          </select></label>
+        <label>Model size
+          <select id="arena-size">
+            <option value="all">All sizes</option>
+            ${sizeOpts.map(s => `<option value="${s}"
+              ${this.filters.size === s ? "selected" : ""}>${s}</option>`).join("")}
+          </select></label>
+        <span class="msg" style="align-self:end">${hw.count} GPUs ·
+          ${hw.vram_per_gpu_gb ?? "?"} GB each · ${hw.device_groups.length}
+          PCIe/NUMA domain(s) · gmu fixed ${a.fixed.gpu_memory_utilization}</span>
+      </div>
+      <div class="arena-cards">${modelsCard}${this.cards().map(cardHtml).join("")}</div>
       <div id="opt-arena-cost" class="callout arena-cost">computing the arena…</div>`;
-    box.querySelectorAll("input[data-arena-model]").forEach(el =>
-      el.addEventListener("change", () => {
-        el.checked ? this.arenaOff.models.delete(el.dataset.arenaModel)
-                   : this.arenaOff.models.add(el.dataset.arenaModel);
-        el.closest(".arena-chip").classList.toggle("off", !el.checked);
-        this.schedulePreview();
+
+    $("#arena-series").addEventListener("change", e => {
+      this.filters.series = e.target.value;
+      this.renderArena(); this.schedulePreview();
+    });
+    $("#arena-size").addEventListener("change", e => {
+      this.filters.size = e.target.value;
+      this.renderArena(); this.schedulePreview();
+    });
+    box.querySelectorAll("[data-edit]").forEach(btn =>
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
+        const pop = box.querySelector(`[data-pop="${btn.dataset.edit}"]`);
+        const wasHidden = pop.hidden;
+        box.querySelectorAll(".card-pop").forEach(p => { p.hidden = true; });
+        pop.hidden = !wasHidden;
       }));
-    box.querySelectorAll("input[data-arena-dim]").forEach(el =>
+    box.querySelectorAll(".card-pop").forEach(p =>
+      p.addEventListener("click", e => e.stopPropagation()));
+    if (!this.popCloser) {
+      this.popCloser = true;
+      document.addEventListener("click", () =>
+        document.querySelectorAll("#opt-arena .card-pop")
+          .forEach(p => { p.hidden = true; }));
+    }
+    const FILTER_KEYS = new Set(["sparsity", "specialty", "quant"]);
+    box.querySelectorAll("input[data-card-opt]").forEach(el =>
       el.addEventListener("change", () => {
-        const off = this.arenaOff.dims[el.dataset.arenaDim] ??= new Set();
+        const key = el.dataset.cardOpt;
+        const off = this.cardOff[key] ??= new Set();
         el.checked ? off.delete(el.dataset.val) : off.add(el.dataset.val);
-        el.closest(".arena-chip").classList.toggle("off", !el.checked);
+        if (FILTER_KEYS.has(key)) {
+          // Filters change WHICH models are eligible — rebuild the
+          // cards, then reopen this popover where the user left it.
+          this.renderArena();
+          const pop = box.querySelector(`[data-pop="${key}"]`);
+          if (pop) pop.hidden = false;
+        } else {
+          this.refreshCardSummaries();
+        }
         this.schedulePreview();
       }));
+    box.querySelectorAll("input[data-model-opt]").forEach(el =>
+      el.addEventListener("change", () => {
+        el.checked ? this.arenaOff.models.delete(el.dataset.modelOpt)
+                   : this.arenaOff.models.add(el.dataset.modelOpt);
+        this.refreshCardSummaries();
+        this.schedulePreview();
+      }));
+  },
+
+  /* Update card summary lines in place so an open popover survives
+   * checkbox clicks (a full re-render would close it). */
+  refreshCardSummaries() {
+    const box = $("#opt-arena");
+    for (const c of this.cards()) {
+      const off = this.cardOff[c.key] ?? new Set();
+      const on = c.options.filter(([v]) => !off.has(v));
+      const el = box.querySelector(`[data-card="${c.key}"] .ac-sel`);
+      if (el) el.innerHTML = on.length === c.options.length
+        ? `All: ${on.map(([, l]) => l).join(" · ")}`
+        : on.length ? on.map(([, l]) => l).join(" · ")
+        : '<span class="status-fail">nothing selected</span>';
+    }
+    const eligible = this.eligibleModels();
+    const inPlay = eligible.filter(m => !this.arenaOff.models.has(m.id));
+    const mEl = box.querySelector('[data-card="models"] .ac-sel');
+    if (mEl) mEl.textContent = `${inPlay.length} of ${eligible.length} eligible`;
   },
 
   schedulePreview() {
@@ -842,10 +1029,20 @@ const Optimizer = {
       out.innerHTML = `<span class="status-fail">${e.message}</span>`;
       return;
     }
+    const nModels = p.models ?? 1;
+    const floor = nModels * 6;
+    const budgetHint = p.budget < floor
+      ? `<span class="status-marginal">With ${nModels} models in play,
+         ${p.budget} evaluations is thin (&lt;6 per model) — consider a
+         budget near ${floor}, or prune models.</span><br>`
+      : "";
     out.innerHTML = `<b>${p.launch_shapes}</b> feasible launch shapes ·
       <b>${p.total_combinations.toLocaleString()}</b> total combinations with
-      batch/KV knobs — the search evaluates <b>${p.budget}</b> of them
-      (coverage first, then refinement).<br>
+      batch/KV knobs. The search MEASURES <b>${p.budget}</b> of them — each
+      one is a real engine launch + ladder climb — covering the space first,
+      then refining around the leaders. Rough wall clock:
+      <b>~${p.estimated_hours} h</b>.<br>
+      ${budgetHint}
       <span class="msg">Scoring: each candidate climbs a concurrency ladder
       (${(p.ladder ?? []).join(" → ")}) at
       ${(p.measurement_tokens ?? []).join("in/")}out tokens, stopping when the
@@ -886,6 +1083,25 @@ const Optimizer = {
             ? "optimizer finished" : `optimizer exited (${status.active.exit_code})`,
           status.active.exit_code === 0 ? "ok" : "error");
       }
+    }
+    // Prior search on disk: restore its selection into the cards and
+    // say plainly that Start RESUMES it unless Fresh run is checked.
+    this.restoreFrom(status.arena_space);
+    const resume = $("#opt-resume");
+    const s = status.search_results?.summary;
+    if (s && !status.running) {
+      resume.hidden = false;
+      const done = s.done_reason
+        ? `finished (${s.done_reason})` : "interrupted mid-search";
+      resume.innerHTML = `A prior search is on record — <b>${s.evaluated}
+        evaluated</b>, ${done}${s.best
+          ? `, best so far <b>${s.best.score.toFixed(0)}</b>` : ""}.
+        The cards below show ITS selection. <b>Start resumes it</b>
+        (already-measured candidates are skipped); check
+        <i>Fresh run</i> to discard and start over — also required
+        after changing the selection.`;
+    } else {
+      resume.hidden = true;
     }
     this.renderResults(status.results);
     this.renderSearch(status.search_results);

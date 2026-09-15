@@ -108,6 +108,25 @@ def hardware() -> dict:
     }
 
 
+# Size grouping for the UI's size dropdown: 30B and 32B are the same
+# operator-level choice. (lo, hi, label) over total params in B.
+SIZE_CLASSES = [
+    (0, 15, "≤ 15B"),
+    (15, 45, "16–45B"),
+    (45, 90, "46–90B"),
+    (90, 10_000, "> 90B"),
+]
+
+
+def size_class(params_b) -> str:
+    if params_b is None:
+        return "unknown"
+    for lo, hi, label in SIZE_CLASSES:
+        if lo < float(params_b) <= hi:
+            return label
+    return "unknown"
+
+
 def _tp_values(max_group: int) -> list[int]:
     out, t = [], 1
     while t <= max_group:
@@ -142,6 +161,10 @@ def full_arena(catalog: Optional[list[dict]] = None) -> dict:
         tps = feasible_tps(e, tp_all, hw["vram_per_gpu_gb"])
         models.append({
             "id": e["id"], "family": e["family"], "quant": e["quant"],
+            "series": e.get("series", ""),
+            "params_b": e.get("params_b"),
+            "size_class": size_class(e.get("params_b")),
+            "specialty": e.get("specialty", "instruct"),
             "moe": e.get("moe", False), "gated": e.get("gated", False),
             "approx_size_gb": e.get("approx_size_gb"),
             "min_vram_gb": e.get("min_vram_gb"),
@@ -282,5 +305,12 @@ def summarize_space_doc(doc: dict) -> dict:
         "estimated_engine_restarts": min(budget, len(shapes) * batch_mult),
         "estimated_cold_weight_loads": min(
             budget, n_models * (space.search.max_iterations + 1)),
+        # Rough wall clock: ~9 min per evaluation (relaunch + ladder
+        # climb with early exit), plus ~4 min extra per cold model
+        # swap. An estimate for planning, not a promise.
+        "estimated_hours": round(
+            (min(budget, len(shapes) * batch_mult) * 9
+             + min(budget, n_models * (space.search.max_iterations + 1)) * 4)
+            / 60, 1),
         "space_hash": space.space_hash(),
     }

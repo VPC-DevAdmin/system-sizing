@@ -213,3 +213,26 @@ def test_arena_api(xe7740, tmp_path, monkeypatch) -> None:
                         json={"mode": "arena",
                               "arena": {"models": ["org/Huge-235B"]}})
         assert r.status_code == 422
+
+
+def test_size_class_grouping() -> None:
+    """30B and 32B land in the same operator-level size bucket."""
+    from simulator.arena import size_class
+    assert size_class(30.5) == size_class(32.8) == "16–45B"
+    assert size_class(14.7) == "≤ 15B"
+    assert size_class(70.6) == "46–90B"
+    assert size_class(235) == "> 90B"
+    assert size_class(None) == "unknown"
+
+
+def test_catalog_carries_series_params_specialty(tmp_path) -> None:
+    from simulator.model_catalog import load_model_catalog
+    by_id = {e["id"]: e for e in load_model_catalog(user_dir=tmp_path / "x")}
+    q = by_id["Qwen/Qwen3-30B-A3B-Instruct-2507"]
+    assert q["series"] == "Qwen3" and q["params_b"] == 30.5
+    assert q["specialty"] == "instruct"
+    assert by_id["Qwen/Qwen3-Coder-30B-A3B-Instruct"]["specialty"] == "coder"
+    # Same size bucket for 30B and 32B — the dropdown's grouping.
+    from simulator.arena import size_class
+    assert size_class(q["params_b"]) == \
+        size_class(by_id["Qwen/Qwen3-32B"]["params_b"])

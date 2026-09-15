@@ -1159,8 +1159,20 @@ const Optimizer = {
     } else {
       resume.hidden = true;
     }
-    this.renderResults(status.results);
-    this.renderSearch(status.search_results);
+    // Show the CURRENT work, not everything ever written: while an
+    // optimizer runs, only its own mode's panel; otherwise whichever
+    // result file is newer wins and the stale one hides.
+    const sr = status.search_results;
+    const rr = status.results;
+    const activeMode = status.running ? status.active?.mode : null;
+    const searchNewer = !!sr?.generated_at
+      && (!rr?.generated_at || sr.generated_at > rr.generated_at);
+    const showRegistry = activeMode
+      ? activeMode === "registry" : !searchNewer;
+    const showSearch = activeMode
+      ? activeMode !== "registry" : searchNewer;
+    this.renderResults(showRegistry ? rr : null);
+    this.renderSearch(showSearch ? sr : null);
   },
 
   renderSearch(doc) {

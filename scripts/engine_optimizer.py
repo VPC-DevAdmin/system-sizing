@@ -2359,6 +2359,10 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool) -> None:
             ) from e
     if sstate is None:
         sstate = search.SearchState(space_hash=space.space_hash())
+    # Persist immediately — a fresh run must REPLACE the previous
+    # run's file right away, or the UI keeps showing stale results
+    # for the ~10 minutes the first evaluation takes.
+    _save_search(out_path, sstate, space, search)
 
     rng = _random.Random(space.search.seed)
     # The measurement ladder: one workload shape, climbed over

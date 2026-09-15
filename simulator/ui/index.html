@@ -74,8 +74,16 @@
         <label style="flex:1;min-width:280px">Add a model (Hugging&nbsp;Face id)
           <input id="model-add-id" placeholder="org/Model-Name"></label>
         <button id="model-add-btn" class="small primary">Add to catalog</button>
+        <button id="model-discover-btn" class="small">Discover new models</button>
+        <label id="discover-sort-wrap" hidden>Sort
+          <select id="discover-sort">
+            <option value="age">Newest</option>
+            <option value="size">Size</option>
+            <option value="downloads">Downloads</option>
+          </select></label>
         <span id="model-add-msg" class="msg"></span>
       </div>
+      <div id="model-discover"></div>
       <div id="model-siblings"></div>
     </section>
 

@@ -130,3 +130,132 @@ models:
   notes: mid-size dense European reference
   series: Mistral Small
   params_b: 24.0
+- id: Qwen/Qwen3.6-35B-A3B
+  family: qwen3.6-35b-a3b
+  series: Qwen3.6
+  params_b: 36.0
+  moe: true
+  quant: bf16
+  approx_size_gb: 72
+  min_vram_gb: 82
+  notes: current Qwen MoE workhorse — 10.9M monthly downloads
+- id: Qwen/Qwen3.6-35B-A3B-FP8
+  family: qwen3.6-35b-a3b
+  series: Qwen3.6
+  params_b: 36.0
+  moe: true
+  quant: fp8
+  approx_size_gb: 37
+  min_vram_gb: 46
+- id: Qwen/Qwen3.6-27B
+  family: qwen3.6-27b
+  series: Qwen3.6
+  params_b: 27.8
+  quant: bf16
+  approx_size_gb: 56
+  min_vram_gb: 64
+  notes: dense counterpart in the 3.6 line
+- id: Qwen/Qwen3.6-27B-FP8
+  family: qwen3.6-27b
+  series: Qwen3.6
+  params_b: 27.8
+  quant: fp8
+  approx_size_gb: 29
+  min_vram_gb: 38
+- id: Qwen/Qwen3-Next-80B-A3B-Instruct
+  family: qwen3-next-80b-a3b
+  series: Qwen3 Next
+  params_b: 81.3
+  moe: true
+  quant: bf16
+  approx_size_gb: 163
+  min_vram_gb: 185
+  notes: hybrid linear-attention MoE — long-context efficiency
+- id: Qwen/Qwen3-Next-80B-A3B-Instruct-FP8
+  family: qwen3-next-80b-a3b
+  series: Qwen3 Next
+  params_b: 81.3
+  moe: true
+  quant: fp8
+  approx_size_gb: 84
+  min_vram_gb: 100
+- id: Qwen/Qwen3-Coder-Next-FP8
+  family: qwen3-coder-next
+  series: Qwen3 Next
+  params_b: 79.7
+  moe: true
+  quant: fp8
+  specialty: coder
+  approx_size_gb: 82
+  min_vram_gb: 100
+- id: Qwen/Qwen3.8-Flash-Next-FP8
+  family: qwen3.8-flash-next
+  series: Qwen3.8
+  params_b: 180.0
+  moe: true
+  quant: fp8
+  approx_size_gb: 181
+  min_vram_gb: 205
+  notes: newest Qwen flash flagship — native FP8, tp4 on 96GB cards
+- id: zai-org/GLM-5.3-Flash
+  family: glm-5.3-flash
+  series: GLM-5
+  params_b: 321.3
+  moe: true
+  quant: fp8
+  approx_size_gb: 322
+  min_vram_gb: 350
+  notes: GLM flagship-flash — native FP8, fits tp4
+- id: zai-org/GLM-5.3
+  family: glm-5.3
+  series: GLM-5
+  params_b: 753.3
+  moe: true
+  quant: fp8
+  approx_size_gb: 755
+  min_vram_gb: 800
+  notes: full GLM flagship — needs a bigger box than 4x96GB per domain
+- id: zai-org/GLM-4.7-Flash
+  family: glm-4.7-flash
+  series: GLM-4.7
+  params_b: 31.2
+  moe: true
+  quant: bf16
+  approx_size_gb: 63
+  min_vram_gb: 72
+  notes: 64-expert MoE-lite — single-card class
+- id: zai-org/GLM-4.5-Air-FP8
+  family: glm-4.5-air
+  series: GLM-4.5
+  params_b: 110.5
+  moe: true
+  quant: fp8
+  approx_size_gb: 112
+  min_vram_gb: 128
+- id: moonshotai/Kimi-Linear-48B-A3B-Instruct
+  family: kimi-linear-48b-a3b
+  series: Kimi Linear
+  params_b: 49.1
+  moe: true
+  quant: bf16
+  approx_size_gb: 99
+  min_vram_gb: 112
+  notes: linear-attention MoE — KV-cache economics outlier worth measuring
+- id: MiniMaxAI/MiniMax-M2.7
+  family: minimax-m2.7
+  series: MiniMax M2
+  params_b: 228.7
+  moe: true
+  quant: fp8
+  approx_size_gb: 230
+  min_vram_gb: 255
+  notes: native FP8 — fits tp4
+- id: deepseek-ai/DeepSeek-V3.2
+  family: deepseek-v3.2
+  series: DeepSeek V3.2
+  params_b: 685.4
+  moe: true
+  quant: fp8
+  approx_size_gb: 687
+  min_vram_gb: 730
+  notes: frontier reference — needs a bigger box than 4x96GB per domain

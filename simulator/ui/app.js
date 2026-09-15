@@ -1618,7 +1618,86 @@ const Models = {
     $("#model-add-id").addEventListener("keydown", e => {
       if (e.key === "Enter") this.add();
     });
+    $("#model-discover-btn").addEventListener("click", () => this.discover());
+    $("#discover-sort").addEventListener("change", () => this.renderDiscovered());
     this.refresh();
+  },
+
+  discovered: null,
+
+  /* Live Hub discovery: recent models from the leading orgs, sized
+   * from their own safetensors metadata and validated against this
+   * box's GPUs. */
+  async discover() {
+    const box = $("#model-discover");
+    this.addMsg("querying the Hub — one call per candidate, ~20s…");
+    $("#model-discover-btn").disabled = true;
+    try {
+      const doc = await api("/api/models/discover");
+      this.discovered = doc.models;
+      $("#discover-sort-wrap").hidden = false;
+      this.addMsg(`${doc.models.length} candidates from the Hub`, "ok");
+      this.renderDiscovered();
+    } catch (e) {
+      this.addMsg(e.message, "error");
+      box.innerHTML = "";
+    } finally {
+      $("#model-discover-btn").disabled = false;
+    }
+  },
+
+  renderDiscovered() {
+    const box = $("#model-discover");
+    if (!this.discovered) return;
+    const sort = $("#discover-sort").value;
+    const rows = [...this.discovered].sort((a, b) =>
+      sort === "size" ? (b.params_b ?? 0) - (a.params_b ?? 0)
+      : sort === "downloads" ? (b.downloads ?? 0) - (a.downloads ?? 0)
+      : (b.last_modified ?? "").localeCompare(a.last_modified ?? ""));
+    const age = iso => {
+      if (!iso) return "—";
+      const d = Math.round((Date.now() - Date.parse(iso)) / 86400000);
+      return d < 1 ? "today" : d < 30 ? `${d}d` : `${Math.round(d / 30)}mo`;
+    };
+    box.innerHTML = `<div class="callout" style="margin-top:12px">
+      <table><thead><tr><th>Model</th><th>Age</th><th>Params</th>
+        <th>Capabilities</th><th>Fits here</th><th>Downloads</th><th></th>
+      </tr></thead><tbody>${rows.map(m => `<tr>
+        <td>${m.id}${m.gated
+          ? ' <span class="status-marginal">gated</span>' : ""}</td>
+        <td>${age(m.last_modified)}</td>
+        <td>${m.params_b}B <span class="msg">~${m.approx_size_gb}GB
+          ${m.quant}</span></td>
+        <td class="msg">${(m.capabilities ?? []).join(" · ") || "dense"}</td>
+        <td>${m.feasible === false
+          ? '<span class="status-fail">won’t fit</span>'
+          : m.feasible_tps ? `tp ${m.feasible_tps.join("/")}` : "?"}</td>
+        <td class="msg">${m.downloads?.toLocaleString?.() ?? "—"}</td>
+        <td>${m.in_catalog ? '<span class="msg">in catalog</span>'
+          : `<button class="small primary" data-disc="${m.id}">+ Add</button>`}
+        </td></tr>`).join("")}</tbody></table></div>`;
+    box.querySelectorAll("button[data-disc]").forEach(btn =>
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        const m = this.discovered.find(x => x.id === btn.dataset.disc);
+        try {
+          await api("/api/models/add", {
+            method: "POST",
+            body: JSON.stringify({
+              model: m.id, check_hub: false, quant: m.quant, moe: m.moe,
+              params_b: m.params_b, approx_size_gb: m.approx_size_gb,
+              min_vram_gb: m.min_vram_gb,
+            }),
+          });
+          m.in_catalog = true;
+          this.addMsg(`added ${m.id}`, "ok");
+          this.renderDiscovered();
+          this.refresh();
+        } catch (e) {
+          this.addMsg(e.message, "error");
+          btn.disabled = false;
+        }
+      }));
   },
 
   addMsg(text, cls = "") {

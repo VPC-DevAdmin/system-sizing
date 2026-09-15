@@ -148,13 +148,27 @@ def add_catalog_model(
     quant: Optional[str] = None,
     notes: str = "",
     user_dir: Path | str = USER_CATALOG_DIR,
+    # Rich metadata (the discovery flow supplies these; manual adds
+    # can omit them and edit the overlay file later).
+    series: Optional[str] = None,
+    params_b: Optional[float] = None,
+    moe: Optional[bool] = None,
+    approx_size_gb: Optional[float] = None,
+    min_vram_gb: Optional[float] = None,
+    specialty: Optional[str] = None,
 ) -> tuple[dict, bool]:
     """Add one model to the local overlay (``config/models/local.yaml``).
     Idempotent: an id already in the merged catalog returns
     ``(existing_entry, False)`` untouched. Returns ``(entry, True)``
     on a new addition. Raises CatalogError on a bad id/quant."""
+    rich = {k: v for k, v in {
+        "series": series, "params_b": params_b, "moe": moe,
+        "approx_size_gb": approx_size_gb, "min_vram_gb": min_vram_gb,
+        "specialty": specialty,
+    }.items() if v is not None}
     entry = _normalize_entry(
-        {"id": model_id, "family": family, "quant": quant, "notes": notes},
+        {"id": model_id, "family": family, "quant": quant,
+         "notes": notes, **rich},
         source="add",
     )
     existing = {e["id"]: e for e in load_model_catalog(user_dir)}
@@ -172,7 +186,7 @@ def add_catalog_model(
         if not isinstance(doc.get("models"), list):
             doc = {"models": []}
     record = {"id": entry["id"], "family": entry["family"],
-              "quant": entry["quant"]}
+              "quant": entry["quant"], **rich}
     if notes:
         record["notes"] = notes
     doc["models"].append(record)

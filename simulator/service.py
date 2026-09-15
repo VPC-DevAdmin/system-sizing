@@ -104,6 +104,14 @@ class ModelAddRequest(BaseModel):
     # Verify the repo exists on the Hub before adding (best-effort:
     # an offline box adds unverified rather than being blocked).
     check_hub: bool = True
+    # Rich metadata — the discovery flow fills these from the Hub's
+    # own safetensors metadata so an added model arrives fully sized.
+    series: Optional[str] = None
+    params_b: Optional[float] = None
+    moe: Optional[bool] = None
+    approx_size_gb: Optional[float] = None
+    min_vram_gb: Optional[float] = None
+    specialty: Optional[str] = None
 
 
 class StorageRequest(BaseModel):
@@ -611,7 +619,10 @@ def create_app(
             entry, created = await asyncio.to_thread(
                 lambda: add_catalog_model(
                     req.model, family=req.family, quant=req.quant,
-                    notes=req.notes,
+                    notes=req.notes, series=req.series,
+                    params_b=req.params_b, moe=req.moe,
+                    approx_size_gb=req.approx_size_gb,
+                    min_vram_gb=req.min_vram_gb, specialty=req.specialty,
                 ),
             )
         except CatalogError as e:
@@ -621,6 +632,31 @@ def create_app(
         )
         return {"entry": entry, "created": created,
                 "hub_verified": exists, "siblings": siblings}
+
+    @app.get("/api/models/discover")
+    async def models_discover(orgs: Optional[str] = None) -> dict:
+        """Live Hub discovery, validated against THIS box: recent
+        text-generation models from the leading orgs with real
+        parameter counts, native-FP8 detection, capability tags, and
+        the feasible TP set for the detected GPUs. Slow (one Hub call
+        per candidate) — the UI calls it on demand, not on load."""
+        from .arena import hardware
+        from .discovery import DEFAULT_ORGS, discover_models
+        from .model_catalog import load_model_catalog
+        hw = await asyncio.to_thread(hardware)
+        known = {e["id"] for e in await asyncio.to_thread(load_model_catalog)}
+        org_list = (tuple(o.strip() for o in orgs.split(",") if o.strip())
+                    if orgs else DEFAULT_ORGS)
+        max_tp = max((len(g) for g in hw["device_groups"]), default=1)
+        entries = await asyncio.to_thread(
+            discover_models, org_list, 6, hw["vram_per_gpu_gb"], max_tp, known,
+        )
+        if not entries:
+            raise HTTPException(
+                502, "the Hub returned nothing — is this box offline? "
+                     "Discovery needs huggingface.co reachable.",
+            )
+        return {"hardware": hw, "models": entries}
 
     @app.post("/api/models/download", status_code=202)
     async def models_download(req: ModelDownloadRequest) -> dict:

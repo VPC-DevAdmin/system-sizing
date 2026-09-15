@@ -139,15 +139,48 @@ def load_space(path: str | Path) -> SearchSpace:
             f"non-empty GPU-id lists (one list per PCIe/NUMA domain)"
         )
 
-    variants = raw.get("model_variants")
-    if not isinstance(variants, dict) or not variants:
-        raise SearchSpaceError(f"{path}: model_variants map required")
+    variants = dict(raw.get("model_variants") or {})
     for vname, v in variants.items():
         if not isinstance(v, dict) or "model" not in v:
             raise SearchSpaceError(
                 f"{path}: model_variant '{vname}' needs at least a "
                 f"'model' (HF id or /models path)"
             )
+    # Families pulled from the model catalog expand into variants named
+    # ``{family}-{quant}``. NOTE: the expansion is part of space_hash,
+    # so adding a model to a listed family deliberately invalidates a
+    # half-finished search state (done:space_changed) — the space is
+    # genuinely different.
+    families = raw.get("catalog_families")
+    if families:
+        if not (isinstance(families, list) and
+                all(isinstance(f, str) for f in families)):
+            raise SearchSpaceError(
+                f"{path}: catalog_families must be a list of family names"
+            )
+        from .model_catalog import CatalogError, catalog_families
+        try:
+            by_family = catalog_families()
+        except CatalogError as e:
+            raise SearchSpaceError(f"{path}: model catalog broken: {e}") from e
+        unknown_fams = [f for f in families if f not in by_family]
+        if unknown_fams:
+            raise SearchSpaceError(
+                f"{path}: catalog_families {unknown_fams} not in the model "
+                f"catalog — known: {sorted(by_family)}"
+            )
+        for fam in families:
+            for entry in by_family[fam]:
+                vname = f"{fam}-{entry['quant']}"
+                variants.setdefault(vname, {
+                    "model": entry["id"],
+                    "served_name": vname,
+                    "extra_args": list(entry.get("engine_args") or []),
+                })
+    if not variants:
+        raise SearchSpaceError(
+            f"{path}: model_variants map or catalog_families required"
+        )
 
     dims_raw = raw.get("dimensions")
     if not isinstance(dims_raw, dict) or not dims_raw:

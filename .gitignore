@@ -17,3 +17,6 @@ build/
 dist/
 .ruff_cache/
 .claude/
+
+# Per-host model additions (UI "Add model" writes here)
+config/models/local.yaml

@@ -125,10 +125,12 @@ def referenced_models(
     profiles_dirs: tuple[str, ...] = ("config/profiles", "config"),
     search_dir: str = "config/search",
 ) -> list[dict]:
-    """Every HF model id referenced by GPU profiles and search spaces,
-    with where it came from. Local ``/models/...`` paths (the CPU
-    pre-staged flow) are skipped — they aren't HF downloads."""
+    """Every HF model id the catalog carries or a GPU profile / search
+    space references, with where each came from. Local ``/models/...``
+    paths (the CPU pre-staged flow) are skipped — they aren't HF
+    downloads."""
     out: dict[str, set[str]] = {}
+    meta: dict[str, dict] = {}
 
     def _add(model, source):
         if not model or str(model).startswith("/"):
@@ -156,9 +158,22 @@ def referenced_models(
                 if isinstance(v, dict):
                     _add(v.get("model"), f"space:{p.stem}/{vname}")
 
+    from .model_catalog import CatalogError, load_model_catalog
+    try:
+        for entry in load_model_catalog():
+            _add(entry["id"], f"catalog:{entry['family']}")
+            meta[entry["id"]] = {
+                k: entry[k]
+                for k in ("family", "quant", "approx_size_gb",
+                          "min_vram_gb", "gated", "notes")
+            }
+    except CatalogError:
+        pass          # a broken local overlay must not hide the rest
+
     cache = hf_cache_dir()
     return [
-        {**model_status(m, cache), "referenced_by": sorted(srcs)}
+        {**model_status(m, cache), "referenced_by": sorted(srcs),
+         **meta.get(m, {})}
         for m, srcs in sorted(out.items())
     ]
 

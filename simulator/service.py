@@ -96,6 +96,16 @@ class ModelDownloadRequest(BaseModel):
     model: str
 
 
+class ModelAddRequest(BaseModel):
+    model: str                          # HF repo id, org/name
+    family: Optional[str] = None        # default: inferred from the id
+    quant: Optional[str] = None         # default: inferred from the id
+    notes: str = ""
+    # Verify the repo exists on the Hub before adding (best-effort:
+    # an offline box adds unverified rather than being blocked).
+    check_hub: bool = True
+
+
 class StorageRequest(BaseModel):
     hf_cache: str      # absolute directory for model weights
 
@@ -559,6 +569,42 @@ def create_app(
             "models": entries,
             "downloads": downloads,
         }
+
+    @app.post("/api/models/add")
+    async def models_add(req: ModelAddRequest) -> dict:
+        """Add a model to the local catalog (config/models/local.yaml)
+        and suggest its quantized siblings. Adding is what makes a
+        model downloadable and searchable — the catalog is the explicit
+        operator-curated list, so the download gate stays meaningful."""
+        from .model_catalog import (
+            CatalogError,
+            add_catalog_model,
+            hub_model_exists,
+            suggest_quant_siblings,
+        )
+        if req.check_hub:
+            exists = await asyncio.to_thread(hub_model_exists, req.model)
+            if exists is False:
+                raise HTTPException(
+                    404, f"'{req.model}' does not exist on the Hugging "
+                         f"Face Hub — check the org/name spelling",
+                )
+        else:
+            exists = None
+        try:
+            entry, created = await asyncio.to_thread(
+                lambda: add_catalog_model(
+                    req.model, family=req.family, quant=req.quant,
+                    notes=req.notes,
+                ),
+            )
+        except CatalogError as e:
+            raise HTTPException(422, str(e)) from e
+        siblings = await asyncio.to_thread(
+            lambda: suggest_quant_siblings(req.model, verify=req.check_hub),
+        )
+        return {"entry": entry, "created": created,
+                "hub_verified": exists, "siblings": siblings}
 
     @app.post("/api/models/download", status_code=202)
     async def models_download(req: ModelDownloadRequest) -> dict:

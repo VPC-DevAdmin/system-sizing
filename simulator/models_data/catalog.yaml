@@ -1,0 +1,107 @@
+# Packaged model catalog — the starter set of models capsim knows how
+# to stage, sweep, and search over. Local additions go in
+# config/models/*.yaml (same schema; the UI's "Add model" writes
+# config/models/local.yaml) and win over this file by id.
+#
+# Entry fields:
+#   id             HF repo id (required)
+#   family         groups precision variants of the same weights —
+#                  search spaces can pull a whole family via
+#                  ``catalog_families``
+#   quant          bf16 | fp8 | awq | gptq-int4 | gptq-int8 | mxfp4 | nvfp4
+#   approx_size_gb rough weight footprint (planning aid, not enforced)
+#   min_vram_gb    smallest single-replica VRAM that loads it (hint)
+#   gated          true when the repo needs an accepted license + HF_TOKEN
+#   engine_args    extra vLLM flags this artifact needs, if any
+#   notes          one-liner for the UI
+
+models:
+  # ── Qwen3 30B MoE (3B active) — the validated XE7740 baseline ────
+  - id: Qwen/Qwen3-30B-A3B-Instruct-2507
+    family: qwen3-30b-a3b
+    quant: bf16
+    approx_size_gb: 61
+    min_vram_gb: 70
+    notes: "MoE, 3B active — validated baseline on RTX PRO 6000"
+  - id: Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+    family: qwen3-30b-a3b
+    quant: fp8
+    approx_size_gb: 31
+    min_vram_gb: 40
+
+  # ── Qwen3 Coder 30B MoE — same shape, code-tuned ─────────────────
+  - id: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    family: qwen3-coder-30b-a3b
+    quant: bf16
+    approx_size_gb: 61
+    min_vram_gb: 70
+    notes: "code-workload counterpart to the 30B-A3B baseline"
+  - id: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8
+    family: qwen3-coder-30b-a3b
+    quant: fp8
+    approx_size_gb: 31
+    min_vram_gb: 40
+
+  # ── Qwen3 32B dense — MoE-vs-dense comparison point ──────────────
+  - id: Qwen/Qwen3-32B
+    family: qwen3-32b
+    quant: bf16
+    approx_size_gb: 66
+    min_vram_gb: 75
+    notes: "dense 32B — how does dense compare to the 30B MoE?"
+  - id: Qwen/Qwen3-32B-FP8
+    family: qwen3-32b
+    quant: fp8
+    approx_size_gb: 34
+    min_vram_gb: 42
+
+  # ── Qwen3 235B MoE (22B active) — the whole-box model ────────────
+  - id: Qwen/Qwen3-235B-A22B-Instruct-2507
+    family: qwen3-235b-a22b
+    quant: bf16
+    approx_size_gb: 470
+    min_vram_gb: 560
+    notes: "needs TP8 on 96GB cards in bf16 — a true whole-box test"
+  - id: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+    family: qwen3-235b-a22b
+    quant: fp8
+    approx_size_gb: 235
+    min_vram_gb: 300
+    notes: "fits TP4 on 96GB cards — enables dp2 on an 8-GPU box"
+
+  # ── gpt-oss — natively MXFP4, no separate quant artifact ─────────
+  - id: openai/gpt-oss-20b
+    family: gpt-oss-20b
+    quant: mxfp4
+    approx_size_gb: 14
+    min_vram_gb: 20
+    notes: "small + fast — good high-DP many-replica probe"
+  - id: openai/gpt-oss-120b
+    family: gpt-oss-120b
+    quant: mxfp4
+    approx_size_gb: 65
+    min_vram_gb: 80
+    notes: "fits one 96GB card — 8 independent replicas per box"
+
+  # ── Llama 3.3 70B dense — the industry reference point ───────────
+  - id: meta-llama/Llama-3.3-70B-Instruct
+    family: llama-3.3-70b
+    quant: bf16
+    approx_size_gb: 140
+    min_vram_gb: 160
+    gated: true
+    notes: "gated — accept the license on the Hub and set HF_TOKEN"
+  - id: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
+    family: llama-3.3-70b
+    quant: fp8
+    approx_size_gb: 70
+    min_vram_gb: 85
+    notes: "ungated FP8 quant of Llama 3.3 70B (RedHatAI/Neural Magic)"
+
+  # ── Mistral Small 24B dense ──────────────────────────────────────
+  - id: mistralai/Mistral-Small-3.2-24B-Instruct-2506
+    family: mistral-small-24b
+    quant: bf16
+    approx_size_gb: 48
+    min_vram_gb: 55
+    notes: "mid-size dense European reference"

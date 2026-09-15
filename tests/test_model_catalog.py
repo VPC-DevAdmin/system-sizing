@@ -1,0 +1,209 @@
+"""Model catalog: packaged starter set + local overlays, one-line
+additions, quant-sibling suggestion, and catalog-driven search spaces."""
+
+from __future__ import annotations
+
+import textwrap
+
+import pytest
+
+from simulator import model_catalog as mc
+from simulator.model_catalog import (
+    CatalogError,
+    add_catalog_model,
+    catalog_families,
+    infer_family,
+    infer_quant,
+    load_model_catalog,
+    sibling_candidates,
+    suggest_quant_siblings,
+)
+
+
+def test_packaged_catalog_loads_and_is_sane(tmp_path) -> None:
+    entries = load_model_catalog(user_dir=tmp_path / "none")
+    assert entries, "packaged catalog must ship a starter set"
+    ids = [e["id"] for e in entries]
+    assert len(ids) == len(set(ids))
+    for e in entries:
+        assert "/" in e["id"]
+        assert e["family"] and e["quant"] in mc.KNOWN_QUANTS
+    # The validated baseline family carries both precisions.
+    fams = catalog_families(user_dir=tmp_path / "none")
+    quants = {e["quant"] for e in fams["qwen3-30b-a3b"]}
+    assert quants == {"bf16", "fp8"}
+
+
+def test_infer_quant_and_family() -> None:
+    assert infer_quant("Qwen/Qwen3-32B-FP8") == "fp8"
+    assert infer_quant("org/Model-AWQ") == "awq"
+    assert infer_quant("org/Model-GPTQ-Int4") == "gptq-int4"
+    assert infer_quant("RedHatAI/Llama-3.3-70B-Instruct-quantized.w4a16") == "gptq-int4"
+    assert infer_quant("meta-llama/Llama-3.3-70B-Instruct") == "bf16"
+    assert infer_family("Qwen/Qwen3-32B-FP8") == "qwen3-32b"
+    assert infer_family("meta-llama/Llama-3.3-70B-Instruct") == "llama-3.3-70b-instruct"
+
+
+def test_add_model_writes_local_overlay(tmp_path) -> None:
+    user = tmp_path / "models"
+    entry, created = add_catalog_model("org/New-Model-7B", user_dir=user)
+    assert created is True
+    assert entry["quant"] == "bf16" and entry["family"] == "new-model-7b"
+    assert (user / "local.yaml").exists()
+
+    # Idempotent: same id returns the existing entry untouched.
+    entry2, created2 = add_catalog_model("org/New-Model-7B", user_dir=user)
+    assert created2 is False and entry2["id"] == entry["id"]
+
+    # Merged view carries packaged + local.
+    ids = {e["id"] for e in load_model_catalog(user_dir=user)}
+    assert "org/New-Model-7B" in ids
+    assert "Qwen/Qwen3-30B-A3B-Instruct-2507" in ids
+
+
+def test_add_model_rejects_bad_ids(tmp_path) -> None:
+    for bad in ("no-slash", "a/b/c", "org/mo del", ""):
+        with pytest.raises(CatalogError):
+            add_catalog_model(bad, user_dir=tmp_path / "m")
+    with pytest.raises(CatalogError):
+        add_catalog_model("org/ok", quant="float42", user_dir=tmp_path / "m")
+
+
+def test_local_overlay_wins_by_id(tmp_path) -> None:
+    user = tmp_path / "models"
+    user.mkdir()
+    (user / "override.yaml").write_text(textwrap.dedent("""\
+        models:
+          - id: Qwen/Qwen3-30B-A3B-Instruct-2507
+            family: qwen3-30b-a3b
+            quant: bf16
+            engine_args: ["--enable-prefix-caching"]
+    """))
+    by_id = {e["id"]: e for e in load_model_catalog(user_dir=user)}
+    assert by_id["Qwen/Qwen3-30B-A3B-Instruct-2507"]["engine_args"] == \
+        ["--enable-prefix-caching"]
+
+
+def test_sibling_candidates_only_for_base_models() -> None:
+    sibs = sibling_candidates("meta-llama/Llama-3.3-70B-Instruct")
+    ids = {s["id"] for s in sibs}
+    assert "meta-llama/Llama-3.3-70B-Instruct-FP8" in ids
+    assert "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic" in ids
+    # A quant artifact has no siblings to suggest.
+    assert sibling_candidates("Qwen/Qwen3-32B-FP8") == []
+
+
+def test_suggest_siblings_offline_and_filtering(tmp_path, monkeypatch) -> None:
+    """Verified-absent candidates drop; unverified (offline) survive
+    as exists=None; already-cataloged ones are flagged."""
+    calls = {}
+
+    def fake_exists(model_id, timeout=5.0):
+        calls[model_id] = True
+        if model_id.endswith("-AWQ"):
+            return False
+        if model_id.endswith("-FP8"):
+            return True
+        return None
+    monkeypatch.setattr(mc, "hub_model_exists", fake_exists)
+
+    out = suggest_quant_siblings(
+        "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        user_dir=tmp_path / "none",
+    )
+    by_id = {s["id"]: s for s in out}
+    fp8 = by_id["Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"]
+    assert fp8["exists"] is True
+    assert fp8["in_catalog"] is True       # packaged catalog has it
+    assert not any(s["id"].endswith("-AWQ") for s in out)
+    assert any(s["exists"] is None for s in out)
+
+    # verify=False never touches the network.
+    calls.clear()
+    out = suggest_quant_siblings(
+        "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        verify=False, user_dir=tmp_path / "none",
+    )
+    assert not calls and all(s["exists"] is None for s in out)
+
+
+def test_referenced_models_includes_catalog(tmp_path, monkeypatch) -> None:
+    """A model that no profile or space mentions is still stageable
+    once it's in the catalog — that's the whole point."""
+    from simulator.models import referenced_models
+    monkeypatch.chdir(tmp_path)          # no config/ at all
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path / "hf"))
+    entries = referenced_models()
+    by_id = {e["model"]: e for e in entries}
+    gpt = by_id["openai/gpt-oss-120b"]
+    assert gpt["referenced_by"] == ["catalog:gpt-oss-120b"]
+    assert gpt["quant"] == "mxfp4" and gpt["approx_size_gb"]
+    assert by_id["meta-llama/Llama-3.3-70B-Instruct"]["gated"] is True
+
+
+def test_search_space_catalog_families(tmp_path, monkeypatch) -> None:
+    from simulator.search import SearchSpaceError, load_space
+    monkeypatch.chdir(tmp_path)          # packaged catalog only
+    space_file = tmp_path / "space.yaml"
+    space_file.write_text(textwrap.dedent("""\
+        name: fam-test
+        engine: vllm_cuda
+        device_groups: [[0, 1]]
+        catalog_families: [qwen3-30b-a3b]
+        dimensions:
+          tp: [1, 2]
+    """))
+    space = load_space(space_file)
+    assert set(space.model_variants) == {
+        "qwen3-30b-a3b-bf16", "qwen3-30b-a3b-fp8",
+    }
+    assert space.model_variants["qwen3-30b-a3b-fp8"]["model"] == \
+        "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
+    # The implicit model_variant dimension covers every family member.
+    assert set(space.dimensions["model_variant"]) == set(space.model_variants)
+
+    # Growing the family changes the fingerprint → resume refuses.
+    h1 = space.space_hash()
+    add_catalog_model("Qwen/Fake-30B-A3B-NVFP4", family="qwen3-30b-a3b",
+                      user_dir=tmp_path / "config" / "models")
+    h2 = load_space(space_file).space_hash()
+    assert h1 != h2
+
+    # Unknown family: named error listing what exists.
+    space_file.write_text(textwrap.dedent("""\
+        name: bad
+        engine: vllm_cuda
+        device_groups: [[0]]
+        catalog_families: [no-such-family]
+        dimensions:
+          tp: [1]
+    """))
+    with pytest.raises(SearchSpaceError, match="no-such-family"):
+        load_space(space_file)
+
+
+def test_models_add_api(tmp_path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from simulator.service import create_app
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path / "hf"))
+    monkeypatch.setattr(mc, "hub_model_exists", lambda m, timeout=5.0: None)
+
+    with TestClient(create_app(tmp_path / "runs")) as client:
+        r = client.post("/api/models/add",
+                        json={"model": "org/Fresh-9B", "check_hub": False})
+        assert r.status_code == 200, r.text
+        doc = r.json()
+        assert doc["created"] is True
+        assert doc["entry"]["family"] == "fresh-9b"
+        assert (tmp_path / "config" / "models" / "local.yaml").exists()
+
+        # Now listed — and therefore downloadable per the gate.
+        models = client.get("/api/models").json()["models"]
+        assert any(m["model"] == "org/Fresh-9B" for m in models)
+
+        # Bad id → 422 with the reason.
+        r = client.post("/api/models/add",
+                        json={"model": "not-an-id", "check_hub": False})
+        assert r.status_code == 422

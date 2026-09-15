@@ -1,0 +1,49 @@
+# Search space: XE7740 (8× RTX PRO 6000 Blackwell 96 GB), model
+# families drawn FROM THE CATALOG.
+#
+# Where xe7740-qwen3.yaml pins two hand-written variants, this space
+# pulls whole precision families from the model catalog
+# (simulator/models_data/catalog.yaml + config/models/*.yaml): every
+# entry in a listed family becomes a variant named {family}-{quant}.
+# Add a model to a family — via the UI's "Add model" or a line in
+# config/models/local.yaml — and the next search covers it, no space
+# edit needed.
+#
+# NOTE: the expansion is part of the space fingerprint, so adding a
+# model to a listed family invalidates a half-finished search state
+# (done:space_changed) — start a new run after growing the catalog.
+# Stage weights first (Prepare → step 3) so launch timeouts measure
+# engines, not the network.
+
+name: xe7740-multimodel
+engine: vllm_cuda
+
+device_groups: [[0, 1, 2, 3], [4, 5, 6, 7]]
+
+catalog_families:
+  - qwen3-30b-a3b        # MoE baseline, bf16 + fp8
+  - qwen3-32b            # dense comparison point, bf16 + fp8
+  - gpt-oss-120b         # one-card native-MXFP4 — high-DP probe
+
+dimensions:
+  tp: [1, 2, 4]
+  dp: [1, 2, 4, 8]
+  gpu_memory_utilization: [0.85, 0.90, 0.95]
+  max_num_seqs: [64, 128, 256, 512]
+  max_num_batched_tokens: [default, 2048, 8192]
+  placement: [pack, spread]
+
+objective:
+  kind: sla_throughput
+  ttft_p95_cap_ms: 10000
+  tpot_p95_cap_ms: 100
+  penalty: 0.25
+
+search:
+  seed: 42
+  initial_samples: 18                 # more variants → wider coverage stage
+  top_k: 3
+  neighbors_per_iteration: 8
+  max_iterations: 4
+  min_improvement: 0.03
+  budget: 48

@@ -60,16 +60,23 @@
     <section class="panel">
       <div class="step-head"><span class="step-num">3</span>
         <div><div class="t">Stage model weights</div>
-          <div class="d">Every model the profiles and search spaces reference, and whether
-            its weights are already in the cache the engines mount
+          <div class="d">Every model in the catalog or referenced by a profile / search
+            space, and whether its weights are already in the cache the engines mount
             (<span id="models-cache-dir"></span>). Download before optimizing, so launch
             timeouts measure engines — not your network.</div></div>
         <button id="models-refresh" class="small" style="margin-left:auto">Refresh</button>
       </div>
       <table id="models-table">
-        <thead><tr><th>Model</th><th>Referenced by</th><th>Status</th><th>Size</th><th></th></tr></thead>
+        <thead><tr><th>Model</th><th>Quant</th><th>Referenced by</th><th>Status</th><th>Size</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
+      <div class="row wrap" style="margin-top:12px">
+        <label style="flex:1;min-width:280px">Add a model (Hugging&nbsp;Face id)
+          <input id="model-add-id" placeholder="org/Model-Name"></label>
+        <button id="model-add-btn" class="small primary">Add to catalog</button>
+        <span id="model-add-msg" class="msg"></span>
+      </div>
+      <div id="model-siblings"></div>
     </section>
 
     <section class="panel">

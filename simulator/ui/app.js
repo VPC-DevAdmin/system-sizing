@@ -1062,7 +1062,60 @@ const Models = {
       .addEventListener("click", () => this.refresh());
     $("#goto-optimize").addEventListener("click", () =>
       document.querySelector('#tabs button[data-view="optimizer"]').click());
+    $("#model-add-btn").addEventListener("click", () => this.add());
+    $("#model-add-id").addEventListener("keydown", e => {
+      if (e.key === "Enter") this.add();
+    });
     this.refresh();
+  },
+
+  addMsg(text, cls = "") {
+    const el = $("#model-add-msg");
+    el.textContent = text;
+    el.className = `msg ${cls}`;
+  },
+
+  async add(id, checkHub = true) {
+    const model = (id ?? $("#model-add-id").value).trim();
+    if (!model) { this.addMsg("paste an org/name Hub id", "error"); return; }
+    this.addMsg("checking the Hub…");
+    let r;
+    try {
+      r = await api("/api/models/add", {
+        method: "POST",
+        body: JSON.stringify({ model, check_hub: checkHub }),
+      });
+    } catch (e) {
+      this.addMsg(e.message, "error");
+      return;
+    }
+    if (!id) $("#model-add-id").value = "";
+    this.addMsg(r.created
+      ? `added ${model} (family ${r.entry.family}, ${r.entry.quant})`
+      : `${model} is already in the catalog`, "ok");
+    // A sibling click passes an id — keep the base model's chip box
+    // (minus the consumed chip) instead of replacing it.
+    if (!id) this.renderSiblings(model, r.siblings);
+    this.refresh();
+  },
+
+  renderSiblings(base, siblings) {
+    const box = $("#model-siblings");
+    const open = (siblings || []).filter(s => !s.in_catalog);
+    if (!open.length) { box.innerHTML = ""; return; }
+    box.innerHTML = `<div class="callout" style="margin-top:12px">
+      Quantized variants of <b>${base}</b> worth testing too — smaller
+      weights, more replicas per box:<br>` +
+      open.map(s => `<button class="small" data-sib="${s.id}"
+        style="margin:6px 6px 0 0">+ ${s.id}
+        <span class="msg">(${s.quant}${s.exists === true ? ", verified on Hub"
+          : s.exists === null ? ", unverified" : ""})</span></button>`).join("") +
+      `</div>`;
+    box.querySelectorAll("button[data-sib]").forEach(btn =>
+      btn.addEventListener("click", () => {
+        btn.disabled = true;
+        this.add(btn.dataset.sib, false);
+      }));
   },
 
   async refresh() {
@@ -1093,11 +1146,16 @@ const Models = {
         status = `<span class="msg">not downloaded</span>`;
         action = `<button class="small primary" data-model="${m.model}">Download</button>`;
       }
+      const size = m.size_gb ? m.size_gb.toFixed(1) + " GB"
+        : m.approx_size_gb ? `~${m.approx_size_gb} GB` : "—";
       tbody.insertAdjacentHTML("beforeend", `<tr>
-        <td>${m.model}</td>
+        <td>${m.model}${m.gated
+          ? ' <span class="status-marginal" title="accept the license on the Hub and set HF_TOKEN">gated</span>' : ""}
+          ${m.notes ? `<div class="msg">${m.notes}</div>` : ""}</td>
+        <td class="msg">${m.quant || "—"}</td>
         <td class="msg">${m.referenced_by.join(", ")}</td>
         <td>${status}</td>
-        <td>${m.size_gb ? m.size_gb.toFixed(1) + " GB" : "—"}</td>
+        <td>${size}</td>
         <td>${action}</td></tr>`);
     }
     tbody.querySelectorAll("button[data-model]").forEach(btn =>

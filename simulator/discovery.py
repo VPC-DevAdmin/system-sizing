@@ -65,6 +65,7 @@ def _candidate(model_id: str) -> bool:
     return any(x in n for x in (
         "instruct", "chat", "-it", "a3b", "a22b", "next", "flash",
         "glm-", "v3.", "-m2", "k2", "kimi", "oss", "thinking",
+        "nvfp4", "mxfp4",
     )) or bool(_MOE_RE.search(n))
 
 
@@ -99,17 +100,34 @@ def discover_models(
             if not total or total < 6e9:
                 continue    # no weights metadata, or below serving size
             kept += 1
-            dtypes = set((st.get("parameters") or {}).keys())
-            native_fp8 = any("F8" in d for d in dtypes)
-            params_b = round(total / 1e9, 1)
-            bytes_per = 1.0 if native_fp8 else 2.0
-            weights_gb = round(params_b * bytes_per * 1.04, 0)
-            min_vram = round(weights_gb * 1.15, 0)
+            params = st.get("parameters") or {}
+            dtypes = set(params.keys())
             name = mid.split("/")[-1].lower()
+            # Weights bytes from the dtype table itself — 4-bit
+            # checkpoints pack two weights per U8, so bytes/param
+            # heuristics undercount or double-count them.
+            _BYTES = {"F32": 4, "I32": 4, "I64": 8, "BF16": 2, "F16": 2,
+                      "F8_E4M3": 1, "F8_E8M0": 1, "U8": 1, "I8": 1,
+                      "F4": 0.5, "U4": 0.5}
+            weights_gb = round(
+                sum(_BYTES.get(k, 1) * v for k, v in params.items()) / 1e9, 0)
+            native_fp8 = any("F8" in d for d in dtypes)
+            packed_4bit = params.get("U8", 0) > total * 0.3
+            quant = ("nvfp4" if "nvfp4" in name
+                     else "mxfp4" if "mxfp4" in name or "fp4" in name
+                     else "mxfp4" if packed_4bit and not native_fp8
+                     else "fp8" if native_fp8 else "bf16")
+            # safetensors "total" counts packed elements; recover the
+            # true parameter count for 4-bit checkpoints (~2 weights
+            # per stored byte in the packed tensors).
+            params_b = round(total / 1e9, 1)
+            if quant in ("nvfp4", "mxfp4"):
+                params_b = round((total + params.get("U8", 0)) / 1e9, 1)
+            min_vram = round(weights_gb * 1.15, 0)
             entry = {
                 "id": mid,
                 "params_b": params_b,
-                "quant": "fp8" if native_fp8 else "bf16",
+                "quant": quant,
                 "moe": bool(_MOE_RE.search(name)
                             or any(x in name for x in ("a22b", "-m2", "glm-5",
                                                        "v3.", "k2"))),
@@ -121,7 +139,8 @@ def discover_models(
                 "created_at": detail.get("createdAt"),
                 "capabilities": [c for c, on in (
                     ("MoE", _MOE_RE.search(name) is not None),
-                    ("native-FP8", native_fp8),
+                    ("4-bit " + quant.upper(), quant in ("nvfp4", "mxfp4")),
+                    ("native-FP8", native_fp8 and quant == "fp8"),
                     ("coder", "coder" in name or "code" in name),
                     ("thinking", "thinking" in name or "reasoner" in name),
                     ("linear/hybrid-attn",

@@ -96,3 +96,31 @@ def test_discover_api(monkeypatch, tmp_path) -> None:
         assert r.status_code == 200, r.text
         entry = r.json()["entry"]
         assert entry["moe"] is True and entry["min_vram_gb"] == m["min_vram_gb"]
+
+
+def test_discover_sizes_4bit_checkpoints(monkeypatch) -> None:
+    """NVFP4/MXFP4 checkpoints pack two weights per stored byte —
+    sizing must come from the dtype table, not bytes-per-param
+    heuristics, or a 122B model reads as 244GB instead of 83."""
+    listing = [{"modelId": "nvidia/Foo-122B-A10B-NVFP4"}]
+    details = {"nvidia/Foo-122B-A10B-NVFP4": {
+        "id": "nvidia/Foo-122B-A10B-NVFP4", "gated": False,
+        "downloads": 5, "lastModified": "2026-09-01T00:00:00.000Z",
+        "safetensors": {"total": 64_600_000_000, "parameters": {
+            "U8": 57_400_000_000,          # packed 4-bit pairs
+            "BF16": 6_000_000_000,
+            "F8_E4M3": 1_200_000_000,      # block scales
+        }},
+    }}
+
+    def fake(url, timeout=15.0):
+        return listing if "?author=" in url \
+            else details.get(url.rsplit("/api/models/", 1)[-1])
+    monkeypatch.setattr(disc, "_hub_get", fake)
+    out = discover_models(orgs=("nvidia",), vram_per_gpu_gb=96.0, max_tp=4)
+    (e,) = out
+    assert e["quant"] == "nvfp4"
+    assert e["approx_size_gb"] == 71.0          # bytes, not 2x params
+    assert e["params_b"] == 122.0               # unpacked param count
+    assert e["feasible"] is True and 1 in e["feasible_tps"]
+    assert "4-bit NVFP4" in e["capabilities"]

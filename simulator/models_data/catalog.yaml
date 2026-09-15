@@ -259,3 +259,65 @@ models:
   approx_size_gb: 687
   min_vram_gb: 730
   notes: frontier reference — needs a bigger box than 4x96GB per domain
+- id: nvidia/Qwen3.6-35B-A3B-NVFP4
+  family: qwen3.6-35b-a3b
+  series: Qwen3.6
+  params_b: 36.0
+  moe: true
+  quant: nvfp4
+  approx_size_gb: 21
+  min_vram_gb: 26
+  notes: Blackwell-native 4-bit — 8.8M downloads; 4+ replicas per card class
+- id: unsloth/Qwen3.8-27B-NVFP4
+  family: qwen3.8-27b
+  series: Qwen3.8
+  params_b: 27.0
+  quant: nvfp4
+  approx_size_gb: 22
+  min_vram_gb: 27
+  notes: dense 27B of the newest Qwen line in native 4-bit
+- id: nvidia/Qwen3.5-122B-A10B-NVFP4
+  family: qwen3.5-122b-a10b
+  series: Qwen3.5
+  params_b: 122.0
+  moe: true
+  quant: nvfp4
+  approx_size_gb: 83
+  min_vram_gb: 95
+  notes: a 122B MoE on ONE 96GB card — the 4-bit density story
+- id: amd/Qwen3.5-397B-A17B-MXFP4
+  family: qwen3.5-397b-a17b
+  series: Qwen3.5
+  params_b: 397.0
+  moe: true
+  quant: mxfp4
+  approx_size_gb: 239
+  min_vram_gb: 275
+  notes: 397B MoE at tp4 — needs recent vLLM (Quark MXFP4)
+- id: amd/MiniMax-M3-MXFP4
+  family: minimax-m3
+  series: MiniMax M3
+  params_b: 460.0
+  moe: true
+  quant: mxfp4
+  approx_size_gb: 243
+  min_vram_gb: 280
+  notes: params approx from 4-bit footprint; tp4 — Quark MXFP4
+- id: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+  family: nemotron-3-super-120b
+  series: Nemotron 3
+  params_b: 120.0
+  moe: true
+  quant: nvfp4
+  approx_size_gb: 73
+  min_vram_gb: 84
+  notes: 120B MoE on one card in native 4-bit
+- id: nvidia/Gemma-4-26B-A4B-NVFP4
+  family: gemma-4-26b-a4b
+  series: Gemma 4
+  params_b: 26.0
+  moe: true
+  quant: nvfp4
+  approx_size_gb: 19
+  min_vram_gb: 24
+  notes: Google's MoE line in Blackwell-native 4-bit

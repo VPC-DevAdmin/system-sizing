@@ -5,7 +5,8 @@
 # the CPU and GPU host classes.
 #
 # Sizing: BF16 30B weights are ~60 GB resident. At TP=1 that needs one
-# 80 GB-class device (A100-80G / H100 / H200); min_vram_gb below
+# 80 GB-class device (A100-80G / H100 / H200, or RTX PRO 6000
+# Blackwell at 96 GB — validated fit on the XE7740); min_vram_gb below
 # enforces it. For 2× 48 GB (L40S) or 2× 40 GB (A100-40G) hosts, set
 #   tensor_parallel_size: 2
 #   min_vram_gb: 40

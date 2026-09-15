@@ -23,8 +23,9 @@ sudo usermod -aG docker $USER && newgrp docker
 
 # GPU hosts only: NVIDIA driver. Headers for the RUNNING kernel first
 # so DKMS builds against it (and avoid apt full-upgrade here — a new
-# kernel is what forces a reboot).
-sudo apt-get install -y linux-headers-$(uname -r) nvidia-driver-570-server
+# kernel is what forces a reboot). Use the -open variant: it supports
+# everything Turing+ and is REQUIRED for Blackwell (see field notes).
+sudo apt-get install -y linux-headers-$(uname -r) nvidia-driver-580-server-open
 sudo reboot                                        # then verify: nvidia-smi
 
 # No-reboot alternative (labs where reboots are costly): if
@@ -35,6 +36,32 @@ sudo reboot                                        # then verify: nvidia-smi
 # then try `sudo rmmod nouveau` before the modprobe. If rmmod refuses
 # ("in use" — it's holding the console framebuffer), reboot is the
 # clean path. Everything below driver install never needs a reboot.
+```
+
+Driver field notes (learned the hard way on an XE7740 with 8× RTX PRO
+6000 Blackwell):
+
+* **Blackwell-generation GPUs require the `-open` driver variant**
+  (`nvidia-driver-<ver>-server-open`). The proprietary module loads
+  cleanly and then reports "No devices were found"; `dmesg | grep -i
+  nvrm` says outright "requires use of the NVIDIA open kernel
+  modules". Verify which module is loaded with
+  `modinfo nvidia | grep -m1 license` — the open module reports
+  `Dual MIT/GPL`, the proprietary one `NVIDIA`.
+* **"Driver/library version mismatch" from nvidia-smi** means the
+  loaded kernel module and the userspace libs come from different
+  driver generations — typical on lab machines with layered installs.
+  Check `cat /proc/driver/nvidia/version` vs `dpkg -l | grep nvidia`;
+  cleanest fix is to purge every nvidia package and reinstall ONE
+  series (the apt resolver usually drags the tangle out in one purge).
+* **DKMS won't replace a same-version module.** When switching
+  proprietary → open within the same series, the precompiled
+  proprietary packages (`linux-modules/objects-nvidia-<ver>-server-*`,
+  no `-open`) still own the .ko files and shadow the open build.
+  Purge them, then `sudo dkms install nvidia/<version> --force &&
+  sudo depmod -a`, then rmmod/modprobe.
+
+```bash
 
 # … and nvidia-container-toolkit, so Docker can hand containers GPUs.
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \

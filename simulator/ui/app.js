@@ -908,11 +908,16 @@ const Optimizer = {
         <button class="ac-edit" data-edit="models" title="edit">✎ edit</button></div>
       <div class="ac-sel">${inPlay.length} of ${eligible.length} eligible
         ${eligible.length < a.models.length
-          ? `<span class="msg">(${a.models.length - eligible.length} filtered
-             or won't fit)</span>` : ""}</div>
+          ? `<span class="msg">(${a.models.length - eligible.length} hidden by
+             the family/size dropdowns or filter cards, or won't fit)</span>`
+          : ""}</div>
       <div class="ac-text msg">${inPlay.map(m =>
         `${m.id.split("/")[1]} <i>(${m.quant})</i>`).join(", ") || "—"}</div>
       <div class="card-pop" data-pop="models" hidden>
+        <div class="pop-row" style="gap:10px">
+          <button class="small" data-models-all="on">Select all</button>
+          <button class="small" data-models-all="off">None</button>
+        </div>
         ${eligible.map(m => `<label class="pop-row">
           <input type="checkbox" data-model-opt="${m.id}"
             ${this.arenaOff.models.has(m.id) ? "" : "checked"}>
@@ -987,6 +992,19 @@ const Optimizer = {
         el.checked ? this.arenaOff.models.delete(el.dataset.modelOpt)
                    : this.arenaOff.models.add(el.dataset.modelOpt);
         this.refreshCardSummaries();
+        this.schedulePreview();
+      }));
+    box.querySelectorAll("button[data-models-all]").forEach(btn =>
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
+        const on = btn.dataset.modelsAll === "on";
+        for (const m of this.eligibleModels()) {
+          on ? this.arenaOff.models.delete(m.id)
+             : this.arenaOff.models.add(m.id);
+        }
+        this.renderArena();
+        const pop = box.querySelector('[data-pop="models"]');
+        if (pop) pop.hidden = false;
         this.schedulePreview();
       }));
   },

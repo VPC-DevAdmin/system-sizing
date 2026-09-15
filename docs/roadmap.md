@@ -11,10 +11,18 @@ critical path for the "land on a new box" requirement.
 
 ---
 
-## Phase 0 — Contract, packaging, and the landing story
+## Phase 0 — Contract, packaging, and the landing story ✅ (2026-09-15)
 
 Goal: `capsim` installs in one command on a fresh host, proves the host is
 usable in minutes, and its JSON output is a versioned contract.
+
+Shipped with two deliberate deviations from the plan below: the export
+schema lives at `simulator/export_schema/buyer_page_data.schema.json`
+(packaged, so an installed capsim can self-validate) rather than
+`docs/`; and 0.2's "migrate-on-open" applies to the write path only —
+the export/dashboard read path deliberately opens run.db read-only and
+keeps its presence-filtering, which is the right behavior for reading
+someone else's legacy run artifacts.
 
 ### 0.1 Versioned export contract
 - Add `schema_version` (semver) to `buyer_page_data*.json`.

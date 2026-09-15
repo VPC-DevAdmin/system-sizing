@@ -18,6 +18,7 @@
     <button data-view="control" class="active">Run control</button>
     <button data-view="live">Live telemetry</button>
     <button data-view="results">Results</button>
+    <button data-view="personas">Personas</button>
   </nav>
   <div id="status-pill" class="pill idle">idle</div>
 </header>
@@ -153,6 +154,37 @@
       <button id="compare-clear" class="small">Clear</button>
     </div>
     <canvas id="chart-compare"></canvas>
+  </section>
+</main>
+
+<!-- ── Personas ────────────────────────────────────────────────── -->
+<main id="view-personas" class="view">
+  <section class="panel">
+    <h2>Persona &amp; cohort catalog</h2>
+    <p class="msg">The packaged catalog ships with capsim; edits save as overlay files under
+    <code>config/personas/</code> and take effect immediately (the next run picks them up).
+    Specs are YAML — distributions as <code>{lognormal: {median, sigma}}</code>,
+    <code>{discrete: {value: weight}}</code>, or <code>{constant: x}</code>.</p>
+    <div class="editor-grid">
+      <div>
+        <h3>Personas</h3>
+        <ul id="persona-list" class="entry-list"></ul>
+        <button id="persona-new" class="small">New persona</button>
+        <h3>Cohorts</h3>
+        <ul id="cohort-list" class="entry-list"></ul>
+        <button id="cohort-new" class="small">New cohort</button>
+      </div>
+      <div>
+        <div class="row wrap">
+          <label>Id <input id="editor-id" placeholder="my_persona"></label>
+          <span id="editor-kind-badge" class="pill">persona</span>
+          <button id="editor-save" class="primary small">Save</button>
+          <span id="editor-msg" class="msg"></span>
+        </div>
+        <textarea id="editor-yaml" spellcheck="false"
+                  placeholder="Select an entry on the left, or New persona / New cohort."></textarea>
+      </div>
+    </div>
   </section>
 </main>
 

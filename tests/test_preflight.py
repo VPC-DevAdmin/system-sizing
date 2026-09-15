@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from simulator.config import load_config
 from simulator.preflight import (
     HardwareInfo,
     HardwareRequirements,
@@ -17,8 +18,6 @@ from simulator.preflight import (
     detect_hardware,
     preflight_check,
 )
-from simulator.config import load_config
-
 
 # ── Detection ─────────────────────────────────────────────────────────
 

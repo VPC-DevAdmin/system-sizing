@@ -12,8 +12,8 @@ import time
 from pathlib import Path
 
 from rich.console import Console
-from rich.live import Live
 from rich.layout import Layout
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -248,10 +248,10 @@ def _render_waiting(run_dir: Path, elapsed_s: float) -> Layout:
     body.append(f"{run_dir}/run_NN/run.db", style="bold yellow")
     body.append(" to appear...\n\n", style="yellow")
     body.append(
-        f"  This is normal during engine boot (~1-3 min cold load) "
-        f"or between cohort transitions.\n", style="dim",
+        "  This is normal during engine boot (~1-3 min cold load) "
+        "or between cohort transitions.\n", style="dim",
     )
-    body.append(f"  Polling every 2s. Ctrl-C to exit.\n\n", style="dim")
+    body.append("  Polling every 2s. Ctrl-C to exit.\n\n", style="dim")
     body.append(f"  Elapsed: {int(elapsed_s)}s\n", style="bold")
     layout["body"].update(Panel(body, title="Waiting for engine"))
     layout["footer"].update(Panel(

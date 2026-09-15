@@ -34,7 +34,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-
 # Connection-establishment cap (separate from the tier policy). The
 # initial ``client.chat.completions.create()`` call returns when the
 # stream object is ready — usually milliseconds. A long delay here

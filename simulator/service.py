@@ -36,7 +36,7 @@ import json
 import logging
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -86,6 +86,10 @@ class ExportRequest(BaseModel):
     slim: bool = False
 
 
+class SaveSpecRequest(BaseModel):
+    yaml: str
+
+
 def _resolve_config_path(req: StartRunRequest) -> Path:
     from .config import resolve_profile
     if req.profile and req.config:
@@ -133,8 +137,12 @@ def _list_runs(base: Path) -> list[dict]:
     return out
 
 
-def create_app(runs_base: Path | str = Path("runs")) -> FastAPI:
+def create_app(
+    runs_base: Path | str = Path("runs"),
+    catalog_dir: Path | str | None = None,
+) -> FastAPI:
     runs_base = Path(runs_base)
+    catalog_dir = Path(catalog_dir) if catalog_dir is not None else None
     app = FastAPI(title="capsim", version="0.2.0")
     app.state.active: Optional[ActiveRun] = None
 
@@ -181,6 +189,89 @@ def create_app(runs_base: Path | str = Path("runs")) -> FastAPI:
             }
             for c in COHORTS.values()
         ]
+
+    # ── persona/cohort editor (Phase 4) ───────────────────────────
+    # The catalog is data: packaged defaults + config/personas/*.yaml
+    # overlays. The editor GETs a spec as YAML, PUTs it back; the
+    # server validates against the full merged catalog before the
+    # overlay file lands, so a bad save can't wedge the registry.
+
+    def _catalog_dir() -> Path:
+        from .persona_loader import USER_CATALOG_DIR
+        return catalog_dir if catalog_dir is not None else USER_CATALOG_DIR
+
+    def _save_catalog_entry(kind: str, entry_id: str, spec_yaml: str) -> None:
+        import yaml as _yaml
+
+        from .persona_loader import PersonaSpecError, load_catalog
+        from .personas import reload_personas
+
+        if not entry_id.replace("_", "").replace("-", "").isalnum():
+            raise HTTPException(422, "id must be alphanumeric/_/-")
+        try:
+            spec = _yaml.safe_load(spec_yaml)
+        except _yaml.YAMLError as e:
+            raise HTTPException(422, f"invalid YAML: {e}") from e
+        if not isinstance(spec, dict):
+            raise HTTPException(422, "spec must be a YAML mapping")
+
+        target = _catalog_dir() / f"{entry_id}.yaml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        previous = target.read_text() if target.exists() else None
+        target.write_text(_yaml.safe_dump(
+            {kind: {entry_id: spec}}, sort_keys=False, allow_unicode=True,
+        ))
+        try:
+            load_catalog(user_dir=_catalog_dir())   # validate with the new file
+        except PersonaSpecError as e:
+            if previous is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_text(previous)
+            raise HTTPException(422, str(e)) from e
+        reload_personas(user_dir=_catalog_dir())
+
+    @app.get("/api/personas/{persona_id}")
+    async def persona_detail(persona_id: str) -> dict:
+        import yaml as _yaml
+
+        from .persona_loader import serialize_persona
+        from .personas import PERSONAS
+        if persona_id not in PERSONAS:
+            raise HTTPException(404, f"unknown persona '{persona_id}'")
+        spec = serialize_persona(PERSONAS[persona_id])
+        return {
+            "id": persona_id,
+            "spec": spec,
+            "yaml": _yaml.safe_dump(spec, sort_keys=False, allow_unicode=True),
+            "editable_file": str(_catalog_dir() / f"{persona_id}.yaml"),
+        }
+
+    @app.put("/api/personas/{persona_id}")
+    async def persona_save(persona_id: str, req: SaveSpecRequest) -> dict:
+        _save_catalog_entry("personas", persona_id, req.yaml)
+        return {"saved": persona_id}
+
+    @app.get("/api/cohorts/{cohort_id}")
+    async def cohort_detail(cohort_id: str) -> dict:
+        import yaml as _yaml
+
+        from .persona_loader import serialize_cohort
+        from .personas import COHORTS
+        if cohort_id not in COHORTS:
+            raise HTTPException(404, f"unknown cohort '{cohort_id}'")
+        spec = serialize_cohort(COHORTS[cohort_id])
+        return {
+            "id": cohort_id,
+            "spec": spec,
+            "yaml": _yaml.safe_dump(spec, sort_keys=False, allow_unicode=True),
+            "editable_file": str(_catalog_dir() / f"{cohort_id}.yaml"),
+        }
+
+    @app.put("/api/cohorts/{cohort_id}")
+    async def cohort_save(cohort_id: str, req: SaveSpecRequest) -> dict:
+        _save_catalog_entry("cohorts", cohort_id, req.yaml)
+        return {"saved": cohort_id}
 
     @app.get("/api/runs")
     async def runs() -> list[dict]:

@@ -193,7 +193,6 @@ async def run_virtual_user(
     reasoning_effort: str | None = None,
 ) -> None:
     """Run one virtual user to completion (or until cancelled)."""
-    sessions_target = stats.sessions_target
     history_messages: list[dict] = []
     history_token_count = 0
 
@@ -287,13 +286,18 @@ async def run_virtual_user(
                     if reasoning_effort else None
                 )
                 stream_result = await consume_with_tiers(
-                    create_stream=lambda: client.chat.completions.create(
-                        model=model_id,
-                        messages=messages,
-                        max_tokens=output_tokens_target,
-                        stream=True,
-                        temperature=0.7,
-                        extra_body=extra_body,
+                    # Bind loop-iteration values as defaults: the
+                    # lambda is awaited within this iteration, but
+                    # explicit binding is strictly safer (B023).
+                    create_stream=lambda m=messages, mt=output_tokens_target, eb=extra_body: (
+                        client.chat.completions.create(
+                            model=model_id,
+                            messages=m,
+                            max_tokens=mt,
+                            stream=True,
+                            temperature=0.7,
+                            extra_body=eb,
+                        )
                     ),
                     pre_ttft_timeout_s=persona.pre_ttft_timeout_s,
                     inter_token_timeout_s=persona.inter_token_timeout_s,

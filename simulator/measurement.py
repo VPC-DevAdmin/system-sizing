@@ -7,13 +7,12 @@ import logging
 import math
 import statistics
 import time
-
-from .bus import BUS
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+from .bus import BUS
 from .virtual_user import SharedState, TurnEvent
 
 log = logging.getLogger(__name__)

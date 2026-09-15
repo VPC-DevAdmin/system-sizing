@@ -1,14 +1,18 @@
-"""Persona and cohort definitions.
+"""Persona and cohort dataclasses + the loaded catalog.
 
-Distribution parameters here are starting points; tune empirically during
-Phase 1 sanity checks.
+The definitions themselves are DATA (roadmap Phase 4): the packaged
+``simulator/personas_data/default.yaml`` is canonical, with site-local
+``config/personas/*.yaml`` overlays merged on top at import (and on
+``reload_personas()``, which the service's persona editor calls after
+writing an overlay). This module keeps the dataclasses, the registry
+dicts, and the lookup helpers.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .distributions import Discrete, Distribution, LogNormal
+from .distributions import Distribution
 
 
 @dataclass
@@ -116,187 +120,30 @@ class Cohort:
                 raise ValueError(f"Cohort {self.id} references unknown persona {pid}")
 
 
-PERSONAS: dict[str, Persona] = {
-    "quick_lookup": Persona(
-        id="quick_lookup",
-        description="Short factual queries with brief responses; FAQ-style",
-        input_tokens=LogNormal.from_median(350, 0.35),
-        output_tokens=LogNormal.from_median(60, 0.4),
-        turns_per_session=Discrete({1: 0.7, 2: 0.2, 3: 0.07, 4: 0.03}),
-        sessions_before_leaving=Discrete({3: 0.2, 5: 0.3, 10: 0.3, 20: 0.2}),
-        inter_session_gap_seconds=LogNormal.from_median(180, 1.0),
-        # Short response (60 tokens) — at typical fast TPOT (~75 ms)
-        # the user falls behind by ~125 ms × 60 = ~8 s. Active think
-        # for a quick lookup is short (~10 s).
-        read_time_seconds=LogNormal.from_median(8, 0.5),
-        active_think_seconds=LogNormal.from_median(10, 0.6),
-        ttft_target_seconds=5.0,
-        ttft_failure_seconds=15.0,
-        tpot_target_ms=150.0,
-        tpot_failure_ms=225.0,
-    ),
-    "conversational": Persona(
-        id="conversational",
-        description="Multi-turn back-and-forth with growing chat history",
-        input_tokens=LogNormal.from_median(180, 0.5),
-        output_tokens=LogNormal.from_median(220, 0.45),
-        turns_per_session=Discrete({3: 0.25, 5: 0.35, 8: 0.25, 12: 0.15}),
-        sessions_before_leaving=Discrete({2: 0.3, 4: 0.4, 8: 0.3}),
-        inter_session_gap_seconds=LogNormal.from_median(600, 1.0),
-        # 220-token response: residual ~28 s; conversational pace
-        # composing the next turn ~25 s.
-        read_time_seconds=LogNormal.from_median(28, 0.5),
-        active_think_seconds=LogNormal.from_median(25, 0.6),
-        ttft_target_seconds=9.0,
-        ttft_failure_seconds=30.0,
-        tpot_target_ms=150.0,
-        tpot_failure_ms=225.0,
-    ),
-    "writer": Persona(
-        id="writer",
-        description="Drafting emails, content, and other prose; no long source documents",
-        input_tokens=LogNormal.from_median(500, 0.5),
-        output_tokens=LogNormal.from_median(350, 0.4),
-        turns_per_session=Discrete({1: 0.5, 2: 0.3, 3: 0.15, 5: 0.05}),
-        sessions_before_leaving=Discrete({3: 0.3, 6: 0.4, 12: 0.3}),
-        inter_session_gap_seconds=LogNormal.from_median(900, 1.0),
-        # 350-token draft: residual ~44 s; users review + edit ~70 s.
-        read_time_seconds=LogNormal.from_median(44, 0.5),
-        active_think_seconds=LogNormal.from_median(70, 0.7),
-        ttft_target_seconds=15.0,
-        ttft_failure_seconds=45.0,
-        tpot_target_ms=180.0,
-        tpot_failure_ms=270.0,
-    ),
-    "document_qa": Persona(
-        id="document_qa",
-        description="Question answering over 4K+ token source documents",
-        input_tokens=LogNormal.from_median(3500, 0.5),
-        output_tokens=LogNormal.from_median(280, 0.4),
-        turns_per_session=Discrete({1: 0.4, 2: 0.3, 4: 0.2, 7: 0.1}),
-        sessions_before_leaving=Discrete({2: 0.4, 4: 0.4, 8: 0.2}),
-        inter_session_gap_seconds=LogNormal.from_median(1200, 1.0),
-        # 280-token answer: residual ~35 s; analysts cross-reference
-        # and verify before continuing — ~115 s active.
-        read_time_seconds=LogNormal.from_median(35, 0.5),
-        active_think_seconds=LogNormal.from_median(115, 0.6),
-        ttft_target_seconds=30.0,
-        ttft_failure_seconds=90.0,
-        tpot_target_ms=200.0,
-        tpot_failure_ms=300.0,
-    ),
-    "code_assist": Persona(
-        id="code_assist",
-        description="Pair-programming with code context in the prompt",
-        input_tokens=LogNormal.from_median(1200, 0.6),
-        output_tokens=LogNormal.from_median(450, 0.5),
-        turns_per_session=Discrete({2: 0.3, 4: 0.35, 8: 0.25, 15: 0.1}),
-        sessions_before_leaving=Discrete({4: 0.3, 8: 0.4, 16: 0.3}),
-        inter_session_gap_seconds=LogNormal.from_median(420, 1.0),
-        # 450-token code/explanation: residual ~56 s (and code reading
-        # is genuinely slower than prose — some of that "active think"
-        # is really careful re-reading). Active deliberation +
-        # composing next prompt for sustained pair programming ~180 s.
-        read_time_seconds=LogNormal.from_median(56, 0.5),
-        active_think_seconds=LogNormal.from_median(180, 0.7),
-        ttft_target_seconds=20.0,
-        ttft_failure_seconds=60.0,
-        tpot_target_ms=220.0,
-        tpot_failure_ms=330.0,
-    ),
-    "long_form_generator": Persona(
-        id="long_form_generator",
-        # The decode-stress counterweight to document_qa.
-        # Both of those are prefill-heavy (long input, short output);
-        # this persona is the inverse — short input, very long output —
-        # so a cohort that mixes long-context personas with this one
-        # exercises both halves of the engine pipeline.
-        description=(
-            "Long-form content generation — extended drafts, articles, "
-            "reports. Short prompt, very long output (decode-bound)."
-        ),
-        input_tokens=LogNormal.from_median(200, 0.5),
-        output_tokens=LogNormal.from_median(3000, 0.4),
-        turns_per_session=Discrete({2: 0.75, 3: 0.25}),
-        # Deprecated under the per-session-respawn model but retained
-        # for back-compat with the dataclass shape — see
-        # virtual_user.run_virtual_user.
-        sessions_before_leaving=Discrete({1: 1.0}),
-        inter_session_gap_seconds=LogNormal.from_median(1200, 1.0),
-        # 3000-token output: residual reading is substantial even with
-        # concurrent streaming. User pauses to review + revise long
-        # output before the next turn — 90 s reading, 120 s composing.
-        read_time_seconds=LogNormal.from_median(90, 0.5),
-        active_think_seconds=LogNormal.from_median(120, 0.6),
-        ttft_target_seconds=15.0,
-        ttft_failure_seconds=45.0,
-        tpot_target_ms=180.0,
-        tpot_failure_ms=270.0,
-    ),
-}
+# ── Registry ─────────────────────────────────────────────────────────
+# Loaded from the packaged default catalog + config/personas/ overlays.
+# Mutated IN PLACE by reload_personas(): other modules hold references
+# to these dicts (pool_manager indexes PERSONAS directly), so the
+# objects must stay identical across reloads.
+
+from .persona_loader import load_catalog  # noqa: E402  (needs dataclasses above)
+
+PERSONAS: dict[str, Persona] = {}
+COHORTS: dict[str, Cohort] = {}
 
 
-COHORTS: dict[str, Cohort] = {
-    # Cohorts are *team mixes* — blended workloads representing realistic
-    # business types. To run a single persona on its own, use the
-    # ``run-persona`` CLI verb which builds an ephemeral one-persona
-    # Cohort via ``cohort_from_persona``.
-    "chat_heavy": Cohort(
-        id="chat_heavy",
-        name="Customer support team",
-        description="Frontline support: customer service reps, sales, inventory checks",
-        persona_weights={
-            "quick_lookup": 0.60,
-            "conversational": 0.30,
-            "writer": 0.10,
-        },
-    ),
-    "general_knowledge": Cohort(
-        id="general_knowledge",
-        name="General knowledge work",
-        description="Typical knowledge work: mixed chat, writing, light research",
-        persona_weights={
-            "quick_lookup": 0.30,
-            "conversational": 0.30,
-            "writer": 0.25,
-            "long_form_generator": 0.10,
-            "document_qa": 0.05,
-        },
-    ),
-    "writer_dominant": Cohort(
-        id="writer_dominant",
-        name="Marketing / content team",
-        description="Marketing, communications, content team",
-        persona_weights={
-            "writer": 0.40,
-            "long_form_generator": 0.30,
-            "conversational": 0.20,
-            "quick_lookup": 0.10,
-        },
-    ),
-    "software_engineering": Cohort(
-        id="software_engineering",
-        name="Software engineering team",
-        description="Software engineering team using AI assistance for code work",
-        persona_weights={
-            "code_assist": 0.50,
-            "long_form_generator": 0.15,
-            "quick_lookup": 0.15,
-            "conversational": 0.15,
-            "document_qa": 0.05,
-        },
-    ),
-    "analyst_team": Cohort(
-        id="analyst_team",
-        name="Analyst team",
-        description="Legal, finance, research analysts working over long documents",
-        persona_weights={
-            "document_qa": 0.70,
-            "writer": 0.20,
-            "long_form_generator": 0.10,
-        },
-    ),
-}
+def reload_personas(user_dir=None) -> None:
+    """(Re)build the registries from the catalog files. In-place so
+    existing references observe the update; raises PersonaSpecError
+    (leaving the registries untouched) when any file is invalid."""
+    personas, cohorts = load_catalog(user_dir=user_dir)
+    PERSONAS.clear()
+    PERSONAS.update(personas)
+    COHORTS.clear()
+    COHORTS.update(cohorts)
+
+
+reload_personas()
 
 
 def cohort_from_persona(persona_id: str) -> Cohort:

@@ -62,7 +62,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .prefix_cache import (
-    PrefixCacheReport,
     analyse_rows,
     read_turn_rows_with_step,
 )

@@ -15,11 +15,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from simulator.amx_utilization import (
-    AmxUtilization,
+    _Dispatch,
     _parse_line,
     aggregate,
-    _Dispatch,
-    parse_amx_utilization,
 )
 from simulator.bandwidth import (
     BandwidthCollector,
@@ -36,7 +34,6 @@ from simulator.perf_collector import (
     AMX_CANDIDATE_EVENTS,
     AMX_RAW_FALLBACK,
 )
-
 
 # ── CPU binding ────────────────────────────────────────────────────────
 
@@ -79,7 +76,7 @@ def test_vllm_dual_socket_config_loads_with_replicas() -> None:
     """The R7735 dual-socket config has a replicas list — yaml gives us
     list[dict], the loader must convert to ReplicaConfig instances or
     the engine sees garbage."""
-    from simulator.config import load_config, ReplicaConfig
+    from simulator.config import ReplicaConfig, load_config
     cfg = load_config("config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml")
     assert cfg.engine.type == "vllm_dual_socket"
     assert len(cfg.engine.replicas) == 2
@@ -607,6 +604,7 @@ def test_pool_manager_load_balances_users_with_sticky_assignment() -> None:
     distribution across replicas. Verify both properties: balance and
     stickiness (same user_id → same replica every time)."""
     from openai import AsyncOpenAI
+
     from simulator.personas import COHORTS
     from simulator.pool_manager import PoolManager
     from simulator.tokenizer_corpus import TokenCorpus
@@ -646,6 +644,7 @@ def test_pool_manager_single_replica_no_routing_overhead() -> None:
     should short-circuit to the only client and never grow the
     assignment map."""
     from openai import AsyncOpenAI
+
     from simulator.personas import COHORTS
     from simulator.pool_manager import PoolManager
     from simulator.tokenizer_corpus import TokenCorpus

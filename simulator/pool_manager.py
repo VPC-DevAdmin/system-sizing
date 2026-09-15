@@ -10,13 +10,13 @@ from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 
-from .personas import Cohort, PERSONAS
+from .personas import PERSONAS, Cohort
 from .tokenizer_corpus import TokenCorpus
 from .virtual_user import (
     SharedState,
     UserStats,
-    run_virtual_user,
     _now_ms,
+    run_virtual_user,
 )
 
 log = logging.getLogger(__name__)

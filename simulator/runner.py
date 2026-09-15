@@ -15,13 +15,12 @@ from pathlib import Path
 from openai import AsyncOpenAI
 
 from .adaptive import FixedGridStepper, StepResult, TwoKneeStepper
-from .bus import BUS
 from .amx_utilization import parse_amx_utilization
+from .bus import BUS
 from .config import Config
 from .cpu_binding import expand_thread_binding
 from .database import Database
 from .engines import Engine, make_engine
-from .preflight import preflight_check
 from .measurement import (
     PHASE_IDLE,
     PhaseTracker,
@@ -29,6 +28,7 @@ from .measurement import (
 )
 from .personas import Cohort, get_cohort
 from .pool_manager import PoolManager
+from .preflight import preflight_check
 from .runs import resolve_run_dir
 from .telemetry import MeasurementTelemetry, SnapshotRecorder
 from .tokenizer_corpus import TokenCorpus
@@ -64,7 +64,7 @@ def load_config_from_run_dir(run_dir: Path) -> Config:
     as the original sweep — otherwise the new measurements aren't
     comparable to the cohort's existing curve.
     """
-    from .config import _merge_dataclass, ReplicaConfig
+    from .config import ReplicaConfig, _merge_dataclass
     db_path = _run_db_path(run_dir)
     if not db_path.exists():
         raise FileNotFoundError(f"No run.db in {run_dir}")
@@ -673,6 +673,7 @@ async def run_spot_check(
     of them.
     """
     from collections import defaultdict
+
     from .personas import cohort_from_persona
 
     rerun = plan.get("rerun_points") or []

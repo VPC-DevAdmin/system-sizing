@@ -107,21 +107,8 @@ const Control = {
   catalogs: { profiles: {}, personas: [], cohorts: [] },
 
   async init() {
-    try {
-      const [profiles, personas, cohorts] = await Promise.all([
-        api("/api/profiles"), api("/api/personas"), api("/api/cohorts"),
-      ]);
-      this.catalogs = { profiles, personas, cohorts };
-      const sel = $("#profile-select");
-      sel.innerHTML = "";
-      for (const name of Object.keys(profiles)) {
-        sel.append(new Option(name, name, false, name === "mock"));
-      }
-      this.fillWorkloads();
-      this.refreshRuns();
-    } catch (e) {
-      this.msg(`catalog load failed: ${e.message}`, "error");
-    }
+    await this.loadCatalogs();
+    this.refreshRuns();
     $("#workload-kind").addEventListener("change", () => this.fillWorkloads());
     $("#start-btn").addEventListener("click", () => this.start());
     $("#stop-btn").addEventListener("click", () => this.stop());
@@ -129,6 +116,24 @@ const Control = {
     $("#doctor-btn").addEventListener("click", () => this.doctor());
     setInterval(() => this.pollStatus(), 2000);
     this.pollStatus();
+  },
+
+  async loadCatalogs() {
+    try {
+      const [profiles, personas, cohorts] = await Promise.all([
+        api("/api/profiles"), api("/api/personas"), api("/api/cohorts"),
+      ]);
+      this.catalogs = { profiles, personas, cohorts };
+      const sel = $("#profile-select");
+      const prev = sel.value;
+      sel.innerHTML = "";
+      for (const name of Object.keys(profiles)) {
+        sel.append(new Option(name, name, false, name === (prev || "mock")));
+      }
+      this.fillWorkloads();
+    } catch (e) {
+      this.msg(`catalog load failed: ${e.message}`, "error");
+    }
   },
 
   msg(text, cls = "") {
@@ -703,8 +708,112 @@ const Results = {
   },
 };
 
+/* ══ Persona / cohort editor ══════════════════════════════════── */
+
+const PERSONA_TEMPLATE = `description: "What this archetype does"
+input_tokens: {lognormal: {median: 400, sigma: 0.5}}
+output_tokens: {lognormal: {median: 200, sigma: 0.4}}
+turns_per_session: {discrete: {1: 0.6, 2: 0.3, 4: 0.1}}
+sessions_before_leaving: {discrete: {3: 0.5, 6: 0.5}}
+inter_session_gap_seconds: {lognormal: {median: 600, sigma: 1.0}}
+read_time_seconds: {lognormal: {median: 25, sigma: 0.5}}
+active_think_seconds: {lognormal: {median: 30, sigma: 0.6}}
+sla:
+  ttft_target_seconds: 10.0
+  ttft_failure_seconds: 30.0
+  tpot_target_ms: 150.0
+  tpot_failure_ms: 225.0
+`;
+
+const COHORT_TEMPLATE = `name: "My team"
+description: "What this team does"
+persona_weights:
+  quick_lookup: 0.5
+  conversational: 0.5
+`;
+
+const Editor = {
+  kind: "personas",    // "personas" | "cohorts"
+  editing: null,       // id being edited, null for new
+
+  init() {
+    $("#editor-save").addEventListener("click", () => this.save());
+    $("#persona-new").addEventListener("click", () =>
+      this.startNew("personas", PERSONA_TEMPLATE));
+    $("#cohort-new").addEventListener("click", () =>
+      this.startNew("cohorts", COHORT_TEMPLATE));
+    document.querySelector('#tabs button[data-view="personas"]')
+      .addEventListener("click", () => this.refreshLists());
+  },
+
+  msg(text, cls = "") {
+    const el = $("#editor-msg");
+    el.textContent = text;
+    el.className = `msg ${cls}`;
+  },
+
+  async refreshLists() {
+    const [personas, cohorts] = await Promise.all([
+      api("/api/personas"), api("/api/cohorts"),
+    ]);
+    const fill = (sel, items, kind) => {
+      const ul = $(sel);
+      ul.innerHTML = "";
+      for (const item of items) {
+        const li = document.createElement("li");
+        li.textContent = item.id;
+        li.classList.toggle(
+          "active", this.kind === kind && this.editing === item.id);
+        li.addEventListener("click", () => this.open(kind, item.id));
+        ul.append(li);
+      }
+    };
+    fill("#persona-list", personas, "personas");
+    fill("#cohort-list", cohorts, "cohorts");
+  },
+
+  async open(kind, id) {
+    this.kind = kind;
+    this.editing = id;
+    const detail = await api(`/api/${kind}/${id}`);
+    $("#editor-id").value = id;
+    $("#editor-yaml").value = detail.yaml;
+    $("#editor-kind-badge").textContent = kind.slice(0, -1);
+    this.msg(`editing ${id} — saves to ${detail.editable_file}`);
+    this.refreshLists();
+  },
+
+  startNew(kind, template) {
+    this.kind = kind;
+    this.editing = null;
+    $("#editor-id").value = "";
+    $("#editor-yaml").value = template;
+    $("#editor-kind-badge").textContent = kind.slice(0, -1);
+    this.msg("set an id and Save");
+    this.refreshLists();
+  },
+
+  async save() {
+    const id = $("#editor-id").value.trim();
+    if (!id) { this.msg("id required", "error"); return; }
+    try {
+      await api(`/api/${this.kind}/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ yaml: $("#editor-yaml").value }),
+      });
+      this.editing = id;
+      this.msg(`saved ${id}`, "ok");
+      this.refreshLists();
+      Control.loadCatalogs();  // refresh workload pickers with the new entry
+    } catch (e) {
+      this.msg(e.message, "error");
+    }
+  },
+};
+
 /* ── boot ─────────────────────────────────────────────────────── */
 
 Control.init();
 Live.init();
 Results.init();
+Editor.init();

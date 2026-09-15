@@ -5,9 +5,9 @@ from __future__ import annotations
 
 from simulator.collectors.gpu import (
     GpuSample,
+    _combine_devices,
     aggregate_gpu_samples,
     parse_smi_csv,
-    _combine_devices,
 )
 
 

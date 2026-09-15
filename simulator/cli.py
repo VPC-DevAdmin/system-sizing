@@ -485,8 +485,6 @@ def ready_cmd(
     Heavy lifting (docker build / hf download) prints progress to stdout
     and aborts with a non-zero exit code on failure.
     """
-    import os
-    import subprocess
     import sys
 
     _setup_logging(verbose)
@@ -509,7 +507,7 @@ def ready_cmd(
         _ensure_model(cfg)
 
     # 3. Preflight — last so we fail with the freshest hardware view.
-    from .preflight import preflight_check, PreflightError
+    from .preflight import PreflightError, preflight_check
     try:
         preflight_check(cfg.engine.hardware_requirements)
     except PreflightError as e:
@@ -871,7 +869,7 @@ def preflight_cmd(
     import sys
     _setup_logging(verbose)
     cfg = load_config(config)
-    from .preflight import detect_hardware, preflight_check, PreflightError
+    from .preflight import PreflightError, detect_hardware, preflight_check
     info = detect_hardware()
     typer.echo(
         f"Detected: vendor={info.vendor} model={info.cpu_model!r} "

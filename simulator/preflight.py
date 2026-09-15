@@ -15,7 +15,6 @@ constraints; we just can't validate from a Mac.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -212,7 +211,7 @@ def check_gpu_requirements(
     if reqs.min_vram_gb:
         insufficient = [
             f"{n} ({v:.0f} GB)"
-            for n, v in zip(gpus.names, gpus.vram_gb)
+            for n, v in zip(gpus.names, gpus.vram_gb, strict=True)
             if v < reqs.min_vram_gb
         ]
         if insufficient:
@@ -298,7 +297,7 @@ def preflight_check(reqs: HardwareRequirements, *, raise_on_fail: bool = True) -
                 "preflight: gpus=%d (%s)",
                 gpus.count,
                 ", ".join(
-                    f"{n} {v:.0f}GB" for n, v in zip(gpus.names, gpus.vram_gb)
+                    f"{n} {v:.0f}GB" for n, v in zip(gpus.names, gpus.vram_gb, strict=True)
                 ),
             )
         failures += check_gpu_requirements(gpus, reqs)

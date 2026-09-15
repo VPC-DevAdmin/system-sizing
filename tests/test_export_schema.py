@@ -18,8 +18,8 @@ import pytest
 
 jsonschema = pytest.importorskip("jsonschema")
 
-from simulator.database import Database
-from simulator.export import (
+from simulator.database import Database  # noqa: E402
+from simulator.export import (  # noqa: E402
     EXPORT_SCHEMA_PATH,
     EXPORT_SCHEMA_VERSION,
     export_dir,

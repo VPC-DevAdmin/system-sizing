@@ -209,7 +209,6 @@ class Engine:
         is also captured under ``kv_cache_used_pct`` — defensive against
         upstream renames in the vllm-openai-cpu image.
         """
-        import re
         wanted = {
             "vllm:num_requests_running": "num_running",
             "vllm:num_requests_waiting": "queue_depth",

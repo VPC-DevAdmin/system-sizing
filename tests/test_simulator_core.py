@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import asyncio
 
 from simulator.adaptive import StepResult, TwoKneeStepper
-from simulator.distributions import Discrete, LogNormal, Constant
+from simulator.distributions import Constant, Discrete, LogNormal
 from simulator.measurement import (
     _classify_status,
     _percentile,
@@ -31,7 +31,6 @@ from simulator.prefix_cache import (
     analyse_sessions,
 )
 from simulator.virtual_user import SharedState
-
 
 # ── Distributions ──────────────────────────────────────────────────────
 
@@ -621,8 +620,9 @@ def test_resolve_workload_group_explicit_list_disambiguates() -> None:
 def test_resolve_workload_group_rejects_unknown_id() -> None:
     """Surfacing a typo at parse time beats running 5 hours of sweep
     only to miss what you meant to measure."""
-    from simulator.personas import resolve_workload_group
     import pytest as _pt
+
+    from simulator.personas import resolve_workload_group
     with _pt.raises(KeyError, match="some_typo"):
         resolve_workload_group("quick_lookup,some_typo")
 
@@ -818,7 +818,7 @@ def test_tier_3_hard_timeout() -> None:
         # 6 tokens spaced 0.1s apart = 0.6s total. Pre-TTFT and
         # inter-token are generous; hard ceiling is 0.3s — should fire
         # mid-stream after ~3 tokens.
-        stream = _FakeStream([
+        _stream = _FakeStream([
             (0.05, f"t{i}") for i in range(6)
         ])
         # Adjust schedule so each token is +0.1s after the previous.
@@ -1007,11 +1007,12 @@ def test_pool_manager_spawns_users_with_single_session() -> None:
     matching what the engine actually sees and what the buyer-page
     deployment narrative wants."""
     import asyncio
+
     from openai import AsyncOpenAI
-    from simulator.pool_manager import PoolManager
+
     from simulator.personas import get_cohort
+    from simulator.pool_manager import PoolManager
     from simulator.virtual_user import SharedState
-    from simulator.tokenizer_corpus import TokenCorpus
 
     async def go():
         cohort = get_cohort("chat_heavy")
@@ -1072,8 +1073,8 @@ def test_failed_turn_event_counts_as_sla_violation_and_target_miss() -> None:
     (failure threshold) AND a target miss (target threshold).
     Without this, fast-failing HTTP errors would fall under the
     failure threshold and silently 'pass'."""
-    from simulator.virtual_user import TurnEvent
     from simulator.personas import PERSONAS
+    from simulator.virtual_user import TurnEvent
 
     persona = PERSONAS["quick_lookup"]
     # quick_lookup: ttft target 5s / failure 15s, tpot 150/225ms
@@ -1120,8 +1121,8 @@ def test_target_miss_without_violation() -> None:
     is the quality signal the buyer page surfaces alongside
     capacity. quick_lookup target=5s, failure=15s → 8s ttft is
     in this band."""
-    from simulator.virtual_user import TurnEvent
     from simulator.personas import PERSONAS
+    from simulator.virtual_user import TurnEvent
 
     persona = PERSONAS["quick_lookup"]
     # 8000ms: between 5s (target) and 15s (failure)
@@ -1142,6 +1143,7 @@ def test_legacy_turn_events_gets_error_column(tmp_path) -> None:
     """Legacy DBs (pre-error-column) must get the column lifted on
     open so the persistence path doesn't crash."""
     import sqlite3
+
     from simulator.database import Database
 
     db_path = tmp_path / "legacy.db"
@@ -1193,6 +1195,7 @@ def test_legacy_simulation_snapshots_gets_step_columns(tmp_path) -> None:
     """Legacy DBs (no step_samples columns yet) must get them lifted
     on open; otherwise the SnapshotRecorder INSERT crashes."""
     import sqlite3
+
     from simulator.database import Database
 
     db_path = tmp_path / "legacy.db"
@@ -1234,6 +1237,7 @@ def test_legacy_measurement_aggregate_migrates_to_columns(tmp_path) -> None:
     lift its measurement_aggregate rows onto cohort_measurements when
     opened. Otherwise old runs go dark on the next ``make export``."""
     import sqlite3
+
     from simulator.database import Database
 
     db_path = tmp_path / "legacy.db"
@@ -1390,8 +1394,8 @@ def test_dashboard_state_reflects_terminal_status(tmp_path) -> None:
     body should treat that as authoritative and render "completed",
     not the stale ``measuring`` phase from the last snapshot before
     SnapshotRecorder shut down."""
-    from simulator.database import Database
     from simulator.dashboard import _read_state, _render
+    from simulator.database import Database
 
     db_path = tmp_path / "run.db"
     db = Database(db_path)
@@ -1448,8 +1452,8 @@ def test_dashboard_waiting_render_does_not_crash(tmp_path) -> None:
 def test_dashboard_state_in_progress(tmp_path) -> None:
     """Mid-sweep (final_status NULL) must still render the live phase
     + step-samples ratio normally."""
-    from simulator.database import Database
     from simulator.dashboard import _read_state, _render
+    from simulator.database import Database
 
     db_path = tmp_path / "run.db"
     db = Database(db_path)
@@ -1554,7 +1558,7 @@ def test_export_derived_deployment_shape_fields(tmp_path) -> None:
             cohort_definition={"name": "x"}, config={},
         )
         for i, (pool, status) in enumerate(curve_steps):
-            mid = db.insert_measurement({
+            db.insert_measurement({
                 "cohort_run_id": "crid", "step_index": i,
                 "target_pool_size": pool,
                 "measured_avg_pool_size": float(pool),
@@ -2224,7 +2228,6 @@ def test_engine_prefix_cache_hit_rate_surfaces_in_export(tmp_path) -> None:
     """End-of-run engine.get_metrics() result is persisted on
     cohort_run and exposed in the export under
     cohort.prefix_cache.engine_hit_rate."""
-    import json
     from simulator.database import Database
     from simulator.export import export_dir
 
@@ -2425,6 +2428,7 @@ def test_export_includes_per_step_time_series(tmp_path) -> None:
     directly; the time-series is the difference between a static knee
     chart and a "drill into a specific step" view."""
     import json
+
     from simulator.database import Database
     from simulator.export import export_dir
 
@@ -2577,7 +2581,7 @@ def test_resolve_run_dir_ignores_non_run_subdirs(tmp_path) -> None:
 
 def test_resolve_run_dir_handles_double_digit_numbering(tmp_path) -> None:
     """Sort by integer, not lexicographic — run_10 must come after run_9."""
-    from simulator.runs import resolve_run_dir, latest_run_dir
+    from simulator.runs import latest_run_dir, resolve_run_dir
     for i in (1, 2, 9, 10, 11):
         (tmp_path / f"run_{i:02d}").mkdir()
     assert latest_run_dir(tmp_path) == tmp_path / "run_11"
@@ -3178,6 +3182,7 @@ def test_parse_pool_sizes_rejects_non_positive_or_non_int() -> None:
     silently skipped — the run would otherwise complete with an
     incomplete curve and no warning."""
     import typer
+
     from simulator.cli import _parse_pool_sizes
     for bad in ["0", "0,8", "8,-1,16", "abc", "8,abc", "8,1.5,16"]:
         try:
@@ -3192,6 +3197,7 @@ def test_resolve_stepper_args_rejects_adaptive_with_pool_sizes() -> None:
     nonsensical (the adaptive stepper picks pool sizes itself). Reject
     at parse time so it surfaces immediately, not after a long run."""
     import typer
+
     from simulator.cli import _resolve_stepper_args
     try:
         _resolve_stepper_args("8,16,32", adaptive=True)
@@ -3224,7 +3230,9 @@ def test_fixed_grid_stepper_walks_default_grid_when_no_failures() -> None:
     """Clean run (every step under threshold) should visit every
     point in the default powers-of-2 grid, in order, then return None."""
     from simulator.adaptive import (
-        DEFAULT_FIXED_GRID, FixedGridStepper, StepResult,
+        DEFAULT_FIXED_GRID,
+        FixedGridStepper,
+        StepResult,
     )
     s = FixedGridStepper()
     visited = []
@@ -3368,8 +3376,9 @@ def test_timeline_classifies_each_phase_within_one_turn(tmp_path) -> None:
     in prefill; once ttft elapses they're in decode; after completion
     they're done (no more turn → no think interval). Tests that the
     three intra-turn phases get the right time slices."""
-    from simulator.timeline import compute_timeline
     import sqlite3
+
+    from simulator.timeline import compute_timeline
     db_path, mid = _seed_timeline_db(tmp_path, turns=[
         {"user_id": "u1", "turn_index": 0,
          "submit": 1000, "ttft": 2000.0, "complete": 6000},
@@ -3396,8 +3405,9 @@ def test_timeline_marks_inter_turn_gap_as_think(tmp_path) -> None:
     ``think``. This is the diagnostic signal for query-storm hunting —
     if many users finish think at the same instant, we'd see a
     coincident plummet in ``think`` and spike in ``prefill``."""
-    from simulator.timeline import compute_timeline
     import sqlite3
+
+    from simulator.timeline import compute_timeline
     db_path, mid = _seed_timeline_db(tmp_path, turns=[
         {"user_id": "u1", "turn_index": 0,
          "submit": 1000, "ttft": 500.0, "complete": 2000},
@@ -3420,8 +3430,9 @@ def test_timeline_emits_trailing_think_after_last_turn(tmp_path) -> None:
     window-end when reality is a fully-populated steady state — this
     is the bug that produced the misleading 'vanishing pool at the
     end' on the AMD software_engineering pool=64 chart."""
-    from simulator.timeline import compute_timeline
     import sqlite3
+
+    from simulator.timeline import compute_timeline
     # Single user, one turn that completes well before window-end
     # (window-end inferred from latest event = the only turn's
     # complete time, so we need a SECOND user to extend the window).
@@ -3461,8 +3472,9 @@ def test_timeline_counts_users_alive_in_window_with_no_completed_turns(tmp_path)
     They must register as ``think`` (pre-first-turn waiting) for
     their alive-in-window interval — otherwise the chart undercounts
     the pool, dramatically so on slow long-prompt workloads."""
-    from simulator.timeline import compute_timeline
     import sqlite3
+
+    from simulator.timeline import compute_timeline
     # u1 actually completes a turn (anchors the window). u2 is
     # spawned but never completes anything within the window.
     db_path, mid = _seed_timeline_db(
@@ -3493,8 +3505,9 @@ def test_timeline_caps_intervals_at_user_termination(tmp_path) -> None:
     """A user that died mid-window shouldn't contribute phase
     intervals past their terminate timestamp. The reaper replaces
     them with a new user_id; the dead one is gone from the pool."""
-    from simulator.timeline import compute_timeline
     import sqlite3
+
+    from simulator.timeline import compute_timeline
     db_path, mid = _seed_timeline_db(
         tmp_path,
         turns=[
@@ -3527,7 +3540,7 @@ def test_timeline_caps_intervals_at_user_termination(tmp_path) -> None:
 
     # t_offset=4 (5000ms = exactly u1's termination): u1's trailing
     # think runs from complete=4000 to terminate=5000 → present at t=4
-    s_at_4s = next(p for p in tl if p.t_offset_s == 4)
+    _s_at_4s = next(p for p in tl if p.t_offset_s == 4)  # asserts presence
     # t_offset=8 (9000ms): u1 should be GONE (died at 5000ms); u2 is
     # in decode. think count from u1 must be 0; only u2's
     # pre-first-turn think (if any) would contribute.
@@ -3551,8 +3564,9 @@ def test_timeline_folds_pre_first_turn_gap_into_think(tmp_path) -> None:
     at measurement-window start when users still mid-cycle from
     warmup-phase turns appear before their first measurement-window
     submit."""
-    from simulator.timeline import compute_timeline
     import sqlite3
+
+    from simulator.timeline import compute_timeline
     # spawn 1000ms before any turn data; second user spawned later
     # to give us a window where the pre-first-turn gap is visible.
     db_path, mid = _seed_timeline_db(
@@ -3584,8 +3598,9 @@ def test_timeline_counts_concurrent_users_correctly(tmp_path) -> None:
     """Two users overlapping in different phases: the timeline must
     sum them, not just track one. This is the headline use case —
     showing how many of N users are in each phase at each moment."""
-    from simulator.timeline import compute_timeline
     import sqlite3
+
+    from simulator.timeline import compute_timeline
     db_path, mid = _seed_timeline_db(tmp_path, turns=[
         # u1: prefill [1000, 3000), decode [3000, 6000)
         {"user_id": "u1", "turn_index": 0,
@@ -3610,8 +3625,9 @@ def test_timeline_empty_when_no_turns(tmp_path) -> None:
     engine that died early) returns an empty list rather than
     raising — the export emits ``rows: []`` so the schema stays
     uniform across cohorts."""
-    from simulator.timeline import compute_timeline
     import sqlite3
+
+    from simulator.timeline import compute_timeline
     db_path, mid = _seed_timeline_db(tmp_path, turns=[])
     conn = sqlite3.connect(db_path)
     tl = compute_timeline(conn, mid, resolution_ms=1000)
@@ -3620,8 +3636,11 @@ def test_timeline_empty_when_no_turns(tmp_path) -> None:
 
 
 def test_timeline_rejects_invalid_resolution(tmp_path) -> None:
+    import sqlite3
+
+    import pytest
+
     from simulator.timeline import compute_timeline
-    import sqlite3, pytest
     db_path, mid = _seed_timeline_db(tmp_path, turns=[
         {"user_id": "u1", "turn_index": 0,
          "submit": 1000, "ttft": 500.0, "complete": 2000},
@@ -3674,6 +3693,7 @@ def test_read_cpu_util_bound_set_unaffected_by_idle_cpus_outside_binding(tmp_pat
     the bound view, even though the host-wide average is ~50%
     (because the unused HT siblings / unused socket are idle)."""
     import os
+
     from simulator import telemetry as t
 
     fake_proc = tmp_path / "stat"
@@ -3727,6 +3747,7 @@ def test_read_cpu_util_falls_back_to_host_when_no_binding(tmp_path, monkeypatch)
     consumer can read either field without special-casing.
     """
     import os
+
     from simulator import telemetry as t
 
     fake_proc = tmp_path / "stat"
@@ -3763,6 +3784,7 @@ def test_read_cpu_util_first_call_returns_nones(tmp_path, monkeypatch) -> None:
     skip the sample. The state dict is still populated for the next
     call's delta."""
     import os
+
     from simulator import telemetry as t
 
     fake_proc = tmp_path / "stat"
@@ -3902,6 +3924,7 @@ def test_export_tolerates_legacy_db_missing_cpu_util_bound_avg(tmp_path) -> None
     schema. Without this, ``make export`` / ``make dashboard`` fails
     with ``OperationalError: no such column`` on every legacy run."""
     import sqlite3
+
     from simulator.export import export_dir
 
     rd = tmp_path / "run_01"

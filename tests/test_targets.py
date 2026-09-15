@@ -3,14 +3,13 @@ hardware requirements, and the remote host-telemetry gate."""
 
 from __future__ import annotations
 
-from simulator.config import Config, EngineConfig
+from simulator.config import EngineConfig
 from simulator.engines import RemoteEngine, VllmCudaEngine, make_engine
 from simulator.preflight import (
     GpuInfo,
     HardwareRequirements,
     check_gpu_requirements,
 )
-
 
 # ── engine registry + config plumbing ─────────────────────────────────
 

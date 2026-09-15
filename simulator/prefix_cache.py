@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-
 # Tunables — these are heuristics for the validation verdict, not hard SLAs.
 # A "hit" session is one whose later-turn TTFT is at most this fraction
 # of its turn-0 TTFT. 0.5 is a deliberate floor: a 50% TTFT reduction is

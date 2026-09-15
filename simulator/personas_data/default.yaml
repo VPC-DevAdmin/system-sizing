@@ -1,0 +1,181 @@
+# Canonical persona & cohort definitions (packaged with capsim).
+#
+# This file IS the persona catalog — simulator/personas.py just loads
+# it. Site-local additions and overrides go in ``config/personas/*.yaml``
+# next to your checkout (same format, merged over these at load; an id
+# collision replaces the packaged entry). The persona editor in the
+# capsim UI writes those files.
+#
+# Distribution specs (see simulator/distributions.py):
+#   {lognormal: {median: X, sigma: Y}}   median-parameterised log-normal
+#   {discrete: {value: weight, ...}}     weighted choice over numbers
+#   {constant: X}                        degenerate
+#
+# Useful lognormal sigma reference points: 0.35 tight, 0.5 typical,
+# 0.7 heavy-tailed, 1.0 very heavy-tailed (P90 ≈ 3.6× median).
+#
+# Per persona:
+#   read_time_seconds:    residual reading after the stream ends (users
+#                         read concurrently with streaming; sized as
+#                         output_tokens × max(0, 200ms − typical TPOT)).
+#   active_think_seconds: deliberation + composing the next message.
+#   sla:                  two-tier thresholds — target_* is "user would
+#                         call it fast", failure_* is "user abandons".
+#                         Capacity gates on FAILURE rate; target rate is
+#                         the informational quality signal.
+#   timeouts:             three-tier abort policy multipliers (optional;
+#                         defaults pre_ttft_factor=5, inter_token_factor=20,
+#                         hard_timeout_s=900).
+
+personas:
+  quick_lookup:
+    description: "Short factual queries with brief responses; FAQ-style"
+    input_tokens: {lognormal: {median: 350, sigma: 0.35}}
+    output_tokens: {lognormal: {median: 60, sigma: 0.4}}
+    turns_per_session: {discrete: {1: 0.7, 2: 0.2, 3: 0.07, 4: 0.03}}
+    sessions_before_leaving: {discrete: {3: 0.2, 5: 0.3, 10: 0.3, 20: 0.2}}
+    inter_session_gap_seconds: {lognormal: {median: 180, sigma: 1.0}}
+    # 60-token response at healthy ~75ms TPOT: user falls ~8s behind.
+    read_time_seconds: {lognormal: {median: 8, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 10, sigma: 0.6}}
+    sla:
+      ttft_target_seconds: 5.0
+      ttft_failure_seconds: 15.0
+      tpot_target_ms: 150.0
+      tpot_failure_ms: 225.0
+
+  conversational:
+    description: "Multi-turn back-and-forth with growing chat history"
+    input_tokens: {lognormal: {median: 180, sigma: 0.5}}
+    output_tokens: {lognormal: {median: 220, sigma: 0.45}}
+    turns_per_session: {discrete: {3: 0.25, 5: 0.35, 8: 0.25, 12: 0.15}}
+    sessions_before_leaving: {discrete: {2: 0.3, 4: 0.4, 8: 0.3}}
+    inter_session_gap_seconds: {lognormal: {median: 600, sigma: 1.0}}
+    # 220-token response: residual ~28s; conversational compose ~25s.
+    read_time_seconds: {lognormal: {median: 28, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 25, sigma: 0.6}}
+    sla:
+      ttft_target_seconds: 9.0
+      ttft_failure_seconds: 30.0
+      tpot_target_ms: 150.0
+      tpot_failure_ms: 225.0
+
+  writer:
+    description: "Drafting emails, content, and other prose; no long source documents"
+    input_tokens: {lognormal: {median: 500, sigma: 0.5}}
+    output_tokens: {lognormal: {median: 350, sigma: 0.4}}
+    turns_per_session: {discrete: {1: 0.5, 2: 0.3, 3: 0.15, 5: 0.05}}
+    sessions_before_leaving: {discrete: {3: 0.3, 6: 0.4, 12: 0.3}}
+    inter_session_gap_seconds: {lognormal: {median: 900, sigma: 1.0}}
+    # 350-token draft: residual ~44s; review + edit ~70s.
+    read_time_seconds: {lognormal: {median: 44, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 70, sigma: 0.7}}
+    sla:
+      ttft_target_seconds: 15.0
+      ttft_failure_seconds: 45.0
+      tpot_target_ms: 180.0
+      tpot_failure_ms: 270.0
+
+  document_qa:
+    description: "Question answering over 4K+ token source documents"
+    input_tokens: {lognormal: {median: 3500, sigma: 0.5}}
+    output_tokens: {lognormal: {median: 280, sigma: 0.4}}
+    turns_per_session: {discrete: {1: 0.4, 2: 0.3, 4: 0.2, 7: 0.1}}
+    sessions_before_leaving: {discrete: {2: 0.4, 4: 0.4, 8: 0.2}}
+    inter_session_gap_seconds: {lognormal: {median: 1200, sigma: 1.0}}
+    # 280-token answer: residual ~35s; analysts cross-reference ~115s.
+    read_time_seconds: {lognormal: {median: 35, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 115, sigma: 0.6}}
+    sla:
+      ttft_target_seconds: 30.0
+      ttft_failure_seconds: 90.0
+      tpot_target_ms: 200.0
+      tpot_failure_ms: 300.0
+
+  code_assist:
+    description: "Pair-programming with code context in the prompt"
+    input_tokens: {lognormal: {median: 1200, sigma: 0.6}}
+    output_tokens: {lognormal: {median: 450, sigma: 0.5}}
+    turns_per_session: {discrete: {2: 0.3, 4: 0.35, 8: 0.25, 15: 0.1}}
+    sessions_before_leaving: {discrete: {4: 0.3, 8: 0.4, 16: 0.3}}
+    inter_session_gap_seconds: {lognormal: {median: 420, sigma: 1.0}}
+    # 450-token code: residual ~56s (code reads slower than prose);
+    # sustained pair-programming deliberation ~180s.
+    read_time_seconds: {lognormal: {median: 56, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 180, sigma: 0.7}}
+    sla:
+      ttft_target_seconds: 20.0
+      ttft_failure_seconds: 60.0
+      tpot_target_ms: 220.0
+      tpot_failure_ms: 330.0
+
+  long_form_generator:
+    # Decode-stress counterweight to document_qa: short input, very
+    # long output, so cohorts mixing both exercise both halves of the
+    # engine pipeline.
+    description: >-
+      Long-form content generation — extended drafts, articles,
+      reports. Short prompt, very long output (decode-bound).
+    input_tokens: {lognormal: {median: 200, sigma: 0.5}}
+    output_tokens: {lognormal: {median: 3000, sigma: 0.4}}
+    turns_per_session: {discrete: {2: 0.75, 3: 0.25}}
+    # Deprecated under per-session respawn; retained for shape compat.
+    sessions_before_leaving: {discrete: {1: 1.0}}
+    inter_session_gap_seconds: {lognormal: {median: 1200, sigma: 1.0}}
+    # 3000-token output: 90s residual reading, 120s review + compose.
+    read_time_seconds: {lognormal: {median: 90, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 120, sigma: 0.6}}
+    sla:
+      ttft_target_seconds: 15.0
+      ttft_failure_seconds: 45.0
+      tpot_target_ms: 180.0
+      tpot_failure_ms: 270.0
+
+# Cohorts are *team mixes* — blended workloads representing realistic
+# business types. Weights must sum to 1.0. Single-persona runs use the
+# run-persona verb (ephemeral cohort), not entries here.
+cohorts:
+  chat_heavy:
+    name: "Customer support team"
+    description: "Frontline support: customer service reps, sales, inventory checks"
+    persona_weights:
+      quick_lookup: 0.60
+      conversational: 0.30
+      writer: 0.10
+
+  general_knowledge:
+    name: "General knowledge work"
+    description: "Typical knowledge work: mixed chat, writing, light research"
+    persona_weights:
+      quick_lookup: 0.30
+      conversational: 0.30
+      writer: 0.25
+      long_form_generator: 0.10
+      document_qa: 0.05
+
+  writer_dominant:
+    name: "Marketing / content team"
+    description: "Marketing, communications, content team"
+    persona_weights:
+      writer: 0.40
+      long_form_generator: 0.30
+      conversational: 0.20
+      quick_lookup: 0.10
+
+  software_engineering:
+    name: "Software engineering team"
+    description: "Software engineering team using AI assistance for code work"
+    persona_weights:
+      code_assist: 0.50
+      long_form_generator: 0.15
+      quick_lookup: 0.15
+      conversational: 0.15
+      document_qa: 0.05
+
+  analyst_team:
+    name: "Analyst team"
+    description: "Legal, finance, research analysts working over long documents"
+    persona_weights:
+      document_qa: 0.70
+      writer: 0.20
+      long_form_generator: 0.10

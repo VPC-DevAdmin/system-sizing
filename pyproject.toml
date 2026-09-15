@@ -42,4 +42,14 @@ simulator = "simulator.cli:app"
 include = ["simulator*"]
 
 [tool.setuptools.package-data]
-simulator = ["export_schema/*.json", "ui/*", "ui/vendor/*"]
+simulator = ["export_schema/*.json", "ui/*", "ui/vendor/*", "personas_data/*.yaml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Correctness (E/F), bugbear (B), and import hygiene (I). B008 is
+# excluded deliberately: typer.Option()-in-default is the Typer idiom.
+select = ["E4", "E7", "E9", "F", "I", "B"]
+ignore = ["B008"]

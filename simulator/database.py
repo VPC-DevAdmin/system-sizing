@@ -469,7 +469,7 @@ class Database:
                 f"this code's {SCHEMA_VERSION} — upgrade the simulator "
                 f"package to open this DB."
             )
-        for version, description, apply in MIGRATIONS:
+        for version, _description, apply in MIGRATIONS:
             if version <= current:
                 continue
             apply(self._conn)

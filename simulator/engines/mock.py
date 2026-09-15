@@ -119,7 +119,7 @@ def _build_app(cfg, state: dict):
                 )
                 await asyncio.sleep(ttft_s)
                 yield _chunk({"role": "assistant", "content": ""})
-                for i in range(max_tokens):
+                for _ in range(max_tokens):
                     await asyncio.sleep(
                         cfg.mock_tpot_ms / 1000.0 * load * _jitter()
                     )

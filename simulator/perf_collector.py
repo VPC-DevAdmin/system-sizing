@@ -304,11 +304,11 @@ class PerfStatCollector:
         local = agg.get("mem_load_l3_miss_retired.local_dram")
         remote = agg.get("mem_load_l3_miss_retired.remote_dram")
         if local is not None or remote is not None:
-            l = local or 0.0
+            lo = local or 0.0
             r = remote or 0.0
-            denom = l + r
+            denom = lo + r
             if denom > 0:
-                canonical["mem_local_fraction"] = l / denom
+                canonical["mem_local_fraction"] = lo / denom
                 canonical["mem_remote_fraction"] = r / denom
 
         # AMX: handle both symbolic names and the raw-event renaming.

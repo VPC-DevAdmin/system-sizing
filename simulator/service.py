@@ -953,9 +953,15 @@ def create_app(
             # for the kernel to release the flock.
             ext = _lock_state() or {}
             pid = ext.get("pid")
-            if pid:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    _os.killpg(_os.getpgid(int(pid)), _signal.SIGTERM)
+            if not pid:
+                raise HTTPException(
+                    409, "an optimizer holds the lock but its PID is "
+                         "unreadable (started by an older build) — kill "
+                         "the engine_optimizer process on the host, or "
+                         "let it finish",
+                )
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                _os.killpg(_os.getpgid(int(pid)), _signal.SIGTERM)
 
             def _wait_released() -> None:
                 deadline = time.time() + 20

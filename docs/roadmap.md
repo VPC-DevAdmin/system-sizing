@@ -137,10 +137,21 @@ ready → sweep` produces a knee curve with GPU-attributed bottleneck evidence.
 
 ---
 
-## Phase 2 — Control-plane service + live telemetry bus
+## Phase 2 — Control-plane service + live telemetry bus ✅ (2026-09-15)
 
 Goal: everything the Makefile/CLI can do is callable over HTTP, and telemetry
 streams to subscribers in real time.
+
+Shipped with two notes. (1) The rich-TUI dashboard was NOT rewritten as a bus
+subscriber: it runs in a separate process over SSH and polls the DB, which the
+in-process bus can't serve — it stays as-is, and the live view moves to the
+browser (a bus/WebSocket client) in Phase 3. (2) 2.4's measurement-math
+coverage largely predated this phase (steppers, Wilson CI, and timeline each
+had extensive fixture tests); the piece that was genuinely missing — a
+mock-engine end-to-end integration test through the real HTTP/SSE/client/
+measurement/DB/export path — now runs in ~5 s in CI, plus the same flow driven
+through the service API with events observed on the WebSocket. Service binds
+127.0.0.1:8321 by default, no auth by design.
 
 ### 2.1 Service
 - FastAPI app: `capsim serve` (localhost by default, single-operator, no auth).

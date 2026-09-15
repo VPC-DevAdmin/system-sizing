@@ -66,6 +66,19 @@
             timeouts measure engines — not your network.</div></div>
         <button id="models-refresh" class="small" style="margin-left:auto">Refresh</button>
       </div>
+      <div class="row wrap" style="margin-bottom:10px">
+        <label>Family <select id="mf-family"><option value="all">All</option></select></label>
+        <label>Precision <select id="mf-quant"><option value="all">All</option></select></label>
+        <label>Status
+          <select id="mf-status">
+            <option value="all">All</option>
+            <option value="cached">Cached / downloading</option>
+            <option value="missing">Not downloaded</option>
+          </select></label>
+        <label style="flex:1;min-width:160px">Filter
+          <input id="mf-search" placeholder="name contains…"></label>
+        <span id="mf-count" class="msg" style="align-self:end"></span>
+      </div>
       <table id="models-table">
         <thead><tr><th>Model</th><th>Quant</th><th>Referenced by</th><th>Status</th><th>Size</th><th></th></tr></thead>
         <tbody></tbody>

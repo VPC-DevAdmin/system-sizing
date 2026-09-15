@@ -1620,6 +1620,10 @@ const Models = {
     });
     $("#model-discover-btn").addEventListener("click", () => this.discover());
     $("#discover-sort").addEventListener("change", () => this.renderDiscovered());
+    for (const id of ["#mf-family", "#mf-quant", "#mf-status"]) {
+      $(id).addEventListener("change", () => this.renderTable());
+    }
+    $("#mf-search").addEventListener("input", () => this.renderTable());
     this.refresh();
   },
 
@@ -1752,11 +1756,47 @@ const Models = {
   async refresh() {
     let doc;
     try { doc = await api("/api/models"); } catch { return; }
+    this.doc = doc;
     $("#models-cache-dir").textContent = doc.cache_dir;
+    // (Re)build filter options, preserving the current selection.
+    const fill = (sel, values) => {
+      const prev = sel.value || "all";
+      sel.innerHTML = '<option value="all">All</option>' + values.map(v =>
+        `<option value="${v}" ${v === prev ? "selected" : ""}>${v}</option>`
+      ).join("");
+    };
+    const uniq = arr => [...new Set(arr.filter(Boolean))].sort();
+    fill($("#mf-family"), uniq(doc.models.map(m => m.series || m.family)));
+    fill($("#mf-quant"), uniq(doc.models.map(m => m.quant)));
+    this.renderTable();
+  },
+
+  renderTable() {
+    const doc = this.doc;
+    if (!doc) return;
+    const fam = $("#mf-family").value, quant = $("#mf-quant").value;
+    const status = $("#mf-status").value;
+    const q = $("#mf-search").value.trim().toLowerCase();
+    const active = m => {
+      const dl = doc.downloads[m.model];
+      return m.cached || m.partial || !!(dl && dl.running);
+    };
+    const rows = doc.models.filter(m =>
+      (fam === "all" || (m.series || m.family) === fam)
+      && (quant === "all" || m.quant === quant)
+      && (status === "all" || (status === "cached") === active(m))
+      && (!q || m.model.toLowerCase().includes(q)));
+    // Working set first: cached / downloading rows above the rest.
+    rows.sort((a, b) => (active(b) - active(a))
+      || (a.series || "").localeCompare(b.series || "")
+      || a.model.localeCompare(b.model));
+    $("#mf-count").textContent = rows.length === doc.models.length
+      ? `${rows.length} models`
+      : `${rows.length} of ${doc.models.length} models`;
     const tbody = $("#models-table tbody");
     tbody.innerHTML = "";
     let anyRunning = false;
-    for (const m of doc.models) {
+    for (const m of rows) {
       const dl = doc.downloads[m.model];
       const running = !!(dl && dl.running);
       anyRunning ||= running;

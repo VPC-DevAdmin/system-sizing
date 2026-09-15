@@ -164,8 +164,10 @@ def referenced_models(
             _add(entry["id"], f"catalog:{entry['family']}")
             meta[entry["id"]] = {
                 k: entry[k]
-                for k in ("family", "quant", "approx_size_gb",
-                          "min_vram_gb", "gated", "notes")
+                for k in ("family", "series", "quant", "approx_size_gb",
+                          "min_vram_gb", "gated", "moe", "specialty",
+                          "notes")
+                if k in entry
             }
     except CatalogError:
         pass          # a broken local overlay must not hide the rest

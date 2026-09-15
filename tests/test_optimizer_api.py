@@ -311,3 +311,93 @@ def test_search_history_archive_and_promote(tmp_path, monkeypatch) -> None:
         # Path traversal refused.
         assert client.get(
             "/api/optimizer/history/..%2Fsearch.json").status_code in (404, 422)
+
+
+def test_combined_group_view(tmp_path, monkeypatch) -> None:
+    """Runs over the SAME model set merge into one ranking (dedup by
+    candidate key, best score wins); a run with a different
+    measurement is excluded by fingerprint, never silently mixed."""
+    import json
+    import textwrap
+
+    from fastapi.testclient import TestClient
+
+    from simulator.search import load_space
+    from simulator.service import create_app
+
+    monkeypatch.chdir(tmp_path)
+    runs = tmp_path / "runs"
+    hist = runs / "engine_optimizer" / "history"
+    hist.mkdir(parents=True)
+
+    space_yaml = textwrap.dedent("""\
+        name: g
+        engine: vllm_cuda
+        device_groups: [[0, 1, 2, 3]]
+        model_variants:
+          bf16: {model: org/M, served_name: m}
+        dimensions:
+          tp: [1, 2]
+          dp: [1, 2]
+    """)
+    sp = hist / "search_A_space.yaml"
+    sp.write_text(space_yaml)
+    space = load_space(sp)
+
+    def _doc(evaluated, generated, measurement=None):
+        return {
+            "kind": "search", "space": "g", "space_file": str(sp),
+            "space_hash": space.space_hash(), "generated_at": generated,
+            "objective": {"kind": "sla_throughput"},
+            "measurement": measurement or {"input_tokens": 512,
+                                           "output_tokens": 256,
+                                           "ladder": [8, 32]},
+            "summary": {"evaluated": len(evaluated)},
+            "state": {"space_hash": space.space_hash(),
+                      "evaluated": evaluated},
+        }
+
+    cell = {"cell_name": "ladder_c0032", "samples": 32, "errors": 0,
+            "timeouts": 0, "ttft_p95_ms": 500.0, "tpot_p95_ms": 40.0,
+            "throughput_out_tok_s": 5000.0}
+    # Run A: dp shapes. Run B (the "addendum"): tp shapes + a repeat
+    # of one key with a WORSE score (the better one must survive).
+    (hist / "search_A_g.json").write_text(json.dumps(_doc({
+        "tp=1|dp=2": {"status": "ok", "score": 9000.0, "iteration": 0,
+                      "params": {"tp": 1, "dp": 2}, "config_name": "a1",
+                      "cells": [cell]},
+    }, "2026-09-15T20:00:00+00:00")))
+    (hist / "search_B_g.json").write_text(json.dumps(_doc({
+        "tp=2|dp=1": {"status": "ok", "score": 7000.0, "iteration": 0,
+                      "params": {"tp": 2, "dp": 1}, "config_name": "b1",
+                      "cells": [cell]},
+        "tp=1|dp=2": {"status": "ok", "score": 8500.0, "iteration": 0,
+                      "params": {"tp": 1, "dp": 2}, "config_name": "b2",
+                      "cells": [cell]},
+    }, "2026-09-15T21:00:00+00:00")))
+    # Different measurement: incomparable scores — must be excluded.
+    (hist / "search_C_g.json").write_text(json.dumps(_doc({
+        "tp=2|dp=2": {"status": "ok", "score": 99999.0, "iteration": 0,
+                      "params": {"tp": 2, "dp": 2}, "config_name": "c1",
+                      "cells": [cell]},
+    }, "2026-09-15T22:00:00+00:00",
+        measurement={"input_tokens": 128, "output_tokens": 64,
+                     "ladder": [4]})))
+
+    stub = tmp_path / "opt.py"
+    stub.write_text("import json; print(json.dumps("
+                    "{'profiles': {}, 'cells': [], 'default_profile': 'x'}))")
+    with TestClient(create_app(runs, optimizer_script=stub)) as client:
+        entries = client.get("/api/optimizer/history").json()
+        keys = {e["group_key"] for e in entries}
+        assert len(keys) == 1                     # same model set → one group
+        gk = keys.pop()
+
+        doc = client.get(f"/api/optimizer/combined/{gk}").json()
+        s = doc["summary"]
+        assert s["evaluated"] == 2                # merged + deduped
+        assert s["best"]["score"] == 9000.0       # better duplicate won
+        assert s["best"]["source"] == "search_A_g.json"
+        assert doc["promote_file"] == "search_A_g.json"
+        assert doc["excluded"] == ["search_C_g.json"]
+        assert "combined view of 2 run(s)" in s["done_reason"]

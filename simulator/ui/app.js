@@ -1298,6 +1298,7 @@ const Optimizer = {
     // Show the CURRENT work, not everything ever written: while an
     // optimizer runs, only its own mode's panel; otherwise whichever
     // result file is newer wins and the stale one hides.
+    this.currentGroup = status.search_group ?? null;
     this.refreshHistoryList();
     // Viewing an archived run: pin the panel to it — live polling
     // must not clobber what the operator chose to look at.
@@ -1327,17 +1328,49 @@ const Optimizer = {
   historyView: null,       // archive file name being viewed, or null
   historyDoc: null,
 
+  currentGroup: null,      // model-set group of the current run
+
+  /* Runs group by the MODEL SET they searched — a follow-up over the
+   * same models (the TP gap-fill) is an addendum to the same
+   * investigation, and each multi-run group gets a Combined entry
+   * that merges the evidence. Different model sets never mix. */
   async refreshHistoryList() {
     let entries;
     try { entries = await api("/api/optimizer/history"); } catch { return; }
     const sel = $("#opt-history");
     const prev = sel.value;
-    sel.innerHTML = '<option value="">current</option>' + entries.map(e =>
-      `<option value="${e.file}" ${e.file === prev ? "selected" : ""}>
-        ${(e.generated_at || "").slice(0, 16).replace("T", " ")} ·
-        ${e.space} · ${e.evaluated} evals ·
-        best ${e.best_score == null ? "—" : Math.round(e.best_score)}
-      </option>`).join("");
+    const groups = new Map();      // key -> {label, entries, hasCurrent}
+    if (this.currentGroup?.key) {
+      groups.set(this.currentGroup.key, {
+        label: this.currentGroup.label, entries: [], hasCurrent: true,
+      });
+    }
+    for (const e of entries) {
+      const key = e.group_key || "ungrouped";
+      if (!groups.has(key)) {
+        groups.set(key, { label: e.group_label || "other runs",
+                          entries: [], hasCurrent: false });
+      }
+      groups.get(key).entries.push(e);
+    }
+    const opt = (value, text) =>
+      `<option value="${value}" ${value === prev ? "selected" : ""}>${text}</option>`;
+    let html = opt("", "current");
+    for (const [key, g] of groups) {
+      const runCount = g.entries.length + (g.hasCurrent ? 1 : 0);
+      if (!g.entries.length) continue;
+      html += `<optgroup label="${g.label}">`;
+      if (runCount > 1 && key !== "ungrouped") {
+        html += opt(`combined:${key}`,
+          `★ Combined — ${runCount} runs, merged ranking`);
+      }
+      html += g.entries.map(e => opt(e.file,
+        `${(e.generated_at || "").slice(0, 16).replace("T", " ")} · ` +
+        `${e.space} · ${e.evaluated} evals · best ` +
+        `${e.best_score == null ? "—" : Math.round(e.best_score)}`)).join("");
+      html += "</optgroup>";
+    }
+    sel.innerHTML = html;
   },
 
   async showHistory() {
@@ -1348,8 +1381,9 @@ const Optimizer = {
       return;
     }
     try {
-      this.historyDoc = await api(
-        `/api/optimizer/history/${encodeURIComponent(name)}`);
+      this.historyDoc = name.startsWith("combined:")
+        ? await api(`/api/optimizer/combined/${name.slice(9)}`)
+        : await api(`/api/optimizer/history/${encodeURIComponent(name)}`);
       this.historyView = name;
       this.renderResults(null);
       this.renderSearch(this.historyDoc);
@@ -1536,11 +1570,19 @@ const Optimizer = {
   async promote(source, configName) {
     let r;
     try {
+      // Promote target: a plain archived run promotes from its file;
+      // the Combined view promotes the overall winner from ITS source
+      // run (promote_file; null = the current live results).
+      let file = null;
+      if (source === "search" && this.historyView) {
+        file = this.historyDoc?.kind === "combined"
+          ? this.historyDoc.promote_file
+          : this.historyView;
+      }
       r = await api("/api/optimizer/promote", {
         method: "POST",
         body: JSON.stringify({ source, config_name: configName ?? null,
-                               file: source === "search"
-                                 ? this.historyView : null }),
+                               file }),
       });
     } catch (e) {
       this.msg(e.message, "error");

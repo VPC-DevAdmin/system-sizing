@@ -773,6 +773,52 @@ def create_app(
             doc["space_file"] = str(space_copy)
         (_history_dir / f"{base}.json").write_text(json.dumps(doc, indent=2))
 
+    def _space_models(space_file) -> list[str]:
+        import yaml as _yaml
+        try:
+            raw = _yaml.safe_load(Path(space_file).read_text()) or {}
+            return sorted(str(v.get("model"))
+                          for v in (raw.get("model_variants") or {}).values()
+                          if isinstance(v, dict) and v.get("model"))
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _group_of(models: list[str]) -> Optional[dict]:
+        """Runs are grouped by the MODEL SET they searched: a run over
+        the same models is more evidence about the same question (the
+        TP gap-fill was an addendum to the dp run, not a new
+        investigation); a run over different models is a different
+        question and never mixes."""
+        if not models:
+            return None
+        import hashlib
+        key = hashlib.sha256("\n".join(models).encode()).hexdigest()[:10]
+        try:
+            from .model_catalog import load_model_catalog
+            series = {e["series"]: 1 for e in load_model_catalog()
+                      if e["id"] in set(models)}
+            label = " + ".join(sorted(series)) if series else "custom"
+        except Exception:  # noqa: BLE001
+            label = "custom"
+        return {"key": key, "label": f"{label} ({len(models)} models)",
+                "models": models}
+
+    def _doc_summary_entry(doc: dict, file_name: str) -> dict:
+        s = doc.get("summary") or {}
+        best = s.get("best") or {}
+        group = _group_of(_space_models(doc.get("space_file") or ""))
+        return {
+            "file": file_name,
+            "space": doc.get("space"),
+            "generated_at": doc.get("generated_at"),
+            "evaluated": s.get("evaluated"),
+            "done_reason": s.get("done_reason"),
+            "best_score": best.get("score"),
+            "best_key": best.get("key"),
+            "group_key": group and group["key"],
+            "group_label": group and group["label"],
+        }
+
     def _history_entries() -> list[dict]:
         if not _history_dir.exists():
             return []
@@ -782,18 +828,111 @@ def create_app(
                 doc = json.loads(p.read_text())
             except (OSError, json.JSONDecodeError):
                 continue
-            s = doc.get("summary") or {}
-            best = s.get("best") or {}
-            out.append({
-                "file": p.name,
-                "space": doc.get("space"),
-                "generated_at": doc.get("generated_at"),
-                "evaluated": s.get("evaluated"),
-                "done_reason": s.get("done_reason"),
-                "best_score": best.get("score"),
-                "best_key": best.get("key"),
-            })
+            out.append(_doc_summary_entry(doc, p.name))
         return out
+
+    def _combined_group(group_key: str) -> dict:
+        """Merge every run of one model-set group — history plus the
+        current run — into a single ranking. Evaluations dedupe by
+        canonical candidate key (best score wins); runs whose
+        objective or measurement fingerprint differs from the group's
+        newest run are EXCLUDED and named, never silently mixed."""
+        from .search import Objective, best_rung
+
+        docs: list[tuple[Optional[str], dict]] = []   # (file|None=current, doc)
+        if _search_out.exists():
+            try:
+                docs.append((None, json.loads(_search_out.read_text())))
+            except (OSError, json.JSONDecodeError):
+                pass
+        if _history_dir.exists():
+            for p in sorted(_history_dir.glob("search_*.json"), reverse=True):
+                try:
+                    docs.append((p.name, json.loads(p.read_text())))
+                except (OSError, json.JSONDecodeError):
+                    continue
+        group_docs = []
+        for fname, doc in docs:
+            g = _group_of(_space_models(doc.get("space_file") or ""))
+            if g and g["key"] == group_key:
+                group_docs.append((fname, doc))
+        if not group_docs:
+            raise HTTPException(404, f"no runs in group '{group_key}'")
+
+        # Comparable scores only: group by (objective, measurement)
+        # fingerprint and keep the MAJORITY cohort (ties go to the
+        # cohort containing the newest run) — one oddball run must
+        # not evict the rest of the evidence.
+        def _fp(doc: dict) -> str:
+            return json.dumps(
+                [doc.get("objective"), doc.get("measurement")],
+                sort_keys=True)
+        counts: dict[str, int] = {}
+        for _f, doc in group_docs:
+            counts[_fp(doc)] = counts.get(_fp(doc), 0) + 1
+        newest_fp = _fp(max(
+            group_docs, key=lambda fd: fd[1].get("generated_at") or "")[1])
+        fingerprint = max(
+            counts, key=lambda f: (counts[f], f == newest_fp))
+        included, excluded = [], []
+        for fname, doc in group_docs:
+            if _fp(doc) == fingerprint:
+                included.append((fname, doc))
+            else:
+                excluded.append(fname or "current")
+
+        ref = included[0][1]
+        objective = Objective(**(ref.get("objective") or {}))
+        merged: dict[str, tuple[dict, Optional[str]]] = {}
+        for fname, doc in included:
+            evaluated = (doc.get("state") or {}).get("evaluated") or {}
+            for k, e in evaluated.items():
+                if e.get("status") != "ok" or e.get("score") is None:
+                    continue
+                if k not in merged or e["score"] > merged[k][0]["score"]:
+                    merged[k] = (e, fname)
+        ranked = sorted(merged.items(), key=lambda kv: kv[1][0]["score"],
+                        reverse=True)
+        top = [{
+            "key": k, "score": e["score"], "params": e.get("params"),
+            "iteration": e.get("iteration"),
+            "config_name": e.get("config_name"),
+            "best_rung": best_rung(e.get("cells") or [], objective),
+            "source": src or "current",
+        } for k, (e, src) in ranked[:10]]
+        best = top[0] if top else None
+        group = _group_of(_space_models(ref.get("space_file") or ""))
+        return {
+            "kind": "combined",
+            "space": group["label"] if group else group_key,
+            "generated_at": max(
+                (d.get("generated_at") or "" for _f, d in included),
+                default=""),
+            "runs": [f or "current" for f, _d in included],
+            "excluded": excluded,
+            # The winner still promotes: from its source run's file
+            # (None = the current live results).
+            "promote_file": (ranked[0][1][1] if ranked else None),
+            "summary": {
+                "evaluated": len(merged),
+                "ok": len(merged),
+                "failed": 0,
+                "iterations": [],
+                "done_reason": (
+                    f"combined view of {len(included)} run(s)"
+                    + (f"; {len(excluded)} excluded "
+                       f"(different objective/measurement)"
+                       if excluded else "")),
+                "best": best,
+                "top": top,
+            },
+        }
+
+    @app.get("/api/optimizer/combined/{group_key}")
+    async def optimizer_combined(group_key: str) -> dict:
+        if not group_key.isalnum():
+            raise HTTPException(422, "bad group key")
+        return await asyncio.to_thread(_combined_group, group_key)
 
     @app.get("/api/optimizer/history")
     async def optimizer_history() -> list[dict]:
@@ -898,6 +1037,10 @@ def create_app(
             "search_results": search_results,
             "search_out_path": str(_search_out),
             "arena_space": arena_space,
+            # Model-set group of the current run, for history grouping.
+            "search_group": (
+                _group_of(_space_models(search_results.get("space_file")))
+                if search_results else None),
         }
         if opt:
             out["active"] = {

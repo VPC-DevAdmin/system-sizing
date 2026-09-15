@@ -17,6 +17,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
+# Bump SCHEMA_VERSION whenever SCHEMA changes shape, and add a matching
+# entry to MIGRATIONS below that lifts an existing DB to the new shape.
+# The version is stamped into SQLite's ``PRAGMA user_version``; DBs from
+# before versioning existed read as 0 and get every migration (each one
+# is idempotent, so a partially-lifted legacy DB is fine too).
+SCHEMA_VERSION = 2
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cohort_run (
     cohort_run_id TEXT PRIMARY KEY,
@@ -34,7 +41,13 @@ CREATE TABLE IF NOT EXISTS cohort_run (
     -- token-level hit rate alongside the per-session TTFT analysis.
     prefix_cache_engine_hits INTEGER,
     prefix_cache_engine_queries INTEGER,
-    prefix_cache_engine_hit_rate REAL
+    prefix_cache_engine_hit_rate REAL,
+    -- JSON {collector_name: status} summary of which telemetry
+    -- collectors actually produced data during this run ("ok",
+    -- "no_data", "disabled", "perf_not_found", ...). Echoed into the
+    -- export's ``collectors`` block so downstream consumers know what
+    -- evidence backs the bottleneck attribution.
+    collectors_json TEXT
 );
 
 -- One row per ramp step. Measurement-window aggregates (PMU, IMC
@@ -192,6 +205,10 @@ CREATE TABLE IF NOT EXISTS measurement_telemetry (
     prefix_cache_hits INTEGER,
     prefix_cache_misses INTEGER,
     cpu_util_avg REAL,
+    -- Bound-set CPU util: mean across only the engine's pinned cores.
+    -- ``cpu_util_avg`` stays host-wide (dilluted by idle cores outside
+    -- the cpuset); this is the actual workload-utilization number.
+    cpu_util_bound_avg REAL,
     memory_used_gb REAL,
     engine_rss_gb REAL,
     freq_mhz_mean REAL,
@@ -250,6 +267,118 @@ _AGGREGATE_COLUMNS: list[tuple[str, str]] = [
 AGGREGATE_COLUMN_NAMES: frozenset[str] = frozenset(c for c, _ in _AGGREGATE_COLUMNS)
 
 
+# ── Versioned migrations ─────────────────────────────────────────────
+#
+# Each migration lifts a DB from version N-1 to N and must be
+# idempotent (pre-versioning DBs may already have any subset of the
+# changes — they were applied ad hoc before the version stamp existed).
+# The write path (this class) migrates on open; the export/dashboard
+# read path deliberately opens read-only and instead tolerates missing
+# columns via presence-filtering (see export._present_columns).
+
+
+def _ensure_columns(
+    conn: sqlite3.Connection, table: str, columns: list[tuple[str, str]],
+) -> None:
+    """Idempotent ALTER TABLE ADD COLUMN: add any of ``columns`` that
+    isn't already on ``table``. New DBs come out of SCHEMA with
+    everything; existing DBs get lifted here."""
+    existing = {
+        r["name"] for r in conn.execute(f"PRAGMA table_info({table})")
+    }
+    for col, col_type in columns:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+
+
+def _migration_1_pre_versioning_lifts(conn: sqlite3.Connection) -> None:
+    """Consolidates every ad-hoc column lift from before versioning:
+    aggregate-table collapse, snapshot progress columns, prefix-cache
+    scrape, target-miss split, reasoning-model columns, bound-set CPU
+    util. A DB that already has some of these is fine — each step is
+    an idempotent ensure."""
+    _ensure_columns(conn, "cohort_measurements", _AGGREGATE_COLUMNS)
+    _migrate_legacy_aggregate(conn)
+    _ensure_columns(
+        conn, "simulation_snapshots",
+        [("step_samples", "INTEGER"), ("step_target_samples", "INTEGER")],
+    )
+    _ensure_columns(
+        conn, "cohort_run",
+        [("prefix_cache_engine_hits", "INTEGER"),
+         ("prefix_cache_engine_queries", "INTEGER"),
+         ("prefix_cache_engine_hit_rate", "REAL")],
+    )
+    _ensure_columns(
+        conn, "turn_events",
+        [("error", "TEXT"),
+         ("ttft_target_miss", "INTEGER"),
+         ("tpot_target_miss", "INTEGER"),
+         ("ttfct_ms", "REAL"),
+         ("reasoning_tokens", "INTEGER")],
+    )
+    _ensure_columns(
+        conn, "cohort_measurements",
+        [("ttft_target_miss_rate", "REAL"),
+         ("tpot_target_miss_rate", "REAL"),
+         ("combined_target_miss_rate", "REAL"),
+         ("target_status", "TEXT"),
+         ("ttfct_p50_ms", "REAL"),
+         ("ttfct_p75_ms", "REAL"),
+         ("ttfct_p95_ms", "REAL"),
+         ("avg_reasoning_tokens", "REAL")],
+    )
+    _ensure_columns(
+        conn, "measurement_telemetry", [("cpu_util_bound_avg", "REAL")],
+    )
+
+
+def _migration_2_collectors_json(conn: sqlite3.Connection) -> None:
+    """Telemetry-collector status summary on cohort_run (roadmap 0.1)."""
+    _ensure_columns(conn, "cohort_run", [("collectors_json", "TEXT")])
+
+
+def _migrate_legacy_aggregate(conn: sqlite3.Connection) -> None:
+    """Copy legacy ``measurement_aggregate`` rows onto
+    ``cohort_measurements`` and drop the table.
+
+    No-op when the legacy table doesn't exist (any DB created after
+    the collapse). Ordered after the aggregate-column ensure so the
+    destination columns definitely exist.
+    """
+    has_legacy = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='measurement_aggregate'"
+    ).fetchone() is not None
+    if not has_legacy:
+        return
+    legacy_cols = [
+        r["name"]
+        for r in conn.execute("PRAGMA table_info(measurement_aggregate)")
+        if r["name"] != "measurement_id"
+    ]
+    if legacy_cols:
+        set_clause = ", ".join(
+            f"{c} = (SELECT a.{c} FROM measurement_aggregate a "
+            f"WHERE a.measurement_id = cohort_measurements.measurement_id)"
+            for c in legacy_cols
+        )
+        conn.execute(
+            f"UPDATE cohort_measurements SET {set_clause} "
+            f"WHERE measurement_id IN "
+            f"(SELECT measurement_id FROM measurement_aggregate)"
+        )
+    conn.execute("DROP TABLE measurement_aggregate")
+
+
+MIGRATIONS: list[tuple[int, str, Any]] = [
+    (1, "consolidate pre-versioning column lifts", _migration_1_pre_versioning_lifts),
+    (2, "cohort_run.collectors_json", _migration_2_collectors_json),
+]
+assert [v for v, _, _ in MIGRATIONS] == list(range(1, SCHEMA_VERSION + 1)), (
+    "MIGRATIONS must be contiguous 1..SCHEMA_VERSION"
+)
+
+
 class Database:
     """Thread-safe-enough wrapper around a single SQLite file."""
 
@@ -264,111 +393,39 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            # Fresh means an empty file: any pre-existing table (even a
+            # partial hand-built legacy DB) goes through migrations.
+            fresh = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+            ).fetchone() is None
             self._conn.executescript(SCHEMA)
-            self._ensure_aggregate_columns()
-            self._migrate_legacy_aggregate()
-            self._ensure_columns(
-                "simulation_snapshots",
-                [("step_samples", "INTEGER"),
-                 ("step_target_samples", "INTEGER")],
-            )
-            self._ensure_columns(
-                "cohort_run",
-                [("prefix_cache_engine_hits", "INTEGER"),
-                 ("prefix_cache_engine_queries", "INTEGER"),
-                 ("prefix_cache_engine_hit_rate", "REAL")],
-            )
-            self._ensure_columns("turn_events", [("error", "TEXT")])
-            # Target-miss tracking (target/failure SLA split).
-            self._ensure_columns(
-                "cohort_measurements",
-                [("ttft_target_miss_rate", "REAL"),
-                 ("tpot_target_miss_rate", "REAL"),
-                 ("combined_target_miss_rate", "REAL"),
-                 ("target_status", "TEXT")],
-            )
-            self._ensure_columns(
-                "turn_events",
-                [("ttft_target_miss", "INTEGER"),
-                 ("tpot_target_miss", "INTEGER")],
-            )
-            # Reasoning-model support — see TurnEvent / streaming.py.
-            self._ensure_columns(
-                "turn_events",
-                [("ttfct_ms", "REAL"),
-                 ("reasoning_tokens", "INTEGER")],
-            )
-            self._ensure_columns(
-                "cohort_measurements",
-                [("ttfct_p50_ms", "REAL"),
-                 ("ttfct_p75_ms", "REAL"),
-                 ("ttfct_p95_ms", "REAL"),
-                 ("avg_reasoning_tokens", "REAL")],
-            )
-            # Bound-set CPU util (mean utilization across only the
-            # cores the engine is pinned to). The pre-existing
-            # ``cpu_util_avg`` is host-wide and on a multi-socket or
-            # HT-enabled host gets diluted by idle cores outside the
-            # cpuset (e.g. a 64-core cpuset on a 128-logical-CPU
-            # host caps at ~50% even when the engine is pegged).
-            # Keep both: host-wide for "did anything else compete?"
-            # forensics, bound for actual workload utilization.
-            self._ensure_columns(
-                "measurement_telemetry",
-                [("cpu_util_bound_avg", "REAL")],
-            )
+            if fresh:
+                # New DB: SCHEMA already carries every column — stamp
+                # the current version, no migrations to run.
+                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            else:
+                self._apply_migrations()
 
-    def _ensure_columns(
-        self, table: str, columns: list[tuple[str, str]],
-    ) -> None:
-        """Idempotent ALTER TABLE ADD COLUMN: add any of ``columns``
-        that isn't already on ``table``. New DBs come out of SCHEMA
-        with everything; legacy DBs need this lift on first open.
+    def _apply_migrations(self) -> None:
+        """Lift an existing DB to SCHEMA_VERSION and stamp it.
+
+        Pre-versioning DBs read ``user_version`` 0 and get every
+        migration (all idempotent). A DB stamped NEWER than this code
+        is refused — writing into a shape we don't understand risks
+        silent corruption; upgrade the package instead.
         """
-        existing = {
-            r["name"]
-            for r in self._conn.execute(f"PRAGMA table_info({table})")
-        }
-        for col, col_type in columns:
-            if col not in existing:
-                self._conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
-                )
-
-    def _ensure_aggregate_columns(self) -> None:
-        """Lift any new aggregate columns onto cohort_measurements."""
-        self._ensure_columns("cohort_measurements", _AGGREGATE_COLUMNS)
-
-    def _migrate_legacy_aggregate(self) -> None:
-        """Copy legacy ``measurement_aggregate`` rows onto
-        ``cohort_measurements`` and drop the table.
-
-        No-op when the legacy table doesn't exist (any DB created after
-        the collapse). Ordered after ``_ensure_aggregate_columns`` so
-        the destination columns definitely exist.
-        """
-        has_legacy = self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='measurement_aggregate'"
-        ).fetchone() is not None
-        if not has_legacy:
-            return
-        legacy_cols = [
-            r["name"]
-            for r in self._conn.execute("PRAGMA table_info(measurement_aggregate)")
-            if r["name"] != "measurement_id"
-        ]
-        if legacy_cols:
-            set_clause = ", ".join(
-                f"{c} = (SELECT a.{c} FROM measurement_aggregate a "
-                f"WHERE a.measurement_id = cohort_measurements.measurement_id)"
-                for c in legacy_cols
+        current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"{self.path} has schema version {current}, newer than "
+                f"this code's {SCHEMA_VERSION} — upgrade the simulator "
+                f"package to open this DB."
             )
-            self._conn.execute(
-                f"UPDATE cohort_measurements SET {set_clause} "
-                f"WHERE measurement_id IN "
-                f"(SELECT measurement_id FROM measurement_aggregate)"
-            )
-        self._conn.execute("DROP TABLE measurement_aggregate")
+        for version, description, apply in MIGRATIONS:
+            if version <= current:
+                continue
+            apply(self._conn)
+            self._conn.execute(f"PRAGMA user_version = {version}")
 
     def close(self) -> None:
         with self._lock:

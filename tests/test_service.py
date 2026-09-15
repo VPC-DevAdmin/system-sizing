@@ -171,3 +171,44 @@ def test_bus_noop_without_subscribers() -> None:
     # Publishing with no subscribers must be safe from any context —
     # including outside an event loop.
     BUS.publish("t", {"x": 1})
+
+
+def test_ui_served_and_per_run_export(tmp_path, fast_persona) -> None:
+    """The packaged no-build UI is served same-origin, and the
+    per-run export endpoint builds on first request (Phase 3)."""
+    config_path = _write_mock_config(tmp_path)
+    with TestClient(create_app(tmp_path / "runs")) as client:
+        # Static UI at the root.
+        index = client.get("/")
+        assert index.status_code == 200
+        assert "<title>capsim</title>" in index.text
+        assert client.get("/app.js").status_code == 200
+        assert client.get("/app.css").status_code == 200
+        # API routes still win over the static mount.
+        assert client.get("/api/status").status_code == 200
+
+        # Per-run export 404s before any run exists…
+        assert client.get("/api/runs/run_01/export").status_code == 404
+
+        client.post("/api/runs", json={
+            "config": config_path,
+            "workload": {"kind": "persona", "id": "fast_svc"},
+            "new_run": True,
+            "pool_sizes": [2],
+        })
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            status = client.get("/api/status").json()
+            if status["active_run"] and not status["active_run"]["running"]:
+                break
+            time.sleep(0.3)
+        assert status["active_run"]["error"] is None
+
+        # …and builds + returns after the run.
+        doc = client.get("/api/runs/run_01/export").json()
+        assert doc["cohorts"][0]["id"] == "fast_svc"
+        # Second call reads the built file (still valid).
+        doc2 = client.get("/api/runs/run_01/export").json()
+        assert doc2["schema_version"] == doc["schema_version"]
+        # Path traversal refused.
+        assert client.get("/api/runs/..%2Fsecrets/export").status_code in (404, 422)

@@ -320,6 +320,26 @@ def create_app(runs_base: Path | str = Path("runs")) -> FastAPI:
             )
         return json.loads(p.read_text())
 
+    @app.get("/api/runs/{run_name}/export")
+    async def run_export(run_name: str, slim: bool = False) -> Any:
+        """Export JSON for one run_NN dir — reads the built file, or
+        builds it on first request (a few seconds on a big run.db).
+        Powers the UI's results + run-comparison views."""
+        if "/" in run_name or run_name.startswith("."):
+            raise HTTPException(422, "bad run name")
+        d = runs_base / run_name
+        if not (d / "run.db").exists():
+            raise HTTPException(404, f"no run.db in {d}")
+        fname = "buyer_page_data_slim.json" if slim else "buyer_page_data.json"
+        p = d / fname
+        if not p.exists():
+            from .export import export_dir
+            try:
+                await asyncio.to_thread(export_dir, d, p, slim=slim)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(500, f"export failed: {e}") from e
+        return json.loads(p.read_text())
+
     # ── live telemetry ────────────────────────────────────────────
 
     @app.websocket("/ws/telemetry")
@@ -334,6 +354,15 @@ def create_app(runs_base: Path | str = Path("runs")) -> FastAPI:
             pass
         finally:
             BUS.unsubscribe(q)
+
+    # ── UI (Phase 3) ──────────────────────────────────────────────
+    # No-build static frontend shipped as package data; same origin as
+    # the API and WebSocket, so no CORS. API routes above win — the
+    # mount only catches what they don't.
+    ui_dir = Path(__file__).parent / "ui"
+    if ui_dir.exists():
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/", StaticFiles(directory=ui_dir, html=True), name="ui")
 
     return app
 

@@ -26,7 +26,7 @@ dependencies = [
     "jsonschema>=4.21",
     # Control-plane service (capsim serve) + the mock engine's SSE server.
     "fastapi>=0.111",
-    "uvicorn>=0.30",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]
@@ -42,4 +42,4 @@ simulator = "simulator.cli:app"
 include = ["simulator*"]
 
 [tool.setuptools.package-data]
-simulator = ["export_schema/*.json"]
+simulator = ["export_schema/*.json", "ui/*", "ui/vendor/*"]

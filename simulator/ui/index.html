@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>capsim</title>
+<link rel="stylesheet" href="app.css">
+<!-- Vendored: benchmark boxes are often offline; no CDN dependency. -->
+<script src="vendor/chart.umd.min.js"></script>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">capsim</span>
+    <span class="sub">AI sizing &amp; capacity engine</span>
+  </div>
+  <nav id="tabs">
+    <button data-view="control" class="active">Run control</button>
+    <button data-view="live">Live telemetry</button>
+    <button data-view="results">Results</button>
+  </nav>
+  <div id="status-pill" class="pill idle">idle</div>
+</header>
+
+<!-- ── Run control ─────────────────────────────────────────────── -->
+<main id="view-control" class="view active">
+  <section class="panel">
+    <h2>Start a run</h2>
+    <div class="form-grid">
+      <label>Profile
+        <select id="profile-select"></select>
+      </label>
+      <label>Workload kind
+        <select id="workload-kind">
+          <option value="cohort">Cohort (team mix)</option>
+          <option value="persona">Persona (single archetype)</option>
+          <option value="sweep">Sweep (many workloads)</option>
+        </select>
+      </label>
+      <label id="workload-id-wrap">Workload
+        <select id="workload-id"></select>
+      </label>
+      <label id="sweep-type-wrap" hidden>Sweep type
+        <input id="sweep-type" value="all"
+               placeholder="all | personas | cohorts | a,b,c">
+      </label>
+      <label>Pool sizes <span class="hint">(optional, e.g. 8,16,32)</span>
+        <input id="pool-sizes" placeholder="default: powers of 2">
+      </label>
+      <label class="check"><input type="checkbox" id="adaptive"> Adaptive two-knee stepper</label>
+      <label class="check"><input type="checkbox" id="new-run"> New run dir (don't resume)</label>
+    </div>
+    <div class="row">
+      <button id="start-btn" class="primary">Start run</button>
+      <button id="stop-btn" class="danger" disabled>Stop run</button>
+      <span id="control-msg" class="msg"></span>
+    </div>
+    <div id="active-run-box" class="active-run" hidden></div>
+  </section>
+
+  <section class="panel">
+    <h2>Host <button id="doctor-btn" class="small">Run doctor</button></h2>
+    <div id="doctor-out" class="doctor">Doctor validates CPU, GPU stack, Docker, disk, telemetry permissions and network. Takes a few seconds.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Runs <button id="runs-refresh" class="small">Refresh</button></h2>
+    <table id="runs-table">
+      <thead><tr><th>Run</th><th>Cohort</th><th>Engine</th><th>Model</th>
+        <th>Steps</th><th>Status</th><th>Started</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<!-- ── Live telemetry ──────────────────────────────────────────── -->
+<main id="view-live" class="view">
+  <section class="panel statusbar">
+    <div class="stat"><span class="k">Phase</span><span id="live-phase" class="v">—</span></div>
+    <div class="stat"><span class="k">Pool</span><span id="live-pool" class="v">—</span></div>
+    <div class="stat"><span class="k">In flight</span><span id="live-inflight" class="v">—</span></div>
+    <div class="stat"><span class="k">Completed</span><span id="live-completed" class="v">—</span></div>
+    <div class="stat"><span class="k">Errors</span><span id="live-errors" class="v">—</span></div>
+    <div class="stat wide"><span class="k">Step progress</span>
+      <span id="live-progress" class="v">—</span>
+      <div class="bar"><div id="live-progress-bar"></div></div>
+    </div>
+    <div class="stat"><span class="k">WS</span><span id="ws-state" class="v">connecting…</span></div>
+  </section>
+
+  <div class="chart-grid">
+    <section class="panel"><h2>Pool &amp; in-flight requests</h2>
+      <canvas id="chart-pool"></canvas></section>
+    <section class="panel"><h2>TTFT — rolling p50 / p95 (ms)</h2>
+      <canvas id="chart-ttft"></canvas></section>
+    <section class="panel"><h2>TPOT — rolling p50 / p95 (ms)</h2>
+      <canvas id="chart-tpot"></canvas></section>
+    <section class="panel"><h2>Engine &amp; host</h2>
+      <canvas id="chart-host"></canvas></section>
+  </div>
+
+  <section class="panel">
+    <h2>Completed steps</h2>
+    <table id="steps-table">
+      <thead><tr><th>Step</th><th>Pool</th><th>Samples</th>
+        <th>Violation %</th><th>Target miss %</th>
+        <th>TTFT p95</th><th>TPOT p95</th><th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<!-- ── Results ─────────────────────────────────────────────────── -->
+<main id="view-results" class="view">
+  <section class="panel">
+    <div class="row wrap">
+      <label>Run <select id="result-run"></select></label>
+      <label>Cohort <select id="result-cohort"></select></label>
+      <button id="result-load" class="primary small">Load</button>
+      <button id="result-export-dl" class="small" disabled>Download export JSON</button>
+      <span id="result-msg" class="msg"></span>
+    </div>
+  </section>
+
+  <section class="panel" id="result-summary" hidden>
+    <h2 id="result-title"></h2>
+    <div id="landing-zones" class="zones"></div>
+    <div id="throughput-line" class="throughput"></div>
+  </section>
+
+  <div class="chart-grid" id="result-charts" hidden>
+    <section class="panel"><h2>Capacity knee — violation rate vs pool size</h2>
+      <canvas id="chart-knee"></canvas></section>
+    <section class="panel"><h2>Latency vs pool size</h2>
+      <canvas id="chart-latency"></canvas></section>
+  </div>
+
+  <section class="panel" id="bottleneck-panel" hidden>
+    <h2>Bottleneck</h2>
+    <div id="bottleneck-out"></div>
+  </section>
+
+  <section class="panel" id="step-detail-panel" hidden>
+    <h2 id="step-detail-title">Step detail</h2>
+    <div id="step-detail-out"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Compare knee curves</h2>
+    <div class="row wrap">
+      <select id="compare-pick"></select>
+      <button id="compare-add" class="small">Add to comparison</button>
+      <button id="compare-clear" class="small">Clear</button>
+    </div>
+    <canvas id="chart-compare"></canvas>
+  </section>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

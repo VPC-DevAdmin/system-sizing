@@ -180,9 +180,22 @@ through the service API with events observed on the WebSocket. Service binds
 
 ---
 
-## Phase 3 — The UI
+## Phase 3 — The UI ✅ (2026-09-15)
 
 Goal: run the benchmark end-to-end from a browser with ongoing telemetry graphs.
+
+Shipped as planned and verified in a live browser against a mock run: run
+control (profile + workload pickers, start/stop, doctor, run history), live
+telemetry (pool/in-flight, rolling TTFT/TPOT percentiles from turn events,
+KV/CPU/GPU chart, per-step progress bar, completed-steps table), and results
+(landing zones, knee chart with Wilson CI band + zone markers, latency vs
+pool, bottleneck evidence + collector statuses, click-through step detail,
+cross-run comparison overlay with lazy per-run export loading, export JSON
+download). Two deviations: Chart.js is VENDORED into the package rather than
+CDN-loaded — benchmark boxes are often offline (the wheel ships the UI as
+package data at simulator/ui/); and uvicorn moved to uvicorn[standard]
+because plain uvicorn has no WebSocket protocol (caught live — TestClient's
+in-process ASGI masks it). web/index.html retirement stays in Phase 4.
 
 - **Stack decision: stay no-build.** Chart.js + vanilla ES modules served by
   `capsim serve` (same origin as the API/WebSocket). The existing `web/` and

@@ -138,6 +138,17 @@ class EngineConfig:
     endpoint_api_key: str | None = None
     endpoint_metrics_url: str | None = None
 
+    # ── mock: in-process synthetic engine (roadmap 2.3) ───────────────
+    # Real OpenAI-compatible SSE server with a synthetic latency model:
+    # flat below mock_capacity_inflight concurrent requests, linear
+    # degradation past it — a tunable capacity knee with no hardware.
+    # For UI development, CI integration tests, and measurement
+    # fixtures.
+    mock_ttft_ms: float = 150.0
+    mock_tpot_ms: float = 15.0
+    mock_capacity_inflight: int = 8
+    mock_jitter: float = 0.1        # +-10% uniform; 0 for determinism
+
     # ── vllm_dual_socket: per-replica fields ──────────────────────────
     # Used when ``type == "vllm_dual_socket"`` — N vLLM-CPU containers
     # pinned to N different NUMA nodes. The simulator hash-routes
@@ -149,7 +160,7 @@ class EngineConfig:
 
     @property
     def base_url(self) -> str:
-        if self.type in ("vllm", "sglang", "vllm_cuda"):
+        if self.type in ("vllm", "sglang", "vllm_cuda", "mock"):
             return f"http://{self.host}:{self.port}/v1"
         if self.type == "vllm_dual_socket":
             return f"http://{self.host}:{self.litellm_port}/v1"

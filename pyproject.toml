@@ -24,6 +24,9 @@ dependencies = [
     "huggingface_hub[cli,hf_transfer]>=0.24",
     # Export-contract validation (capsim smoke gate + validate_export).
     "jsonschema>=4.21",
+    # Control-plane service (capsim serve) + the mock engine's SSE server.
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]

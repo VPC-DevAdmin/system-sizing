@@ -1,0 +1,49 @@
+# Profile: mock engine — the whole pipeline with zero hardware.
+#
+# A real in-process OpenAI-compatible SSE server with a synthetic
+# latency knee (flat below mock_capacity_inflight concurrent requests,
+# linear degradation past it). Use it to develop the UI, demo the
+# tool, or exercise the run → telemetry → DB → export pipeline on a
+# laptop:
+#
+#   capsim run --cohort chat_heavy --profile mock
+#   capsim serve                    # then start mock runs from the API/UI
+#
+# Simulation knobs are shrunk so a full cohort run completes in
+# minutes, not hours; the knee lands around pool ~24-48 depending on
+# the cohort's duty cycle (capacity_inflight=6 with chat-style ~15%
+# duty ≈ 40 concurrent sessions).
+
+engine:
+  type: mock
+  model_id: mock-model            # tokenizer falls back to the word heuristic
+  host: 127.0.0.1
+  port: 9100
+  startup_timeout_s: 30
+
+  mock_ttft_ms: 150
+  mock_tpot_ms: 12
+  mock_capacity_inflight: 6
+  mock_jitter: 0.1
+
+simulation:
+  target_samples_per_step: 40
+  warmup_min_duration_s: 5
+  warmup_max_duration_s: 30
+  convergence_window_s: 15
+  measurement_timeout_s: 240
+  max_total_duration_minutes: 60
+  request_timeout_s: 60
+
+telemetry:
+  # Host PMU / bandwidth / power are about the engine's host — for an
+  # in-process mock they'd just measure this laptop; keep the cheap
+  # ones and the engine metrics path (which the mock serves).
+  enable_pmu: false
+  enable_memory_bandwidth: false
+  enable_power: false
+  enable_engine_metrics: true
+  enable_gpu: false
+
+output:
+  db_directory: runs

@@ -1,6 +1,7 @@
 """Engine launchers."""
 
 from .base import Engine
+from .mock import MockEngine
 from .remote import RemoteEngine
 from .sglang import SGLangEngine
 from .vllm import VLLMEngine
@@ -19,6 +20,8 @@ def make_engine(engine_type: str, config) -> Engine:
         return VllmDualSocketEngine(config)
     if engine_type == "remote":
         return RemoteEngine(config)
+    if engine_type == "mock":
+        return MockEngine(config)
     raise ValueError(f"Unknown engine type: {engine_type}")
 
 
@@ -29,5 +32,6 @@ __all__ = [
     "SGLangEngine",
     "VllmDualSocketEngine",
     "RemoteEngine",
+    "MockEngine",
     "make_engine",
 ]

@@ -355,3 +355,25 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   font: .8rem/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: var(--text); margin: 8px 0 0;
 }
+
+/* ── Arena (Optimize tab) ─────────────────────────────────────── */
+.arena-row { margin-top: 14px; }
+.arena-row .rt {
+  font-size: 12px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 6px;
+}
+.arena-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.arena-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--stroke); background: var(--panel-2, rgba(255,255,255,.03));
+  font-size: 13px; user-select: none;
+}
+.arena-chip input { margin: 0; }
+.arena-chip:hover { border-color: var(--stroke-strong); }
+.arena-chip.off { opacity: .45; }
+.arena-chip.infeasible {
+  opacity: .35; cursor: not-allowed; border-style: dashed;
+}
+.arena-chip .sub { color: var(--muted); font-size: 12px; }
+.arena-cost { margin-top: 14px; }

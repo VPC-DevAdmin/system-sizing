@@ -1,0 +1,14 @@
+# Arena hardware hints — the one thing detection can't do reliably:
+# which GPUs share a PCIe/NUMA domain. TP peers must stay inside one
+# domain (cross-domain all-reduce is never the answer), so the arena's
+# TP ceiling is the largest group listed here.
+#
+# XE7740: nvidia-smi order 0-3 are PCI domain 0000, 4-7 are 0001.
+# Delete or edit this file for other hosts; without it, all detected
+# GPUs form a single group (TP up to the full count).
+
+device_groups: [[0, 1, 2, 3], [4, 5, 6, 7]]
+
+# Per-GPU VRAM is detected from nvidia-smi; set it here only for
+# hosts where detection is unavailable (e.g. planning on a laptop).
+# vram_per_gpu_gb: 96

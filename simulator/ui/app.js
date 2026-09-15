@@ -728,6 +728,11 @@ const Optimizer = {
   catalog: null,
   spaceDetails: {},
   polling: null,
+  arena: null,                  // /api/arena document
+  // Deselections — the arena default is EVERYTHING in play, the
+  // operator subtracts. Only what's unchecked is tracked.
+  arenaOff: { models: new Set(), dims: {} },
+  previewTimer: null,
 
   init() {
     $("#opt-start").addEventListener("click", () => this.start());
@@ -735,20 +740,135 @@ const Optimizer = {
     $("#opt-profile").addEventListener("change", () => this.renderConfigs());
     $("#opt-mode").addEventListener("change", () => this.renderMode());
     $("#opt-space").addEventListener("change", () => this.renderSpaceDetail());
+    $("#opt-budget").addEventListener("change", () => this.schedulePreview());
     document.querySelector('#tabs button[data-view="optimizer"]')
       .addEventListener("click", () => this.refresh());
     this.renderMode();
   },
 
   renderMode() {
-    const search = $("#opt-mode").value === "search";
-    $("#opt-profile-wrap").hidden = search;
-    $("#opt-space-wrap").hidden = !search;
-    $("#opt-search-hint").hidden = !search;
-    $("#opt-registry-hint").hidden = search;
-    $("#opt-configs").hidden = search;
-    $("#opt-space-detail").hidden = !search;
-    if (search) this.renderSpaceDetail();
+    const mode = $("#opt-mode").value;
+    $("#opt-profile-wrap").hidden = mode !== "registry";
+    $("#opt-space-wrap").hidden = mode !== "search";
+    $("#opt-budget-wrap").hidden = mode !== "arena";
+    $("#opt-arena").hidden = mode !== "arena";
+    $("#opt-search-hint").hidden = mode !== "search";
+    $("#opt-registry-hint").hidden = mode !== "registry";
+    $("#opt-configs").hidden = mode !== "registry";
+    $("#opt-space-detail").hidden = mode !== "search";
+    if (mode === "search") this.renderSpaceDetail();
+    if (mode === "arena") this.loadArena();
+  },
+
+  /* ── Arena: the full feasible space, subtract to narrow ──────── */
+
+  async loadArena() {
+    if (!this.arena) {
+      try { this.arena = await api("/api/arena"); }
+      catch (e) { this.msg(e.message, "error"); return; }
+    }
+    this.renderArena();
+    this.schedulePreview();
+  },
+
+  arenaSelection() {
+    const models = this.arena.models
+      .filter(m => m.feasible && !this.arenaOff.models.has(m.id))
+      .map(m => m.id);
+    const dims = {};
+    for (const [dim, vals] of Object.entries(this.arena.dimensions)) {
+      const off = this.arenaOff.dims[dim];
+      if (off?.size) dims[dim] = vals.filter(v => !off.has(String(v)));
+    }
+    return { models, dims };
+  },
+
+  renderArena() {
+    const a = this.arena;
+    const box = $("#opt-arena");
+    if (!a) { box.innerHTML = ""; return; }
+    const hw = a.hardware;
+    if (!hw.count) {
+      box.innerHTML = `<div class="callout">No GPUs detected on this host —
+        the arena needs a GPU box (or <code>device_groups</code> in
+        <code>config/arena.yaml</code> for planning).</div>`;
+      return;
+    }
+    const gb = v => (v == null ? "?" : `${v}`);
+    const modelChip = m => {
+      const off = this.arenaOff.models.has(m.id);
+      if (!m.feasible) {
+        return `<span class="arena-chip infeasible" title="needs ${m.min_vram_gb} GB
+          — largest domain here provides less">
+          ${m.id} <span class="sub">${m.quant} · won't fit</span></span>`;
+      }
+      return `<label class="arena-chip ${off ? "off" : ""}">
+        <input type="checkbox" data-arena-model="${m.id}" ${off ? "" : "checked"}>
+        ${m.id} <span class="sub">${m.quant}${m.moe ? " · MoE" : ""}
+        · ~${gb(m.approx_size_gb)} GB · tp ${m.feasible_tps.join("/")}</span></label>`;
+    };
+    const dimRow = (dim, vals) => `
+      <div class="arena-row"><div class="rt">${dim.replaceAll("_", " ")}</div>
+        <div class="arena-chips">${vals.map(v => {
+          const off = this.arenaOff.dims[dim]?.has(String(v));
+          return `<label class="arena-chip ${off ? "off" : ""}">
+            <input type="checkbox" data-arena-dim="${dim}" data-val="${v}"
+              ${off ? "" : "checked"}> ${v}</label>`;
+        }).join("")}</div></div>`;
+    box.innerHTML = `
+      <div class="arena-row"><div class="rt">Hardware</div>
+        <span class="msg">${hw.count} GPUs · ${gb(hw.vram_per_gpu_gb)} GB each ·
+        ${hw.device_groups.length} PCIe/NUMA domain(s)
+        (${hw.source}) · gpu_memory_utilization fixed at
+        ${a.fixed.gpu_memory_utilization}</span></div>
+      <div class="arena-row"><div class="rt">Models &amp; precisions
+        (${a.models.filter(m => m.feasible).length} runnable)</div>
+        <div class="arena-chips">${a.models.map(modelChip).join("")}</div></div>
+      ${Object.entries(a.dimensions).map(([d, v]) => dimRow(d, v)).join("")}
+      <div id="opt-arena-cost" class="callout arena-cost">computing the arena…</div>`;
+    box.querySelectorAll("input[data-arena-model]").forEach(el =>
+      el.addEventListener("change", () => {
+        el.checked ? this.arenaOff.models.delete(el.dataset.arenaModel)
+                   : this.arenaOff.models.add(el.dataset.arenaModel);
+        el.closest(".arena-chip").classList.toggle("off", !el.checked);
+        this.schedulePreview();
+      }));
+    box.querySelectorAll("input[data-arena-dim]").forEach(el =>
+      el.addEventListener("change", () => {
+        const off = this.arenaOff.dims[el.dataset.arenaDim] ??= new Set();
+        el.checked ? off.delete(el.dataset.val) : off.add(el.dataset.val);
+        el.closest(".arena-chip").classList.toggle("off", !el.checked);
+        this.schedulePreview();
+      }));
+  },
+
+  schedulePreview() {
+    clearTimeout(this.previewTimer);
+    this.previewTimer = setTimeout(() => this.preview(), 350);
+  },
+
+  async preview() {
+    const out = $("#opt-arena-cost");
+    if (!out || !this.arena?.hardware?.count) return;
+    let p;
+    try {
+      p = await api("/api/arena/preview", {
+        method: "POST",
+        body: JSON.stringify({ mode: "arena", arena: this.arenaSelection(),
+                               budget: +$("#opt-budget").value || null }),
+      });
+    } catch (e) {
+      out.innerHTML = `<span class="status-fail">${e.message}</span>`;
+      return;
+    }
+    out.innerHTML = `<b>${p.launch_shapes}</b> feasible launch shapes ·
+      <b>${p.total_combinations.toLocaleString()}</b> total combinations with
+      batch/KV knobs — the search evaluates <b>${p.budget}</b> of them
+      (coverage first, then refinement).<br>
+      <span class="msg">Cost model: every evaluation restarts the engine
+      (~${p.estimated_engine_restarts} restarts), but batches are ordered by
+      model so cold weight loads stay near ${p.estimated_cold_weight_loads}
+      (~one per model per iteration) — the rest relaunch on hot weights.</span>`;
   },
 
   /* What would this search actually cover? Models, dimension sizes,
@@ -878,7 +998,12 @@ const Optimizer = {
   async start() {
     const mode = $("#opt-mode").value;
     let body;
-    if (mode === "search") {
+    if (mode === "arena") {
+      const sel = this.arenaSelection();
+      if (!sel.models.length) { this.msg("every model is unchecked", "error"); return; }
+      body = { mode, arena: sel, budget: +$("#opt-budget").value || null,
+               new_run: $("#opt-new-run").checked };
+    } else if (mode === "search") {
       if (!$("#opt-space").value) { this.msg("no search space selected", "error"); return; }
       body = { mode, space: $("#opt-space").value,
                new_run: $("#opt-new-run").checked };

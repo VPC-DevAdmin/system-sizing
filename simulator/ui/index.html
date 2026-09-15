@@ -103,23 +103,28 @@
     <div class="row wrap">
       <label>Mode
         <select id="opt-mode">
-          <option value="search">Guided search (recommended)</option>
+          <option value="arena">Full arena &mdash; this host (recommended)</option>
+          <option value="search">YAML search space</option>
           <option value="registry">Quick sweep &mdash; one-knob probes</option>
         </select>
       </label>
       <label id="opt-profile-wrap" hidden>Curated set <select id="opt-profile"></select></label>
-      <label id="opt-space-wrap">Search space <select id="opt-space"></select></label>
+      <label id="opt-space-wrap" hidden>Search space <select id="opt-space"></select></label>
+      <label id="opt-budget-wrap">Budget
+        <input id="opt-budget" type="number" min="4" max="500" value="48"
+          style="width:70px"></label>
       <label class="check"><input type="checkbox" id="opt-new-run"> Fresh run (don't resume)</label>
       <button id="opt-start" class="primary">Start optimizer</button>
       <button id="opt-stop" class="danger" disabled>Stop</button>
       <span id="opt-msg" class="msg"></span>
     </div>
+    <div id="opt-arena"></div>
     <div id="opt-space-detail" class="callout" hidden></div>
-    <p id="opt-search-hint" class="msg">Guided search covers the space first (every
-    model, precision and shape represented), ranks candidates by the space's objective
-    (default: summed throughput with p95-latency caps), then refines one-dimension
-    neighbors of the leaders until improvement flattens or the budget is spent.
-    Spaces are YAML in <code>config/search/</code>; spaces with
+    <p id="opt-search-hint" class="msg" hidden>Guided search covers the space first
+    (every model, precision and shape represented), ranks candidates by the space's
+    objective (default: summed throughput with p95-latency caps), then refines
+    one-dimension neighbors of the leaders until improvement flattens or the budget is
+    spent. Spaces are YAML in <code>config/search/</code>; spaces with
     <code>catalog_families</code> pick up newly added models automatically.</p>
     <p id="opt-registry-hint" class="msg" hidden>The quick sweep runs a handful of
     hand-curated configs that each change <b>one knob</b> off a sane baseline —

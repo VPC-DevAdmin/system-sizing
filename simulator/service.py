@@ -118,12 +118,21 @@ class PromoteRequest(BaseModel):
 
 
 class OptimizerStartRequest(BaseModel):
-    # mode "registry": sweep a fixed profile of hand-curated configs.
-    # mode "search": guided coarse-to-fine over a config/search/ space.
+    # mode "arena": guided search over the full feasible space for
+    #   this host (optionally narrowed by ``arena``).
+    # mode "search": guided coarse-to-fine over a config/search/ YAML.
+    # mode "registry": sweep a fixed set of hand-curated configs.
+    # The default stays "registry" for wire compatibility (a bare
+    # {"profile": ...} body must keep meaning a registry sweep); the
+    # UI always sends mode explicitly and defaults to "arena" there.
     mode: str = "registry"
     profile: Optional[str] = None      # registry mode
     space: Optional[str] = None        # search mode: space name or path
     only: Optional[list[str]] = None   # registry mode: config subset
+    # arena mode: {"models": [hf ids], "dims": {dim: [values]}} —
+    # empty/absent means "everything feasible".
+    arena: Optional[dict] = None
+    budget: Optional[int] = None       # arena mode: evaluation budget
     new_run: bool = False
 
 
@@ -686,6 +695,27 @@ def create_app(
             app.state.optimizer_catalog = json.loads(res.stdout)
         return app.state.optimizer_catalog
 
+    @app.get("/api/arena")
+    async def arena() -> dict:
+        """The full test arena for this host: every catalog model with
+        its feasible TP set, every dimension with all values. The UI
+        renders this with everything selected; the operator subtracts."""
+        from .arena import full_arena
+        return await asyncio.to_thread(full_arena)
+
+    @app.post("/api/arena/preview")
+    async def arena_preview(req: OptimizerStartRequest) -> dict:
+        """Shape count + restart-cost estimate for a selection, before
+        committing a night to it."""
+        from .arena import build_space_doc, summarize_space_doc
+        try:
+            doc = await asyncio.to_thread(
+                build_space_doc, req.arena or {}, None, req.budget,
+            )
+            return await asyncio.to_thread(summarize_space_doc, doc)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+
     @app.get("/api/optimizer")
     async def optimizer_status() -> dict:
         catalog = await _optimizer_catalog()
@@ -749,7 +779,25 @@ def create_app(
         log_path = _opt_out.parent / (
             f"optimizer_{time.strftime('%Y%m%dT%H%M%S')}.log"
         )
-        if req.mode == "search":
+        if req.mode == "arena":
+            import yaml as _yaml
+
+            from .arena import build_space_doc
+            try:
+                doc = await asyncio.to_thread(
+                    build_space_doc, req.arena or {}, None, req.budget,
+                )
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            space_path = _opt_out.parent / "arena_space.yaml"
+            space_path.parent.mkdir(parents=True, exist_ok=True)
+            space_path.write_text(_yaml.safe_dump(doc, sort_keys=False))
+            cmd = [sys.executable, str(optimizer_script),
+                   "--search", str(space_path),
+                   "--search-out", str(_search_out)]
+            if req.new_run:
+                cmd.append("--new-run")
+        elif req.mode == "search":
             from .search import list_spaces
             spaces = list_spaces()
             space_path = spaces.get(req.space or "") or req.space
@@ -777,14 +825,15 @@ def create_app(
             if req.only:
                 cmd.extend(["--only", *req.only])
         else:
-            raise HTTPException(422, "mode must be registry | search")
+            raise HTTPException(422, "mode must be arena | search | registry")
         log_file = open(log_path, "w")
         proc = subprocess.Popen(
             cmd, stdout=log_file, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, start_new_session=True,
         )
         app.state.optimizer = {
-            "proc": proc, "profile": req.profile or req.space,
+            "proc": proc,
+            "profile": req.profile or req.space or "arena",
             "mode": req.mode,
             "started_at": time.time(), "log": str(log_path),
         }

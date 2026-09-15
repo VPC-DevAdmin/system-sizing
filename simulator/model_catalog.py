@@ -92,6 +92,7 @@ def _normalize_entry(raw: dict, source: str) -> dict:
         "approx_size_gb": raw.get("approx_size_gb"),
         "min_vram_gb": raw.get("min_vram_gb"),
         "gated": bool(raw.get("gated", False)),
+        "moe": bool(raw.get("moe", False)),
         "engine_args": list(raw.get("engine_args") or []),
         "notes": str(raw.get("notes") or ""),
         "source": source,

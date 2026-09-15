@@ -19,12 +19,14 @@ models:
   # ── Qwen3 30B MoE (3B active) — the validated XE7740 baseline ────
   - id: Qwen/Qwen3-30B-A3B-Instruct-2507
     family: qwen3-30b-a3b
+    moe: true
     quant: bf16
     approx_size_gb: 61
     min_vram_gb: 70
     notes: "MoE, 3B active — validated baseline on RTX PRO 6000"
   - id: Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
     family: qwen3-30b-a3b
+    moe: true
     quant: fp8
     approx_size_gb: 31
     min_vram_gb: 40
@@ -32,12 +34,14 @@ models:
   # ── Qwen3 Coder 30B MoE — same shape, code-tuned ─────────────────
   - id: Qwen/Qwen3-Coder-30B-A3B-Instruct
     family: qwen3-coder-30b-a3b
+    moe: true
     quant: bf16
     approx_size_gb: 61
     min_vram_gb: 70
     notes: "code-workload counterpart to the 30B-A3B baseline"
   - id: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8
     family: qwen3-coder-30b-a3b
+    moe: true
     quant: fp8
     approx_size_gb: 31
     min_vram_gb: 40
@@ -58,12 +62,14 @@ models:
   # ── Qwen3 235B MoE (22B active) — the whole-box model ────────────
   - id: Qwen/Qwen3-235B-A22B-Instruct-2507
     family: qwen3-235b-a22b
+    moe: true
     quant: bf16
     approx_size_gb: 470
     min_vram_gb: 560
     notes: "needs TP8 on 96GB cards in bf16 — a true whole-box test"
   - id: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
     family: qwen3-235b-a22b
+    moe: true
     quant: fp8
     approx_size_gb: 235
     min_vram_gb: 300
@@ -72,12 +78,14 @@ models:
   # ── gpt-oss — natively MXFP4, no separate quant artifact ─────────
   - id: openai/gpt-oss-20b
     family: gpt-oss-20b
+    moe: true
     quant: mxfp4
     approx_size_gb: 14
     min_vram_gb: 20
     notes: "small + fast — good high-DP many-replica probe"
   - id: openai/gpt-oss-120b
     family: gpt-oss-120b
+    moe: true
     quant: mxfp4
     approx_size_gb: 65
     min_vram_gb: 80

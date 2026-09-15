@@ -53,6 +53,12 @@ KNOWN_DIMENSIONS: dict[str, str] = {
     "max_num_seqs": "ordinal",
     "max_num_batched_tokens": "ordinal",
     "placement": "categorical",
+    # FP8 KV cache halves KV memory/bandwidth (Blackwell-friendly).
+    "kv_cache_dtype": "categorical",         # auto | fp8
+    # Expert parallelism for MoE models — only meaningful when the
+    # variant is MoE and tp>1 (normalize() forces "off" otherwise, so
+    # infeasible combinations dedupe instead of wasting evaluations).
+    "expert_parallel": "categorical",         # off | on
 }
 
 # Sentinel meaning "don't pass the flag; let the engine pick".
@@ -90,11 +96,16 @@ class SearchSpace:
     name: str
     engine: str
     device_groups: list[list[int]]
-    model_variants: dict[str, dict]     # name -> {model, served_name, extra_args?}
+    model_variants: dict[str, dict]     # name -> {model, served_name,
+                                        #   extra_args?, min_vram_gb?, moe?}
     dimensions: dict[str, list]         # dim -> ordered values
     objective: Objective
     search: SearchParams
     source: str = ""                    # file path, informational
+    # Per-GPU VRAM (GB). When set, a candidate is invalid unless
+    # tp × vram covers the variant's min_vram_gb — so a 235B model
+    # never wastes an evaluation trying to load at tp=1.
+    vram_per_gpu_gb: Optional[float] = None
 
     @property
     def total_devices(self) -> int:
@@ -109,6 +120,7 @@ class SearchSpace:
             "device_groups": self.device_groups,
             "model_variants": self.model_variants,
             "dimensions": self.dimensions,
+            "vram_per_gpu_gb": self.vram_per_gpu_gb,
         }
         return hashlib.sha256(
             json.dumps(doc, sort_keys=True).encode()
@@ -176,6 +188,8 @@ def load_space(path: str | Path) -> SearchSpace:
                     "model": entry["id"],
                     "served_name": vname,
                     "extra_args": list(entry.get("engine_args") or []),
+                    "min_vram_gb": entry.get("min_vram_gb"),
+                    "moe": bool(entry.get("moe")),
                 })
     if not variants:
         raise SearchSpaceError(
@@ -215,6 +229,7 @@ def load_space(path: str | Path) -> SearchSpace:
         raise SearchSpaceError(f"{path}: objective.kind '{objective.kind}' unknown")
     search = SearchParams(**(raw.get("search") or {}))
 
+    vram = raw.get("vram_per_gpu_gb")
     return SearchSpace(
         name=str(raw.get("name", path.stem)),
         engine=engine,
@@ -224,6 +239,7 @@ def load_space(path: str | Path) -> SearchSpace:
         objective=objective,
         search=search,
         source=str(path),
+        vram_per_gpu_gb=float(vram) if vram is not None else None,
     )
 
 
@@ -240,18 +256,26 @@ def _dim_value(params: dict, dim: str, space: SearchSpace):
         return space.dimensions[dim][0]
     return {"tp": 1, "dp": 1, "gpu_memory_utilization": 0.90,
             "max_num_seqs": DEFAULT, "max_num_batched_tokens": DEFAULT,
-            "placement": "pack"}.get(dim)
+            "placement": "pack", "kv_cache_dtype": "auto",
+            "expert_parallel": "off"}.get(dim)
 
 
 def normalize(params: dict, space: SearchSpace) -> dict:
     """Canonical form so equivalent candidates dedupe: placement is
     meaningless (forced to the first placement value) when the
-    candidate uses a single device."""
+    candidate uses a single device, and expert_parallel is meaningless
+    (forced "off") unless the variant is MoE with tp>1 — vLLM's EP
+    splits experts across the TP group."""
     out = {d: _dim_value(params, d, space) for d in KNOWN_DIMENSIONS
            if d in space.dimensions or d in params}
     tp, dp = int(_dim_value(out, "tp", space)), int(_dim_value(out, "dp", space))
     if tp * dp <= 1 and "placement" in out:
         out["placement"] = space.dimensions.get("placement", ["pack"])[0]
+    if "expert_parallel" in out:
+        variant = space.model_variants.get(
+            str(_dim_value(out, "model_variant", space))) or {}
+        if not variant.get("moe") or tp <= 1:
+            out["expert_parallel"] = "off"
     return out
 
 
@@ -313,6 +337,19 @@ def validate_candidate(params: dict, space: SearchSpace) -> tuple[bool, str]:
     placement = str(_dim_value(n, "placement", space))
     if assign_devices(tp, dp, placement, space.device_groups) is None:
         return False, f"tp={tp} dp={dp} placement={placement} does not fit devices"
+    # VRAM fit: don't burn an evaluation on a shape that can't load
+    # the weights (a 235B bf16 model at tp=1 fails after minutes of
+    # downloading/loading — prune it here instead).
+    if space.vram_per_gpu_gb:
+        variant = space.model_variants.get(
+            str(_dim_value(n, "model_variant", space))) or {}
+        need = variant.get("min_vram_gb")
+        if need and tp * space.vram_per_gpu_gb < float(need):
+            return False, (
+                f"{_dim_value(n, 'model_variant', space)} needs "
+                f"{need} GB, tp={tp} provides "
+                f"{tp * space.vram_per_gpu_gb:.0f} GB"
+            )
     return True, ""
 
 
@@ -433,6 +470,20 @@ def score_cells(cells: list[dict], objective: Objective) -> Optional[float]:
     return total if any_signal else None
 
 
+def _restart_order(batch: list[dict], space: SearchSpace) -> list[dict]:
+    """Order a batch to minimize expensive engine transitions: every
+    evaluation restarts the engine, but consecutive candidates on the
+    SAME model reuse hot weights (page cache + HF cache) — a ~60 GB
+    reload versus seconds. Group by variant, then by tp/dp so shape
+    changes cluster too. Stable within groups, so proposal order (and
+    determinism under seed) is preserved."""
+    return sorted(batch, key=lambda p: (
+        str(_dim_value(p, "model_variant", space)),
+        int(_dim_value(p, "tp", space)),
+        int(_dim_value(p, "dp", space)),
+    ))
+
+
 # ── Search state machine ─────────────────────────────────────────────
 
 
@@ -543,7 +594,7 @@ def next_batch(
         return "done:budget", []
 
     if not state.iterations:
-        batch = propose_initial(space, rng)[:budget_left]
+        batch = _restart_order(propose_initial(space, rng)[:budget_left], space)
         state.iterations.append({
             "index": 0, "kind": "initial",
             "params": batch,
@@ -571,10 +622,10 @@ def next_batch(
     if not tops:
         state.done_reason = "no_successful_candidates"
         return "done:no_successful_candidates", []
-    batch = propose_neighbors(
+    batch = _restart_order(propose_neighbors(
         space, tops, set(state.evaluated),
         min(space.search.neighbors_per_iteration, budget_left),
-    )
+    ), space)
     if not batch:
         state.done_reason = "neighborhood_exhausted"
         return "done:neighborhood_exhausted", []
@@ -655,6 +706,11 @@ def candidate_summary(params: dict, space: SearchSpace) -> dict[str, Any]:
     mbt = _dim_value(n, "max_num_batched_tokens", space)
     if mbt not in (None, DEFAULT):
         args += ["--max-num-batched-tokens", str(mbt)]
+    kv = _dim_value(n, "kv_cache_dtype", space)
+    if kv not in (None, "auto"):
+        args += ["--kv-cache-dtype", str(kv)]
+    if _dim_value(n, "expert_parallel", space) == "on":
+        args += ["--enable-expert-parallel"]
     args += list(variant.get("extra_args") or [])
     return {
         "params": n,

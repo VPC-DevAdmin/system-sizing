@@ -53,8 +53,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from simulator.database import Database  # noqa: E402
-from simulator.runs import next_run_dir   # noqa: E402
-
+from simulator.runs import next_run_dir  # noqa: E402
 
 # Personas that exist in the current personas.py. cohort_run rows
 # whose cohort_id is in this set are preserved (ephemeral

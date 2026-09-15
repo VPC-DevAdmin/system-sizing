@@ -35,6 +35,7 @@ import contextlib
 import json
 import logging
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +91,12 @@ class SaveSpecRequest(BaseModel):
     yaml: str
 
 
+class OptimizerStartRequest(BaseModel):
+    profile: str
+    only: Optional[list[str]] = None   # subset of config names
+    new_run: bool = False
+
+
 def _resolve_config_path(req: StartRunRequest) -> Path:
     from .config import resolve_profile
     if req.profile and req.config:
@@ -140,11 +147,17 @@ def _list_runs(base: Path) -> list[dict]:
 def create_app(
     runs_base: Path | str = Path("runs"),
     catalog_dir: Path | str | None = None,
+    # The engine optimizer is a repo script (like config/, resolved
+    # against the working directory); injectable for tests.
+    optimizer_script: Path | str = Path("scripts/engine_optimizer.py"),
 ) -> FastAPI:
     runs_base = Path(runs_base)
     catalog_dir = Path(catalog_dir) if catalog_dir is not None else None
+    optimizer_script = Path(optimizer_script)
     app = FastAPI(title="capsim", version="0.2.0")
     app.state.active: Optional[ActiveRun] = None
+    app.state.optimizer: Optional[dict] = None       # {proc, profile, started_at, log}
+    app.state.optimizer_catalog: Optional[dict] = None
 
     # ── introspection ─────────────────────────────────────────────
 
@@ -293,6 +306,12 @@ def create_app(
                 409, "a run is already active — stop it first "
                      "(POST /api/runs/stop)",
             )
+        opt = app.state.optimizer
+        if opt and opt["proc"].poll() is None:
+            raise HTTPException(
+                409, "the engine optimizer is running — it owns the "
+                     "engines/GPUs; stop it first (POST /api/optimizer/stop)",
+            )
         config_path = _resolve_config_path(req)
 
         from .config import load_config
@@ -377,6 +396,128 @@ def create_app(
         active.task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await active.task
+        return {"stopped": True}
+
+
+    # ── engine optimizer (find the best launch shape first) ──────
+    # Runs scripts/engine_optimizer.py as a supervised subprocess —
+    # same artifact contract as `make optimize-engine` (incremental
+    # runs/engine_optimizer/run.json, resumable), so the UI, the CLI,
+    # and a second SSH session all watch the same file.
+
+    _opt_out = runs_base / "engine_optimizer" / "run.json"
+
+    def _optimizer_running() -> bool:
+        opt = app.state.optimizer
+        return bool(opt and opt["proc"].poll() is None)
+
+    async def _optimizer_catalog() -> dict:
+        if app.state.optimizer_catalog is None:
+            if not optimizer_script.exists():
+                raise HTTPException(
+                    404, f"{optimizer_script} not found — run the service "
+                         f"from the repo root",
+                )
+            import sys
+            res = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, str(optimizer_script), "--list-json"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if res.returncode != 0:
+                raise HTTPException(
+                    500, f"optimizer --list-json failed: {res.stderr[-500:]}",
+                )
+            app.state.optimizer_catalog = json.loads(res.stdout)
+        return app.state.optimizer_catalog
+
+    @app.get("/api/optimizer")
+    async def optimizer_status() -> dict:
+        catalog = await _optimizer_catalog()
+        opt = app.state.optimizer
+        results = None
+        if _opt_out.exists():
+            try:
+                results = json.loads(_opt_out.read_text())
+            except (OSError, json.JSONDecodeError):
+                results = None
+        out: dict = {
+            "running": _optimizer_running(),
+            "catalog": catalog,
+            "results": results,
+            "out_path": str(_opt_out),
+        }
+        if opt:
+            out["active"] = {
+                "profile": opt["profile"],
+                "started_at": opt["started_at"],
+                "log": opt["log"],
+                "exit_code": opt["proc"].poll(),
+            }
+        return out
+
+    @app.post("/api/optimizer/start", status_code=202)
+    async def optimizer_start(req: OptimizerStartRequest) -> dict:
+        active = app.state.active
+        if active is not None and not active.task.done():
+            raise HTTPException(
+                409, "a capacity run is active — the optimizer needs the "
+                     "engines/GPUs to itself; stop the run first",
+            )
+        if _optimizer_running():
+            raise HTTPException(409, "optimizer already running")
+        catalog = await _optimizer_catalog()
+        if req.profile not in catalog["profiles"]:
+            raise HTTPException(
+                404, f"unknown optimizer profile '{req.profile}' — "
+                     f"known: {sorted(catalog['profiles'])}",
+            )
+        import sys
+        _opt_out.parent.mkdir(parents=True, exist_ok=True)
+        log_path = _opt_out.parent / (
+            f"optimizer_{time.strftime('%Y%m%dT%H%M%S')}.log"
+        )
+        cmd = [sys.executable, str(optimizer_script),
+               "--out", str(_opt_out), "--profile", req.profile]
+        if req.new_run:
+            cmd.append("--new-run")
+        if req.only:
+            cmd.extend(["--only", *req.only])
+        log_file = open(log_path, "w")
+        proc = subprocess.Popen(
+            cmd, stdout=log_file, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+        app.state.optimizer = {
+            "proc": proc, "profile": req.profile,
+            "started_at": time.time(), "log": str(log_path),
+        }
+        return {"accepted": True, "profile": req.profile,
+                "log": str(log_path), "out": str(_opt_out)}
+
+    @app.post("/api/optimizer/stop")
+    async def optimizer_stop() -> dict:
+        if not _optimizer_running():
+            raise HTTPException(409, "no optimizer running")
+        import os as _os
+        import signal as _signal
+        proc = app.state.optimizer["proc"]
+        with contextlib.suppress(ProcessLookupError):
+            _os.killpg(_os.getpgid(proc.pid), _signal.SIGTERM)
+        await asyncio.to_thread(proc.wait, 20)
+        # The optimizer cleans containers between configs, not on
+        # SIGTERM — sweep up any vllm-* container it left running.
+        def _cleanup() -> None:
+            with contextlib.suppress(Exception):
+                res = subprocess.run(
+                    ["docker", "ps", "-aq", "--filter", "name=vllm-"],
+                    capture_output=True, text=True, timeout=20,
+                )
+                cids = res.stdout.split()
+                if cids:
+                    subprocess.run(["docker", "rm", "-f", *cids],
+                                   capture_output=True, timeout=60)
+        await asyncio.to_thread(_cleanup)
         return {"stopped": True}
 
     # ── export ────────────────────────────────────────────────────

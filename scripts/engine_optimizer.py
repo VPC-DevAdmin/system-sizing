@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Mini engine optimiser for CPU LLM inference hosts.
+"""Mini engine optimiser for LLM inference hosts (CPU and NVIDIA GPU).
 
-Iterates a registry of vLLM-CPU launch configurations, measures TTFT
-and TPOT across a few representative (input-tokens, output-tokens,
+Iterates a registry of vLLM launch configurations, measures TTFT and
+TPOT across a few representative (input-tokens, output-tokens,
 concurrency) cells, and reports the configuration that minimises
-latency / maximises throughput on this specific host. Designed for the
-dual-socket EPYC R7735 platform but works on any host with Docker +
-the ``vllm/vllm-openai-cpu:latest-x86_64`` image (or whatever the
-``IMAGE`` environment variable points at).
+latency / maximises throughput on this specific host. CPU profiles
+(``amd_*``, ``intel_*``) sweep vLLM-CPU cpuset/NUMA/OMP shapes; the
+``nvidia_qwen3`` profile sweeps CUDA-vLLM shapes (KV-pool sizing,
+batch width, chunked prefill, TP=2 vs two data-parallel replicas) —
+run it before the first GPU capacity sweep on a new host. Image and
+model default per profile; the ``OPTIMIZER_IMAGE`` /
+``OPTIMIZER_MODEL_PATH`` env vars override.
 
 Per config, the flow is:
 
@@ -50,7 +53,6 @@ import asyncio
 import dataclasses
 import json
 import os
-import statistics
 import subprocess
 import sys
 import time
@@ -103,9 +105,13 @@ REQUEST_TIMEOUT_S = int(os.environ.get("OPTIMIZER_REQUEST_TIMEOUT_S", "900"))
 class ReplicaSpec:
     name: str
     port: int
-    cpuset_cpus: str
+    cpuset_cpus: Optional[str] = None    # CPU replicas; None for GPU replicas
     cpuset_mems: Optional[str] = None
     env: dict = field(default_factory=dict)
+    # NVIDIA GPU assignment ("device=0", "device=0,1", "all"). When
+    # set, docker_launch adds --gpus + --ipc=host (vLLM CUDA workers
+    # use shared memory; the docker default 64 MB kills TP>1 init).
+    gpus: Optional[str] = None
 
 
 @dataclass
@@ -1046,11 +1052,139 @@ _AMD_GPT_OSS_CONFIGS: list[EngineConfig] = [
 ]
 
 
+
+# ── NVIDIA GPU profile (roadmap: GPU launch-shape optimization) ─────────
+#
+# CUDA vLLM on discrete GPUs. Written for 8× RTX PRO 6000 Blackwell
+# (96 GB, PCIe — no NVLink) on the XE7740, but the axes generalize to
+# any multi-GPU vLLM host. Each config isolates one question:
+#
+#   * KV-pool sizing (gpu-memory-utilization)
+#   * batch width (max-num-seqs) — TPOT-under-load vs peak throughput
+#   * chunked-prefill tightness (max-num-batched-tokens) — does capping
+#     prefill chunks protect decode TPOT during 4k-input storms
+#     (the long_pain cells)?
+#   * TP=2 vs two data-parallel replicas — the GPU replay of the CPU
+#     dual-socket lesson (replica scaling beat TP there; on PCIe
+#     without NVLink the all-reduce tax makes this a live question).
+#
+# The model is referenced by HF id: the first config downloads weights
+# into the mounted HF cache once (~60 GB — pre-fetch with
+# ``hf download Qwen/Qwen3-30B-A3B-Instruct-2507`` to keep launch
+# timeouts honest on slow links); every later config reuses the cache.
+
+def _gpu_replica(name: str = "vllm-g0", port: int = 8000,
+                 gpus: str = "device=0") -> ReplicaSpec:
+    return ReplicaSpec(name=name, port=port, gpus=gpus)
+
+
+_NVIDIA_QWEN3_CONFIGS: list[EngineConfig] = [
+    EngineConfig(
+        name="baseline_tp1",
+        description="One GPU, vLLM defaults (gmu 0.90, TP=1)",
+        replicas=[_gpu_replica()],
+        replica_args=["--gpu-memory-utilization", "0.90"],
+        shm_size="16g",
+        expected_outcome="Reference point every other config diffs against.",
+    ),
+    EngineConfig(
+        name="kv_pool_95",
+        description="gpu-memory-utilization 0.95 — larger KV pool",
+        replicas=[_gpu_replica()],
+        replica_args=["--gpu-memory-utilization", "0.95"],
+        shm_size="16g",
+        expected_outcome=(
+            "More KV headroom → fewer preemptions on long_pain cells. "
+            "Watch for OOM fragility; 0.90 wins if results are equal."
+        ),
+    ),
+    EngineConfig(
+        name="maxseqs_64",
+        description="max-num-seqs 64 — latency-lean batch width",
+        replicas=[_gpu_replica()],
+        replica_args=["--gpu-memory-utilization", "0.90",
+                      "--max-num-seqs", "64"],
+        shm_size="16g",
+        expected_outcome=(
+            "Tighter TPOT under load at some cost to peak throughput. "
+            "Best if the capacity knee is TPOT-SLA-bound."
+        ),
+    ),
+    EngineConfig(
+        name="maxseqs_512",
+        description="max-num-seqs 512 — throughput-wide batch width",
+        replicas=[_gpu_replica()],
+        replica_args=["--gpu-memory-utilization", "0.90",
+                      "--max-num-seqs", "512"],
+        shm_size="16g",
+        expected_outcome=(
+            "Higher short_throughput ceiling; TPOT p95 degrades under "
+            "concurrency. Best if the knee is throughput-bound."
+        ),
+    ),
+    EngineConfig(
+        name="chunked_2048",
+        description="max-num-batched-tokens 2048 — tight chunked prefill",
+        replicas=[_gpu_replica()],
+        replica_args=["--gpu-memory-utilization", "0.90",
+                      "--max-num-batched-tokens", "2048"],
+        shm_size="16g",
+        expected_outcome=(
+            "Prefill chunks capped so decode TPOT stays flat during the "
+            "long_pain 4k-input storms, trading some TTFT on long inputs."
+        ),
+    ),
+    EngineConfig(
+        name="tp2",
+        description="TP=2 across two GPUs (PCIe all-reduce, no NVLink)",
+        replicas=[_gpu_replica(gpus="device=0,1")],
+        replica_args=["--gpu-memory-utilization", "0.90",
+                      "--tensor-parallel-size", "2"],
+        shm_size="32g",
+        launch_timeout_s=2700,
+        expected_outcome=(
+            "2x weight bandwidth → lower single-stream TTFT/TPOT, but "
+            "PCIe all-reduce taxes every layer. Compare per-GPU "
+            "efficiency against dp2 before choosing."
+        ),
+    ),
+    EngineConfig(
+        name="dp2",
+        description="Two data-parallel replicas, one GPU each (round-robin)",
+        replicas=[
+            _gpu_replica(name="vllm-g0", port=8000, gpus="device=0"),
+            _gpu_replica(name="vllm-g1", port=8001, gpus="device=1"),
+        ],
+        replica_args=["--gpu-memory-utilization", "0.90"],
+        shm_size="16g",
+        launch_timeout_s=2700,
+        expected_outcome=(
+            "~2x throughput at unchanged per-request latency — the CPU "
+            "dual-socket lesson replayed on GPUs. If this beats tp2 on "
+            "per-GPU efficiency, whole-box capacity = N independent "
+            "replicas with sticky routing."
+        ),
+    ),
+]
+
+
 PROFILES: dict[str, list[EngineConfig]] = {
     "amd_dual_socket": _AMD_DUAL_SOCKET_CONFIGS,
     "amd_gemma4": _AMD_GEMMA4_CONFIGS,
     "amd_gpt_oss": _AMD_GPT_OSS_CONFIGS,
     "intel_gemma4": _INTEL_GEMMA4_CONFIGS,
+    "nvidia_qwen3": _NVIDIA_QWEN3_CONFIGS,
+}
+
+# Per-profile image/model defaults; OPTIMIZER_IMAGE / _MODEL_PATH /
+# _SERVED_NAME env vars still override. CPU profiles keep the module
+# defaults (vllm-openai-cpu + pre-staged /models path).
+PROFILE_DEFAULTS: dict[str, dict] = {
+    "nvidia_qwen3": {
+        "image": "vllm/vllm-openai:latest",
+        "model": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        "served_name": "qwen3_30b_a3b",
+    },
 }
 
 # Default profile for backwards compatibility — the optimizer originally
@@ -1156,14 +1290,32 @@ def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
         "docker", "run", "-d",
         "--network", "host",
         "--shm-size", cfg.shm_size,
-        "--cpuset-cpus", replica.cpuset_cpus,
         "--security-opt", "seccomp=unconfined",
         "--cap-add", "SYS_NICE",
-        "-v", "/data/ml/models:/models",
-        "--name", replica.name,
     ]
+    if replica.cpuset_cpus:
+        args.extend(["--cpuset-cpus", replica.cpuset_cpus])
     if replica.cpuset_mems is not None:
         args.extend(["--cpuset-mems", replica.cpuset_mems])
+    if replica.gpus:
+        args.extend(["--gpus", replica.gpus, "--ipc=host"])
+    # Mounts, existence-checked so CPU hosts without the /data/ml
+    # layout and GPU hosts without pre-staged /models both work:
+    # pre-downloaded weights (CPU flow, --model /models/...) and the
+    # HF cache (GPU flow, --model by HF id — weights download once on
+    # the first config and are reused by every later one).
+    if Path("/data/ml/models").exists():
+        args.extend(["-v", "/data/ml/models:/models"])
+    hf_cache = os.environ.get("OPTIMIZER_HF_CACHE") or (
+        "/data/ml/huggingface" if Path("/data/ml/huggingface").exists()
+        else str(Path.home() / ".cache" / "huggingface")
+    )
+    Path(hf_cache).mkdir(parents=True, exist_ok=True)
+    args.extend(["-v", f"{hf_cache}:/root/.cache/huggingface"])
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(var):
+            args.extend(["-e", f"{var}={os.environ[var]}"])
+    args.extend(["--name", replica.name])
     env = {**cfg.replica_env, **replica.env}
     for k, v in env.items():
         args.extend(["-e", f"{k}={v}"])
@@ -1968,7 +2120,9 @@ async def main_async(
             return
 
     prompts = make_prompts(TEST_CELLS)
-    save = lambda: _save_json(out_path, state)
+
+    def save() -> None:
+        _save_json(out_path, state)
 
     if use_dashboard:
         console = Console()
@@ -2228,6 +2382,14 @@ def main() -> None:
         help="Print the registered configs and exit.",
     )
     p.add_argument(
+        "--list-json", action="store_true",
+        help=(
+            "Print every profile's configs and the test cells as JSON "
+            "and exit — machine-readable form of --list, consumed by "
+            "the capsim service's optimizer UI."
+        ),
+    )
+    p.add_argument(
         "--watch", action="store_true",
         help=(
             "Read-only dashboard mode: poll the --out JSON + the latest "
@@ -2255,9 +2417,37 @@ def main() -> None:
     # _ACTIVE_PROFILE is also rebinded so the JSON saver tags entries
     # with the profile that produced them, and the resume check can
     # detect cross-profile mismatches.
-    global CONFIGS, _ACTIVE_PROFILE
+    global CONFIGS, _ACTIVE_PROFILE, IMAGE, MODEL_PATH, SERVED_NAME
     CONFIGS = PROFILES[args.profile]
     _ACTIVE_PROFILE = args.profile
+    defaults = PROFILE_DEFAULTS.get(args.profile, {})
+    if "OPTIMIZER_IMAGE" not in os.environ and "image" in defaults:
+        IMAGE = defaults["image"]
+    if "OPTIMIZER_MODEL_PATH" not in os.environ and "model" in defaults:
+        MODEL_PATH = defaults["model"]
+    if "OPTIMIZER_SERVED_NAME" not in os.environ and "served_name" in defaults:
+        SERVED_NAME = defaults["served_name"]
+
+    if args.list_json:
+        print(json.dumps({
+            "profiles": {
+                pname: [
+                    {"name": c.name, "description": c.description,
+                     "expected_outcome": c.expected_outcome,
+                     "replicas": len(c.replicas)}
+                    for c in configs
+                ]
+                for pname, configs in PROFILES.items()
+            },
+            "cells": [
+                {"name": c.name, "input_tokens": c.input_tokens,
+                 "output_tokens": c.output_tokens,
+                 "concurrency": c.concurrency}
+                for c in TEST_CELLS
+            ],
+            "default_profile": DEFAULT_PROFILE,
+        }, indent=2))
+        return
 
     if args.list:
         print(f"profile: {args.profile}")

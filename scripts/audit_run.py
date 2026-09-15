@@ -48,7 +48,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from simulator.measurement import _classify_status  # noqa: E402
 
-
 # Status thresholds — must match measurement._classify_status / export.
 PASS_UPPER = 0.05
 FAIL_LOWER = 0.30

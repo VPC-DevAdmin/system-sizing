@@ -708,6 +708,184 @@ const Results = {
   },
 };
 
+/* ══ Engine optimizer ═════════════════════════════════════════── */
+
+const Optimizer = {
+  catalog: null,
+  polling: null,
+
+  init() {
+    $("#opt-start").addEventListener("click", () => this.start());
+    $("#opt-stop").addEventListener("click", () => this.stop());
+    $("#opt-profile").addEventListener("change", () => this.renderConfigs());
+    document.querySelector('#tabs button[data-view="optimizer"]')
+      .addEventListener("click", () => this.refresh());
+  },
+
+  msg(text, cls = "") {
+    const el = $("#opt-msg");
+    el.textContent = text;
+    el.className = `msg ${cls}`;
+  },
+
+  async refresh() {
+    let status;
+    try {
+      status = await api("/api/optimizer");
+    } catch (e) {
+      this.msg(e.message, "error");
+      return;
+    }
+    if (!this.catalog) {
+      this.catalog = status.catalog;
+      const sel = $("#opt-profile");
+      sel.innerHTML = "";
+      for (const name of Object.keys(status.catalog.profiles)) {
+        sel.append(new Option(name, name, false, name === "nvidia_qwen3"));
+      }
+      this.renderConfigs();
+    }
+    $("#opt-start").disabled = status.running;
+    $("#opt-stop").disabled = !status.running;
+    if (status.running) {
+      this.msg(`running (${status.active.profile}) — log: ${status.active.log}`);
+      if (!this.polling) {
+        this.polling = setInterval(() => this.refresh(), 4000);
+      }
+    } else {
+      if (this.polling) { clearInterval(this.polling); this.polling = null; }
+      if (status.active && status.active.exit_code !== null) {
+        this.msg(
+          status.active.exit_code === 0
+            ? "optimizer finished" : `optimizer exited (${status.active.exit_code})`,
+          status.active.exit_code === 0 ? "ok" : "error");
+      }
+    }
+    this.renderResults(status.results);
+  },
+
+  renderConfigs() {
+    if (!this.catalog) return;
+    const configs = this.catalog.profiles[$("#opt-profile").value] ?? [];
+    $("#opt-configs").innerHTML = configs.map(c => `
+      <label class="opt-config">
+        <input type="checkbox" data-cfg="${c.name}" checked>
+        <span><b>${c.name}</b><span class="d"> — ${c.description}</span></span>
+      </label>`).join("");
+  },
+
+  async start() {
+    const only = [...document.querySelectorAll("#opt-configs input:checked")]
+      .map(el => el.dataset.cfg);
+    if (!only.length) { this.msg("select at least one config", "error"); return; }
+    const all = document.querySelectorAll("#opt-configs input").length;
+    try {
+      await api("/api/optimizer/start", {
+        method: "POST",
+        body: JSON.stringify({
+          profile: $("#opt-profile").value,
+          only: only.length === all ? null : only,
+          new_run: $("#opt-new-run").checked,
+        }),
+      });
+      this.msg("started", "ok");
+      this.refresh();
+    } catch (e) {
+      this.msg(e.message, "error");
+    }
+  },
+
+  async stop() {
+    try {
+      await api("/api/optimizer/stop", { method: "POST" });
+      this.msg("stopped", "ok");
+    } catch (e) {
+      this.msg(e.message, "error");
+    }
+    this.refresh();
+  },
+
+  /* Composite ranking: for each cell, rank ok-configs by TTFT p95
+   * (asc) and by throughput (desc); a config's score is the mean of
+   * all its ranks. Lower = better. Explainable, no magic weights. */
+  rank(configs) {
+    const ok = configs.filter(c => c.status === "ok" && c.cells.length);
+    const scores = new Map(ok.map(c => [c.name, []]));
+    const cells = [...new Set(ok.flatMap(c => c.cells.map(x => x.cell_name)))];
+    for (const cell of cells) {
+      const rows = ok
+        .map(c => ({ name: c.name, r: c.cells.find(x => x.cell_name === cell) }))
+        .filter(x => x.r);
+      for (const [key, dir] of [["ttft_p95_ms", 1], ["throughput_out_tok_s", -1]]) {
+        const ranked = [...rows]
+          .filter(x => x.r[key] != null)
+          .sort((a, b) => dir * (a.r[key] - b.r[key]));
+        ranked.forEach((x, i) => scores.get(x.name).push(i + 1));
+      }
+    }
+    return ok
+      .map(c => ({
+        name: c.name,
+        score: scores.get(c.name).length
+          ? scores.get(c.name).reduce((a, b) => a + b, 0) / scores.get(c.name).length
+          : Infinity,
+      }))
+      .sort((a, b) => a.score - b.score);
+  },
+
+  renderResults(results) {
+    const panel = $("#opt-results-panel");
+    if (!results || !results.configs?.length) { panel.hidden = true; return; }
+    panel.hidden = false;
+    $("#opt-results-title").textContent =
+      `Results — ${results.profile} · ${results.model} · ${results.generated_at?.slice(0, 19) ?? ""}`;
+
+    const ranking = this.rank(results.configs);
+    $("#opt-ranking").innerHTML = ranking.map((r, i) => `
+      <div class="opt-rank-card ${i === 0 ? "winner" : ""}">
+        <span class="n">#${i + 1} ${r.name}</span>
+        <span class="s"> mean rank ${r.score === Infinity ? "—" : r.score.toFixed(1)}</span>
+      </div>`).join("")
+      + results.configs.filter(c => c.status !== "ok").map(c => `
+      <div class="opt-rank-card">
+        <span class="n">${c.name}</span>
+        <span class="s status-fail"> ${c.status}${c.failure_reason ? ": " + c.failure_reason.slice(0, 80) : ""}</span>
+      </div>`).join("");
+
+    // Per-cell best highlighting on TTFT p95 and throughput.
+    const best = {};
+    for (const c of results.configs) {
+      for (const r of c.cells ?? []) {
+        const b = best[r.cell_name] ??= {};
+        if (r.ttft_p95_ms != null && (b.ttft == null || r.ttft_p95_ms < b.ttft)) b.ttft = r.ttft_p95_ms;
+        if (r.throughput_out_tok_s != null && (b.tps == null || r.throughput_out_tok_s > b.tps)) b.tps = r.throughput_out_tok_s;
+      }
+    }
+    const tbody = $("#opt-results tbody");
+    tbody.innerHTML = "";
+    for (const c of results.configs) {
+      (c.cells ?? []).forEach((r, i) => {
+        const b = best[r.cell_name] ?? {};
+        tbody.insertAdjacentHTML("beforeend", `<tr class="${i === 0 ? "cfg-first" : ""}">
+          <td>${i === 0 ? c.name : ""}</td><td>${r.cell_name}</td>
+          <td>${r.samples}</td><td>${r.errors || ""}</td><td>${r.timeouts || ""}</td>
+          <td>${fmt.ms(r.ttft_p50_ms)}</td>
+          <td class="${r.ttft_p95_ms === b.ttft ? "best" : ""}">${fmt.ms(r.ttft_p95_ms)}</td>
+          <td>${fmt.ms(r.tpot_p50_ms)}</td><td>${fmt.ms(r.tpot_p95_ms)}</td>
+          <td class="${r.throughput_out_tok_s === b.tps ? "best" : ""}">${
+            r.throughput_out_tok_s == null ? "—" : r.throughput_out_tok_s.toFixed(1)}</td>
+        </tr>`);
+      });
+      if (!(c.cells ?? []).length) {
+        tbody.insertAdjacentHTML("beforeend",
+          `<tr class="cfg-first"><td>${c.name}</td>
+           <td colspan="9" class="status-fail">${c.status}${
+             c.failure_reason ? " — " + c.failure_reason.slice(0, 120) : ""}</td></tr>`);
+      }
+    }
+  },
+};
+
 /* ══ Persona / cohort editor ══════════════════════════════════── */
 
 const PERSONA_TEMPLATE = `description: "What this archetype does"
@@ -816,4 +994,5 @@ const Editor = {
 Control.init();
 Live.init();
 Results.init();
+Optimizer.init();
 Editor.init();

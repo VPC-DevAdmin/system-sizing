@@ -27,7 +27,7 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Lint
-        run: ruff check simulator tests
+        run: ruff check simulator tests scripts
       - name: Tests (unit + contract + mock integration)
         run: pytest tests/ -q
 

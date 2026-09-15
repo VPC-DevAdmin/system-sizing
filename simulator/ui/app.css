@@ -182,3 +182,17 @@ canvas { max-height: 300px; }
 #editor-id { width: 180px; }
 code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: .85em; }
 @media (max-width: 900px) { .editor-grid { grid-template-columns: 1fr; } }
+
+.opt-configs { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px 16px; margin-top: 14px; }
+.opt-config { display: flex; gap: 8px; align-items: baseline; font-size: .85rem; }
+.opt-config input { flex: none; }
+.opt-config .d { color: var(--muted); }
+.opt-ranking { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.opt-rank-card { background: var(--panel-2); border-radius: 8px; padding: 8px 14px;
+  border-left: 4px solid var(--line); font-size: .85rem; }
+.opt-rank-card.winner { border-left-color: var(--ok); }
+.opt-rank-card .n { font-weight: 700; }
+.opt-rank-card .s { color: var(--muted); }
+#opt-results td.best { color: var(--ok); font-weight: 600; }
+tr.cfg-first td { border-top: 2px solid var(--line); }

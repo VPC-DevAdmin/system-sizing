@@ -140,6 +140,16 @@ re-run. If smoke passes, the whole pipeline works on this host.
 
 ## 4. Full preparation and first benchmark
 
+Find the best engine launch shape BEFORE the first sweep — capacity
+numbers are only as good as the launch config they were measured on.
+From the UI's **Optimizer** tab (or `make optimize-engine
+PROFILE=nvidia_qwen3` headless): it sweeps KV-pool sizing, batch
+width, chunked prefill, and TP=2 vs data-parallel replicas against
+representative latency/throughput cells, ranks the outcomes, and
+persists/resumes at `runs/engine_optimizer/run.json`. Encode the
+winner in the profile you sweep with (e.g. add the winning
+`--max-num-seqs` to `vllm_extra_flags`, or switch to TP=2).
+
 ```bash
 capsim ready --profile <recommended>       # engine image + full model
 capsim serve                               # web UI on 127.0.0.1:8321

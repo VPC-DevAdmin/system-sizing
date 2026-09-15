@@ -123,6 +123,9 @@ class PromoteRequest(BaseModel):
     # promotes the named sweep config (the UI passes its ranked #1).
     source: str
     config_name: Optional[str] = None
+    # Promote from an ARCHIVED search (a runs/engine_optimizer/history
+    # file name) instead of the live search.json.
+    file: Optional[str] = None
 
 
 class OptimizerStartRequest(BaseModel):
@@ -745,6 +748,67 @@ def create_app(
             return True
         return _lock_state() is not None
 
+    _history_dir = _opt_out.parent / "history"
+
+    def _archive_search_results() -> None:
+        """A fresh run overwrites search.json — archive the previous
+        run first so optimizer results have history like benchmark
+        runs do. The space file is archived alongside and the doc's
+        space_file re-pointed at the copy, so a historical winner can
+        still be promoted (the space hash still verifies)."""
+        if not _search_out.exists():
+            return
+        try:
+            doc = json.loads(_search_out.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        ts = (doc.get("generated_at") or "")[:19].replace(":", "").replace(
+            "-", "") or time.strftime("%Y%m%dT%H%M%S")
+        _history_dir.mkdir(parents=True, exist_ok=True)
+        base = f"search_{ts}_{doc.get('space', 'space')}"
+        space_src = Path(doc.get("space_file") or "")
+        if space_src.exists():
+            space_copy = _history_dir / f"{base}_space.yaml"
+            space_copy.write_text(space_src.read_text())
+            doc["space_file"] = str(space_copy)
+        (_history_dir / f"{base}.json").write_text(json.dumps(doc, indent=2))
+
+    def _history_entries() -> list[dict]:
+        if not _history_dir.exists():
+            return []
+        out = []
+        for p in sorted(_history_dir.glob("search_*.json"), reverse=True):
+            try:
+                doc = json.loads(p.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            s = doc.get("summary") or {}
+            best = s.get("best") or {}
+            out.append({
+                "file": p.name,
+                "space": doc.get("space"),
+                "generated_at": doc.get("generated_at"),
+                "evaluated": s.get("evaluated"),
+                "done_reason": s.get("done_reason"),
+                "best_score": best.get("score"),
+                "best_key": best.get("key"),
+            })
+        return out
+
+    @app.get("/api/optimizer/history")
+    async def optimizer_history() -> list[dict]:
+        return await asyncio.to_thread(_history_entries)
+
+    @app.get("/api/optimizer/history/{name}")
+    async def optimizer_history_doc(name: str) -> Any:
+        if "/" in name or not name.startswith("search_") \
+                or not name.endswith(".json"):
+            raise HTTPException(422, "bad history name")
+        p = _history_dir / name
+        if not p.exists():
+            raise HTTPException(404, f"no archived search '{name}'")
+        return json.loads(p.read_text())
+
     async def _optimizer_catalog() -> dict:
         if app.state.optimizer_catalog is None:
             if not optimizer_script.exists():
@@ -884,6 +948,8 @@ def create_app(
         log_path = _opt_out.parent / (
             f"optimizer_{time.strftime('%Y%m%dT%H%M%S')}.log"
         )
+        if req.new_run:
+            _archive_search_results()
         if req.mode == "arena":
             import yaml as _yaml
 
@@ -958,9 +1024,18 @@ def create_app(
         )
         try:
             if req.source == "search":
-                if not _search_out.exists():
-                    raise HTTPException(404, "no guided-search results yet")
-                doc = json.loads(_search_out.read_text())
+                if req.file:
+                    if "/" in req.file or not req.file.startswith("search_"):
+                        raise HTTPException(422, "bad history file name")
+                    src = _opt_out.parent / "history" / req.file
+                    if not src.exists():
+                        raise HTTPException(404, f"no archived search "
+                                                 f"'{req.file}'")
+                else:
+                    src = _search_out
+                    if not src.exists():
+                        raise HTTPException(404, "no guided-search results yet")
+                doc = json.loads(src.read_text())
                 result = await asyncio.to_thread(promote_search_winner, doc)
             elif req.source == "registry":
                 if not req.config_name:

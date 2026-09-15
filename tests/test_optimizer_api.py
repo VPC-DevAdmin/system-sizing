@@ -232,3 +232,82 @@ def test_attaches_to_external_optimizer(tmp_path, monkeypatch) -> None:
     finally:
         if not lock.closed:
             lock.close()
+
+
+def test_search_history_archive_and_promote(tmp_path, monkeypatch) -> None:
+    """A fresh run archives the previous search (results + space copy,
+    space_file re-pointed) so optimizer runs have history — and an
+    archived winner can still be promoted."""
+    import json
+    import textwrap
+
+    import yaml as _yaml
+    from fastapi.testclient import TestClient
+
+    from simulator.search import load_space
+    from simulator.service import create_app
+
+    monkeypatch.chdir(tmp_path)
+    runs = tmp_path / "runs"
+    opt_dir = runs / "engine_optimizer"
+    opt_dir.mkdir(parents=True)
+
+    space_path = opt_dir / "arena_space.yaml"
+    space_path.write_text(textwrap.dedent("""\
+        name: histspace
+        engine: vllm_cuda
+        device_groups: [[0, 1]]
+        model_variants:
+          bf16: {model: org/M, served_name: m}
+        dimensions:
+          tp: [1]
+          dp: [2]
+    """))
+    space = load_space(space_path)
+    (opt_dir / "search.json").write_text(json.dumps({
+        "kind": "search", "space": "histspace",
+        "space_file": str(space_path),
+        "space_hash": space.space_hash(),
+        "generated_at": "2026-09-15T20:00:00+00:00",
+        "summary": {"evaluated": 5, "done_reason": "converged",
+                    "best": {"key": "k", "score": 9000.0,
+                             "params": {"model_variant": "bf16",
+                                        "tp": 1, "dp": 2}}},
+        "state": {"space_hash": space.space_hash()},
+    }))
+
+    stub = tmp_path / "opt.py"
+    stub.write_text("import json; print(json.dumps("
+                    "{'profiles': {}, 'cells': [], 'default_profile': 'x'}))")
+    with TestClient(create_app(runs, optimizer_script=stub)) as client:
+        # No history yet.
+        assert client.get("/api/optimizer/history").json() == []
+
+        # A fresh arena start archives the old results first. (The
+        # start itself fails later or not — archive happens first;
+        # use a bad selection so no subprocess launches.)
+        client.post("/api/optimizer/start", json={
+            "mode": "arena", "new_run": True,
+            "arena": {"models": ["org/NopeNotInCatalog"]},
+        })
+        hist = client.get("/api/optimizer/history").json()
+        assert len(hist) == 1
+        entry = hist[0]
+        assert entry["space"] == "histspace"
+        assert entry["evaluated"] == 5 and entry["best_score"] == 9000.0
+
+        # The archived doc's space_file points at the archived COPY.
+        doc = client.get(
+            f"/api/optimizer/history/{entry['file']}").json()
+        assert "history" in doc["space_file"]
+        assert _yaml.safe_load(open(doc["space_file"]))["name"] == "histspace"
+
+        # Promote straight from history — hash still verifies.
+        r = client.post("/api/optimizer/promote",
+                        json={"source": "search", "file": entry["file"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["profile"] == "optimized-histspace"
+
+        # Path traversal refused.
+        assert client.get(
+            "/api/optimizer/history/..%2Fsearch.json").status_code in (404, 422)

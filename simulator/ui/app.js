@@ -830,6 +830,7 @@ const Optimizer = {
       this.budgetTouched = true;      // the operator took the dial
       this.schedulePreview();
     });
+    $("#opt-history").addEventListener("change", () => this.showHistory());
     document.querySelector('#tabs button[data-view="optimizer"]')
       .addEventListener("click", () => { this.refresh(); this.loadArena(); });
     this.loadArena().then(() => this.refresh());
@@ -1297,6 +1298,14 @@ const Optimizer = {
     // Show the CURRENT work, not everything ever written: while an
     // optimizer runs, only its own mode's panel; otherwise whichever
     // result file is newer wins and the stale one hides.
+    this.refreshHistoryList();
+    // Viewing an archived run: pin the panel to it — live polling
+    // must not clobber what the operator chose to look at.
+    if (this.historyView && this.historyDoc) {
+      this.renderResults(null);
+      this.renderSearch(this.historyDoc);
+      return;
+    }
     const sr = status.search_results;
     const rr = status.results;
     const searchNewer = !!sr?.generated_at
@@ -1313,6 +1322,40 @@ const Optimizer = {
     }
     this.renderResults(showSearch ? null : rr);
     this.renderSearch(showSearch ? sr : null);
+  },
+
+  historyView: null,       // archive file name being viewed, or null
+  historyDoc: null,
+
+  async refreshHistoryList() {
+    let entries;
+    try { entries = await api("/api/optimizer/history"); } catch { return; }
+    const sel = $("#opt-history");
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">current</option>' + entries.map(e =>
+      `<option value="${e.file}" ${e.file === prev ? "selected" : ""}>
+        ${(e.generated_at || "").slice(0, 16).replace("T", " ")} ·
+        ${e.space} · ${e.evaluated} evals ·
+        best ${e.best_score == null ? "—" : Math.round(e.best_score)}
+      </option>`).join("");
+  },
+
+  async showHistory() {
+    const name = $("#opt-history").value;
+    if (!name) {
+      this.historyView = this.historyDoc = null;
+      this.refresh();
+      return;
+    }
+    try {
+      this.historyDoc = await api(
+        `/api/optimizer/history/${encodeURIComponent(name)}`);
+      this.historyView = name;
+      this.renderResults(null);
+      this.renderSearch(this.historyDoc);
+    } catch (e) {
+      this.msg(e.message, "error");
+    }
   },
 
   renderSearch(doc) {
@@ -1495,7 +1538,9 @@ const Optimizer = {
     try {
       r = await api("/api/optimizer/promote", {
         method: "POST",
-        body: JSON.stringify({ source, config_name: configName ?? null }),
+        body: JSON.stringify({ source, config_name: configName ?? null,
+                               file: source === "search"
+                                 ? this.historyView : null }),
       });
     } catch (e) {
       this.msg(e.message, "error");

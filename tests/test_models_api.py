@@ -100,3 +100,40 @@ def test_models_api_download_flow(tmp_path, monkeypatch) -> None:
         assert dl["exit_code"] == 0
         assert "done org/tiny" in dl["log_tail"]
         assert doc["models"][0]["cached"] is True
+
+
+def test_storage_api(tmp_path, monkeypatch) -> None:
+    """Storage step: filesystem listing, current-cache resolution, and
+    persisting a chosen location that downstream resolution honors."""
+    import simulator.models as models_mod
+
+    monkeypatch.delenv("OPTIMIZER_HF_CACHE", raising=False)
+    monkeypatch.setattr(models_mod, "STORAGE_CONFIG",
+                        tmp_path / "cfg" / "storage.json")
+
+    with TestClient(create_app(tmp_path / "runs")) as client:
+        doc = client.get("/api/storage").json()
+        assert doc["hf_cache_source"] in ("default", "data-layout")
+        assert isinstance(doc["filesystems"], list) and doc["filesystems"]
+        fs = doc["filesystems"][0]
+        assert {"mountpoint", "free_gb", "total_gb", "fstype"} <= set(fs)
+
+        # Relative path refused with a human-readable reason.
+        r = client.post("/api/storage", json={"hf_cache": "relative/path"})
+        assert r.status_code == 422 and "absolute" in r.json()["detail"]
+
+        # A good choice persists and resolution follows it.
+        target = tmp_path / "bigdisk" / "capsim" / "huggingface"
+        r = client.post("/api/storage", json={"hf_cache": str(target)})
+        assert r.status_code == 200, r.text
+        assert r.json()["resolved"] == str(target)
+        assert target.exists()
+        assert models_mod.hf_cache_dir() == target
+        assert models_mod.hf_cache_source() == "configured"
+        doc = client.get("/api/storage").json()
+        assert doc["hf_cache"] == str(target)
+
+        # Env override wins and blocks UI changes with an explanation.
+        monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path / "env"))
+        r = client.post("/api/storage", json={"hf_cache": str(target)})
+        assert r.status_code == 422 and "OPTIMIZER_HF_CACHE" in r.json()["detail"]

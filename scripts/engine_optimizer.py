@@ -1306,11 +1306,16 @@ def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
     # the first config and are reused by every later one).
     if Path("/data/ml/models").exists():
         args.extend(["-v", "/data/ml/models:/models"])
-    hf_cache = os.environ.get("OPTIMIZER_HF_CACHE") or (
-        "/data/ml/huggingface" if Path("/data/ml/huggingface").exists()
-        else str(Path.home() / ".cache" / "huggingface")
-    )
-    Path(hf_cache).mkdir(parents=True, exist_ok=True)
+    # Shared cache resolution (env > UI-chosen storage.json >
+    # /data/ml layout > ~/.cache) — same as the service and engines,
+    # so the optimizer's containers see the disk the user picked.
+    try:
+        from simulator.models import hf_cache_dir
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from simulator.models import hf_cache_dir
+    hf_cache = hf_cache_dir()
+    hf_cache.mkdir(parents=True, exist_ok=True)
     args.extend(["-v", f"{hf_cache}:/root/.cache/huggingface"])
     for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
         if os.environ.get(var):

@@ -34,6 +34,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -93,6 +94,10 @@ class SaveSpecRequest(BaseModel):
 
 class ModelDownloadRequest(BaseModel):
     model: str
+
+
+class StorageRequest(BaseModel):
+    hf_cache: str      # absolute directory for model weights
 
 
 class OptimizerStartRequest(BaseModel):
@@ -408,6 +413,103 @@ def create_app(
         return {"stopped": True}
 
 
+
+
+    # ── storage (choose the disk + location for model weights) ────
+    # Lists every mounted filesystem and every large unmounted disk;
+    # lets the user pick where weights live. The choice persists to
+    # ~/.config/capsim/storage.json and everything downstream (doctor,
+    # downloads, engine mounts, optimizer) resolves through it. The
+    # service NEVER formats or mounts disks — that is root-privileged
+    # and destructive, so unmounted disks come with the exact commands
+    # for a human instead.
+
+    @app.get("/api/storage")
+    async def storage_status() -> dict:
+        import psutil
+
+        from .doctor import parse_lsblk_unmounted
+        from .models import hf_cache_dir, hf_cache_source
+
+        def _fs_list() -> list[dict]:
+            out, seen = [], set()
+            for part in psutil.disk_partitions(all=False):
+                mp = part.mountpoint
+                if part.fstype in ("tmpfs", "devtmpfs", "squashfs",
+                                   "overlay", "vfat", "autofs", "nullfs") \
+                        or mp.startswith(("/boot", "/snap", "/System",
+                                          "/private/var", "/dev")):
+                    continue
+                try:
+                    usage = shutil.disk_usage(mp)
+                    dev = Path(mp).stat().st_dev
+                except OSError:
+                    continue
+                if dev in seen:
+                    continue
+                seen.add(dev)
+                out.append({
+                    "mountpoint": mp,
+                    "device": part.device,
+                    "fstype": part.fstype,
+                    "total_gb": round(usage.total / 1e9, 1),
+                    "free_gb": round(usage.free / 1e9, 1),
+                })
+            return sorted(out, key=lambda f: -f["free_gb"])
+
+        unmounted: list[dict] = []
+        try:
+            res = await asyncio.to_thread(
+                subprocess.run,
+                ["lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            res = None                     # non-Linux host — no lsblk
+        if res and res.returncode == 0 and res.stdout.strip():
+            try:
+                for name, size_gb in parse_lsblk_unmounted(
+                    json.loads(res.stdout), min_gb=200.0,
+                ):
+                    unmounted.append({
+                        "name": name,
+                        "size_gb": round(size_gb, 1),
+                        # Commands for a HUMAN with sudo — shown, never run.
+                        "commands": [
+                            f"sudo mkfs.ext4 -L capsim-data /dev/{name}",
+                            "sudo mkdir -p /data",
+                            f"sudo mount /dev/{name} /data",
+                            "echo 'LABEL=capsim-data /data ext4 defaults,nofail 0 2' | sudo tee -a /etc/fstab",
+                            "sudo chown $USER /data",
+                        ],
+                    })
+            except (ValueError, KeyError):
+                pass
+
+        cache = hf_cache_dir()
+        probe = cache
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        try:
+            cache_free = round(shutil.disk_usage(probe).free / 1e9, 1)
+        except OSError:
+            cache_free = None
+        return {
+            "hf_cache": str(cache),
+            "hf_cache_source": hf_cache_source(),
+            "hf_cache_free_gb": cache_free,
+            "filesystems": await asyncio.to_thread(_fs_list),
+            "unmounted": unmounted,
+        }
+
+    @app.post("/api/storage")
+    async def storage_set(req: StorageRequest) -> dict:
+        from .models import hf_cache_dir, set_hf_cache_dir
+        try:
+            chosen = await asyncio.to_thread(set_hf_cache_dir, req.hf_cache)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        return {"hf_cache": str(chosen), "resolved": str(hf_cache_dir())}
 
     # ── model staging (weights into the shared HF cache) ──────────
     # The UI's Models panel: which models do profiles/search spaces

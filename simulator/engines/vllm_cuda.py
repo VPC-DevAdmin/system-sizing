@@ -199,10 +199,21 @@ class VllmCudaEngine(Engine):
         # setups need an explicit publish (image serves on 8000).
         if cfg.docker_network != "host":
             cmd += ["-p", f"{cfg.port}:8000"]
+        mounted_targets = set()
         for host_path, container_path in (cfg.docker_volumes or {}).items():
             if not Path(host_path).exists():
                 continue
             cmd += ["-v", f"{host_path}:{container_path}"]
+            mounted_targets.add(container_path)
+        # Weights cache: when the profile's HF-cache mount didn't apply
+        # (host path absent, or a UI-chosen storage location is in
+        # play), mount the RESOLVED cache so weights land / are found
+        # on the disk the user actually picked.
+        if "/root/.cache/huggingface" not in mounted_targets:
+            from ..models import hf_cache_dir
+            cache = hf_cache_dir()
+            cache.mkdir(parents=True, exist_ok=True)
+            cmd += ["-v", f"{cache}:/root/.cache/huggingface"]
         # Pass through an HF token for gated models.
         for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
             if os.environ.get(var):

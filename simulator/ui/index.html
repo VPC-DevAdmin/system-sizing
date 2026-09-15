@@ -40,6 +40,25 @@
 
     <section class="panel">
       <div class="step-head"><span class="step-num">2</span>
+        <div><div class="t">Choose where models live</div>
+          <div class="d">Model weights are 30&ndash;60 GB each — pick the disk and directory
+            they download to. The doctor, downloads, engines and optimizer all follow this
+            choice. Current: <b id="storage-current">&mdash;</b>
+            <span id="storage-source" class="msg"></span></div></div>
+        <button id="storage-refresh" class="small" style="margin-left:auto">Refresh</button>
+      </div>
+      <div id="storage-fs" class="chips"></div>
+      <div class="row wrap" style="margin-top:12px">
+        <label style="flex:1;min-width:280px">Directory on the selected filesystem
+          <input id="storage-path" placeholder="/data/capsim/huggingface"></label>
+        <button id="storage-apply" class="primary small">Use this location</button>
+        <span id="storage-msg" class="msg"></span>
+      </div>
+      <div id="storage-unmounted"></div>
+    </section>
+
+    <section class="panel">
+      <div class="step-head"><span class="step-num">3</span>
         <div><div class="t">Stage model weights</div>
           <div class="d">Every model the profiles and search spaces reference, and whether
             its weights are already in the cache the engines mount
@@ -54,7 +73,7 @@
     </section>
 
     <section class="panel">
-      <div class="step-head"><span class="step-num">3</span>
+      <div class="step-head"><span class="step-num">4</span>
         <div><div class="t">Find the best launch shape</div>
           <div class="d">Capacity numbers are only as good as the engine config they were
             measured on. Sweep the curated registry, or run the guided search over the

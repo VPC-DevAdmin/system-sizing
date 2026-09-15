@@ -341,3 +341,17 @@ code {
 /* Focus: keep keyboard accessibility, drop the mouse-click ring. */
 button:focus:not(:focus-visible), select:focus:not(:focus-visible) { outline: none; }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Storage step */
+.fs-chip { cursor: pointer; display: flex; flex-direction: column; gap: 2px; min-width: 200px; }
+.fs-chip.selected { border-color: var(--accent); }
+.fs-chip .m { font-weight: 600; }
+.fs-chip .f { color: var(--muted); font-size: .76rem; }
+.fs-chip .free { color: var(--teal); font-weight: 650; font-size: 1.05rem; }
+.unmounted-box { margin-top: 14px; }
+.unmounted-box pre {
+  background: rgba(8, 20, 31, .7); border: 1px solid var(--stroke);
+  border-radius: 10px; padding: 12px 14px; overflow-x: auto;
+  font: .8rem/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text); margin: 8px 0 0;
+}

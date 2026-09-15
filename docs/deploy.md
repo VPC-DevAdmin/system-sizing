@@ -21,9 +21,20 @@ sudo apt-get install -y git python3 curl linux-tools-common linux-tools-$(uname 
 sudo apt-get install -y docker.io
 sudo usermod -aG docker $USER && newgrp docker
 
-# GPU hosts only: NVIDIA driver …
-sudo apt-get install -y nvidia-driver-570-server   # or ubuntu-drivers install
+# GPU hosts only: NVIDIA driver. Headers for the RUNNING kernel first
+# so DKMS builds against it (and avoid apt full-upgrade here — a new
+# kernel is what forces a reboot).
+sudo apt-get install -y linux-headers-$(uname -r) nvidia-driver-570-server
 sudo reboot                                        # then verify: nvidia-smi
+
+# No-reboot alternative (labs where reboots are costly): if
+# `lsmod | grep nouveau` is empty — common on headless GPU servers —
+# just load the modules by hand and skip the reboot:
+#   sudo modprobe nvidia nvidia_uvm && nvidia-smi
+# If nouveau IS loaded: blacklist it (modprobe.d + update-initramfs),
+# then try `sudo rmmod nouveau` before the modprobe. If rmmod refuses
+# ("in use" — it's holding the console framebuffer), reboot is the
+# clean path. Everything below driver install never needs a reboot.
 
 # … and nvidia-container-toolkit, so Docker can hand containers GPUs.
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \

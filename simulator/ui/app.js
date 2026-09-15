@@ -1080,6 +1080,20 @@ const Optimizer = {
       out.innerHTML = `<span class="status-fail">${e.message}</span>`;
       return;
     }
+    // Budget in context, right next to the input: what fraction of
+    // the CURRENT arena would actually be measured.
+    const ctx = $("#opt-budget-context");
+    if (ctx) {
+      const total = p.total_combinations || 1;
+      const pct = (Math.min(p.budget, total) / total) * 100;
+      const pctText = pct >= 99.5 ? "the whole arena"
+        : `${pct < 1 ? "<1" : pct.toFixed(pct < 10 ? 1 : 0)}% of the
+           ${total.toLocaleString()}-combination arena`;
+      ctx.innerHTML = `= ${pctText} measured directly · ~${p.estimated_hours} h
+        <span title="The first pass covers every value of every dimension;
+        the rest refines around the leaders — so effective coverage is far
+        higher than the raw percentage.">ⓘ</span>`;
+    }
     const nModels = p.models ?? 1;
     const floor = nModels * 6;
     const budgetHint = p.budget < floor

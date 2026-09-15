@@ -22,7 +22,7 @@ from typing import Any, Iterable
 # The version is stamped into SQLite's ``PRAGMA user_version``; DBs from
 # before versioning existed read as 0 and get every migration (each one
 # is idempotent, so a partially-lifted legacy DB is fine too).
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cohort_run (
@@ -213,7 +213,10 @@ CREATE TABLE IF NOT EXISTS simulation_snapshots (
     prefill_in_flight INTEGER,
     decode_in_flight INTEGER,
     sessions_warm INTEGER,
-    sessions_cold INTEGER
+    sessions_cold INTEGER,
+    -- v5: token-weighted hot set — Σ history tokens over warm
+    -- sessions, comparable against the engine's KV pool.
+    warm_kv_tokens INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_run_time ON simulation_snapshots(cohort_run_id, snapshot_at_ms);
@@ -422,6 +425,16 @@ def _migration_4_deep_telemetry(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_5_warm_kv_tokens(conn: sqlite3.Connection) -> None:
+    """Token-weighted hot set: sessions are not equal (personas differ
+    10-100x in history length), so the warm set is also recorded in
+    TOKENS — the unit the engine's KV pool is sized in."""
+    _ensure_columns(
+        conn, "simulation_snapshots",
+        [("warm_kv_tokens", "INTEGER")],
+    )
+
+
 def _migrate_legacy_aggregate(conn: sqlite3.Connection) -> None:
     """Copy legacy ``measurement_aggregate`` rows onto
     ``cohort_measurements`` and drop the table.
@@ -460,6 +473,7 @@ MIGRATIONS: list[tuple[int, str, Any]] = [
     (3, "gpu telemetry columns", _migration_3_gpu_telemetry),
     (4, "deep telemetry (token rates, host/gpu detail, session phases)",
      _migration_4_deep_telemetry),
+    (5, "token-weighted warm KV hot set", _migration_5_warm_kv_tokens),
 ]
 assert [v for v, _, _ in MIGRATIONS] == list(range(1, SCHEMA_VERSION + 1)), (
     "MIGRATIONS must be contiguous 1..SCHEMA_VERSION"

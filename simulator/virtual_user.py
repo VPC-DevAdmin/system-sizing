@@ -155,6 +155,11 @@ class SharedState:
         self._errors = 0
         self._prefill_in_flight = 0
         self._warm_thinking = 0
+        # Token-weighted hot set: Σ history tokens over warm sessions.
+        # Sessions are not equal — a deep-analysis session's warm KV
+        # dwarfs a quick-lookup's — so the hot set is measured in
+        # TOKENS, which is comparable against the engine's KV pool.
+        self._warm_kv_tokens = 0
         self.events: asyncio.Queue[TurnEvent] = asyncio.Queue()
         # Live progress for the in-flight measurement step. Both
         # written from the single ``run_measurement_step`` task — no
@@ -179,6 +184,10 @@ class SharedState:
     @property
     def warm_thinking(self) -> int:
         return self._warm_thinking
+
+    @property
+    def warm_kv_tokens(self) -> int:
+        return self._warm_kv_tokens
 
     @property
     def completed(self) -> int:
@@ -213,11 +222,13 @@ class SharedState:
                 self._prefill_in_flight = max(0, self._prefill_in_flight - 1)
             self._errors += 1
 
-    def enter_warm_think(self) -> None:
+    def enter_warm_think(self, history_tokens: int = 0) -> None:
         self._warm_thinking += 1
+        self._warm_kv_tokens += history_tokens
 
-    def leave_warm_think(self) -> None:
+    def leave_warm_think(self, history_tokens: int = 0) -> None:
         self._warm_thinking = max(0, self._warm_thinking - 1)
+        self._warm_kv_tokens = max(0, self._warm_kv_tokens - history_tokens)
 
 
 def _now_ms() -> int:
@@ -491,14 +502,15 @@ async def run_virtual_user(
                         persona.read_time_seconds.sample(rng)
                         + persona.active_think_seconds.sample(rng)
                     )
-                    state.enter_warm_think()
+                    warm_tokens = history_token_count
+                    state.enter_warm_think(warm_tokens)
                     try:
                         await asyncio.wait_for(cancel_event.wait(), timeout=delay)
                         return  # cancel fired
                     except asyncio.TimeoutError:
                         pass
                     finally:
-                        state.leave_warm_think()
+                        state.leave_warm_think(warm_tokens)
 
             stats.sessions_completed += 1
         # Session done — return so the pool manager spawns a

@@ -370,6 +370,12 @@ const Live = {
     $("#live-inflight").textContent = s.in_flight;
     $("#live-completed").textContent = s.requests_completed;
     $("#live-errors").textContent = s.errors;
+    if (s.warm_kv_tokens != null) {
+      const t = s.warm_kv_tokens;
+      $("#live-warmkv").textContent =
+        t >= 1e6 ? `${(t / 1e6).toFixed(1)}M` :
+        t >= 1e3 ? `${(t / 1e3).toFixed(1)}k` : `${t}`;
+    }
     const target = s.step_target_samples || 0;
     if (target > 0) {
       $("#live-progress").textContent = `${s.step_samples} / ${target} samples`;

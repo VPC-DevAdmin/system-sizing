@@ -144,6 +144,12 @@ class SnapshotRecorder:
                         self.state, "decode_in_flight", None),
                     "sessions_warm": warm,
                     "sessions_cold": max(0, pool_size - in_flight - warm),
+                    # Token-weighted hot set: Σ history tokens across
+                    # warm sessions — comparable against the engine's
+                    # KV pool, unlike a bare session count (personas
+                    # differ 10-100× in history length).
+                    "warm_kv_tokens": getattr(
+                        self.state, "warm_kv_tokens", None),
                     "requests_completed": self.state.completed,
                     "errors": self.state.errors,
                     "step_samples": self.state.step_samples,

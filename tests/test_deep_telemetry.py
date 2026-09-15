@@ -63,10 +63,12 @@ def test_shared_state_phase_split() -> None:
         await s.fail(first_token_seen=False)
         assert s.in_flight == 0 and s.prefill_in_flight == 0
 
-        s.enter_warm_think()
-        s.enter_warm_think()
-        s.leave_warm_think()
+        # Warm set is token-weighted: unequal sessions, unequal KV.
+        s.enter_warm_think(4000)
+        s.enter_warm_think(150)
+        s.leave_warm_think(4000)
         assert s.warm_thinking == 1
+        assert s.warm_kv_tokens == 150
 
     asyncio.run(_run())
 
@@ -84,8 +86,8 @@ def test_migration_v4_lifts_legacy_db(tmp_path) -> None:
     assert {"prefill_tok_s", "decode_tok_s", "preemptions",
             "host_json", "gpu_devices_json"} <= cols
     snap_cols = {r[1] for r in conn.execute("PRAGMA table_info(simulation_snapshots)")}
-    assert {"prefill_in_flight", "decode_in_flight",
-            "sessions_warm", "sessions_cold"} <= snap_cols
+    assert {"prefill_in_flight", "decode_in_flight", "sessions_warm",
+            "sessions_cold", "warm_kv_tokens"} <= snap_cols
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     conn.close()
     db.close()

@@ -690,9 +690,14 @@ def create_app(
                 fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 try:
-                    return json.loads(fh.read() or "{}") or {}
+                    doc = json.loads(fh.read() or "{}")
                 except json.JSONDecodeError:
                     return {}
+                if isinstance(doc, dict):
+                    return doc
+                if isinstance(doc, int):
+                    return {"pid": doc}    # pre-JSON lock: bare PID
+                return {}
             fcntl.flock(fh, fcntl.LOCK_UN)
             return None
         finally:

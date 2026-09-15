@@ -168,13 +168,35 @@
     encode the winner in the profile you sweep with. Results persist to
     <code>runs/engine_optimizer/run.json</code> and resume if interrupted.</p>
     <div class="row wrap">
-      <label>Profile <select id="opt-profile"></select></label>
+      <label>Mode
+        <select id="opt-mode">
+          <option value="registry">Registry sweep (curated configs)</option>
+          <option value="search">Guided search (coarse → refine)</option>
+        </select>
+      </label>
+      <label id="opt-profile-wrap">Profile <select id="opt-profile"></select></label>
+      <label id="opt-space-wrap" hidden>Space <select id="opt-space"></select></label>
       <label class="check"><input type="checkbox" id="opt-new-run"> Fresh run (don't resume)</label>
       <button id="opt-start" class="primary">Start optimizer</button>
       <button id="opt-stop" class="danger" disabled>Stop</button>
       <span id="opt-msg" class="msg"></span>
     </div>
+    <p id="opt-search-hint" class="msg" hidden>Guided search samples the space for
+    coverage, ranks candidates by the space's objective (default: summed throughput
+    with p95-latency caps), then refines one-dimension neighbors of the leaders until
+    the budget is spent or improvement flattens. Dimensions, objective and budget live
+    in the space YAML (<code>config/search/</code>).</p>
     <div id="opt-configs" class="opt-configs"></div>
+  </section>
+
+  <section class="panel" id="opt-search-panel" hidden>
+    <h2 id="opt-search-title">Guided search</h2>
+    <div id="opt-search-best" class="opt-ranking"></div>
+    <table id="opt-search-table">
+      <thead><tr><th>#</th><th>Iter</th><th>Candidate</th><th>Score</th>
+        <th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
   </section>
 
   <section class="panel" id="opt-results-panel" hidden>

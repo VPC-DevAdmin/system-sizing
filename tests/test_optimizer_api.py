@@ -32,10 +32,26 @@ p.add_argument("--out", type=Path)
 p.add_argument("--profile")
 p.add_argument("--new-run", action="store_true")
 p.add_argument("--only", nargs="+")
+p.add_argument("--search", type=Path)
+p.add_argument("--search-out", type=Path)
 args = p.parse_args()
 
 if args.list_json:
     print(json.dumps(CATALOG)); sys.exit(0)
+
+if args.search:
+    args.search_out.parent.mkdir(parents=True, exist_ok=True)
+    args.search_out.write_text(json.dumps({
+        "kind": "search", "space": args.search.stem,
+        "summary": {"evaluated": 3, "ok": 3, "failed": 0,
+                     "done_reason": "budget",
+                     "best": {"key": "tp=2", "params": {"tp": 2},
+                              "score": 5000.0, "config_name": "s001"},
+                     "top": [], "iterations": []},
+        "state": {"space_hash": "x", "iterations": [],
+                   "evaluated": {}, "done_reason": "budget"},
+    }))
+    sys.exit(0)
 
 args.out.parent.mkdir(parents=True, exist_ok=True)
 names = args.only or ["baseline", "variant"]
@@ -125,3 +141,43 @@ def test_optimizer_excludes_capacity_runs(tmp_path, monkeypatch) -> None:
         assert r.status_code == 409
         assert "capacity run" in r.json()["detail"]
         app.state.active = None
+
+
+def test_optimizer_search_mode(tmp_path) -> None:
+    """Search mode resolves a space by name, launches the driver with
+    --search, and surfaces search.json through the status endpoint."""
+    import yaml as _yaml
+
+    space_dir = tmp_path / "spaces"
+    space_dir.mkdir()
+    (space_dir / "tiny.yaml").write_text(_yaml.safe_dump({
+        "engine": "vllm_cuda", "device_groups": [[0]],
+        "model_variants": {"bf16": {"model": "m"}},
+        "dimensions": {"tp": [1]},
+    }))
+    import simulator.search as search_mod
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        import unittest.mock as mock
+        with mock.patch.object(
+            search_mod, "list_spaces",
+            lambda directory=None: {"tiny": str(space_dir / "tiny.yaml")},
+        ):
+            status = client.get("/api/optimizer").json()
+            assert "tiny" in status["spaces"]
+
+            r = client.post("/api/optimizer/start", json={
+                "mode": "search", "space": "nope"})
+            assert r.status_code == 404
+
+            r = client.post("/api/optimizer/start", json={
+                "mode": "search", "space": "tiny", "new_run": True})
+            assert r.status_code == 202, r.text
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                status = client.get("/api/optimizer").json()
+                if not status["running"] and status["search_results"]:
+                    break
+                time.sleep(0.2)
+            assert status["search_results"]["summary"]["best"]["score"] == 5000.0
+            assert status["active"]["mode"] == "search"

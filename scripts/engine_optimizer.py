@@ -2246,6 +2246,152 @@ def _print_summary(state: OptimizerState) -> None:
             )
 
 
+
+# ── Guided search mode (simulator/search.py drives, we evaluate) ────────
+#
+# ``--search config/search/<space>.yaml`` replaces the fixed registry
+# with a coarse-to-fine search over models × precision × TP/DP ×
+# placement × batch shape. This side owns the expensive part —
+# launching candidates and measuring cells via the same run_config
+# machinery the registry uses; the pure search logic (sampling,
+# neighbors, scoring, stop rules, resume) lives in simulator.search
+# where it is unit-tested.
+
+DEFAULT_SEARCH_OUT = Path("runs/engine_optimizer/search.json")
+
+
+def _import_search():
+    try:
+        from simulator import search as _search
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from simulator import search as _search
+    return _search
+
+
+def _set_model_globals(model: str, served_name: str) -> None:
+    """Per-candidate model binding. Candidates run strictly
+    sequentially, so rebinding the module globals the launch/measure
+    helpers read is safe — and far smaller than threading a model
+    parameter through every helper."""
+    global MODEL_PATH, SERVED_NAME
+    MODEL_PATH = model
+    SERVED_NAME = served_name
+
+
+def _candidate_engine_config(view: dict, index: int) -> EngineConfig:
+    params = view["params"]
+    bits = [f"s{index:03d}", str(params.get("model_variant", "m")),
+            f"tp{view['tp']}dp{len(view['replica_devices'])}"]
+    if len(view["replica_devices"]) * view["tp"] > 1:
+        bits.append(str(params.get("placement", "pack")))
+    name = "_".join(bits)
+    replicas = [
+        ReplicaSpec(
+            name=f"vllm-s{i}", port=8000 + i,
+            gpus="device=" + ",".join(str(d) for d in devices),
+        )
+        for i, devices in enumerate(view["replica_devices"])
+    ]
+    return EngineConfig(
+        name=name,
+        description=", ".join(f"{k}={v}" for k, v in params.items()),
+        replicas=replicas,
+        replica_args=list(view["engine_args"]),
+        shm_size="32g" if view["tp"] > 1 else "16g",
+        launch_timeout_s=2700,
+    )
+
+
+def _save_search(out_path: Path, sstate, space, search_mod) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps({
+        "kind": "search",
+        "space": space.name,
+        "space_file": space.source,
+        "space_hash": space.space_hash(),
+        "objective": dataclasses.asdict(space.objective),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": search_mod.summarize(sstate),
+        "state": sstate.to_dict(),
+    }, indent=2))
+
+
+async def run_search(space_path: Path, out_path: Path, new_run: bool) -> None:
+    import random as _random
+
+    search = _import_search()
+    space = search.load_space(space_path)
+
+    sstate = None
+    if new_run and out_path.exists():
+        out_path.unlink()
+        print(f"--new-run: removed prior {out_path}")
+    if out_path.exists():
+        try:
+            doc = json.loads(out_path.read_text())
+            sstate = search.SearchState.from_dict(doc["state"])
+            print(f"Resuming search: {len(sstate.evaluated)} candidates "
+                  f"already evaluated ({out_path})")
+        except (KeyError, ValueError) as e:
+            raise SystemExit(
+                f"{out_path} exists but is not a readable search state "
+                f"({e}) — pass --new-run to discard it"
+            ) from e
+    if sstate is None:
+        sstate = search.SearchState(space_hash=space.space_hash())
+
+    rng = _random.Random(space.search.seed)
+    prompts = make_prompts(TEST_CELLS)
+    state_ui = OptimizerState(total_configs=space.search.budget,
+                              print_to_stdout=True)
+    print(f"Guided search: space={space.name} objective="
+          f"{space.objective.kind} budget={space.search.budget} "
+          f"-> {out_path}")
+
+    eval_index = len(sstate.evaluated)
+    while True:
+        kind, batch = search.next_batch(sstate, space, rng)
+        if kind.startswith("done"):
+            print(f"\nSearch finished: {kind[5:] or sstate.done_reason}")
+            break
+        print(f"\n=== iteration {sstate.iterations[-1]['index']} "
+              f"({kind}): {len(batch)} candidate(s) ===")
+        for params in batch:
+            view = search.candidate_summary(params, space)
+            cfg = _candidate_engine_config(view, eval_index)
+            _set_model_globals(view["model"], view["served_name"])
+            state_ui.begin_config(eval_index, cfg.name)
+            result = await run_config(
+                cfg, state_ui, prompts,
+                save=lambda: None,     # search persists its own state
+            )
+            cells = [dataclasses.asdict(c) for c in result.cells]
+            score = (search.score_cells(cells, space.objective)
+                     if result.status == "ok" else None)
+            search.record_evaluation(
+                sstate, space, params,
+                status=result.status if result.status == "ok" else "launch_failed",
+                score=score, config_name=cfg.name, cells=cells,
+                iteration=sstate.iterations[-1]["index"],
+            )
+            _save_search(out_path, sstate, space, search)
+            print(f"    -> {cfg.name}: {result.status}"
+                  + (f", score={score:.1f}" if score is not None else ""))
+            eval_index += 1
+
+    _save_search(out_path, sstate, space, search)
+    summary = search.summarize(sstate)
+    print(f"\nEvaluated {summary['evaluated']} candidates "
+          f"({summary['failed']} failed). Top:")
+    for i, entry in enumerate(summary["top"][:5]):
+        print(f"  #{i + 1} score={entry['score']:.1f}  {entry['key']}")
+    if summary["best"]:
+        print(f"\nBest: {summary['best']['key']}")
+        print("Encode this shape in the profile you sweep with.")
+    print(f"Saved -> {out_path}")
+
+
 DEFAULT_OUT = Path("runs/engine_optimizer/run.json")
 
 
@@ -2399,6 +2545,20 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--search", type=Path, default=None,
+        help=(
+            "Guided coarse-to-fine search over a parameter space "
+            "(config/search/*.yaml) instead of the fixed registry: "
+            "coverage sample, rank by the space's objective, refine "
+            "around the leaders until budget/convergence. Resumable; "
+            "state at --search-out."
+        ),
+    )
+    p.add_argument(
+        "--search-out", type=Path, default=DEFAULT_SEARCH_OUT,
+        help=f"Search state/results JSON (default {DEFAULT_SEARCH_OUT}).",
+    )
+    p.add_argument(
         "--profile",
         default=os.environ.get("OPTIMIZER_PROFILE", DEFAULT_PROFILE),
         choices=sorted(PROFILES.keys()),
@@ -2459,6 +2619,10 @@ def main() -> None:
 
     if args.watch:
         watch_dashboard(args.out)
+        return
+
+    if args.search is not None:
+        asyncio.run(run_search(args.search, args.search_out, args.new_run))
         return
 
     asyncio.run(main_async(args.out, args.only, args.new_run))

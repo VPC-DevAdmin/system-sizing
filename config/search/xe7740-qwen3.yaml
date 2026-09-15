@@ -1,0 +1,59 @@
+# Search space: XE7740 (8× RTX PRO 6000 Blackwell 96 GB), Qwen3-30B.
+#
+# Drives the guided coarse-to-fine search (Optimizer tab → Guided
+# search, or `make optimize-search SPACE=config/search/xe7740-qwen3.yaml`):
+# a coverage sample of this space first, then neighborhood refinement
+# around the leaders until improvement flattens or the budget is spent.
+#
+# ~2,000 valid combinations; the defaults below measure at most 40.
+
+name: xe7740-qwen3
+engine: vllm_cuda
+
+# GPU ids grouped by PCIe/NUMA domain (nvidia-smi order: 0-3 are PCI
+# domain 0000, 4-7 are domain 0001 on this box). "pack" placement
+# keeps TP peers inside one domain; "spread" deals replicas across
+# domains. A TP replica never spans domains — cross-domain all-reduce
+# is the one shape that's never the answer.
+device_groups: [[0, 1, 2, 3], [4, 5, 6, 7]]
+
+# Precision = model artifact + flags, not a flag alone: FP8 is a
+# different set of weights. Both variants serve under the same name so
+# measurement code is agnostic. Prefetch weights to keep launch
+# timeouts honest:  hf download <model>
+model_variants:
+  bf16:
+    model: Qwen/Qwen3-30B-A3B-Instruct-2507
+    served_name: qwen3_30b_a3b
+  fp8:
+    model: Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+    served_name: qwen3_30b_a3b
+
+dimensions:
+  model_variant: [bf16, fp8]
+  tp: [1, 2, 4]                       # ordinal — refinement steps ±1
+  dp: [1, 2, 4, 8]
+  gpu_memory_utilization: [0.85, 0.90, 0.95]
+  max_num_seqs: [64, 128, 256, 512]
+  max_num_batched_tokens: [default, 2048, 8192]
+  placement: [pack, spread]
+
+# One scalar per candidate: summed output tok/s across the optimizer
+# cells, a cell's contribution penalized ×0.25 when its p95 latencies
+# blow the caps — "fastest while staying interactive", matching the
+# repo's SLA-first capacity philosophy. kinds: sla_throughput |
+# throughput | latency.
+objective:
+  kind: sla_throughput
+  ttft_p95_cap_ms: 10000
+  tpot_p95_cap_ms: 100
+  penalty: 0.25
+
+search:
+  seed: 42
+  initial_samples: 14                 # coverage stage
+  top_k: 3                            # leaders refined each iteration
+  neighbors_per_iteration: 8
+  max_iterations: 4
+  min_improvement: 0.03               # stop when <3% better per iteration
+  budget: 40                          # hard cap on total evaluations

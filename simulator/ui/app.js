@@ -718,8 +718,17 @@ const Optimizer = {
     $("#opt-start").addEventListener("click", () => this.start());
     $("#opt-stop").addEventListener("click", () => this.stop());
     $("#opt-profile").addEventListener("change", () => this.renderConfigs());
+    $("#opt-mode").addEventListener("change", () => this.renderMode());
     document.querySelector('#tabs button[data-view="optimizer"]')
       .addEventListener("click", () => this.refresh());
+  },
+
+  renderMode() {
+    const search = $("#opt-mode").value === "search";
+    $("#opt-profile-wrap").hidden = search;
+    $("#opt-space-wrap").hidden = !search;
+    $("#opt-search-hint").hidden = !search;
+    $("#opt-configs").hidden = search;
   },
 
   msg(text, cls = "") {
@@ -745,6 +754,12 @@ const Optimizer = {
       }
       this.renderConfigs();
     }
+    const spaceSel = $("#opt-space");
+    const prevSpace = spaceSel.value;
+    spaceSel.innerHTML = "";
+    for (const name of Object.keys(status.spaces ?? {})) {
+      spaceSel.append(new Option(name, name, false, name === prevSpace));
+    }
     $("#opt-start").disabled = status.running;
     $("#opt-stop").disabled = !status.running;
     if (status.running) {
@@ -762,6 +777,42 @@ const Optimizer = {
       }
     }
     this.renderResults(status.results);
+    this.renderSearch(status.search_results);
+  },
+
+  renderSearch(doc) {
+    const panel = $("#opt-search-panel");
+    if (!doc || !doc.summary) { panel.hidden = true; return; }
+    panel.hidden = false;
+    const s = doc.summary;
+    $("#opt-search-title").textContent =
+      `Guided search — ${doc.space} · ${s.evaluated} evaluated` +
+      (s.done_reason ? ` · stopped: ${s.done_reason}` : " · in progress");
+    const prog = (s.iterations ?? []).map(it =>
+      `<div class="opt-rank-card"><span class="n">iter ${it.iteration}</span>
+       <span class="s"> ${it.kind}, ${it.candidates} cand · best ${
+         it.best_score_so_far == null ? "—" : it.best_score_so_far.toFixed(0)}</span></div>`
+    ).join("");
+    const best = s.best ? `
+      <div class="opt-rank-card winner"><span class="n">BEST ${
+        s.best.score.toFixed(0)}</span>
+       <span class="s"> ${s.best.key.replaceAll("|", " · ")}</span></div>` : "";
+    $("#opt-search-best").innerHTML = best + prog;
+    const tbody = $("#opt-search-table tbody");
+    tbody.innerHTML = "";
+    (s.top ?? []).forEach((e, i) => {
+      tbody.insertAdjacentHTML("beforeend", `<tr>
+        <td>${i + 1}</td><td>${e.iteration}</td>
+        <td>${e.key.replaceAll("|", " · ")}</td>
+        <td>${e.score == null ? "—" : e.score.toFixed(1)}</td>
+        <td class="status-pass">ok</td></tr>`);
+    });
+    const failed = s.failed ?? 0;
+    if (failed) {
+      tbody.insertAdjacentHTML("beforeend",
+        `<tr><td colspan="5" class="msg">${failed} candidate(s) failed to launch
+         (see the optimizer log for reasons)</td></tr>`);
+    }
   },
 
   renderConfigs() {
@@ -775,18 +826,25 @@ const Optimizer = {
   },
 
   async start() {
-    const only = [...document.querySelectorAll("#opt-configs input:checked")]
-      .map(el => el.dataset.cfg);
-    if (!only.length) { this.msg("select at least one config", "error"); return; }
-    const all = document.querySelectorAll("#opt-configs input").length;
+    const mode = $("#opt-mode").value;
+    let body;
+    if (mode === "search") {
+      if (!$("#opt-space").value) { this.msg("no search space selected", "error"); return; }
+      body = { mode, space: $("#opt-space").value,
+               new_run: $("#opt-new-run").checked };
+    } else {
+      const only = [...document.querySelectorAll("#opt-configs input:checked")]
+        .map(el => el.dataset.cfg);
+      if (!only.length) { this.msg("select at least one config", "error"); return; }
+      const all = document.querySelectorAll("#opt-configs input").length;
+      body = { mode, profile: $("#opt-profile").value,
+               only: only.length === all ? null : only,
+               new_run: $("#opt-new-run").checked };
+    }
     try {
       await api("/api/optimizer/start", {
         method: "POST",
-        body: JSON.stringify({
-          profile: $("#opt-profile").value,
-          only: only.length === all ? null : only,
-          new_run: $("#opt-new-run").checked,
-        }),
+        body: JSON.stringify(body),
       });
       this.msg("started", "ok");
       this.refresh();

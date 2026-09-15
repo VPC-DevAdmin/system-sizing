@@ -462,6 +462,29 @@ optimize-engine:
 	echo "=== Optimizer finished (PID $$PID, exit $$OPT_EXIT) — see $$OUT ===" ; \
 	exit $$OPT_EXIT
 
+# Guided coarse-to-fine search over a launch-shape parameter space
+# (models x precision x TP/DP x placement x batch shape). Same nohup
+# pattern as optimize-engine; resumable state at
+# runs/engine_optimizer/search.json. SPACE defaults to the XE7740 space.
+.PHONY: optimize-search
+optimize-search:
+	@OUT_DIR="runs/engine_optimizer" ; \
+	OUT="$$OUT_DIR/search.json" ; \
+	LOG="$$OUT_DIR/search_$$(date +%Y%m%dT%H%M%S).log" ; \
+	mkdir -p "$$OUT_DIR" ; \
+	nohup $(PY) scripts/engine_optimizer.py \
+		--search "$(or $(SPACE),config/search/xe7740-qwen3.yaml)" \
+		--search-out "$$OUT" \
+		$(if $(RUN_NEW),--new-run) \
+		>"$$LOG" 2>&1 </dev/null & \
+	PID=$$! ; \
+	echo "Guided search started in background (PID $$PID)" ; \
+	echo "  state: $$OUT" ; \
+	echo "  log:   $$LOG" ; \
+	echo "Following live (Ctrl-C exits the tail; the search keeps running)." ; \
+	for i in 1 2 3 4 5 ; do [ -f "$$LOG" ] && break ; sleep 0.2 ; done ; \
+	exec tail -f "$$LOG"
+
 # Read-only dashboard against a running (or completed) optimizer.
 # Polls runs/engine_optimizer/run.json + the latest optimizer_*.log so
 # you can watch progress from a second SSH session without touching

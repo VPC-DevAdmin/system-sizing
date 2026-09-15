@@ -92,8 +92,12 @@ class SaveSpecRequest(BaseModel):
 
 
 class OptimizerStartRequest(BaseModel):
-    profile: str
-    only: Optional[list[str]] = None   # subset of config names
+    # mode "registry": sweep a fixed profile of hand-curated configs.
+    # mode "search": guided coarse-to-fine over a config/search/ space.
+    mode: str = "registry"
+    profile: Optional[str] = None      # registry mode
+    space: Optional[str] = None        # search mode: space name or path
+    only: Optional[list[str]] = None   # registry mode: config subset
     new_run: bool = False
 
 
@@ -406,6 +410,7 @@ def create_app(
     # and a second SSH session all watch the same file.
 
     _opt_out = runs_base / "engine_optimizer" / "run.json"
+    _search_out = runs_base / "engine_optimizer" / "search.json"
 
     def _optimizer_running() -> bool:
         opt = app.state.optimizer
@@ -441,14 +446,25 @@ def create_app(
                 results = json.loads(_opt_out.read_text())
             except (OSError, json.JSONDecodeError):
                 results = None
+        search_results = None
+        if _search_out.exists():
+            try:
+                search_results = json.loads(_search_out.read_text())
+            except (OSError, json.JSONDecodeError):
+                search_results = None
+        from .search import list_spaces
         out: dict = {
             "running": _optimizer_running(),
             "catalog": catalog,
             "results": results,
             "out_path": str(_opt_out),
+            "spaces": list_spaces(),
+            "search_results": search_results,
+            "search_out_path": str(_search_out),
         }
         if opt:
             out["active"] = {
+                "mode": opt.get("mode", "registry"),
                 "profile": opt["profile"],
                 "started_at": opt["started_at"],
                 "log": opt["log"],
@@ -466,34 +482,53 @@ def create_app(
             )
         if _optimizer_running():
             raise HTTPException(409, "optimizer already running")
-        catalog = await _optimizer_catalog()
-        if req.profile not in catalog["profiles"]:
-            raise HTTPException(
-                404, f"unknown optimizer profile '{req.profile}' — "
-                     f"known: {sorted(catalog['profiles'])}",
-            )
         import sys
         _opt_out.parent.mkdir(parents=True, exist_ok=True)
         log_path = _opt_out.parent / (
             f"optimizer_{time.strftime('%Y%m%dT%H%M%S')}.log"
         )
-        cmd = [sys.executable, str(optimizer_script),
-               "--out", str(_opt_out), "--profile", req.profile]
-        if req.new_run:
-            cmd.append("--new-run")
-        if req.only:
-            cmd.extend(["--only", *req.only])
+        if req.mode == "search":
+            from .search import list_spaces
+            spaces = list_spaces()
+            space_path = spaces.get(req.space or "") or req.space
+            if not space_path or not Path(space_path).exists():
+                raise HTTPException(
+                    404, f"unknown search space '{req.space}' — "
+                         f"known: {sorted(spaces)}",
+                )
+            cmd = [sys.executable, str(optimizer_script),
+                   "--search", str(space_path),
+                   "--search-out", str(_search_out)]
+            if req.new_run:
+                cmd.append("--new-run")
+        elif req.mode == "registry":
+            catalog = await _optimizer_catalog()
+            if req.profile not in catalog["profiles"]:
+                raise HTTPException(
+                    404, f"unknown optimizer profile '{req.profile}' — "
+                         f"known: {sorted(catalog['profiles'])}",
+                )
+            cmd = [sys.executable, str(optimizer_script),
+                   "--out", str(_opt_out), "--profile", req.profile]
+            if req.new_run:
+                cmd.append("--new-run")
+            if req.only:
+                cmd.extend(["--only", *req.only])
+        else:
+            raise HTTPException(422, "mode must be registry | search")
         log_file = open(log_path, "w")
         proc = subprocess.Popen(
             cmd, stdout=log_file, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, start_new_session=True,
         )
         app.state.optimizer = {
-            "proc": proc, "profile": req.profile,
+            "proc": proc, "profile": req.profile or req.space,
+            "mode": req.mode,
             "started_at": time.time(), "log": str(log_path),
         }
-        return {"accepted": True, "profile": req.profile,
-                "log": str(log_path), "out": str(_opt_out)}
+        return {"accepted": True, "mode": req.mode,
+                "profile": req.profile, "space": req.space,
+                "log": str(log_path)}
 
     @app.post("/api/optimizer/stop")
     async def optimizer_stop() -> dict:

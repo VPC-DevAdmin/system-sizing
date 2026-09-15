@@ -146,9 +146,14 @@ From the UI's **Optimizer** tab (or `make optimize-engine
 PROFILE=nvidia_qwen3` headless): it sweeps KV-pool sizing, batch
 width, chunked prefill, and TP=2 vs data-parallel replicas against
 representative latency/throughput cells, ranks the outcomes, and
-persists/resumes at `runs/engine_optimizer/run.json`. Encode the
-winner in the profile you sweep with (e.g. add the winning
-`--max-num-seqs` to `vllm_extra_flags`, or switch to TP=2).
+persists/resumes at `runs/engine_optimizer/run.json`. For the wider
+question — best shape across models, precision, TP, DP and placement —
+use the tab's **Guided search** mode (or `make optimize-search
+SPACE=config/search/xe7740-qwen3.yaml`): coverage sample, SLA-aware
+scoring, neighborhood refinement, budget-capped and resumable. Either
+way, encode the winner in the profile you sweep with (e.g. add the
+winning `--max-num-seqs` to `vllm_extra_flags`, switch to FP8's model
+id, or set `tensor_parallel_size`).
 
 ```bash
 capsim ready --profile <recommended>       # engine image + full model

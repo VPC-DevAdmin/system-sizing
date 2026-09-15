@@ -185,6 +185,12 @@ class VllmCudaEngine(Engine):
 
         if cfg.gpu_device_ids:
             gpus_arg = "device=" + ",".join(str(i) for i in cfg.gpu_device_ids)
+            # Docker parses the --gpus value as CSV, so a multi-device
+            # list needs EMBEDDED quotes (`"device=0,1"`, quote chars
+            # included) or it reads as device=0 + count=1 and the
+            # daemon refuses ("cannot set both Count and DeviceIDs").
+            if len(cfg.gpu_device_ids) > 1:
+                gpus_arg = f'"{gpus_arg}"'
         else:
             gpus_arg = "all"
 

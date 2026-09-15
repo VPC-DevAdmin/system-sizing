@@ -88,7 +88,7 @@ def test_vllm_cuda_device_ids_and_bridge_port() -> None:
     )
     cmd = VllmCudaEngine(cfg)._build_docker_command()
     joined = " ".join(cmd)
-    assert "--gpus device=0,1" in joined
+    assert '--gpus "device=0,1"' in joined   # embedded quotes: docker CSV parsing
     # bridged: publish host port to the image's 8000, serve on 8000 inside
     assert "-p 9200:8000" in joined
     assert "--port 8000" in joined
@@ -190,3 +190,20 @@ def test_unknown_profile_lists_available(monkeypatch) -> None:
     monkeypatch.chdir(Path(__file__).parent.parent)
     with pytest.raises(FileNotFoundError, match="xeon-gpu-qwen3-30b"):
         resolve_profile("no-such-profile")
+
+
+def test_vllm_cuda_multi_gpu_device_list_quoted() -> None:
+    """Docker parses --gpus values as CSV: `device=0,1` reads as
+    device=0 + count=1 and the daemon refuses. Multi-device lists
+    must carry embedded quotes; single-device stays plain (both
+    verified against dockerd in the field)."""
+    from simulator.config import EngineConfig
+    from simulator.engines.vllm_cuda import VllmCudaEngine
+
+    cfg = EngineConfig(type="vllm_cuda", gpu_device_ids=[0, 1])
+    cmd = VllmCudaEngine(cfg)._build_docker_command()
+    assert cmd[cmd.index("--gpus") + 1] == '"device=0,1"'
+
+    cfg = EngineConfig(type="vllm_cuda", gpu_device_ids=[3])
+    cmd = VllmCudaEngine(cfg)._build_docker_command()
+    assert cmd[cmd.index("--gpus") + 1] == "device=3"

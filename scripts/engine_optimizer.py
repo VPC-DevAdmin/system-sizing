@@ -1298,7 +1298,16 @@ def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
     if replica.cpuset_mems is not None:
         args.extend(["--cpuset-mems", replica.cpuset_mems])
     if replica.gpus:
-        args.extend(["--gpus", replica.gpus, "--ipc=host"])
+        # Docker's --gpus value is parsed as CSV: `device=0,1` reads
+        # as device=0 PLUS count=1 → "cannot set both Count and
+        # DeviceIDs". Multi-device lists need EMBEDDED quotes — the
+        # literal argument must be `"device=0,1"` (quote characters
+        # included). This is why every TP>=2 launch failed in the
+        # field while TP=1 worked.
+        gpus = replica.gpus
+        if gpus and "," in gpus and not gpus.startswith('"'):
+            gpus = f'"{gpus}"'
+        args.extend(["--gpus", gpus, "--ipc=host"])
     # Mounts, existence-checked so CPU hosts without the /data/ml
     # layout and GPU hosts without pre-staged /models both work:
     # pre-downloaded weights (CPU flow, --model /models/...) and the

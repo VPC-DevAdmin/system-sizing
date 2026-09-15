@@ -401,3 +401,80 @@ def test_combined_group_view(tmp_path, monkeypatch) -> None:
         assert doc["promote_file"] == "search_A_g.json"
         assert doc["excluded"] == ["search_C_g.json"]
         assert "combined view of 2 run(s)" in s["done_reason"]
+
+
+def test_arena_start_seeds_from_group_history(tmp_path, monkeypatch) -> None:
+    """Reopening a (series, size-range) investigation seeds the new
+    run from the group's archived evaluations — the start response
+    reports the count and the driver receives --seed-results."""
+    import json
+    import textwrap
+
+    from fastapi.testclient import TestClient
+
+    from simulator import arena as arena_mod
+    from simulator.search import load_space
+    from simulator.service import create_app
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(arena_mod, "detect_gpus", lambda: [96.0] * 8)
+    cfg = tmp_path / "arena.yaml"
+    cfg.write_text("device_groups: [[0, 1, 2, 3], [4, 5, 6, 7]]\n")
+    monkeypatch.setattr(arena_mod, "ARENA_CONFIG", cfg)
+
+    runs = tmp_path / "runs"
+    hist = runs / "engine_optimizer" / "history"
+    hist.mkdir(parents=True)
+
+    # Archived run over the same catalog models (same group + same
+    # default objective/measurement as a new arena space).
+    models = ["Qwen/Qwen3-30B-A3B-Instruct-2507",
+              "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"]
+    import yaml as _yaml
+
+    from simulator.arena import build_space_doc
+    old_doc = build_space_doc({"models": models}, None, 20)
+    sp = hist / "search_old_space.yaml"
+    sp.write_text(_yaml.safe_dump(old_doc, sort_keys=False))
+    space = load_space(sp)
+    (hist / "search_old_arena.json").write_text(json.dumps({
+        "kind": "search", "space": "arena", "space_file": str(sp),
+        "space_hash": space.space_hash(),
+        "generated_at": "2026-09-15T20:00:00+00:00",
+        "objective": old_doc["objective"],
+        "measurement": old_doc["measurement"],
+        "summary": {"evaluated": 1},
+        "state": {"space_hash": space.space_hash(), "evaluated": {
+            "model_variant=qwen3-30b-a3b-bf16|tp=1|dp=8": {
+                "status": "ok", "score": 9000.0, "iteration": 0,
+                "params": {"model_variant": "qwen3-30b-a3b-bf16",
+                           "tp": 1, "dp": 8}, "config_name": "s1",
+                "cells": []}}},
+    }))
+
+    # Stub optimizer script records its argv.
+    stub = tmp_path / "opt.py"
+    stub.write_text(textwrap.dedent("""\
+        import json, sys
+        if "--list-json" in sys.argv:
+            print(json.dumps({"profiles": {}, "cells": [],
+                              "default_profile": "x"}))
+        else:
+            open("argv.txt", "w").write("\\n".join(sys.argv[1:]))
+    """))
+    with TestClient(create_app(runs, optimizer_script=stub)) as client:
+        r = client.post("/api/optimizer/start", json={
+            "mode": "arena", "new_run": True, "budget": 24,
+            "arena": {"models": models},
+        })
+        assert r.status_code == 202, r.text
+        assert r.json()["seeded"] == 1
+        import time as _t
+        deadline = _t.time() + 5
+        while _t.time() < deadline and not (tmp_path / "argv.txt").exists():
+            _t.sleep(0.05)
+        argv = (tmp_path / "argv.txt").read_text()
+        assert "--seed-results" in argv
+        seed = json.loads(
+            (runs / "engine_optimizer" / "seed.json").read_text())
+        assert len(seed["evaluated"]) == 1

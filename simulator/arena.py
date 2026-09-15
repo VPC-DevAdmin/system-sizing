@@ -128,6 +128,50 @@ def size_class(params_b) -> str:
     return "unknown"
 
 
+def group_for_models(model_ids: list[str]) -> Optional[dict]:
+    """Investigation-grouping identity for a set of models: the
+    (series, size-range) pairs they cover — "Qwen3 16–45B". Two runs
+    over Qwen3 mid-size models are the same investigation even if one
+    added a coder variant; Qwen3.6 is a DIFFERENT series and never
+    groups with Qwen3. Unknown models fall into a stable 'custom'
+    bucket keyed by the exact id set."""
+    if not model_ids:
+        return None
+    import hashlib
+
+    from .model_catalog import load_model_catalog
+    try:
+        by_id = {e["id"]: e for e in load_model_catalog()}
+    except Exception:  # noqa: BLE001
+        by_id = {}
+    pairs: set[tuple[str, str]] = set()
+    unknown: list[str] = []
+    for mid in model_ids:
+        e = by_id.get(mid)
+        if e and e.get("series"):
+            pairs.add((e["series"], size_class(e.get("params_b"))))
+        else:
+            unknown.append(mid)
+    if pairs:
+        key_src = "\n".join(sorted(f"{s}|{z}" for s, z in pairs))
+        by_series: dict[str, list[str]] = {}
+        for s, z in sorted(pairs):
+            by_series.setdefault(s, []).append(z)
+        label = " + ".join(
+            f"{s} {'/'.join(zs)}" for s, zs in sorted(by_series.items()))
+        if unknown:
+            label += f" (+{len(unknown)} custom)"
+            key_src += "\n" + "\n".join(sorted(unknown))
+    else:
+        key_src = "\n".join(sorted(unknown))
+        label = f"custom ({len(unknown)} models)"
+    return {
+        "key": hashlib.sha256(key_src.encode()).hexdigest()[:10],
+        "label": label,
+        "models": sorted(model_ids),
+    }
+
+
 def _tp_values(max_group: int) -> list[int]:
     out, t = [], 1
     while t <= max_group:

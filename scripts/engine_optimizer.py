@@ -2374,7 +2374,8 @@ def _save_search(out_path: Path, sstate, space, search_mod) -> None:
     }, indent=2))
 
 
-async def run_search(space_path: Path, out_path: Path, new_run: bool) -> None:
+async def run_search(space_path: Path, out_path: Path, new_run: bool,
+                     seed_results: Path | None = None) -> None:
     import random as _random
 
     search = _import_search()
@@ -2406,6 +2407,34 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool) -> None:
             ) from e
     if sstate is None:
         sstate = search.SearchState(space_hash=space.space_hash())
+        # Seed prior results from the same investigation group (same
+        # models family/size, same objective+measurement): candidates
+        # already measured are recorded up front, so the budget spends
+        # only on NEW territory — reopening "Qwen3 16-45B" with more
+        # things checked ADDS to the investigation instead of
+        # re-measuring it. Only ok results seed; failures re-try.
+        if seed_results is not None and Path(seed_results).exists():
+            try:
+                seeds = json.loads(Path(seed_results).read_text())
+            except (OSError, json.JSONDecodeError):
+                seeds = {}
+            n = 0
+            for e in (seeds.get("evaluated") or {}).values():
+                if e.get("status") != "ok" or e.get("score") is None:
+                    continue
+                params = e.get("params") or {}
+                ok, _why = search.validate_candidate(params, space)
+                if not ok:
+                    continue          # not valid in the grown space
+                search.record_evaluation(
+                    sstate, space, params, status="ok",
+                    score=e["score"], config_name=e.get("config_name", ""),
+                    cells=e.get("cells") or [], iteration=0,
+                )
+                n += 1
+            if n:
+                print(f"Seeded {n} prior result(s) from the group's "
+                      f"earlier runs — budget spends on new candidates.")
     # Persist immediately — a fresh run must REPLACE the previous
     # run's file right away, or the UI keeps showing stale results
     # for the ~10 minutes the first evaluation takes.
@@ -2651,6 +2680,14 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--seed-results", type=Path, default=None,
+        help=(
+            "JSON of prior evaluations ({'evaluated': {key: eval}}) "
+            "from earlier runs of the same investigation — seeded into "
+            "a fresh search so the budget spends only on new candidates."
+        ),
+    )
+    p.add_argument(
         "--search-out", type=Path, default=DEFAULT_SEARCH_OUT,
         help=f"Search state/results JSON (default {DEFAULT_SEARCH_OUT}).",
     )
@@ -2733,7 +2770,8 @@ def main() -> None:
     _lock = _acquire_instance_lock(out_dir / ".optimizer.lock")  # noqa: F841
 
     if args.search is not None:
-        asyncio.run(run_search(args.search, args.search_out, args.new_run))
+        asyncio.run(run_search(args.search, args.search_out, args.new_run,
+                               seed_results=args.seed_results))
         return
 
     asyncio.run(main_async(args.out, args.only, args.new_run))

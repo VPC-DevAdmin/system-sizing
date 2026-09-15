@@ -784,24 +784,13 @@ def create_app(
             return []
 
     def _group_of(models: list[str]) -> Optional[dict]:
-        """Runs are grouped by the MODEL SET they searched: a run over
-        the same models is more evidence about the same question (the
-        TP gap-fill was an addendum to the dp run, not a new
-        investigation); a run over different models is a different
-        question and never mixes."""
-        if not models:
-            return None
-        import hashlib
-        key = hashlib.sha256("\n".join(models).encode()).hexdigest()[:10]
-        try:
-            from .model_catalog import load_model_catalog
-            series = {e["series"]: 1 for e in load_model_catalog()
-                      if e["id"] in set(models)}
-            label = " + ".join(sorted(series)) if series else "custom"
-        except Exception:  # noqa: BLE001
-            label = "custom"
-        return {"key": key, "label": f"{label} ({len(models)} models)",
-                "models": models}
+        """Runs group by (series, size-range) — "Qwen3 16–45B": a
+        follow-up over the same family/size bracket is an addendum to
+        the same investigation even if the exact model subset differs;
+        Qwen3.6 is a different series and never mixes. See
+        arena.group_for_models."""
+        from .arena import group_for_models
+        return group_for_models(models)
 
     def _doc_summary_entry(doc: dict, file_name: str) -> dict:
         s = doc.get("summary") or {}
@@ -927,6 +916,56 @@ def create_app(
                 "top": top,
             },
         }
+
+    def _build_seed_file(space_doc: dict) -> tuple[Path, int]:
+        """Collect ok evaluations from the new run's investigation
+        group (history archives with the same (series, size-range)
+        identity AND the same objective+measurement fingerprint) into
+        a seed file for the driver. Best score wins on duplicates."""
+        import dataclasses as _dc
+
+        from .search import Measurement, Objective
+
+        def _fp_of(objective, measurement) -> str:
+            try:
+                return json.dumps([
+                    _dc.asdict(Objective(**(objective or {}))),
+                    _dc.asdict(Measurement(**(measurement or {}))),
+                ], sort_keys=True)
+            except TypeError:
+                return "?"
+
+        models = sorted({str(v.get("model"))
+                         for v in (space_doc.get("model_variants") or {}).values()
+                         if isinstance(v, dict) and v.get("model")})
+        group = _group_of(models)
+        if group is None:
+            return _opt_out.parent / "seed.json", 0
+        want_fp = _fp_of(space_doc.get("objective"),
+                         space_doc.get("measurement"))
+        merged: dict[str, dict] = {}
+        if _history_dir.exists():
+            for p in sorted(_history_dir.glob("search_*.json")):
+                try:
+                    hdoc = json.loads(p.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                g = _group_of(_space_models(hdoc.get("space_file") or ""))
+                if not g or g["key"] != group["key"]:
+                    continue
+                if _fp_of(hdoc.get("objective"),
+                          hdoc.get("measurement")) != want_fp:
+                    continue
+                for k, e in ((hdoc.get("state") or {}).get("evaluated")
+                             or {}).items():
+                    if e.get("status") != "ok" or e.get("score") is None:
+                        continue
+                    if k not in merged or e["score"] > merged[k]["score"]:
+                        merged[k] = e
+        seed_path = _opt_out.parent / "seed.json"
+        seed_path.parent.mkdir(parents=True, exist_ok=True)
+        seed_path.write_text(json.dumps({"evaluated": merged}))
+        return seed_path, len(merged)
 
     @app.get("/api/optimizer/combined/{group_key}")
     async def optimizer_combined(group_key: str) -> dict:
@@ -1091,6 +1130,7 @@ def create_app(
         log_path = _opt_out.parent / (
             f"optimizer_{time.strftime('%Y%m%dT%H%M%S')}.log"
         )
+        seeded = 0
         if req.new_run:
             _archive_search_results()
         if req.mode == "arena":
@@ -1111,6 +1151,14 @@ def create_app(
                    "--search-out", str(_search_out)]
             if req.new_run:
                 cmd.append("--new-run")
+                # Reopening an investigation: seed everything the
+                # group's earlier runs already measured, so this run
+                # ADDS to "Qwen3 16-45B" instead of re-measuring it.
+                seed_path, seeded = await asyncio.to_thread(
+                    _build_seed_file, doc,
+                )
+                if seeded:
+                    cmd.extend(["--seed-results", str(seed_path)])
         elif req.mode == "search":
             from .search import list_spaces
             spaces = list_spaces()
@@ -1153,7 +1201,7 @@ def create_app(
         }
         return {"accepted": True, "mode": req.mode,
                 "profile": req.profile, "space": req.space,
-                "log": str(log_path)}
+                "seeded": seeded, "log": str(log_path)}
 
     @app.post("/api/optimizer/promote")
     async def optimizer_promote(req: PromoteRequest) -> dict:

@@ -398,15 +398,23 @@ def _random_candidate(space: SearchSpace, rng: random.Random) -> dict:
     )
 
 
-def propose_initial(space: SearchSpace, rng: random.Random) -> list[dict]:
+def propose_initial(
+    space: SearchSpace, rng: random.Random,
+    evaluated_keys: frozenset = frozenset(),
+) -> list[dict]:
     """Greedy-coverage sample: draw a pool of valid candidates, then
     repeatedly pick the one covering the most not-yet-covered
     (dimension, value) pairs — every value of every dimension shows up
     in stage 0 when the budget allows, which is what makes the first
-    ranking a *representative* picture rather than a lucky corner."""
+    ranking a *representative* picture rather than a lucky corner.
+
+    ``evaluated_keys`` (seeded results from a prior run of the same
+    investigation) are never re-proposed — the budget spends on NEW
+    territory — but they still count as covering their (dim, value)
+    pairs, so coverage tops up around them instead of re-measuring."""
     want = space.search.initial_samples
     pool: list[dict] = []
-    seen: set[str] = set()
+    seen: set[str] = set(evaluated_keys)
     for _ in range(max(400, want * 40)):
         cand = _random_candidate(space, rng)
         ok, _reason = validate_candidate(cand, space)
@@ -416,6 +424,11 @@ def propose_initial(space: SearchSpace, rng: random.Random) -> list[dict]:
             pool.append(cand)
     uncovered = {(d, str(v)) for d, vals in space.dimensions.items() for v in vals}
     picked: list[dict] = []
+    for key in evaluated_keys:
+        # "dim=value|dim=value" canonical keys → mark covered.
+        for part in key.split("|"):
+            d, _, v = part.partition("=")
+            uncovered.discard((d, v))
     while pool and len(picked) < want:
         snapshot = frozenset(uncovered)
         pool.sort(
@@ -692,7 +705,10 @@ def next_batch(
         return "done:budget", []
 
     if not state.iterations:
-        batch = _restart_order(propose_initial(space, rng)[:budget_left], space)
+        batch = _restart_order(
+            propose_initial(space, rng,
+                            evaluated_keys=frozenset(state.evaluated),
+                            )[:budget_left], space)
         state.iterations.append({
             "index": 0, "kind": "initial",
             "params": batch,

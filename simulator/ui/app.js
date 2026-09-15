@@ -1460,11 +1460,14 @@ const Optimizer = {
                    budget: +$("#opt-budget").value || null,
                    new_run: newRun };
     try {
-      await api("/api/optimizer/start", {
+      const r = await api("/api/optimizer/start", {
         method: "POST",
         body: JSON.stringify(body),
       });
-      this.msg("started", "ok");
+      this.msg(r.seeded
+        ? `started — ${r.seeded} prior result(s) from this group seeded;
+           budget spends on new candidates`
+        : "started", "ok");
       this.refresh();
     } catch (e) {
       this.msg(e.message, "error");

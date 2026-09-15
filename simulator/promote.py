@@ -69,7 +69,9 @@ def _parse_gpus(gpus: Optional[str]) -> Optional[list[int]]:
 
 
 def _slug(text: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_" else "-" for c in text).strip("-").lower()
+    import re
+    out = "".join(c if c.isalnum() or c in "-_" else "-" for c in text)
+    return re.sub(r"-{2,}", "-", out).strip("-").lower()
 
 
 def _write_profile(
@@ -170,8 +172,20 @@ def promote_search_winner(
             f"sticky per-user routing (whole-box capacity, measured)."
         )
     score = best.get("score")
+    # Profile name from the investigation group — "Optimized Qwen3
+    # 16–45B" is what the operator picks in the Benchmark tab, not
+    # the space's internal name. Unknown-model runs keep the space
+    # name.
+    from .arena import group_for_models
+    model_ids = sorted({str(v.get("model"))
+                        for v in space.model_variants.values()
+                        if v.get("model")})
+    group = group_for_models(model_ids)
+    name_hint = (group["label"]
+                 if group and not group["label"].startswith("custom")
+                 else search_doc.get("space", "search"))
     result = _write_profile(
-        name_hint=search_doc.get("space", "search"),
+        name_hint=name_hint,
         model_id=str(summary["model"]),
         engine_fields=fields,
         extra_flags=leftover,

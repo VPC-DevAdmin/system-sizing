@@ -149,3 +149,60 @@ def test_search_driver_survives_launch_failures(
     doc = json.loads(out.read_text())
     assert doc["summary"]["best"] is None
     assert doc["state"]["done_reason"] == "no_successful_candidates"
+
+
+def test_search_seeding_skips_prior_results(
+    optimizer, space_file, tmp_path, monkeypatch,
+) -> None:
+    """--seed-results: a fresh run over a grown space records the
+    group's prior ok evaluations up front and never re-runs them —
+    reopening an investigation ADDS instead of re-measuring."""
+    from simulator.search import canonical_key, load_space
+
+    space = load_space(space_file)
+    seeded_params = {"model_variant": "bf16", "tp": 1, "dp": 1,
+                     "max_num_seqs": 128}
+    seed = tmp_path / "seed.json"
+    seed.write_text(json.dumps({"evaluated": {
+        canonical_key(seeded_params, space): {
+            "status": "ok", "score": 4321.0, "iteration": 0,
+            "config_name": "prior", "params": seeded_params,
+            "cells": [{"cell_name": "ladder_c0032", "samples": 32,
+                       "errors": 0, "timeouts": 0,
+                       "throughput_out_tok_s": 4321.0,
+                       "ttft_p95_ms": 100.0, "tpot_p95_ms": 10.0}]},
+        # Invalid in this space (tp=4 not a dim value) — must be
+        # dropped, not crash.
+        "model_variant=bf16|tp=4": {
+            "status": "ok", "score": 9.0, "iteration": 0,
+            "params": {"model_variant": "bf16", "tp": 4}, "cells": []},
+        # Failures never seed — they deserve a retry.
+        "model_variant=fp8|tp=2|dp=2|max_num_seqs=256": {
+            "status": "launch_failed", "score": None, "iteration": 0,
+            "params": {"model_variant": "fp8", "tp": 2, "dp": 2,
+                       "max_num_seqs": 256}, "cells": []},
+    }}))
+
+    seen: list[dict] = []
+    monkeypatch.setattr(optimizer, "run_config",
+                        _stub_run_config(optimizer, seen))
+    monkeypatch.setattr(optimizer, "make_prompts", lambda cells: {})
+    out = tmp_path / "search.json"
+    asyncio.run(optimizer.run_search(space_file, out, new_run=False,
+                                     seed_results=seed))
+
+    doc = json.loads(out.read_text())
+    evaluated = doc["state"]["evaluated"]
+    key = canonical_key(seeded_params, space)
+    assert evaluated[key]["score"] == 4321.0
+    assert evaluated[key]["config_name"] == "prior"
+    # The driver never re-ran the seeded candidate...
+    ran_models = {(s["name"]) for s in seen}
+    assert not any("prior" in n for n in ran_models)
+    assert all(evaluated[canonical_key(p, space)]["config_name"] != "prior"
+               or canonical_key(p, space) == key
+               for p in [seeded_params])
+    # ...the invalid seed was dropped, and new candidates were measured.
+    assert "model_variant=bf16|tp=4" not in evaluated
+    assert len(evaluated) > 1
+    assert len(seen) == len(evaluated) - 1     # everything else ran

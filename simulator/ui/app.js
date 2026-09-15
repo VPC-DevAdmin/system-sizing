@@ -744,7 +744,6 @@ const Optimizer = {
   /* ── Arena: dropdowns + cards, everything in play by default ─── */
 
   filters: { series: "all", size: "all" },
-  restored: false,
 
   async loadArena() {
     if (!this.arena) {
@@ -845,11 +844,18 @@ const Optimizer = {
     return { models, dims };
   },
 
-  /* Restore the last search's selection so reopening the page shows
-   * what a resume would actually continue. */
-  restoreFrom(doc) {
-    if (this.restored || !doc || !this.arena) return;
-    this.restored = true;
+  priorDoc: null,        // arena_space of the last search (resume target)
+
+  /* Apply the last search's selection to the cards — ONLY on the
+   * operator's explicit click (the banner's button). The default view
+   * is always the full arena with everything checked; the UI never
+   * unchecks anything on its own. */
+  loadPriorSelection() {
+    const doc = this.priorDoc;
+    if (!doc || !this.arena) return;
+    this.filters = { series: "all", size: "all" };
+    this.arenaOff.models = new Set();
+    this.cardOff = {};
     const wanted = new Set(Object.values(doc.model_variants ?? {})
       .map(v => v.model));
     for (const m of this.arena.models) {
@@ -862,8 +868,30 @@ const Optimizer = {
       const off = vals.map(String).filter(v => !keptSet.has(v));
       if (off.length) this.cardOff[dim] = new Set(off);
     }
+    $("#opt-new-run").checked = false;
     this.renderArena();
     this.schedulePreview();
+    this.msg("previous search's selection loaded — Start resumes it", "ok");
+  },
+
+  /* Does the current selection match the resumable search's space?
+   * A resume with a different selection would immediately end
+   * done:space_changed, so Start falls back to a fresh run instead. */
+  selectionMatchesPrior() {
+    const doc = this.priorDoc;
+    if (!doc) return false;
+    const sel = this.arenaSelection();
+    const prior = new Set(Object.values(doc.model_variants ?? {})
+      .map(v => v.model));
+    if (sel.models.length !== prior.size
+        || !sel.models.every(m => prior.has(m))) return false;
+    for (const [dim, vals] of Object.entries(this.arena.dimensions)) {
+      const kept = ((doc.dimensions ?? {})[dim] ?? vals).map(String);
+      const cur = (sel.dims[dim] ?? vals).map(String);
+      if (kept.length !== cur.length
+          || !cur.every(v => kept.includes(v))) return false;
+    }
+    return true;
   },
 
   renderArena() {
@@ -946,12 +974,17 @@ const Optimizer = {
       <div class="arena-cards">${modelsCard}${this.cards().map(cardHtml).join("")}</div>
       <div id="opt-arena-cost" class="callout arena-cost">computing the arena…</div>`;
 
+    // A dropdown change re-baselines the model set: everything the
+    // new filter makes eligible starts CHECKED — per-model unchecks
+    // belong to the operator and only survive within one baseline.
     $("#arena-series").addEventListener("change", e => {
       this.filters.series = e.target.value;
+      this.arenaOff.models = new Set();
       this.renderArena(); this.schedulePreview();
     });
     $("#arena-size").addEventListener("change", e => {
       this.filters.size = e.target.value;
+      this.arenaOff.models = new Set();
       this.renderArena(); this.schedulePreview();
     });
     box.querySelectorAll("[data-edit]").forEach(btn =>
@@ -1102,22 +1135,27 @@ const Optimizer = {
           status.active.exit_code === 0 ? "ok" : "error");
       }
     }
-    // Prior search on disk: restore its selection into the cards and
-    // say plainly that Start RESUMES it unless Fresh run is checked.
-    this.restoreFrom(status.arena_space);
+    // Prior search on disk: offer the resume, never rearrange the
+    // operator's cards on our own.
+    this.priorDoc = status.arena_space ?? null;
     const resume = $("#opt-resume");
     const s = status.search_results?.summary;
     if (s && !status.running) {
       resume.hidden = false;
       const done = s.done_reason
         ? `finished (${s.done_reason})` : "interrupted mid-search";
+      const prior = this.priorDoc
+        ? `${Object.keys(this.priorDoc.model_variants ?? {}).length} models`
+        : "";
       resume.innerHTML = `A prior search is on record — <b>${s.evaluated}
         evaluated</b>, ${done}${s.best
-          ? `, best so far <b>${s.best.score.toFixed(0)}</b>` : ""}.
-        The cards below show ITS selection. <b>Start resumes it</b>
-        (already-measured candidates are skipped); check
-        <i>Fresh run</i> to discard and start over — also required
-        after changing the selection.`;
+          ? `, best so far <b>${s.best.score.toFixed(0)}</b>` : ""}${prior
+          ? ` (${prior})` : ""}.
+        <button class="small" id="opt-load-prior" style="margin:0 6px">
+          Load its selection &amp; resume</button>
+        Starting with a different selection runs fresh automatically.`;
+      $("#opt-load-prior")?.addEventListener("click", () =>
+        this.loadPriorSelection());
     } else {
       resume.hidden = true;
     }
@@ -1181,9 +1219,17 @@ const Optimizer = {
   async start() {
     const sel = this.arenaSelection();
     if (!sel.models.length) { this.msg("every model is unchecked", "error"); return; }
+    let newRun = $("#opt-new-run").checked;
+    // A resume only makes sense against the SAME selection — with a
+    // different one the driver would refuse (space_changed). Fall
+    // back to a fresh run rather than a dead start.
+    if (!newRun && this.priorDoc && !this.selectionMatchesPrior()) {
+      newRun = true;
+      this.msg("selection differs from the prior search — starting fresh", "ok");
+    }
     const body = { mode: "arena", arena: sel,
                    budget: +$("#opt-budget").value || null,
-                   new_run: $("#opt-new-run").checked };
+                   new_run: newRun };
     try {
       await api("/api/optimizer/start", {
         method: "POST",

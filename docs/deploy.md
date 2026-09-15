@@ -6,6 +6,52 @@ cases. Prerequisites on the target: Python 3.10+, Docker, git.
 Everything else (uv, the capsim tool, models, engine images) is
 installed by the flow itself, without sudo.
 
+## 0. Bare OS → prerequisites (one-time, needs sudo)
+
+Fresh box with nothing but the OS (Ubuntu 22.04/24.04 shown; RHEL
+notes below). This is the only sudo-requiring stage.
+
+```bash
+# Basics — git, python3 (Ubuntu ships 3.10+; uv manages its own
+# Python for capsim anyway), and perf for the PMU/bandwidth collectors.
+sudo apt-get update
+sudo apt-get install -y git python3 curl linux-tools-common linux-tools-$(uname -r)
+
+# Docker (engine runtime), and let your user run it without sudo.
+sudo apt-get install -y docker.io
+sudo usermod -aG docker $USER && newgrp docker
+
+# GPU hosts only: NVIDIA driver …
+sudo apt-get install -y nvidia-driver-570-server   # or ubuntu-drivers install
+sudo reboot                                        # then verify: nvidia-smi
+
+# … and nvidia-container-toolkit, so Docker can hand containers GPUs.
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -sL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
+# Telemetry permissions (warn-only if skipped — runs complete without
+# them, but bottleneck evidence is much thinner):
+echo 'kernel.perf_event_paranoid=-1' | sudo tee /etc/sysctl.d/99-capsim.conf
+sudo sysctl --system
+sudo chmod a+r /sys/class/powercap/intel-rapl:*/energy_uj 2>/dev/null || true
+```
+
+RHEL/Rocky: `dnf install git python3 perf docker` (or docker-ce from
+Docker's repo), driver via the NVIDIA CUDA repo or precompiled
+modules, container toolkit from the same NVIDIA repo. Everything from
+step 1 down is identical.
+
+`capsim doctor` (step 2) verifies every one of these — including the
+container-toolkit runtime registration, which nvidia-smi alone does
+not prove — so run it after this stage rather than trusting the
+install went cleanly.
+
 ## 1. Install
 
 ```bash

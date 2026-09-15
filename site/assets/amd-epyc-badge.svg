@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 140" role="img" aria-label="AMD EPYC">
+  <rect x="4" y="4" width="232" height="132" rx="10" fill="#0c0c0c"/>
+  <rect x="4" y="4" width="232" height="132" rx="10" fill="none" stroke="#2a2a2a" stroke-width="1.5"/>
+  <!-- AMD arrow mark -->
+  <g fill="#ffffff">
+    <text x="24" y="62" font-family="Helvetica, Arial, sans-serif" font-size="38" font-weight="700" letter-spacing="1">AMD</text>
+  </g>
+  <g>
+    <path d="M196 22 h22 v22 l-8 -8 h-14 z" fill="#00a651"/>
+    <path d="M196 22 v22 l8 8 v-22 z" fill="#007a3b"/>
+  </g>
+  <text x="24" y="108" font-family="Helvetica, Arial, sans-serif" font-size="40" font-weight="300" fill="#ffffff" letter-spacing="6">EPYC</text>
+  <text x="152" y="108" font-family="Helvetica, Arial, sans-serif" font-size="14" fill="#9aa0a6">&#8482;</text>
+</svg>

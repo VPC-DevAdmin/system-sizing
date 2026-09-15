@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Giving 1,500 People AI on One Server — Dell PowerEdge R7625, AMD EPYC</title>
+<meta name="description" content="What it takes to give a 1,500-person group AI assistance: measured demand, a load-tested dual-socket Dell PowerEdge R7625 on CPU only, and the numbers behind the fit.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<style>:root { --accent: #0a7d3e; --accent-soft: #e3f4ea; --blue-deep: #075c2d; }</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="container">
+    <div class="brand">
+      <img class="dell" src="assets/dell-technologies-logo.png" alt="Dell Technologies">
+      <span class="divider"></span>
+      <span class="tagline">PowerEdge R7625 · AI Capacity</span>
+    </div>
+    <nav class="site-nav" aria-label="Sections">
+      <a href="#demand">Demand</a>
+      <a href="#test">Test</a>
+      <a href="#fit">Fit</a>
+      <a href="#replay">Replay</a>
+      <a href="#cost">Cost</a>
+      <a href="#order">Order sheet</a>
+    </nav>
+    <div class="prepared-by">prepared by <img src="assets/vpc-banner.png" alt="Vector Path Consulting"></div>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ======================= HERO · THE ASSIGNMENT ======================= -->
+<section class="hero">
+  <div class="container">
+    <span class="eyebrow-chip">Dell PowerEdge R7625 · Dual AMD EPYC · no GPUs</span>
+    <h1>What does it take to give <span class="accent">1,500 people</span> AI?</h1>
+    <p class="lede">
+      Suppose a 1,500-person group — a business unit, a division, a mid-size company — is getting AI
+      assistance for everyday work: drafting, lookups, document questions, code help. The instinct is to
+      size for 1,500 users, which points at GPU clusters or a permanent per-seat cloud bill. We tested
+      what the workload actually requires. The answer is a single dual-socket rack server with no GPUs,
+      and this page shows the measurements.
+    </p>
+    <div class="cta-line">
+      <a class="btn btn-primary" href="#demand">Follow the numbers ↓</a>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= 01 THE DEMAND ======================= -->
+<section class="block" id="demand">
+  <div class="container">
+    <div class="kicker"><span class="num">01</span><span class="topic">The demand</span></div>
+    <h2>Watch what 1,500 people actually ask of a server.</h2>
+    <p class="section-lede">
+      Below is one dot per person, animated through a typical working hour. A dot lights up only
+      while that person's request is running, and goes dark while they read the answer, think, or do
+      other work. The number to watch is the live count.
+    </p>
+
+    <div class="card demand-stage">
+      <div class="demand-grid-wrap"><canvas id="demand-grid"></canvas></div>
+      <div class="demand-legend">
+        <span class="key"><span class="swatch" style="background:#e4edf4"></span> doesn't use AI</span>
+        <span class="key"><span class="swatch" style="background:#c6d9e8"></span> uses AI, not this hour</span>
+        <span class="key"><span class="swatch" style="background:#9dbfda"></span> active this hour (<span data-demand-hourly>215</span> people)</span>
+        <span class="key"><span class="swatch" style="background:var(--accent)"></span> request running now</span>
+        <span class="key" style="margin-left:auto" id="demand-clock"></span>
+      </div>
+      <div class="demand-readouts">
+        <div class="demand-counter">
+          <div class="v" id="demand-now">0</div>
+          <div class="k">requests running right now</div>
+        </div>
+        <div class="demand-counter quiet">
+          <div class="v" id="demand-peak">0</div>
+          <div class="k">busiest moment so far</div>
+        </div>
+        <div class="demand-counter quiet">
+          <div class="v"><span data-demand-people>1,500</span></div>
+          <div class="k">people in the group</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="section-lede" style="margin-top:30px;margin-bottom:0">
+      The pattern holds across workplaces. About 65% of knowledge workers use AI at work at all, and
+      daily users are roughly 22% of them (Gallup, Q3 2025). Even someone in an active session has a
+      request running only about 11% of the time — the rest is reading and thinking (Microsoft 2025
+      Work Trend Index). Multiplied out, the simulation above matches the arithmetic:
+      <span data-demand-people>1,500</span> people → <span data-demand-users>975</span> AI users →
+      <span data-demand-hourly>215</span> active in a given hour →
+      about <span data-demand-concurrent>24</span> requests running at once.
+    </p>
+
+    <div class="takeaway-band reveal">
+      At its busiest moment, a 1,500-person group generates about <span class="num">25 simultaneous
+      requests</span>. That, not 1,500, is the number a server has to handle.
+    </div>
+  </div>
+</section>
+
+<!-- ======================= 02 THE TEST ======================= -->
+<section class="block tinted" id="test">
+  <div class="container">
+    <div class="kicker"><span class="num">02</span><span class="topic">The test</span></div>
+    <h2>Can one server handle 25 requests at once? We tested well past that.</h2>
+    <p class="section-lede">
+      We put a standard Dell PowerEdge R7625 on the bench — two AMD EPYC 9374F CPUs, no GPU — running a
+      30-billion-parameter open model with one inference engine per socket. Simulated workers sent
+      requests in the same ask-read-think cycle as the animation above, in six everyday patterns
+      combined into five team profiles. We raised the number of simultaneous users step by step and
+      recorded, for every request, how long the answer took to start and how fast it streamed.
+    </p>
+
+    <div id="persona-legend" class="persona-legend"></div>
+    <div id="cohort-grid" class="cohort-grid" style="margin-top:6px"></div>
+
+    <h2 style="font-size:22px;margin-top:48px">Results by team</h2>
+    <p class="section-lede" style="margin-bottom:20px">
+      Each bar is one test run. Green means nearly every request met the response-time target; the
+      marked line is the capacity we quote — the largest group the server handled while staying above
+      the 95% threshold.
+    </p>
+
+    <div id="proof-tabs" class="tab-row"></div>
+
+    <div class="proof-layout">
+      <div class="card chart-card">
+        <div class="chart-title">
+          <span>Requests answered on time, by group size</span>
+          <span class="view-toggle" id="proof-view">
+            <button class="active" data-view="ontime">On-time view</button>
+            <button data-view="latency">Latency detail</button>
+          </span>
+        </div>
+        <div class="chart-wrap"><canvas id="proof-chart"></canvas></div>
+        <div class="zone-legend">
+          <span class="key"><span class="swatch" style="background:var(--good)"></span> within target</span>
+          <span class="key"><span class="swatch" style="background:var(--warn)"></span> borderline</span>
+          <span class="key"><span class="swatch" style="background:var(--bad)"></span> over capacity</span>
+          <span class="key" style="margin-left:auto" data-generated></span>
+        </div>
+      </div>
+      <div class="readout">
+        <div class="card knee-tile">
+          <div class="k">Capacity for this team</div>
+          <div class="v"><span id="ro-knee">—</span><span class="unit"> simultaneous users</span></div>
+          <div class="note">noticeable slowdown past <b id="ro-fail">—</b></div>
+        </div>
+        <div class="card knee-tile">
+          <div class="k">Output at capacity</div>
+          <div class="v"><span id="ro-tput">—</span><span class="unit"> tokens / second</span></div>
+          <div class="note" id="ro-tput-note"></div>
+        </div>
+        <div class="card knee-tile">
+          <div class="k">What sets the limit</div>
+          <div class="note" id="ro-bottleneck" style="margin-top:6px;font-size:13px;line-height:1.55"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card reveal" style="margin-top:18px">
+      <div class="cohort-blurb">
+        <div id="ro-summary"></div>
+        <div class="rec" id="ro-rec"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= 03 THE FIT ======================= -->
+<section class="block" id="fit">
+  <div class="container">
+    <div class="kicker"><span class="num">03</span><span class="topic">The fit</span></div>
+    <h2>Demand meets capacity.</h2>
+    <p class="section-lede">
+      For general office work, the measured capacity is 64 simultaneous requests; the 1,500-person
+      group's busiest moment needs about 25. The bar shows both. Adjust the group size and usage level
+      to test your own situation.
+    </p>
+
+    <div class="card capacity-visual">
+      <div class="cap-bar-track" id="cap-bar"></div>
+      <div class="fit-controls">
+        <div class="slider-row" style="margin-bottom:0">
+          <label for="fit-emp">Group size <output for="fit-emp"></output></label>
+          <input type="range" id="fit-emp" min="100" max="10000" step="50">
+        </div>
+        <div class="preset-row" style="margin-bottom:0">
+          <button class="preset-btn" data-preset="light">Light<small>occasional use</small></button>
+          <button class="preset-btn active" data-preset="typical">Typical<small>survey averages</small></button>
+          <button class="preset-btn" data-preset="heavy">Heavy<small>AI-forward teams</small></button>
+        </div>
+      </div>
+      <p class="fit-verdict" id="fit-verdict"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= 04 THE RECORDING ======================= -->
+<section class="block tinted" id="replay">
+  <div class="container">
+    <div class="kicker"><span class="num">04</span><span class="topic">The recording</span></div>
+    <h2>One measurement window, played back.</h2>
+    <p class="section-lede">
+      The feed below replays a measurement window from the benchmark log at
+      <span id="replay-pool">—</span> simultaneous users. Every row is a real request: who sent it,
+      how large it was, and how quickly the answer started. The chart alongside shows the server's
+      clock speed and conversation memory over the same window.
+    </p>
+
+    <div class="replay-controls">
+      <select id="replay-cohort" class="ctl" style="width:auto;min-width:220px"></select>
+      <button id="replay-play" class="ctl-btn">⏵ Play</button>
+      <button id="replay-reset" class="ctl-btn">↻ Reset</button>
+      <span class="spacer"></span>
+      <button class="ctl-btn" data-speed="4">4×</button>
+      <button class="ctl-btn active" data-speed="16">16×</button>
+      <button class="ctl-btn" data-speed="64">64×</button>
+    </div>
+
+    <div class="replay-stat-row">
+      <div class="card replay-stat"><div class="v" id="rs-done">0</div><div class="k">requests completed</div></div>
+      <div class="card replay-stat"><div class="v" id="rs-ttft">—</div><div class="k">median wait for first word</div></div>
+      <div class="card replay-stat"><div class="v" id="rs-tput">—</div><div class="k">output tokens / second</div></div>
+      <div class="card replay-stat"><div class="v" id="rs-sla">—</div><div class="k">answered on time</div></div>
+    </div>
+
+    <div class="replay-layout">
+      <div>
+        <div id="turn-feed" class="turn-feed"></div>
+        <div class="replay-clock" style="margin-top:10px"><span id="replay-clock"></span> · <span id="replay-duration"></span></div>
+      </div>
+      <div class="replay-side">
+        <div class="card chart-card">
+          <div class="label">Server telemetry, same window</div>
+          <div class="chart-wrap short"><canvas id="telemetry-chart"></canvas></div>
+          <div class="fine" style="margin-top:10px">Core clock speed and the share of conversation memory in use, sampled on the R7625 during the test.</div>
+        </div>
+        <div class="card">
+          <div class="label">About this recording</div>
+          <div class="fine" style="font-size:12.5px;line-height:1.6">
+            The simulated workers pause to read and think between requests, the way real staff do.
+            That arrival pattern, rather than a constant stream of requests, is what the capacity
+            figures on this page are based on.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= 05 THE COST ======================= -->
+<section class="block" id="cost">
+  <div class="container">
+    <div class="kicker"><span class="num">05</span><span class="topic">The cost</span></div>
+    <h2>What the same workload costs in the cloud.</h2>
+    <p class="section-lede">
+      The chart compares the cumulative cost of owning this server against paying for the same request
+      volume through a cloud API. The request volume follows from the group size and usage level set above.
+    </p>
+
+    <div class="tco-headline">
+      <div class="card replay-stat"><div class="v" id="tco-api-mo">—</div><div class="k">cloud API cost / month</div></div>
+      <div class="card replay-stat"><div class="v" id="tco-opex-mo">—</div><div class="k">server running cost / month</div></div>
+      <div class="card replay-stat"><div class="v" id="tco-breakeven">—</div><div class="k">break-even point</div></div>
+    </div>
+    <p class="fine" id="tco-verdict" style="margin:-4px 0 16px"></p>
+
+    <div class="tco-layout">
+      <div class="card chart-card">
+        <div class="chart-title"><span>Cumulative spend over 36 months</span><span class="fine" id="tco-req-note"></span></div>
+        <div class="chart-wrap"><canvas id="tco-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="slider-row" style="margin-bottom:14px">
+          <label for="tco-comparator">Cloud model to compare against</label>
+          <select id="tco-comparator" class="ctl"></select>
+        </div>
+        <details>
+          <summary class="fine" style="cursor:pointer;font-weight:700;margin-bottom:12px">Adjust cost assumptions</summary>
+          <div class="slider-row" style="margin-top:14px">
+            <label for="tco-server">Server cost <output for="tco-server"></output></label>
+            <input type="range" id="tco-server" min="10000" max="100000" step="1000">
+          </div>
+          <div class="slider-row">
+            <label for="tco-power">Power draw <output for="tco-power"></output></label>
+            <input type="range" id="tco-power" min="100" max="600" step="10">
+          </div>
+          <div class="slider-row">
+            <label for="tco-kwh">Electricity <output for="tco-kwh"></output></label>
+            <input type="range" id="tco-kwh" min="0.05" max="0.30" step="0.01">
+          </div>
+          <div class="slider-row">
+            <label for="tco-admin">Administration <output for="tco-admin"></output></label>
+            <input type="range" id="tco-admin" min="0" max="30000" step="500">
+          </div>
+          <div class="slider-row" style="margin-bottom:4px">
+            <label for="tco-reqs">Requests per active hour <output for="tco-reqs"></output></label>
+            <input type="range" id="tco-reqs" min="1" max="30" step="1">
+          </div>
+        </details>
+        <p class="fine" style="margin-bottom:0">
+          Server costs include purchase price, power with cooling overhead, and administration time.
+          Cloud costs use list prices per million tokens for the selected model.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= 06 THE ORDER SHEET ======================= -->
+<section class="block tinted" id="order">
+  <div class="container">
+    <div class="kicker"><span class="num">06</span><span class="topic">The order sheet</span></div>
+    <h2>The tested configuration, and its siblings.</h2>
+    <p class="section-lede">
+      Everything on this page was measured on the Standard configuration below — a stock, orderable 2U
+      server. The EPYC 9374F was chosen for its high all-core clock speed, which is what generation
+      speed depends on; one inference engine runs per socket, and no GPU is installed.
+    </p>
+
+    <div class="hardware-layout">
+      <div class="card server-visual">
+        <img src="assets/dell-r7625-server.png" alt="Dell PowerEdge R7625 server">
+        <div class="caption"><b>Dell PowerEdge R7625</b> · 2× AMD EPYC 9374F · 2U</div>
+        <img src="assets/amd-epyc-badge.svg" alt="AMD EPYC" style="max-height:74px;margin-top:14px">
+      </div>
+      <div class="card">
+        <table class="spec-table">
+          <tr><td>Server</td><td>Dell PowerEdge R7625</td></tr>
+          <tr><td>CPU</td><td>2× AMD EPYC 9374F (Zen 4), 32 cores / 64 threads per socket</td></tr>
+          <tr><td>Total cores</td><td>64 cores / 128 threads across two sockets</td></tr>
+          <tr><td>Memory</td><td>1 TB DDR5, two NUMA nodes</td></tr>
+          <tr><td>GPU</td><td>None</td></tr>
+          <tr><td>Engine</td><td>vLLM on CPU, one engine per socket, users pinned per socket</td></tr>
+          <tr><td>Model</td><td>Qwen3-30B-A3B-Instruct (FP8), 8,192-token requests</td></tr>
+          <tr><td>KV cache</td><td>64 GB allocated</td></tr>
+          <tr><td>OS</td><td>Ubuntu 24.04</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <h2 style="font-size:22px;margin-top:44px">Four sizes</h2>
+    <p class="section-lede" style="margin-bottom:18px">
+      People counts assume the typical usage level from section 01. "Tested" means measured in this
+      benchmark; "Estimated" configurations are scaled from the tested result by core count and
+      frequency, not measured directly.
+    </p>
+    <div id="tier-grid" class="tier-grid"></div>
+
+    <div class="card reveal" style="margin-top:24px">
+      <div class="model-strip">
+        <span class="name">About the model</span>
+        <span class="note">
+          Qwen3-30B-A3B-Instruct is an open-weight mixture-of-experts model: 30B parameters total, about
+          3B active per token, which is what makes CPU serving practical. Its published benchmark scores
+          are comparable to GPT-4o across knowledge, reasoning, coding, and writing tasks. It does not
+          handle images; pair it with a cloud endpoint if you need vision.
+        </span>
+      </div>
+      <details style="margin-top:12px">
+        <summary class="fine" style="cursor:pointer;font-weight:700">Published benchmark scores, side by side</summary>
+        <div style="overflow-x:auto;margin-top:12px">
+          <table class="cap-table">
+            <thead><tr><th>Benchmark</th><th style="text-align:right">Qwen3-30B (local)</th><th style="text-align:right">GPT-4o (cloud)</th><th>Higher is better →</th></tr></thead>
+            <tbody id="cap-tbody"></tbody>
+          </table>
+          <p class="fine" style="margin-bottom:0;margin-top:12px">
+            Scores as reported by Qwen using a consistent evaluation across both models
+            (Qwen3-30B-A3B-Instruct-2507 model card, July 2025).
+          </p>
+        </div>
+      </details>
+    </div>
+
+    <div class="honesty-grid">
+      <div class="card reveal">
+        <h3>Where this setup is not the right fit</h3>
+        <ul>
+          <li>Workloads that need image understanding — add a vision-capable cloud endpoint or GPU node.</li>
+          <li>Sub-second full responses on very long outputs; GPU systems remain faster at raw generation.</li>
+          <li>Usage that regularly spikes to many times its baseline; keep a cloud API available for bursts.</li>
+          <li>Fewer than about 50 total users; a smaller entry-level server is the better purchase.</li>
+          <li>Environments that depend on compliance certifications a cloud provider already holds.</li>
+        </ul>
+      </div>
+      <div class="card reveal">
+        <h3>Limits of the test</h3>
+        <ul>
+          <li>Single server only; multi-node deployments were not measured.</li>
+          <li>No GPU variants of the same model were tested.</li>
+          <li>No retrieval (RAG) pipeline was layered on top of inference.</li>
+          <li>Each group size ran for a ten-minute measurement window, not sustained 24/7 load.</li>
+          <li>FP8 quantization only; BF16 and INT8 may perform differently.</li>
+        </ul>
+      </div>
+    </div>
+
+    <details class="methodology">
+      <summary>Full workload methodology</summary>
+      <div class="inner">
+        For each team, a pool of independent virtual users was generated to match the team's persona mix.
+        Each user behaved according to its persona profile: token counts, turn counts, and read/think times
+        sampled from distributions calibrated to typical enterprise variability. Users issued requests to the
+        server in their natural cycle: submit, wait for response, read, think, submit again. After the server
+        reached steady state, we measured time to first token (TTFT) and time per output token (TPOT) for
+        every request in a measurement window, then aggregated into the percentiles reported throughout this
+        page. When a user completed its sessions, it was replaced with a fresh user to keep the pool at the
+        target size. For each team, we repeated the test at progressively higher active-user counts to map
+        how performance changed as load increased.
+      </div>
+    </details>
+  </div>
+</section>
+
+</main>
+
+<!-- ======================= FOOTER ======================= -->
+<section class="footer-cta">
+  <div class="container">
+    <h2>Next steps</h2>
+    <p>Configure the tested server, borrow a demo unit, or run the capacity simulator against your own workload.</p>
+    <div class="btns">
+      <a class="btn btn-primary" href="https://www.dell.com/en-us/shop/dell-poweredge-servers/poweredge-r7625-rack-server/spd/poweredge-r7625/pe_r7625_15972_vi_vp" target="_blank" rel="noopener">Configure the R7625</a>
+      <a class="btn btn-ghost" href="https://www.delldemodepot.com/" target="_blank" rel="noopener">Request a Demo System</a>
+      <a class="btn btn-ghost" href="https://github.com/VPC-DevAdmin/system-sizing" target="_blank" rel="noopener">Get the Simulator Code</a>
+    </div>
+  </div>
+</section>
+<footer class="footer-meta">
+  <div class="container">
+    <div class="logos">
+      <img src="assets/dell-technologies-logo.png" alt="Dell Technologies">
+      <img class="badge-img" src="assets/amd-epyc-badge.svg" alt="AMD EPYC">
+    </div>
+    <span>Dell PowerEdge R7625 · AI capacity benchmark · data exported <span data-generated></span></span>
+    <div class="right">prepared by <img src="assets/vpc-banner.png" alt="Vector Path Consulting"></div>
+  </div>
+</footer>
+
+<script src="data/amd-data.js"></script>
+<script>
+window.PAGE = {
+  platform: "amd",
+  story: { people: 1500 },
+  personas: [
+    { id: "quick_lookup", name: "Quick lookup", description: "support, sales, inventory checks", example: "What's our return policy on opened software?", inTok: 350, outTok: 60, color: "#2f7fd1" },
+    { id: "conversational", name: "Conversational", description: "coaching, customer dialogue", example: "Walk me through how to handle this objection…", inTok: 180, outTok: 220, color: "#1a936f" },
+    { id: "writer", name: "Drafting", description: "email and short-form writing", example: "Draft a follow-up email to the prospect about pricing.", inTok: 500, outTok: 350, color: "#d9921c" },
+    { id: "document_qa", name: "Document Q&A", description: "legal, finance, research over long documents", example: "Summarize the indemnification clauses in this contract.", inTok: 3500, outTok: 280, color: "#c2526a" },
+    { id: "code_assist", name: "Code assistance", description: "engineers pair-programming", example: "Why is this function returning null on edge cases?", inTok: 1200, outTok: 450, color: "#7c4fd1" },
+    { id: "long_form_generator", name: "Long-form writing", description: "articles and reports", example: "Draft a 1,500-word article on Q3 product launches.", inTok: 200, outTok: 3000, color: "#119fb8" }
+  ],
+  cohorts: [
+    { id: "general_knowledge", name: "General office", description: "A mix of all six patterns; the baseline workload for a typical group.", defaultMixPct: 35,
+      summaryLine: "Up to 44 simultaneous users get a responsive experience, with typical output around 15 tokens per second — well above reading pace. Between 44 and 64, the system stays up but users start waiting on the model. Past 128, responses degrade badly.",
+      recommendation: "The tested configuration covers a typical group's peak comfortably. A second R7625 node roughly doubles capacity if needed." },
+    { id: "chat_heavy", name: "Customer support", description: "Mostly quick lookups, with a high request rate per person.", defaultMixPct: 15,
+      summaryLine: "Up to 94 simultaneous users get a responsive experience, with typical output around 6 tokens per second — near reading pace. Between 94 and 96, users start waiting on the model. Past 96, responses degrade badly.",
+      recommendation: "Output volume is the limit for this team. A higher-frequency EPYC SKU, or a second R7625 node, gives the most additional room." },
+    { id: "writer_dominant", name: "Marketing / content", description: "Drafting-heavy work that keeps the server generating long outputs.", defaultMixPct: 10,
+      summaryLine: "Up to 92 simultaneous users get a responsive experience, with typical output around 11 tokens per second — comfortably above reading pace. Between 92 and 128, users start waiting on the model. Past 128, responses degrade badly.",
+      recommendation: "Similar profile to support: a higher-frequency SKU helps most if writers run at full tilt all day." },
+    { id: "software_engineering", name: "Software engineering", description: "Code assistance with long generated answers.", defaultMixPct: 15,
+      summaryLine: "Up to 52 simultaneous users get a responsive experience, with typical output around 6 tokens per second — near reading pace. Between 52 and 56, users start waiting on the model. Past 56, responses degrade badly.",
+      recommendation: "The tightest envelope of the five teams. Above about 50 active engineers, plan a second R7625 node or the 96-core configuration." },
+    { id: "analyst_team", name: "Analyst team", description: "Long documents in, summaries out; fewer requests per person.", defaultMixPct: 25,
+      summaryLine: "Up to 72 simultaneous users get a responsive experience, with typical output around 12 tokens per second — well above reading pace. Between 72 and 128, users start waiting on the model. Past 128, responses degrade badly.",
+      recommendation: "This team's workload is generation-heavy; additional CPU capacity is what raises its ceiling." }
+  ],
+  profiles: [
+    { id: "entry", name: "Entry", bestFit: "800–1,200", cpu: "Single EPYC 9004, 24–32 cores", memory: "256 GB DDR5", costMin: 18000, costMax: 22000, capacityMultiplier: 0.55 },
+    { id: "standard", name: "Standard R7625", bestFit: "2,000–3,200", cpu: "2× EPYC 9374F, 32 cores each", memory: "1 TB DDR5", costMin: 38000, costMax: 42000, capacityMultiplier: 1.0, isTested: true },
+    { id: "capacity", name: "High-frequency R7625", bestFit: "2,800–3,800", cpu: "2× EPYC 9474F / 9554", memory: "1.5 TB DDR5", costMin: 50000, costMax: 60000, capacityMultiplier: 1.2 },
+    { id: "dual", name: "96-core R7625", bestFit: "3,800–5,500", cpu: "2× EPYC 9654, 96 cores each", memory: "1–2 TB DDR5", costMin: 60000, costMax: 75000, capacityMultiplier: 1.8 }
+  ],
+  comparators: [
+    { name: "GPT-4o", inputPerMtok: 2.50, outputPerMtok: 10.00 },
+    { name: "GPT-4o-mini", inputPerMtok: 0.15, outputPerMtok: 0.60 },
+    { name: "GPT-5.4-mini", inputPerMtok: 0.75, outputPerMtok: 4.50 },
+    { name: "Gemini 2.5 Flash", inputPerMtok: 0.30, outputPerMtok: 2.50 }
+  ],
+  tco: { serverCost: 40000, powerW: 250, powerKwhCost: 0.12, coolingOverheadPct: 35, adminYearlyCost: 8000, rackMonthlyCost: 0, comparatorIndex: 0, blendedMidPct: 70, businessHoursPerMonth: 168, requestsPerInflightHour: 8 },
+  capabilities: [
+    { group: "Knowledge", items: [
+      { capability: "MMLU-Pro", local: 78.4, cloud: 79.8 },
+      { capability: "MMLU-Redux", local: 89.3, cloud: 91.3 },
+      { capability: "GPQA", local: 70.4, cloud: 66.9 },
+      { capability: "SuperGPQA", local: 53.4, cloud: 51.0 } ] },
+    { group: "Reasoning", items: [
+      { capability: "AIME25", local: 61.3, cloud: 26.7 },
+      { capability: "ZebraLogic", local: 90.0, cloud: 52.6 },
+      { capability: "LiveBench", local: 69.0, cloud: 63.7 } ] },
+    { group: "Coding", items: [
+      { capability: "LiveCodeBench v6", local: 43.2, cloud: 35.8 },
+      { capability: "MultiPL-E", local: 83.8, cloud: 82.7 } ] },
+    { group: "Instruction & writing", items: [
+      { capability: "IFEval", local: 84.7, cloud: 83.9 },
+      { capability: "Arena-Hard v2", local: 69.0, cloud: 61.9 },
+      { capability: "Creative Writing v3", local: 86.0, cloud: 84.9 },
+      { capability: "WritingBench", local: 85.5, cloud: 75.5 } ] },
+    { group: "Tool use / agent", items: [
+      { capability: "BFCL-v3", local: 65.1, cloud: 66.5 } ] }
+  ]
+};
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

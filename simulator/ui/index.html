@@ -95,31 +95,37 @@
 <main id="view-optimizer" class="view">
   <section class="panel">
     <h2>Engine optimizer</h2>
-    <p class="msg">Sweeps engine launch shapes (KV pool, batch width, chunked prefill,
-    TP vs data-parallel replicas) against representative latency/throughput cells and
-    ranks them — run this on a new host <b>before</b> the first capacity benchmark, then
-    encode the winner in the profile you benchmark with. Results persist to
-    <code>runs/engine_optimizer/</code> and resume if interrupted.</p>
+    <p class="msg">Finds the launch shape (model, precision, TP/DP, placement, batch
+    limits) that maximizes performance on <b>this</b> hardware — run it before the
+    first capacity benchmark, then promote the winner into the profile you benchmark
+    with. Results persist to <code>runs/engine_optimizer/</code> and resume if
+    interrupted.</p>
     <div class="row wrap">
       <label>Mode
         <select id="opt-mode">
-          <option value="registry">Registry sweep (curated configs)</option>
-          <option value="search">Guided search (coarse &rarr; refine)</option>
+          <option value="search">Guided search (recommended)</option>
+          <option value="registry">Quick sweep &mdash; one-knob probes</option>
         </select>
       </label>
-      <label id="opt-profile-wrap">Profile <select id="opt-profile"></select></label>
-      <label id="opt-space-wrap" hidden>Space <select id="opt-space"></select></label>
+      <label id="opt-profile-wrap" hidden>Curated set <select id="opt-profile"></select></label>
+      <label id="opt-space-wrap">Search space <select id="opt-space"></select></label>
       <label class="check"><input type="checkbox" id="opt-new-run"> Fresh run (don't resume)</label>
       <button id="opt-start" class="primary">Start optimizer</button>
       <button id="opt-stop" class="danger" disabled>Stop</button>
       <span id="opt-msg" class="msg"></span>
     </div>
-    <p id="opt-search-hint" class="msg" hidden>Guided search samples the space for
-    coverage, ranks candidates by the space's objective (default: summed throughput
-    with p95-latency caps), then refines one-dimension neighbors of the leaders until
-    the budget is spent or improvement flattens. Dimensions, objective and budget live
-    in the space YAML (<code>config/search/</code>).</p>
-    <div id="opt-configs" class="opt-configs"></div>
+    <div id="opt-space-detail" class="callout" hidden></div>
+    <p id="opt-search-hint" class="msg">Guided search covers the space first (every
+    model, precision and shape represented), ranks candidates by the space's objective
+    (default: summed throughput with p95-latency caps), then refines one-dimension
+    neighbors of the leaders until improvement flattens or the budget is spent.
+    Spaces are YAML in <code>config/search/</code>; spaces with
+    <code>catalog_families</code> pick up newly added models automatically.</p>
+    <p id="opt-registry-hint" class="msg" hidden>The quick sweep runs a handful of
+    hand-curated configs that each change <b>one knob</b> off a sane baseline —
+    about an hour on a fresh host, and it answers the big directional questions
+    (TP&nbsp;vs&nbsp;DP, batch width) before you commit a night to the guided search.</p>
+    <div id="opt-configs" class="opt-configs" hidden></div>
   </section>
 
   <section class="panel" id="opt-search-panel" hidden>

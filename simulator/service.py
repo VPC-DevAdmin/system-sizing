@@ -110,6 +110,13 @@ class StorageRequest(BaseModel):
     hf_cache: str      # absolute directory for model weights
 
 
+class PromoteRequest(BaseModel):
+    # "search" promotes the guided search's best candidate; "registry"
+    # promotes the named sweep config (the UI passes its ranked #1).
+    source: str
+    config_name: Optional[str] = None
+
+
 class OptimizerStartRequest(BaseModel):
     # mode "registry": sweep a fixed profile of hand-curated configs.
     # mode "search": guided coarse-to-fine over a config/search/ space.
@@ -695,13 +702,25 @@ def create_app(
                 search_results = json.loads(_search_out.read_text())
             except (OSError, json.JSONDecodeError):
                 search_results = None
-        from .search import list_spaces
+        from .search import SearchSpaceError, list_spaces, load_space
+        spaces = list_spaces()
+
+        def _details() -> dict:
+            from .promote import space_overview
+            out = {}
+            for name, path in spaces.items():
+                try:
+                    out[name] = space_overview(load_space(path))
+                except SearchSpaceError as e:
+                    out[name] = {"error": str(e)}
+            return out
         out: dict = {
             "running": _optimizer_running(),
             "catalog": catalog,
             "results": results,
             "out_path": str(_opt_out),
-            "spaces": list_spaces(),
+            "spaces": spaces,
+            "space_details": await asyncio.to_thread(_details),
             "search_results": search_results,
             "search_out_path": str(_search_out),
         }
@@ -772,6 +791,40 @@ def create_app(
         return {"accepted": True, "mode": req.mode,
                 "profile": req.profile, "space": req.space,
                 "log": str(log_path)}
+
+    @app.post("/api/optimizer/promote")
+    async def optimizer_promote(req: PromoteRequest) -> dict:
+        """Winner → benchmark profile (config/profiles/optimized-*.yaml).
+        Writes repo config the same way the persona editor does — the
+        generated file is plain YAML the operator can read and rename."""
+        from .promote import (
+            PromoteError,
+            promote_registry_winner,
+            promote_search_winner,
+        )
+        try:
+            if req.source == "search":
+                if not _search_out.exists():
+                    raise HTTPException(404, "no guided-search results yet")
+                doc = json.loads(_search_out.read_text())
+                result = await asyncio.to_thread(promote_search_winner, doc)
+            elif req.source == "registry":
+                if not req.config_name:
+                    raise HTTPException(422, "registry promote needs config_name")
+                if not _opt_out.exists():
+                    raise HTTPException(404, "no registry-sweep results yet")
+                doc = json.loads(_opt_out.read_text())
+                catalog = await _optimizer_catalog()
+                result = await asyncio.to_thread(
+                    promote_registry_winner, catalog, doc, req.config_name,
+                )
+            else:
+                raise HTTPException(422, "source must be search | registry")
+        except PromoteError as e:
+            raise HTTPException(409, str(e)) from e
+        except (OSError, json.JSONDecodeError) as e:
+            raise HTTPException(500, f"could not read results: {e}") from e
+        return result
 
     @app.post("/api/optimizer/stop")
     async def optimizer_stop() -> dict:

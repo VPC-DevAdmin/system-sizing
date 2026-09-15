@@ -2599,11 +2599,18 @@ def main() -> None:
                 pname: [
                     {"name": c.name, "description": c.description,
                      "expected_outcome": c.expected_outcome,
-                     "replicas": len(c.replicas)}
+                     "replicas": len(c.replicas),
+                     # Launch shape — lets the service promote a sweep
+                     # winner into a benchmark profile without
+                     # re-deriving what the config actually ran.
+                     "replica_args": list(c.replica_args),
+                     "replica_gpus": [r.gpus for r in c.replicas],
+                     "shm_size": c.shm_size}
                     for c in configs
                 ]
                 for pname, configs in PROFILES.items()
             },
+            "profile_defaults": PROFILE_DEFAULTS,
             "cells": [
                 {"name": c.name, "input_tokens": c.input_tokens,
                  "output_tokens": c.output_tokens,

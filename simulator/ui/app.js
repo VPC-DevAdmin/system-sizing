@@ -726,6 +726,7 @@ const Results = {
 
 const Optimizer = {
   catalog: null,
+  spaceDetails: {},
   polling: null,
 
   init() {
@@ -733,8 +734,10 @@ const Optimizer = {
     $("#opt-stop").addEventListener("click", () => this.stop());
     $("#opt-profile").addEventListener("change", () => this.renderConfigs());
     $("#opt-mode").addEventListener("change", () => this.renderMode());
+    $("#opt-space").addEventListener("change", () => this.renderSpaceDetail());
     document.querySelector('#tabs button[data-view="optimizer"]')
       .addEventListener("click", () => this.refresh());
+    this.renderMode();
   },
 
   renderMode() {
@@ -742,7 +745,34 @@ const Optimizer = {
     $("#opt-profile-wrap").hidden = search;
     $("#opt-space-wrap").hidden = !search;
     $("#opt-search-hint").hidden = !search;
+    $("#opt-registry-hint").hidden = search;
     $("#opt-configs").hidden = search;
+    $("#opt-space-detail").hidden = !search;
+    if (search) this.renderSpaceDetail();
+  },
+
+  /* What would this search actually cover? Models, dimension sizes,
+   * devices and budget — so picking a space is an informed choice,
+   * not a filename guess. */
+  renderSpaceDetail() {
+    const box = $("#opt-space-detail");
+    const d = this.spaceDetails[$("#opt-space").value];
+    if (!d) { box.hidden = true; return; }
+    box.hidden = $("#opt-mode").value !== "search";
+    if (d.error) {
+      box.innerHTML = `<span class="status-fail">space broken:</span> ${d.error}`;
+      return;
+    }
+    const models = Object.entries(d.models ?? {});
+    const dims = Object.entries(d.dimensions ?? {})
+      .map(([k, n]) => `${k}&thinsp;×${n}`).join(" · ");
+    box.innerHTML = `
+      <b>${models.length} model variant(s)</b> — ${models.map(([v, m]) =>
+        `<code title="${m}">${v}</code>`).join(", ")}<br>
+      <span class="msg">dimensions: ${dims} · ${d.devices} GPUs in
+      ${(d.device_groups ?? []).length} domain(s) · objective
+      ${d.objective} · ${d.initial_samples} coverage samples,
+      budget ${d.budget} evaluations</span>`;
   },
 
   msg(text, cls = "") {
@@ -774,6 +804,8 @@ const Optimizer = {
     for (const name of Object.keys(status.spaces ?? {})) {
       spaceSel.append(new Option(name, name, false, name === prevSpace));
     }
+    this.spaceDetails = status.space_details ?? {};
+    this.renderSpaceDetail();
     $("#opt-start").disabled = status.running;
     $("#opt-stop").disabled = !status.running;
     if (status.running) {
@@ -810,8 +842,12 @@ const Optimizer = {
     const best = s.best ? `
       <div class="opt-rank-card winner"><span class="n">BEST ${
         s.best.score.toFixed(0)}</span>
-       <span class="s"> ${s.best.key.replaceAll("|", " · ")}</span></div>` : "";
+       <span class="s"> ${s.best.key.replaceAll("|", " · ")}</span>
+       <button class="small primary" id="opt-promote-search"
+         style="margin-left:12px">Use for benchmark</button></div>` : "";
     $("#opt-search-best").innerHTML = best + prog;
+    $("#opt-promote-search")?.addEventListener("click", () =>
+      this.promote("search"));
     const tbody = $("#opt-search-table tbody");
     tbody.innerHTML = "";
     (s.top ?? []).forEach((e, i) => {
@@ -917,6 +953,8 @@ const Optimizer = {
       <div class="opt-rank-card ${i === 0 ? "winner" : ""}">
         <span class="n">#${i + 1} ${r.name}</span>
         <span class="s"> mean rank ${r.score === Infinity ? "—" : r.score.toFixed(1)}</span>
+        ${i === 0 ? `<button class="small primary" id="opt-promote-registry"
+          data-cfg="${r.name}" style="margin-left:12px">Use for benchmark</button>` : ""}
       </div>`).join("")
       + results.configs.filter(c => c.status !== "ok").map(c => `
       <div class="opt-rank-card">
@@ -955,6 +993,29 @@ const Optimizer = {
              c.failure_reason ? " — " + c.failure_reason.slice(0, 120) : ""}</td></tr>`);
       }
     }
+    $("#opt-promote-registry")?.addEventListener("click", e =>
+      this.promote("registry", e.currentTarget.dataset.cfg));
+  },
+
+  /* Winner → benchmark profile, then hand off to the Benchmark tab
+   * with the generated profile preselected. */
+  async promote(source, configName) {
+    let r;
+    try {
+      r = await api("/api/optimizer/promote", {
+        method: "POST",
+        body: JSON.stringify({ source, config_name: configName ?? null }),
+      });
+    } catch (e) {
+      this.msg(e.message, "error");
+      return;
+    }
+    const warn = (r.warnings ?? []).length ? ` — NOTE: ${r.warnings[0]}` : "";
+    this.msg(`profile "${r.profile}" written (${r.path})${warn}`, "ok");
+    await Control.loadCatalogs();
+    const sel = $("#profile-select");
+    if ([...sel.options].some(o => o.value === r.profile)) sel.value = r.profile;
+    document.querySelector('#tabs button[data-view="control"]').click();
   },
 };
 

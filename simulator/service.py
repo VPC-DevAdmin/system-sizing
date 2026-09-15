@@ -815,8 +815,12 @@ def create_app(
             if "--search" in argv:
                 mode = ("arena" if any("arena_space" in str(a) for a in argv)
                         else "search")
-            else:
+            elif argv:
                 mode = "registry"
+            else:
+                # Pre-JSON lock: nothing to infer from — say so rather
+                # than guess, and let the UI route by file freshness.
+                mode = "unknown"
             logs = sorted(_opt_out.parent.glob("optimizer_*.log"))
             out["active"] = {
                 "mode": mode,

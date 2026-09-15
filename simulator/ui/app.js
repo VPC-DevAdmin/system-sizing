@@ -1209,14 +1209,19 @@ const Optimizer = {
     // result file is newer wins and the stale one hides.
     const sr = status.search_results;
     const rr = status.results;
-    const activeMode = status.running ? status.active?.mode : null;
     const searchNewer = !!sr?.generated_at
       && (!rr?.generated_at || sr.generated_at > rr.generated_at);
-    const showRegistry = activeMode
-      ? activeMode === "registry" : !searchNewer;
-    const showSearch = activeMode
-      ? activeMode !== "registry" : searchNewer;
-    this.renderResults(showRegistry ? rr : null);
+    const m = status.running ? status.active?.mode : null;
+    let showSearch;
+    if (m && m !== "unknown") {
+      showSearch = m !== "registry";      // the active run's own panel
+    } else {
+      // Idle, or an attached run that can't declare its mode: the
+      // file being written RIGHT NOW is the newer one — route by
+      // freshness rather than guessing.
+      showSearch = searchNewer;
+    }
+    this.renderResults(showSearch ? null : rr);
     this.renderSearch(showSearch ? sr : null);
   },
 

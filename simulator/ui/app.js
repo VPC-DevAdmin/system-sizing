@@ -1012,14 +1012,23 @@ const Storage = {
 
     const un = $("#storage-unmounted");
     if (doc.unmounted.length) {
+      const label = (d) => `${d.name} (${d.size_gb >= 1000
+        ? (d.size_gb / 1000).toFixed(1) + " TB" : d.size_gb + " GB"})`
+        + (d.has_partitions
+           ? ' <span class="status-marginal">— has existing partitions, check contents first</span>'
+           : ' <span class="status-pass">— blank</span>');
+      // The pasteable example must be the SAFEST candidate: a blank
+      // disk when one exists (the API sorts blank-first).
+      const example = doc.unmounted.find(d => !d.has_partitions) ?? doc.unmounted[0];
       un.innerHTML = `<div class="unmounted-box callout">
-        <b>${doc.unmounted.length} unmounted disk(s) on this box:</b> ` +
-        doc.unmounted.map(d => `${d.name} (${d.size_gb >= 1000
-          ? (d.size_gb / 1000).toFixed(1) + " TB" : d.size_gb + " GB"})`).join(", ") +
-        `. capsim won't format or mount disks — that needs root and destroys
-        whatever is on them. To bring one online (this example uses
-        <code>${doc.unmounted[0].name}</code>), run on the host, then Refresh:
-        <pre>${doc.unmounted[0].commands.join("\n")}</pre></div>`;
+        <b>${doc.unmounted.length} unmounted disk(s) on this box:</b><br>` +
+        doc.unmounted.map(label).join("<br>") +
+        `<br><br>capsim won't format or mount disks — that needs root and destroys
+        whatever is on them. Run these on the host <b>one line at a time</b>
+        (this example uses <code>${example.name}</code>${example.has_partitions
+          ? " — read the check-first lines carefully" : ", which is blank"}),
+        then Refresh:
+        <pre>${example.commands.join("\n")}</pre></div>`;
     } else {
       un.innerHTML = "";
     }

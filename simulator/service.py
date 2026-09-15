@@ -468,20 +468,37 @@ def create_app(
             res = None                     # non-Linux host — no lsblk
         if res and res.returncode == 0 and res.stdout.strip():
             try:
-                for name, size_gb in parse_lsblk_unmounted(
+                for name, size_gb, has_partitions in parse_lsblk_unmounted(
                     json.loads(res.stdout), min_gb=200.0,
                 ):
+                    # Commands for a HUMAN with sudo — shown, never
+                    # run. A partitioned disk was used by SOMETHING
+                    # before (leftover ZFS pools look exactly like
+                    # this): its recipe starts with an explicit
+                    # check-then-wipe, never a bare mkfs.
+                    if has_partitions:
+                        commands = [
+                            f"# {name} has existing partitions — check what's on it first:",
+                            f"sudo blkid /dev/{name}* ; lsblk -f /dev/{name}",
+                            "# ONLY if the contents are disposable:",
+                            f"sudo wipefs -a /dev/{name}",
+                            f"sudo mkfs.ext4 -L capsim-data /dev/{name}",
+                        ]
+                    else:
+                        commands = [
+                            f"sudo mkfs.ext4 -L capsim-data /dev/{name}",
+                        ]
+                    commands += [
+                        "sudo mkdir -p /data",
+                        f"sudo mount /dev/{name} /data",
+                        "grep -q capsim-data /etc/fstab || echo 'LABEL=capsim-data /data ext4 defaults,nofail 0 2' | sudo tee -a /etc/fstab",
+                        "sudo chown $USER /data",
+                    ]
                     unmounted.append({
                         "name": name,
                         "size_gb": round(size_gb, 1),
-                        # Commands for a HUMAN with sudo — shown, never run.
-                        "commands": [
-                            f"sudo mkfs.ext4 -L capsim-data /dev/{name}",
-                            "sudo mkdir -p /data",
-                            f"sudo mount /dev/{name} /data",
-                            "echo 'LABEL=capsim-data /data ext4 defaults,nofail 0 2' | sudo tee -a /etc/fstab",
-                            "sudo chown $USER /data",
-                        ],
+                        "has_partitions": has_partitions,
+                        "commands": commands,
                     })
             except (ValueError, KeyError):
                 pass

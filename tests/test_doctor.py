@@ -68,7 +68,28 @@ def test_parse_lsblk_unmounted() -> None:
                        "type": "part", "mountpoints": ["/data"]}]},
     ]}
     out = parse_lsblk_unmounted(doc)
-    assert out == [("nvme1n1", 3840.0)]
+    assert out == [("nvme1n1", 3840.0, False)]
+
+
+def test_parse_lsblk_blank_disks_sort_first() -> None:
+    """A partitioned-but-unmounted disk (leftover ZFS pool shape) must
+    never be the default formatting example — blank disks sort first
+    even when smaller."""
+    from simulator.doctor import parse_lsblk_unmounted
+
+    doc = {"blockdevices": [
+        {"name": "nvme1n1", "size": 3_000_000_000_000, "type": "disk",
+         "mountpoint": None,
+         "children": [
+             {"name": "nvme1n1p1", "size": 2_990_000_000_000,
+              "type": "part", "mountpoint": None},
+             {"name": "nvme1n1p9", "size": 8_000_000, "type": "part",
+              "mountpoint": None}]},
+        {"name": "nvme3n1", "size": 1_500_000_000_000, "type": "disk",
+         "mountpoint": None},
+    ]}
+    out = parse_lsblk_unmounted(doc)
+    assert out == [("nvme3n1", 1500.0, False), ("nvme1n1", 3000.0, True)]
 
 
 def test_disk_check_reports_real_consumers(tmp_path, monkeypatch) -> None:

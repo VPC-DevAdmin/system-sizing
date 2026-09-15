@@ -185,10 +185,18 @@ def _nearest_existing(path: Path) -> Path:
     return p
 
 
-def parse_lsblk_unmounted(doc: dict, min_gb: float = 400.0) -> list[tuple[str, float]]:
+def parse_lsblk_unmounted(
+    doc: dict, min_gb: float = 400.0,
+) -> list[tuple[str, float, bool]]:
     """Large block devices with no mountpoint anywhere in their tree —
     the 'this lab box has a data NVMe nobody mounted' case. Pure
-    parser over ``lsblk -J -b -o NAME,SIZE,TYPE,MOUNTPOINT`` output."""
+    parser over ``lsblk -J -b -o NAME,SIZE,TYPE,MOUNTPOINT`` output.
+
+    Each entry is ``(name, size_gb, has_partitions)``. The flag
+    matters for safety: a disk WITH partitions was used by something
+    before (a leftover ZFS pool member looks exactly like this) and
+    must never be the default formatting example — blank disks first.
+    """
 
     def mounted(node: dict) -> bool:
         if node.get("mountpoint") or node.get("mountpoints", [None]) != [None] \
@@ -196,14 +204,16 @@ def parse_lsblk_unmounted(doc: dict, min_gb: float = 400.0) -> list[tuple[str, f
             return True
         return any(mounted(c) for c in node.get("children") or [])
 
-    out: list[tuple[str, float]] = []
+    out: list[tuple[str, float, bool]] = []
     for dev in doc.get("blockdevices") or []:
         if dev.get("type") != "disk":
             continue
         size_gb = float(dev.get("size") or 0) / 1e9
         if size_gb >= min_gb and not mounted(dev):
-            out.append((str(dev.get("name")), size_gb))
-    return out
+            out.append((str(dev.get("name")), size_gb,
+                        bool(dev.get("children"))))
+    # Blank disks first — they are the safe formatting candidates.
+    return sorted(out, key=lambda e: (e[2], -e[1]))
 
 
 def _check_disk(report: DoctorReport, docker_ok: bool = False) -> None:
@@ -284,8 +294,10 @@ def _check_disk(report: DoctorReport, docker_ok: bool = False) -> None:
         except (ValueError, KeyError):
             unmounted = []
         if unmounted:
-            devs = ", ".join(f"{n} ({g / 1000:.1f} TB)" if g >= 1000
-                             else f"{n} ({g:.0f} GB)" for n, g in unmounted)
+            devs = ", ".join(
+                (f"{n} ({g / 1000:.1f} TB)" if g >= 1000 else f"{n} ({g:.0f} GB)")
+                + (" — HAS EXISTING PARTITIONS, check contents first" if part else "")
+                for n, g, part in unmounted)
             hints.append(
                 f"UNMOUNTED disk(s) present: {devs} — format and mount "
                 f"(e.g. at /data), then point the caches there"

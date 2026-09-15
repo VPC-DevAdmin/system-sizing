@@ -2303,7 +2303,15 @@ def _acquire_instance_lock(lock_path: Path):
             f"names. Stop it first (POST /api/optimizer/stop, or kill "
             f"the process)."
         ) from None
-    fh.write(str(os.getpid()))
+    # The lock body is the attach point: a service that did NOT start
+    # this process (restarted serve, second browser session) reads it
+    # to show the run and to stop it.
+    fh.truncate(0)
+    fh.write(json.dumps({
+        "pid": os.getpid(),
+        "started_at": time.time(),
+        "argv": sys.argv[1:],
+    }))
     fh.flush()
     return fh
 

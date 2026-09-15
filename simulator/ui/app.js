@@ -1166,7 +1166,8 @@ const Optimizer = {
     $("#opt-start").disabled = status.running;
     $("#opt-stop").disabled = !status.running;
     if (status.running) {
-      this.msg(`running (${status.active.profile}) — log: ${status.active.log}`);
+      this.msg(`running (${status.active.profile}${status.active.external
+        ? " — attached to in-flight run" : ""}) — log: ${status.active.log}`);
       if (!this.polling) {
         this.polling = setInterval(() => this.refresh(), 4000);
       }

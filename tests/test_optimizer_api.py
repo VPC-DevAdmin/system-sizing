@@ -181,3 +181,54 @@ def test_optimizer_search_mode(tmp_path) -> None:
                 time.sleep(0.2)
             assert status["search_results"]["summary"]["best"]["score"] == 5000.0
             assert status["active"]["mode"] == "search"
+
+
+def test_attaches_to_external_optimizer(tmp_path, monkeypatch) -> None:
+    """A serve restart orphans a running optimizer — the service must
+    still report it as running (via the flock) and refuse a second
+    start; releasing the lock clears the state."""
+    import fcntl
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from simulator.service import create_app
+
+    runs = tmp_path / "runs"
+    lock_dir = runs / "engine_optimizer"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / "optimizer_20260101T000000.log").write_text("log\n")
+    lock = open(lock_dir / ".optimizer.lock", "w")
+    lock.write(_json.dumps({
+        "pid": 999999, "started_at": 123.0,
+        "argv": ["--search", "runs/engine_optimizer/arena_space.yaml"],
+    }))
+    lock.flush()
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    stub = tmp_path / "opt.py"
+    stub.write_text("import json; print(json.dumps("
+                    "{'profiles': {}, 'cells': [], 'default_profile': 'x'}))")
+    try:
+        with TestClient(create_app(runs, optimizer_script=stub)) as client:
+            doc = client.get("/api/optimizer").json()
+            assert doc["running"] is True
+            active = doc["active"]
+            assert active["external"] is True
+            assert active["mode"] == "arena"
+            assert active["pid"] == 999999
+            assert active["log"].endswith("optimizer_20260101T000000.log")
+
+            # Mutual exclusion holds across the attach boundary.
+            r = client.post("/api/optimizer/start",
+                            json={"mode": "registry", "profile": "x"})
+            assert r.status_code == 409
+
+            # Lock released (runner exited) -> no longer running.
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            lock.close()
+            doc = client.get("/api/optimizer").json()
+            assert doc["running"] is False
+    finally:
+        if not lock.closed:
+            lock.close()

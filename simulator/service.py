@@ -671,9 +671,38 @@ def create_app(
     _opt_out = runs_base / "engine_optimizer" / "run.json"
     _search_out = runs_base / "engine_optimizer" / "search.json"
 
+    def _lock_state() -> Optional[dict]:
+        """Attach point for optimizers this service did not start
+        (serve restarted mid-run, or a CLI launch): the runner holds
+        an exclusive flock on .optimizer.lock with {pid, started_at,
+        argv} inside. If the flock is TAKEN, someone is running —
+        return their state; if we can acquire it, nobody is (the
+        kernel releases flocks when the holder dies, so a stale file
+        never reads as running)."""
+        import fcntl
+        p = _opt_out.parent / ".optimizer.lock"
+        try:
+            fh = open(p)
+        except OSError:
+            return None
+        try:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                try:
+                    return json.loads(fh.read() or "{}") or {}
+                except json.JSONDecodeError:
+                    return {}
+            fcntl.flock(fh, fcntl.LOCK_UN)
+            return None
+        finally:
+            fh.close()
+
     def _optimizer_running() -> bool:
         opt = app.state.optimizer
-        return bool(opt and opt["proc"].poll() is None)
+        if opt and opt["proc"].poll() is None:
+            return True
+        return _lock_state() is not None
 
     async def _optimizer_catalog() -> dict:
         if app.state.optimizer_catalog is None:
@@ -772,6 +801,26 @@ def create_app(
                 "started_at": opt["started_at"],
                 "log": opt["log"],
                 "exit_code": opt["proc"].poll(),
+            }
+        elif out["running"]:
+            # Not our child — attach to the lock holder so a freshly
+            # loaded UI still shows the in-flight run and can stop it.
+            ext = _lock_state() or {}
+            argv = ext.get("argv") or []
+            if "--search" in argv:
+                mode = ("arena" if any("arena_space" in str(a) for a in argv)
+                        else "search")
+            else:
+                mode = "registry"
+            logs = sorted(_opt_out.parent.glob("optimizer_*.log"))
+            out["active"] = {
+                "mode": mode,
+                "profile": mode,
+                "started_at": ext.get("started_at"),
+                "log": str(logs[-1]) if logs else None,
+                "exit_code": None,
+                "external": True,
+                "pid": ext.get("pid"),
             }
         return out
 
@@ -892,10 +941,27 @@ def create_app(
             raise HTTPException(409, "no optimizer running")
         import os as _os
         import signal as _signal
-        proc = app.state.optimizer["proc"]
-        with contextlib.suppress(ProcessLookupError):
-            _os.killpg(_os.getpgid(proc.pid), _signal.SIGTERM)
-        await asyncio.to_thread(proc.wait, 20)
+        opt = app.state.optimizer
+        if opt and opt["proc"].poll() is None:
+            proc = opt["proc"]
+            with contextlib.suppress(ProcessLookupError):
+                _os.killpg(_os.getpgid(proc.pid), _signal.SIGTERM)
+            await asyncio.to_thread(proc.wait, 20)
+        else:
+            # External runner (started before a serve restart, or from
+            # the CLI): kill the lock holder's process group and wait
+            # for the kernel to release the flock.
+            ext = _lock_state() or {}
+            pid = ext.get("pid")
+            if pid:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    _os.killpg(_os.getpgid(int(pid)), _signal.SIGTERM)
+
+            def _wait_released() -> None:
+                deadline = time.time() + 20
+                while time.time() < deadline and _lock_state() is not None:
+                    time.sleep(0.5)
+            await asyncio.to_thread(_wait_released)
         # The optimizer cleans containers between configs, not on
         # SIGTERM — sweep up any vllm-* container it left running.
         def _cleanup() -> None:

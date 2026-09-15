@@ -265,6 +265,10 @@ async def run_cohort(
         bound_cpus=bound_cpus,
         engine_pid=getattr(engine, "pid", None),
         artifacts_dir=run_dir,
+        # Remote targets: host-local collectors would measure the
+        # client box, not the system under test — skip them (the
+        # endpoint's /metrics scrape stays on).
+        host_telemetry=(cfg.engine.type != "remote"),
     )
 
     # Stepper selection (precedence: spot-check override → adaptive →

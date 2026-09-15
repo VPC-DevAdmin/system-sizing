@@ -118,6 +118,26 @@ class EngineConfig:
         default_factory=HardwareRequirements
     )
 
+    # ── vllm_cuda: local NVIDIA GPU target (roadmap 1.1) ──────────────
+    # Runs the upstream CUDA vLLM image with --gpus. Reuses model_id /
+    # max_model_len / tensor_parallel_size / quantization / port /
+    # docker_volumes / vllm_extra_flags from above.
+    gpu_image: str = "vllm/vllm-openai:latest"
+    # Fraction of each GPU's VRAM vLLM may claim (weights + KV pool).
+    gpu_memory_utilization: float = 0.90
+    # Restrict to specific devices (e.g. [0, 1]); None = all GPUs.
+    gpu_device_ids: list[int] | None = None
+
+    # ── remote: endpoint-only target (roadmap 1.1) ────────────────────
+    # Benchmarks an OpenAI-compatible endpoint the simulator doesn't
+    # launch or own. Host-local telemetry is skipped (it would measure
+    # the client box); the endpoint's /metrics is scraped when
+    # endpoint_metrics_url is set. base_url comes from endpoint_url
+    # verbatim (include the /v1 suffix).
+    endpoint_url: str | None = None
+    endpoint_api_key: str | None = None
+    endpoint_metrics_url: str | None = None
+
     # ── vllm_dual_socket: per-replica fields ──────────────────────────
     # Used when ``type == "vllm_dual_socket"`` — N vLLM-CPU containers
     # pinned to N different NUMA nodes. The simulator hash-routes
@@ -129,21 +149,29 @@ class EngineConfig:
 
     @property
     def base_url(self) -> str:
-        if self.type == "vllm":
-            return f"http://{self.host}:{self.port}/v1"
-        if self.type == "sglang":
+        if self.type in ("vllm", "sglang", "vllm_cuda"):
             return f"http://{self.host}:{self.port}/v1"
         if self.type == "vllm_dual_socket":
             return f"http://{self.host}:{self.litellm_port}/v1"
+        if self.type == "remote":
+            if not self.endpoint_url:
+                raise ValueError(
+                    "engine.type 'remote' requires engine.endpoint_url "
+                    "(the OpenAI-compatible base URL, including /v1)"
+                )
+            return self.endpoint_url.rstrip("/")
         raise ValueError(f"Unknown engine type {self.type!r}")
 
     @property
     def api_key(self) -> str:
         """OpenAI-compatible API key. ``vllm_dual_socket`` requires the
-        LiteLLM master key in the Authorization header; direct vLLM /
-        SGLang accept any non-empty value."""
+        LiteLLM master key in the Authorization header; ``remote``
+        endpoints use the configured key; direct vLLM / SGLang accept
+        any non-empty value."""
         if self.type == "vllm_dual_socket":
             return self.litellm_master_key
+        if self.type == "remote":
+            return self.endpoint_api_key or "EMPTY"
         return "EMPTY"
 
 

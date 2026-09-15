@@ -126,6 +126,13 @@ class HardwareRequirements:
     cpu_features: list[str] = field(default_factory=list)  # /proc/cpuinfo flags
     min_physical_cores: Optional[int] = None
     min_sockets: Optional[int] = None
+    # GPU constraints (roadmap 1.1 — vllm_cuda target). ``min_vram_gb``
+    # is per-device: a 30B BF16 model needs ~70 GB on ONE GPU unless
+    # tensor_parallel_size spreads it, in which case set min_gpus
+    # instead and lower min_vram_gb accordingly.
+    requires_gpu: bool = False
+    min_gpus: Optional[int] = None
+    min_vram_gb: Optional[float] = None
     notes: str = ""                          # free-form note shown on fail
 
     def is_empty(self) -> bool:
@@ -134,7 +141,86 @@ class HardwareRequirements:
             and not self.cpu_features
             and self.min_physical_cores is None
             and self.min_sockets is None
+            and not self.requires_gpu
+            and self.min_gpus is None
+            and self.min_vram_gb is None
         )
+
+
+@dataclass
+class GpuInfo:
+    """Best-effort NVIDIA GPU detection via nvidia-smi."""
+    count: int
+    names: list[str]
+    vram_gb: list[float]                 # per-device totals
+    detection_status: str                # "ok" | "no_nvidia_smi" | "query_failed"
+
+
+def detect_gpus() -> GpuInfo:
+    """Detect NVIDIA GPUs with nvidia-smi. ``no_nvidia_smi`` means no
+    usable NVIDIA stack — for GPU-requiring configs that is a real
+    failure, not a soft skip (the docker --gpus path needs the driver)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("nvidia-smi") is None:
+        return GpuInfo(0, [], [], "no_nvidia_smi")
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0:
+            return GpuInfo(0, [], [], "query_failed")
+        names: list[str] = []
+        vram: list[float] = []
+        for line in r.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 2:
+                names.append(parts[0])
+                try:
+                    vram.append(float(parts[1]) / 1024.0)
+                except ValueError:
+                    vram.append(0.0)
+        return GpuInfo(len(names), names, vram, "ok")
+    except Exception:  # noqa: BLE001
+        return GpuInfo(0, [], [], "query_failed")
+
+
+def check_gpu_requirements(
+    gpus: GpuInfo, reqs: HardwareRequirements,
+) -> list[str]:
+    """GPU-side requirement failures (empty list = satisfied).
+
+    Unlike the CPU checks, an absent detection signal is a FAILURE
+    when the config requires a GPU — nvidia-smi missing means the
+    docker --gpus launch path cannot work on this host."""
+    failures: list[str] = []
+    needs_gpu = reqs.requires_gpu or reqs.min_gpus or reqs.min_vram_gb
+    if not needs_gpu:
+        return failures
+    if gpus.detection_status != "ok" or gpus.count == 0:
+        failures.append(
+            f"config requires an NVIDIA GPU but none detected "
+            f"(status: {gpus.detection_status})"
+        )
+        return failures
+    min_gpus = reqs.min_gpus or 1
+    if gpus.count < min_gpus:
+        failures.append(f"min_gpus={min_gpus}, detected {gpus.count}")
+    if reqs.min_vram_gb:
+        insufficient = [
+            f"{n} ({v:.0f} GB)"
+            for n, v in zip(gpus.names, gpus.vram_gb)
+            if v < reqs.min_vram_gb
+        ]
+        if insufficient:
+            failures.append(
+                f"min_vram_gb={reqs.min_vram_gb:.0f} per device; "
+                f"below the bar: {', '.join(insufficient)}"
+            )
+    return failures
 
 
 class PreflightError(RuntimeError):
@@ -205,6 +291,17 @@ def preflight_check(reqs: HardwareRequirements, *, raise_on_fail: bool = True) -
     )
 
     failures = check_requirements(info, reqs)
+    if reqs.requires_gpu or reqs.min_gpus or reqs.min_vram_gb:
+        gpus = detect_gpus()
+        if gpus.detection_status == "ok" and gpus.count:
+            log.info(
+                "preflight: gpus=%d (%s)",
+                gpus.count,
+                ", ".join(
+                    f"{n} {v:.0f}GB" for n, v in zip(gpus.names, gpus.vram_gb)
+                ),
+            )
+        failures += check_gpu_requirements(gpus, reqs)
     if not failures:
         return True
 
@@ -219,6 +316,10 @@ def preflight_check(reqs: HardwareRequirements, *, raise_on_fail: bool = True) -
         msg_lines.append(f"  min_physical_cores: {reqs.min_physical_cores}")
     if reqs.min_sockets:
         msg_lines.append(f"  min_sockets: {reqs.min_sockets}")
+    if reqs.requires_gpu or reqs.min_gpus:
+        msg_lines.append(f"  gpus: {reqs.min_gpus or 1}+ NVIDIA")
+    if reqs.min_vram_gb:
+        msg_lines.append(f"  min_vram_gb: {reqs.min_vram_gb}")
     if reqs.notes:
         msg_lines.append(f"  notes: {reqs.notes}")
     msg_lines.append("Detected:")

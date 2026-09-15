@@ -449,6 +449,8 @@ def ready_cmd(
         _ensure_sglang_image(cfg.engine.docker_image)
     elif cfg.engine.type == "vllm_dual_socket" and not skip_build:
         _ensure_pulled_image(cfg.engine.vllm_image)
+    elif cfg.engine.type == "vllm_cuda" and not skip_build:
+        _ensure_pulled_image(cfg.engine.gpu_image)
 
     # 2. Model staging (only when the config points at a local mount).
     if not skip_download:

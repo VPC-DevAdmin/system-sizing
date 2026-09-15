@@ -125,12 +125,25 @@ class SnapshotRecorder:
     async def _loop(self) -> None:
         try:
             while not self._stopped:
+                pool_size = self.pool.target_size
+                in_flight = self.state.in_flight
+                warm = getattr(self.state, "warm_thinking", 0)
                 row = {
                     "cohort_run_id": self.cohort_run_id,
                     "snapshot_at_ms": _now_ms(),
                     "phase": self.get_phase(),
-                    "pool_size": self.pool.target_size,
-                    "in_flight": self.state.in_flight,
+                    "pool_size": pool_size,
+                    "in_flight": in_flight,
+                    # Live phase split of the sessions themselves:
+                    # prefill/decode inside the engine, warm (mid-
+                    # session think — KV is the prefix cache's hot
+                    # set), cold (pre-first-turn / fresh sessions).
+                    "prefill_in_flight": getattr(
+                        self.state, "prefill_in_flight", None),
+                    "decode_in_flight": getattr(
+                        self.state, "decode_in_flight", None),
+                    "sessions_warm": warm,
+                    "sessions_cold": max(0, pool_size - in_flight - warm),
                     "requests_completed": self.state.completed,
                     "errors": self.state.errors,
                     "step_samples": self.state.step_samples,
@@ -179,6 +192,19 @@ class _IntervalSample:
     gpu_power_w: Optional[float] = None
     gpu_sm_clock_mhz: Optional[float] = None
     gpu_throttled: Optional[bool] = None  # window aggregate only, no DB column
+    # Engine token rates from the /metrics counters' deltas: prefill
+    # rate (prompt tokens ingested/s) and decode rate (generation
+    # tokens emitted/s). The two phases have opposite hardware
+    # signatures (compute-bound vs bandwidth-bound), so one combined
+    # tok/s hides which one the engine is doing.
+    prefill_tok_s: Optional[float] = None
+    decode_tok_s: Optional[float] = None
+    preemptions: Optional[int] = None
+    # Rich per-second detail, stored as JSON columns rather than a
+    # column per metric: per-core CPU + breakdown + disk/net (host)
+    # and per-device GPU readings.
+    host: Optional[dict] = None
+    gpu_devices: Optional[list] = None
 
 
 class MeasurementTelemetry:
@@ -220,6 +246,12 @@ class MeasurementTelemetry:
         if host_telemetry and getattr(telemetry_config, "enable_gpu", True):
             from .collectors import GpuCollector
             self._gpu = GpuCollector()
+        self._host = None
+        if host_telemetry and getattr(telemetry_config, "enable_host_detail", True):
+            from .collectors.host import HostCollector
+            self._host = HostCollector()
+        # Previous engine token counters, for per-second rate deltas.
+        self._prev_tokens: Optional[tuple[float, float, float]] = None
         self._perf: PerfStatCollector | None = None
         self._bandwidth: BandwidthCollector | None = None
         self._power: PowerProbe | None = None
@@ -344,7 +376,8 @@ class MeasurementTelemetry:
             window = {
                 name: "skipped_remote_target"
                 for name in ("pmu", "memory_bandwidth", "power", "frequency",
-                             "cpu_util", "memory", "engine_rss", "gpu")
+                             "cpu_util", "memory", "engine_rss", "gpu",
+                             "host_detail")
             }
             window["engine_metrics"] = (
                 "disabled" if not self.cfg.enable_engine_metrics
@@ -392,6 +425,11 @@ class MeasurementTelemetry:
                 else ("not_available" if not self._gpu.is_available()
                       else _sampled("gpu_sm_util_pct"))
             ),
+            "host_detail": (
+                "disabled" if self._host is None
+                else ("not_available" if not self._host.is_available()
+                      else _sampled("host"))
+            ),
         }
         for name, status in window.items():
             if self.collector_statuses.get(name) != "ok":
@@ -415,6 +453,21 @@ class MeasurementTelemetry:
                         sample.queue_depth = int(qd)
                     if "prefix_cache_hits" in m:
                         sample.prefix_cache_hits = int(m["prefix_cache_hits"])
+                    # Token-rate deltas from the monotonic counters.
+                    pt = m.get("prompt_tokens_total")
+                    gt = m.get("generation_tokens_total")
+                    if pt is not None and gt is not None:
+                        now_s = time.monotonic()
+                        if self._prev_tokens is not None:
+                            p0, g0, t0 = self._prev_tokens
+                            dt = max(1e-3, now_s - t0)
+                            # Counter reset (engine restart) → skip.
+                            if pt >= p0 and gt >= g0:
+                                sample.prefill_tok_s = round((pt - p0) / dt, 1)
+                                sample.decode_tok_s = round((gt - g0) / dt, 1)
+                        self._prev_tokens = (pt, gt, now_s)
+                    if "preemptions_total" in m:
+                        sample.preemptions = int(m["preemptions_total"])
 
                 if self.host_telemetry:
                     # CPU util via /proc/stat — both views from a single
@@ -435,10 +488,16 @@ class MeasurementTelemetry:
                     sample.freq_mhz_stddev = std_mhz
                     sample.freq_mhz_min = min_mhz
 
-                    # GPU (NVML / nvidia-smi; None on CPU-only hosts)
+                    # GPU (NVML / nvidia-smi; None on CPU-only hosts).
+                    # One per-device read feeds both the per-device
+                    # detail and the aggregate columns.
                     if self._gpu is not None:
-                        gs = await asyncio.to_thread(self._gpu.sample)
-                        if gs is not None:
+                        devices = await asyncio.to_thread(
+                            self._gpu.sample_devices)
+                        if devices:
+                            from .collectors.gpu import _combine_devices
+                            sample.gpu_devices = devices
+                            gs = _combine_devices(devices)
                             sample.gpu_sm_util_pct = gs.sm_util_pct
                             sample.gpu_vram_used_gb = gs.vram_used_gb
                             sample.gpu_power_w = gs.power_w
@@ -448,6 +507,12 @@ class MeasurementTelemetry:
                                 gs.vram_total_gb or self._gpu_vram_total_gb
                             )
 
+                    # Host detail (per-core CPU, breakdown, sched,
+                    # memory, disk, net, optional IPMI power).
+                    if self._host is not None:
+                        sample.host = await asyncio.to_thread(
+                            self._host.sample)
+
                 self._samples.append(sample)
                 BUS.publish("telemetry", self._sample_to_row(sample))
                 await asyncio.sleep(1.0)
@@ -455,6 +520,7 @@ class MeasurementTelemetry:
             pass
 
     def _sample_to_row(self, s: _IntervalSample) -> dict:
+        import json as _json
         return {
             "measurement_id": self._measurement_id,
             "sampled_at_ms": s.sampled_at_ms,
@@ -473,6 +539,12 @@ class MeasurementTelemetry:
             "gpu_vram_used_gb": s.gpu_vram_used_gb,
             "gpu_power_w": s.gpu_power_w,
             "gpu_sm_clock_mhz": s.gpu_sm_clock_mhz,
+            "prefill_tok_s": s.prefill_tok_s,
+            "decode_tok_s": s.decode_tok_s,
+            "preemptions": s.preemptions,
+            "host_json": _json.dumps(s.host) if s.host else None,
+            "gpu_devices_json": (
+                _json.dumps(s.gpu_devices) if s.gpu_devices else None),
         }
 
 

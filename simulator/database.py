@@ -22,7 +22,7 @@ from typing import Any, Iterable
 # The version is stamped into SQLite's ``PRAGMA user_version``; DBs from
 # before versioning existed read as 0 and get every migration (each one
 # is idempotent, so a partially-lifted legacy DB is fine too).
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cohort_run (
@@ -206,7 +206,14 @@ CREATE TABLE IF NOT EXISTS simulation_snapshots (
     -- when a step isn't running (warmup / ramp / idle) so the
     -- dashboard renders "—" rather than a stale ratio.
     step_samples INTEGER,
-    step_target_samples INTEGER
+    step_target_samples INTEGER,
+    -- Live session-phase split (v4): prefill/decode inside the
+    -- engine; warm = mid-session think (their KV is the prefix
+    -- cache's hot set), cold = fresh / pre-first-turn sessions.
+    prefill_in_flight INTEGER,
+    decode_in_flight INTEGER,
+    sessions_warm INTEGER,
+    sessions_cold INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_run_time ON simulation_snapshots(cohort_run_id, snapshot_at_ms);
@@ -234,7 +241,16 @@ CREATE TABLE IF NOT EXISTS measurement_telemetry (
     gpu_sm_util_pct REAL,
     gpu_vram_used_gb REAL,
     gpu_power_w REAL,
-    gpu_sm_clock_mhz REAL
+    gpu_sm_clock_mhz REAL,
+    -- Deep telemetry (v4): engine token rates (prefill vs decode
+    -- have opposite hardware signatures), scheduler preemptions,
+    -- and JSON detail blobs — per-core CPU/breakdown/disk/net
+    -- (host_json) and per-device GPU readings (gpu_devices_json).
+    prefill_tok_s REAL,
+    decode_tok_s REAL,
+    preemptions INTEGER,
+    host_json TEXT,
+    gpu_devices_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_telemetry_measurement ON measurement_telemetry(measurement_id);
@@ -385,6 +401,27 @@ def _migration_3_gpu_telemetry(conn: sqlite3.Connection) -> None:
     _ensure_columns(conn, "cohort_measurements", _AGGREGATE_COLUMNS)
 
 
+def _migration_4_deep_telemetry(conn: sqlite3.Connection) -> None:
+    """Deep-telemetry columns: engine token rates + preemptions and
+    the JSON detail blobs (per-core CPU/disk/net, per-device GPU) on
+    intervals; live session phase split on snapshots."""
+    _ensure_columns(
+        conn, "measurement_telemetry",
+        [("prefill_tok_s", "REAL"),
+         ("decode_tok_s", "REAL"),
+         ("preemptions", "INTEGER"),
+         ("host_json", "TEXT"),
+         ("gpu_devices_json", "TEXT")],
+    )
+    _ensure_columns(
+        conn, "simulation_snapshots",
+        [("prefill_in_flight", "INTEGER"),
+         ("decode_in_flight", "INTEGER"),
+         ("sessions_warm", "INTEGER"),
+         ("sessions_cold", "INTEGER")],
+    )
+
+
 def _migrate_legacy_aggregate(conn: sqlite3.Connection) -> None:
     """Copy legacy ``measurement_aggregate`` rows onto
     ``cohort_measurements`` and drop the table.
@@ -421,6 +458,8 @@ MIGRATIONS: list[tuple[int, str, Any]] = [
     (1, "consolidate pre-versioning column lifts", _migration_1_pre_versioning_lifts),
     (2, "cohort_run.collectors_json", _migration_2_collectors_json),
     (3, "gpu telemetry columns", _migration_3_gpu_telemetry),
+    (4, "deep telemetry (token rates, host/gpu detail, session phases)",
+     _migration_4_deep_telemetry),
 ]
 assert [v for v, _, _ in MIGRATIONS] == list(range(1, SCHEMA_VERSION + 1)), (
     "MIGRATIONS must be contiguous 1..SCHEMA_VERSION"

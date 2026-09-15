@@ -418,3 +418,26 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pop-row input { flex: none; margin: 0; }
 .pop-row:hover { background: rgba(255,255,255,.05); }
 .pop-row i { color: var(--muted); font-style: normal; font-size: 12px; }
+
+/* ── System detail (live per-GPU + host line) ─────────────────── */
+.host-detail { font-size: 13px; line-height: 1.9; }
+.host-detail b { color: var(--text); font-weight: 600; }
+.gpu-grid { margin-top: 10px; display: grid; gap: 4px; }
+.gpu-row {
+  display: grid; align-items: center; gap: 10px; font-size: 12.5px;
+  grid-template-columns: 52px minmax(60px, 1fr) 44px minmax(60px, 1fr) 36px minmax(180px, 2fr);
+}
+.gpu-row .g-id { color: var(--muted); font-weight: 600; }
+.g-bar {
+  height: 10px; border-radius: 5px; background: rgba(255,255,255,.06);
+  overflow: hidden; display: block;
+}
+.g-bar i {
+  display: block; height: 100%; background: var(--teal);
+  border-radius: 5px; transition: width .4s;
+}
+.g-bar.vram i { background: var(--gold); }
+.g-num { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.g-sub { color: var(--muted); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.gpu-row.throttled .g-id { color: var(--fail); }

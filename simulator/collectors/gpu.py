@@ -98,20 +98,27 @@ def parse_smi_csv(text: str) -> list[dict]:
                 pass
         used = _num(mem_used_mib)
         total = _num(mem_total_mib)
-        devices.append({
+        d = {
+            "index": len(devices),
             "sm_util_pct": _num(util),
             "vram_used_gb": used / 1024.0 if used is not None else None,
             "vram_total_gb": total / 1024.0 if total is not None else None,
             "power_w": _num(power_w),
             "sm_clock_mhz": _num(clock_mhz),
             "throttled": throttled,
-        })
+        }
+        # Extended columns (temperature, DRAM-controller util) — older
+        # callers/tests may feed the 6-column form; both parse.
+        if len(parts) >= 8:
+            d["temperature_c"] = _num(parts[6])
+            d["mem_util_pct"] = _num(parts[7])
+        devices.append(d)
     return devices
 
 
 _SMI_QUERY = (
     "utilization.gpu,memory.used,memory.total,power.draw,clocks.sm,"
-    "clocks_throttle_reasons.active"
+    "clocks_throttle_reasons.active,temperature.gpu,utilization.memory"
 )
 
 
@@ -168,23 +175,38 @@ class GpuCollector:
     def sample(self) -> Optional[GpuSample]:
         """One aggregated reading; None when unavailable or on a
         transient failure (caller records NULLs for that second)."""
+        devices = self.sample_devices()
+        return _combine_devices(devices) if devices else None
+
+    def sample_devices(self) -> Optional[list[dict]]:
+        """Per-device readings — the aggregate hides exactly what an
+        operator needs when a TP group stalls or one replica runs hot:
+        WHICH GPU. Each dict carries index, util, VRAM, power, clock,
+        throttle, and (backend permitting) temperature, DRAM-controller
+        utilization and PCIe traffic."""
         if not self.is_available():
             return None
         try:
             if self._mode == "nvml":
-                return self._sample_nvml()
-            return self._sample_smi()
+                return self._sample_nvml_devices()
+            return self._sample_smi_devices()
         except Exception as e:  # noqa: BLE001
             log.debug("gpu sample failed: %s", e)
             return None
 
-    def _sample_nvml(self) -> Optional[GpuSample]:
+    def _sample_nvml_devices(self) -> list[dict]:
         nv = self._nvml
         devices: list[dict] = []
-        for h in self._handles:
-            d: dict = {}
+        for i, h in enumerate(self._handles):
+            d: dict = {"index": i}
             try:
-                d["sm_util_pct"] = float(nv.nvmlDeviceGetUtilizationRates(h).gpu)
+                rates = nv.nvmlDeviceGetUtilizationRates(h)
+                d["sm_util_pct"] = float(rates.gpu)
+                # % of time the DRAM controller was busy — the
+                # memory-bandwidth-pressure signal (decode is
+                # bandwidth-bound; this pegging while SM idles is the
+                # classic LLM-decode signature).
+                d["mem_util_pct"] = float(rates.memory)
             except Exception:  # noqa: BLE001
                 d["sm_util_pct"] = None
             try:
@@ -208,18 +230,34 @@ class GpuCollector:
                 d["throttled"] = bool(reasons & _THROTTLE_MASK)
             except Exception:  # noqa: BLE001
                 d["throttled"] = None
+            try:
+                d["temperature_c"] = float(
+                    nv.nvmlDeviceGetTemperature(h, nv.NVML_TEMPERATURE_GPU)
+                )
+            except Exception:  # noqa: BLE001
+                d["temperature_c"] = None
+            # PCIe traffic — the TP-over-PCIe tax made visible.
+            # NVML samples ~20ms per counter; ~40ms/device is fine
+            # at 1 Hz (the caller already runs us in a thread).
+            try:
+                d["pcie_tx_mb_s"] = nv.nvmlDeviceGetPcieThroughput(
+                    h, nv.NVML_PCIE_UTIL_TX_BYTES) / 1024.0
+                d["pcie_rx_mb_s"] = nv.nvmlDeviceGetPcieThroughput(
+                    h, nv.NVML_PCIE_UTIL_RX_BYTES) / 1024.0
+            except Exception:  # noqa: BLE001
+                pass
             devices.append(d)
-        return _combine_devices(devices)
+        return devices
 
-    def _sample_smi(self) -> Optional[GpuSample]:
+    def _sample_smi_devices(self) -> list[dict]:
         r = subprocess.run(
             ["nvidia-smi", f"--query-gpu={_SMI_QUERY}",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10,
         )
         if r.returncode != 0:
-            return None
-        return _combine_devices(parse_smi_csv(r.stdout))
+            return []
+        return parse_smi_csv(r.stdout)
 
     def close(self) -> None:
         if self._mode == "nvml" and self._nvml is not None:

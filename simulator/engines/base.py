@@ -214,6 +214,14 @@ class Engine:
             "vllm:num_requests_waiting": "queue_depth",
             "vllm:prefix_cache_hits_total": "prefix_cache_hits",
             "vllm:prefix_cache_queries_total": "prefix_cache_queries",
+            # Monotonic token counters — the telemetry loop turns their
+            # deltas into prefill tok/s and decode tok/s.
+            "vllm:prompt_tokens_total": "prompt_tokens_total",
+            "vllm:generation_tokens_total": "generation_tokens_total",
+            # Scheduler evictions under KV pressure: a nonzero rate
+            # means requests are being restarted — latency cliffs
+            # follow. Distinct signal from queue depth.
+            "vllm:num_preemptions_total": "preemptions_total",
             # SGLang naming is in flux; best-effort matches.
             "sglang:num_running_reqs": "num_running",
             "sglang:num_waiting_reqs": "queue_depth",

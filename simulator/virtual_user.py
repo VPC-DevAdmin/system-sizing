@@ -130,13 +130,31 @@ class UserStats:
 
 
 class SharedState:
-    """In-flight tracking and event publishing."""
+    """In-flight tracking and event publishing.
+
+    Beyond the total in-flight count, the state now tracks the LIVE
+    phase decomposition the timeline module reconstructs post-hoc:
+
+      * ``prefill_in_flight`` — submitted, no first token yet
+      * ``decode_in_flight``  — streaming (in_flight − prefill)
+      * ``warm_thinking``     — users between turns of a session whose
+        conversation history is retained: their next turn replays the
+        prefix, so their KV is the prefix cache's hot set. The
+        "resident sessions, hot" approximation this stack can honestly
+        make — vLLM does not expose per-request KV residency.
+
+    Phase counters are plain ints mutated only from the event loop
+    (asyncio is single-threaded here), so no locking beyond the
+    existing in-flight lock is needed.
+    """
 
     def __init__(self):
         self._in_flight = 0
         self._lock = asyncio.Lock()
         self._completed = 0
         self._errors = 0
+        self._prefill_in_flight = 0
+        self._warm_thinking = 0
         self.events: asyncio.Queue[TurnEvent] = asyncio.Queue()
         # Live progress for the in-flight measurement step. Both
         # written from the single ``run_measurement_step`` task — no
@@ -151,6 +169,18 @@ class SharedState:
         return self._in_flight
 
     @property
+    def prefill_in_flight(self) -> int:
+        return self._prefill_in_flight
+
+    @property
+    def decode_in_flight(self) -> int:
+        return max(0, self._in_flight - self._prefill_in_flight)
+
+    @property
+    def warm_thinking(self) -> int:
+        return self._warm_thinking
+
+    @property
     def completed(self) -> int:
         return self._completed
 
@@ -161,17 +191,33 @@ class SharedState:
     async def submit(self) -> int:
         async with self._lock:
             self._in_flight += 1
+            self._prefill_in_flight += 1
             return self._in_flight
 
-    async def complete(self) -> None:
+    def note_first_token(self) -> None:
+        """Prefill→decode transition (called from the streaming
+        consumer's first-chunk hook)."""
+        self._prefill_in_flight = max(0, self._prefill_in_flight - 1)
+
+    async def complete(self, *, first_token_seen: bool = True) -> None:
         async with self._lock:
             self._in_flight = max(0, self._in_flight - 1)
+            if not first_token_seen:
+                self._prefill_in_flight = max(0, self._prefill_in_flight - 1)
             self._completed += 1
 
-    async def fail(self) -> None:
+    async def fail(self, *, first_token_seen: bool = True) -> None:
         async with self._lock:
             self._in_flight = max(0, self._in_flight - 1)
+            if not first_token_seen:
+                self._prefill_in_flight = max(0, self._prefill_in_flight - 1)
             self._errors += 1
+
+    def enter_warm_think(self) -> None:
+        self._warm_thinking += 1
+
+    def leave_warm_think(self) -> None:
+        self._warm_thinking = max(0, self._warm_thinking - 1)
 
 
 def _now_ms() -> int:
@@ -303,6 +349,7 @@ async def run_virtual_user(
                     inter_token_timeout_s=persona.inter_token_timeout_s,
                     hard_timeout_s=min(persona.hard_timeout_s, request_timeout_s),
                     capture_token_timestamps=capture_token_timestamps,
+                    on_first_token=state.note_first_token,
                 )
                 ttft_obs: float | None = (
                     stream_result.ttft_ms / 1000.0
@@ -319,7 +366,9 @@ async def run_virtual_user(
                 e2e_ms = (completed_at - submitted_at) * 1000.0
 
                 if error is not None:
-                    await state.fail()
+                    await state.fail(
+                        first_token_seen=stream_result.ttft_ms is not None,
+                    )
                     log.debug("user %s turn failed: %s", stats.user_id, error)
                     # Synthetic TurnEvent so the failure registers
                     # in the SLA framework. Carries whatever partial
@@ -419,7 +468,7 @@ async def run_virtual_user(
                     reasoning_tokens=stream_result.reasoning_tokens,
                 )
 
-                await state.complete()
+                await state.complete(first_token_seen=ttft_obs is not None)
                 await state.events.put(event)
 
                 # Append turn to history (byte-identical reuse for prefix cache)
@@ -435,15 +484,21 @@ async def run_virtual_user(
                     # independently and summed; both are LogNormal
                     # so the sum is a heavy-tail bimodal-ish
                     # distribution with the right central tendency.
+                    # The user is "warm" for this gap: its next turn
+                    # replays the conversation prefix, so its KV is
+                    # what the prefix cache is holding hot.
                     delay = (
                         persona.read_time_seconds.sample(rng)
                         + persona.active_think_seconds.sample(rng)
                     )
+                    state.enter_warm_think()
                     try:
                         await asyncio.wait_for(cancel_event.wait(), timeout=delay)
                         return  # cancel fired
                     except asyncio.TimeoutError:
                         pass
+                    finally:
+                        state.leave_warm_think()
 
             stats.sessions_completed += 1
         # Session done — return so the pool manager spawns a

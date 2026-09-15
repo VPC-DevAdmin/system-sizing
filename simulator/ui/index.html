@@ -212,7 +212,27 @@
       <div class="chart-note">KV cache is the engine's own gauge; CPU is the bound-set
         (pinned cores only); GPU is SM utilization averaged across devices. Absent lines
         mean that collector isn't available on this host.</div></section>
+    <section class="panel"><h2>Token rates &middot; prefill vs decode</h2>
+      <canvas id="chart-tokens"></canvas>
+      <div class="chart-note">From the engine's own counters. Prefill (prompt ingest) is
+        compute-bound; decode (generation) is memory-bandwidth-bound — spiky prefill with
+        sagging decode is the query-storm signature.</div></section>
+    <section class="panel"><h2>Session states</h2>
+      <canvas id="chart-sessions"></canvas>
+      <div class="chart-note">Where every session in the pool is right now: in prefill,
+        streaming (decode), <b>warm</b> think (mid-conversation — their KV is the prefix
+        cache's hot set), or cold (fresh sessions, nothing cached).</div></section>
   </div>
+
+  <section class="panel">
+    <h2>System detail</h2>
+    <div id="host-detail" class="host-detail msg">waiting for telemetry&hellip;</div>
+    <div id="gpu-grid" class="gpu-grid"></div>
+    <div class="chart-note">Per-GPU: SM utilization, VRAM, DRAM-controller busy%
+      (the bandwidth-pressure signal), power, temperature, PCIe traffic. Host row:
+      what the CPUs are doing, scheduler pressure, storage and network rates —
+      per-core detail and NVMe/NIC counters land in the run DB every second.</div>
+  </section>
 
   <section class="panel">
     <h2>Completed steps</h2>

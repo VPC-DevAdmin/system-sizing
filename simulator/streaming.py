@@ -103,6 +103,10 @@ async def consume_with_tiers(
     inter_token_timeout_s: float,
     hard_timeout_s: float,
     capture_token_timestamps: bool = False,
+    # Invoked exactly once, at the prefill→decode transition (first
+    # streamed chunk, reasoning or content). Drives the live
+    # prefill/decode in-flight split; must be cheap and non-raising.
+    on_first_token: Optional[Callable[[], None]] = None,
 ) -> StreamResult:
     """Open a streaming chat completion and consume it under the
     three-tier policy.
@@ -215,6 +219,8 @@ async def consume_with_tiers(
             now_chunk = time.monotonic()
             if ttft_obs is None:
                 ttft_obs = now_chunk - submitted_at
+                if on_first_token is not None:
+                    on_first_token()
             t_last_chunk = now_chunk
             reasoning_tokens += 1
             # Note: reasoning text deliberately not appended to
@@ -224,6 +230,8 @@ async def consume_with_tiers(
             now_chunk = time.monotonic()
             if ttft_obs is None:
                 ttft_obs = now_chunk - submitted_at
+                if on_first_token is not None:
+                    on_first_token()
             if ttfct_obs is None:
                 ttfct_obs = now_chunk - submitted_at
             t_last_chunk = now_chunk

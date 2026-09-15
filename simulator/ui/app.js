@@ -320,6 +320,18 @@ const Live = {
       { label: "CPU bound-set %", data: [], borderColor: C.teal },
       { label: "GPU SM %", data: [], borderColor: C.purple },
     ], { suggestedMax: 100 });
+    this.charts.tokens = makeLiveChart("#chart-tokens", [
+      { label: "prefill tok/s", data: [], borderColor: C.blue, fill: true,
+        backgroundColor: fill(C.blue, "1f") },
+      { label: "decode tok/s", data: [], borderColor: C.teal, fill: true,
+        backgroundColor: fill(C.teal, "1f") },
+    ]);
+    this.charts.sessions = makeLiveChart("#chart-sessions", [
+      { label: "prefill", data: [], borderColor: C.blue },
+      { label: "decode", data: [], borderColor: C.teal },
+      { label: "warm think", data: [], borderColor: C.gold },
+      { label: "cold", data: [], borderColor: C.muted, borderDash: [4, 4] },
+    ]);
     this.connect();
   },
 
@@ -368,6 +380,12 @@ const Live = {
       $("#live-progress-bar").style.width = "0";
     }
     this.push(this.charts.pool, fmt.clock(ts), [s.pool_size, s.in_flight]);
+    if (s.prefill_in_flight != null) {
+      this.push(this.charts.sessions, fmt.clock(ts), [
+        s.prefill_in_flight, s.decode_in_flight,
+        s.sessions_warm, s.sessions_cold,
+      ]);
+    }
   },
 
   onTurn(ts, t) {
@@ -388,6 +406,72 @@ const Live = {
       t.kv_cache_used_pct, t.cpu_util_bound_avg ?? t.cpu_util_avg,
       t.gpu_sm_util_pct,
     ]);
+    if (t.prefill_tok_s != null || t.decode_tok_s != null) {
+      this.push(this.charts.tokens, fmt.clock(ts),
+        [t.prefill_tok_s, t.decode_tok_s]);
+    }
+    let host = null, gpus = null;
+    try { host = t.host_json ? JSON.parse(t.host_json) : null; } catch { /* skip */ }
+    try { gpus = t.gpu_devices_json ? JSON.parse(t.gpu_devices_json) : null; } catch { /* skip */ }
+    this.renderHostDetail(host, t);
+    this.renderGpuGrid(gpus);
+  },
+
+  /* Compact key/value line: what the CPUs are doing, scheduler and
+   * I/O pressure, chassis power when IPMI grants it. */
+  renderHostDetail(h, t) {
+    const el = $("#host-detail");
+    if (!h) return;
+    const bd = h.cpu_breakdown_pct || {};
+    const disks = Object.entries(h.disk || {});
+    const busiest = disks.sort((a, b) => b[1].util_pct - a[1].util_pct)[0];
+    const io = disks.length ? {
+      r: disks.reduce((s, [, d]) => s + d.read_mb_s, 0),
+      w: disks.reduce((s, [, d]) => s + d.write_mb_s, 0),
+    } : null;
+    const parts = [
+      bd.user != null && `CPU: <b>${bd.user}%</b> user · <b>${bd.system}%</b> sys
+        · <b>${bd.iowait}%</b> iowait · <b>${bd.irq}%</b> irq`,
+      h.load1 != null && `load <b>${h.load1}</b>`,
+      h.ctx_switches_s != null && `<b>${(h.ctx_switches_s / 1000).toFixed(1)}k</b> ctx/s`,
+      h.mem && `mem avail <b>${h.mem.available_gb}</b> GB · cached
+        <b>${h.mem.cached_gb}</b> GB${h.mem.swap_used_gb > 0.05
+          ? ` · <span class="status-marginal">swap ${h.mem.swap_used_gb} GB</span>` : ""}`,
+      io && `disk <b>${io.r.toFixed(0)}</b>R/<b>${io.w.toFixed(0)}</b>W MB/s${busiest
+        && busiest[1].util_pct > 50
+          ? ` · <span class="status-marginal">${busiest[0]} ${busiest[1].util_pct}% busy</span>` : ""}`,
+      h.net && `net <b>${h.net.rx_mb_s}</b>↓/<b>${h.net.tx_mb_s}</b>↑ MB/s`,
+      h.system_power_w != null && `system <b>${h.system_power_w}</b> W`,
+      t.gpu_power_w != null && `GPUs <b>${t.gpu_power_w.toFixed(0)}</b> W`,
+      t.engine_rss_gb != null && `engine RSS <b>${t.engine_rss_gb.toFixed(1)}</b> GB`,
+      t.preemptions != null && t.preemptions > 0
+        && `<span class="status-marginal">preemptions ${t.preemptions}</span>`,
+    ].filter(Boolean);
+    el.innerHTML = parts.join(" &nbsp;·&nbsp; ");
+  },
+
+  renderGpuGrid(gpus) {
+    const el = $("#gpu-grid");
+    if (!gpus || !gpus.length) return;
+    el.innerHTML = gpus.map(g => {
+      const vramPct = g.vram_total_gb
+        ? 100 * g.vram_used_gb / g.vram_total_gb : 0;
+      return `<div class="gpu-row ${g.throttled ? "throttled" : ""}">
+        <span class="g-id">GPU ${g.index}</span>
+        <span class="g-bar" title="SM ${g.sm_util_pct ?? "—"}%">
+          <i style="width:${g.sm_util_pct ?? 0}%"></i></span>
+        <span class="g-num">${g.sm_util_pct == null ? "—" : g.sm_util_pct + "%"}</span>
+        <span class="g-bar vram" title="VRAM ${(g.vram_used_gb ?? 0).toFixed(1)} GB">
+          <i style="width:${vramPct}%"></i></span>
+        <span class="g-num">${(g.vram_used_gb ?? 0).toFixed(0)}G</span>
+        <span class="g-sub">${g.mem_util_pct != null ? `mem ${g.mem_util_pct}%` : ""}
+          ${g.power_w != null ? ` · ${g.power_w.toFixed(0)}W` : ""}
+          ${g.temperature_c != null ? ` · ${g.temperature_c}°C` : ""}
+          ${g.pcie_tx_mb_s != null
+            ? ` · pcie ${(g.pcie_tx_mb_s + g.pcie_rx_mb_s).toFixed(0)}MB/s` : ""}
+          ${g.throttled ? ' · <span class="status-fail">throttled</span>' : ""}</span>
+      </div>`;
+    }).join("");
   },
 
   onStep(s) {

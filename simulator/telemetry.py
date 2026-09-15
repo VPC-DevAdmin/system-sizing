@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from .bandwidth import BandwidthCollector, bandwidth_summary
+from .bus import BUS
 from .frequency import FrequencyCollector
 from .perf_collector import PerfStatCollector
 from .power_probe import PowerProbe
@@ -124,7 +125,7 @@ class SnapshotRecorder:
     async def _loop(self) -> None:
         try:
             while not self._stopped:
-                self.db.insert_snapshot({
+                row = {
                     "cohort_run_id": self.cohort_run_id,
                     "snapshot_at_ms": _now_ms(),
                     "phase": self.get_phase(),
@@ -134,7 +135,9 @@ class SnapshotRecorder:
                     "errors": self.state.errors,
                     "step_samples": self.state.step_samples,
                     "step_target_samples": self.state.step_target_samples,
-                })
+                }
+                self.db.insert_snapshot(row)
+                BUS.publish("snapshot", row)
                 await asyncio.sleep(self.interval_s)
         except asyncio.CancelledError:
             pass
@@ -446,6 +449,7 @@ class MeasurementTelemetry:
                             )
 
                 self._samples.append(sample)
+                BUS.publish("telemetry", self._sample_to_row(sample))
                 await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             pass

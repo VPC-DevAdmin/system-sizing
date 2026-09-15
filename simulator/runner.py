@@ -15,6 +15,7 @@ from pathlib import Path
 from openai import AsyncOpenAI
 
 from .adaptive import FixedGridStepper, StepResult, TwoKneeStepper
+from .bus import BUS
 from .amx_utilization import parse_amx_utilization
 from .config import Config
 from .cpu_binding import expand_thread_binding
@@ -188,6 +189,15 @@ async def run_cohort(
         )
         starting_step_index = 0
         log.info("Cohort run %s -> %s", cohort_run_id, db_path)
+
+    BUS.publish("run", {
+        "event": "started",
+        "cohort_run_id": cohort_run_id,
+        "cohort_id": cohort_id,
+        "engine": cfg.engine.type,
+        "model": cfg.engine.model_id,
+        "run_dir": str(run_dir),
+    })
 
     state = SharedState()
     phase_tracker = PhaseTracker()
@@ -364,6 +374,12 @@ async def run_cohort(
     except KeyboardInterrupt:
         final_status = "interrupted"
         raise
+    except asyncio.CancelledError:
+        # Service-initiated stop (or loop teardown). Mark the run so
+        # resume logic re-measures it instead of skipping a half-run
+        # stamped 'ok'.
+        final_status = "cancelled"
+        raise
     finally:
         phase_tracker.set(PHASE_IDLE)
         await snap.stop()
@@ -458,6 +474,12 @@ async def run_cohort(
         db.close()
         if own_engine:
             engine.shutdown()
+        BUS.publish("run", {
+            "event": "finished",
+            "cohort_run_id": cohort_run_id,
+            "cohort_id": cohort_id,
+            "final_status": final_status,
+        })
 
     return db_path
 

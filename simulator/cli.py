@@ -643,6 +643,40 @@ def _ensure_model(cfg) -> None:
     typer.echo(f"==> Downloaded to {host_dir}")
 
 
+@app.command("serve")
+def serve_cmd(
+    host: str = typer.Option(
+        "127.0.0.1", "--host",
+        help="Bind address. Localhost by default — the service has no "
+             "auth; open it up only on a network you trust.",
+    ),
+    port: int = typer.Option(8321, "--port"),
+    runs_dir: Path = typer.Option(
+        Path("runs"), "--runs-dir",
+        help="Base directory the service reads runs from and starts "
+             "runs into.",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Run the control-plane service: run lifecycle over HTTP + live
+    telemetry over WebSocket.
+
+    Endpoints under /api (status, profiles, personas, cohorts, runs,
+    doctor, export) plus /ws/telemetry streaming the event bus
+    (run / snapshot / telemetry / turn / step events) to any client.
+    Runs execute in-process — one at a time — via the same run_cohort /
+    run_sweep the CLI uses; run.db stays the source of truth.
+
+    Try it:  capsim serve  &  then
+             curl -X POST localhost:8321/api/runs -H 'content-type: application/json' \\
+                  -d '{"profile": "mock", "workload": {"kind": "cohort", "id": "chat_heavy"}}'
+    """
+    _setup_logging(verbose)
+    from .service import serve
+    typer.echo(f"capsim service on http://{host}:{port}  (runs dir: {runs_dir})")
+    serve(host=host, port=port, runs_base=runs_dir)
+
+
 @app.command("doctor")
 def doctor_cmd(
     output: Path = typer.Option(

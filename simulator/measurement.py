@@ -7,6 +7,8 @@ import logging
 import math
 import statistics
 import time
+
+from .bus import BUS
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -318,6 +320,25 @@ async def run_measurement_step(
                 break
             buffer.append(event)
             state.step_samples = len(buffer)
+            BUS.publish("turn", {
+                "step_index": step_index,
+                "pool_size": target_pool_size,
+                "persona_id": event.persona_id,
+                "user_id": event.user_id,
+                "session_id": event.session_id,
+                "turn_index": event.turn_index,
+                "ttft_ms": event.ttft_ms,
+                "ttfct_ms": event.ttfct_ms,
+                "tpot_ms": event.tpot_ms,
+                "end_to_end_ms": event.end_to_end_ms,
+                "input_tokens": event.input_tokens,
+                "output_tokens": event.output_tokens,
+                "reasoning_tokens": event.reasoning_tokens,
+                "in_flight_at_submit": event.in_flight_at_submit,
+                "ttft_violation": event.ttft_violation(),
+                "tpot_violation": event.tpot_violation(),
+                "error": event.error,
+            })
     finally:
         sampler_task.cancel()
         try:
@@ -431,6 +452,12 @@ async def run_measurement_step(
         "target_status": target_status,
     }
     db.update_measurement(measurement_id, final_row)
+    BUS.publish("step", {
+        "step_index": step_index,
+        "pool_size": target_pool_size,
+        **{k: v for k, v in final_row.items()
+           if k not in ("estimated_prefix_hit_rate",)},
+    })
 
     # Persist events
     event_rows = [_event_to_row(e, measurement_id) for e in buffer]

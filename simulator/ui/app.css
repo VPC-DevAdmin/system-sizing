@@ -578,6 +578,34 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .arena-card:hover .ac-edit { opacity: 1; }
 .ac-sel { margin-top: 6px; font-weight: 600; font-size: 13.5px; }
 .ac-text { margin-top: 6px; font-size: 12.5px; line-height: 1.45; }
+
+/* The narrative lives behind an ⓘ dot — hover (or keyboard focus)
+ * reveals it, so the cards stay two lines tall. */
+.info-dot {
+  flex: none; width: 15px; height: 15px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-style: italic; font-family: Georgia, serif;
+  color: var(--muted); border: 1px solid var(--stroke-strong);
+  cursor: help; user-select: none; align-self: center;
+  /* NOT position:relative — the .info-pop inside anchors to the
+   * .arena-card so it can span the card's width. */
+}
+.info-dot:hover, .info-dot:focus {
+  color: var(--accent); border-color: var(--accent);
+}
+.info-pop {
+  display: none; position: absolute; left: 12px; right: 12px; top: 34px;
+  z-index: 40; max-height: 300px; overflow-y: auto;
+  background: var(--bg-1, #0b1826); border: 1px solid var(--stroke-strong);
+  border-radius: 12px; padding: 10px 12px; font-size: 12.5px;
+  font-style: normal; font-family: inherit; line-height: 1.5;
+  text-transform: none; letter-spacing: normal; font-weight: 400;
+  text-align: left; box-shadow: 0 12px 32px rgba(0,0,0,.5);
+  cursor: default;
+}
+.info-dot:hover .info-pop, .info-dot:focus .info-pop,
+.info-dot:focus-within .info-pop { display: block; }
+.info-pop i { color: var(--muted); font-style: normal; font-size: 12px; }
 .card-pop {
   position: absolute; top: 40px; right: 10px; z-index: 30;
   min-width: 240px; max-width: 360px; max-height: 280px; overflow-y: auto;

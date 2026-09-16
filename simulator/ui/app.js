@@ -1997,9 +1997,10 @@ const Optimizer = {
         : '<span class="status-fail">nothing selected</span>';
       return `<div class="arena-card" data-card="${c.key}">
         <div class="ac-head"><span class="ac-title">${c.title}</span>
+          <span class="info-dot" tabindex="0" aria-label="what this knob does">i
+            <span class="info-pop msg">${c.text}</span></span>
           <button class="ac-edit" data-edit="${c.key}" title="edit">✎ edit</button></div>
         <div class="ac-sel">${summary}</div>
-        <div class="ac-text msg">${c.text}</div>
         <div class="card-pop" data-pop="${c.key}" hidden>
           ${c.options.map(([v, l]) => `<label class="pop-row">
             <input type="checkbox" data-card-opt="${c.key}" data-val="${v}"
@@ -2009,14 +2010,16 @@ const Optimizer = {
 
     const modelsCard = `<div class="arena-card" data-card="models">
       <div class="ac-head"><span class="ac-title">Models in play</span>
+        <span class="info-dot" tabindex="0" aria-label="which models">i
+          <span class="info-pop msg">${inPlay.map(m =>
+            `${m.id.split("/")[1]} <i>(${m.quant})</i>`).join(", ") || "—"}
+          </span></span>
         <button class="ac-edit" data-edit="models" title="edit">✎ edit</button></div>
       <div class="ac-sel">${inPlay.length} of ${eligible.length} eligible
         ${eligible.length < a.models.length
           ? `<span class="msg">(${a.models.length - eligible.length} hidden by
              the family/size dropdowns or filter cards, or won't fit)</span>`
           : ""}</div>
-      <div class="ac-text msg">${inPlay.map(m =>
-        `${m.id.split("/")[1]} <i>(${m.quant})</i>`).join(", ") || "—"}</div>
       <div class="card-pop" data-pop="models" hidden>
         <div class="pop-row" style="gap:10px">
           <button class="small" data-models-all="on">Select all</button>
@@ -2135,6 +2138,9 @@ const Optimizer = {
     const inPlay = eligible.filter(m => !this.arenaOff.models.has(m.id));
     const mEl = box.querySelector('[data-card="models"] .ac-sel');
     if (mEl) mEl.textContent = `${inPlay.length} of ${eligible.length} eligible`;
+    const mPop = box.querySelector('[data-card="models"] .info-pop');
+    if (mPop) mPop.innerHTML = inPlay.map(m =>
+      `${m.id.split("/")[1]} <i>(${m.quant})</i>`).join(", ") || "—";
   },
 
   schedulePreview() {

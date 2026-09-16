@@ -1041,6 +1041,7 @@ const Results = {
   renderGPU(c, ctx) {
     const { pts, ax, last, knee, xOf } = ctx;
     const hw = p => p.hw || {};
+    const kvOf = p => p ? (p.kv_cache_used_pct ?? hw(p).kv_cache_pct) : null;
     const x = pts.map(p => p[ax.key]);
     const has = pts.some(p => hw(p).gpu_sm_pct != null);
     $("#sec-gpu .quad").style.display = has ? "" : "none";
@@ -1061,7 +1062,7 @@ const Results = {
         C.fail, { borderDash: [5, 4] }),
     ], { ytitle: "%" });
     this.xy("chart-gpu-mem", x, [
-      this.ds("KV cache used %", pts.map(p => p.kv_cache_used_pct), C.gold),
+      this.ds("KV cache used %", pts.map(p => kvOf(p)), C.gold),
       this.ds("DRAM controllers busy %",
         pts.map(p => hw(p).gpu_mem_busy_pct), C.teal),
     ], { ytitle: "%" });
@@ -1083,21 +1084,21 @@ const Results = {
     $("#take-gpu").textContent = last == null ? "no data" :
       `SM ${Math.round(L.gpu_sm_pct ?? 0)}% · DRAM busy
        ${Math.round(L.gpu_mem_busy_pct ?? 0)}% · KV
-       ${Math.round(last.kv_cache_used_pct ?? 0)}% at the last stable load`;
+       ${Math.round(kvOf(last) ?? 0)}% at the last stable load`;
     $("#narr-gpu").innerHTML = last == null ? "" : `
       <p>At <b>${xOf(last)}</b> the GPUs averaged
       <b>${Math.round(L.gpu_sm_pct ?? 0)}%</b> SM utilization with DRAM
       controllers <b>${Math.round(L.gpu_mem_busy_pct ?? 0)}%</b> busy —
       decode is memory-bandwidth-bound, so the DRAM line is the truer
       "how full is the box" signal. The KV cache held
-      <b>${Math.round(last.kv_cache_used_pct ?? 0)}%</b> of its pool and
+      <b>${Math.round(kvOf(last) ?? 0)}%</b> of its pool and
       VRAM sat at <b>${Math.round(L.gpu_vram_gb ?? 0)}</b>${vramTotal
         ? ` of ${Math.round(vramTotal)}` : ""} GB (vLLM pre-allocates —
       capacity pressure shows in KV%, not raw VRAM).</p>
       ${knee ? `<p>At the collapse point the same gauges read SM
         <b>${Math.round(K.gpu_sm_pct ?? 0)}%</b>, DRAM
         <b>${Math.round(K.gpu_mem_busy_pct ?? 0)}%</b>, KV
-        <b>${Math.round(knee.kv_cache_used_pct ?? 0)}%</b> —
+        <b>${Math.round(kvOf(knee) ?? 0)}%</b> —
         whichever moved hardest with load is the resource that ran
         out.</p>` : ""}
       ${L.gpu_temp_c_max != null ? `<p>Hottest device:

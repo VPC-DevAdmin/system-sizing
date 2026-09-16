@@ -278,6 +278,10 @@ class SimulationConfig:
     # distinguish from noise.
     open_loop_window_s: int = 120
     open_loop_refine_window_s: int = 240
+    # The run is complete when the stable/divergent bracket has
+    # converged to this percentage — 5 means λ_max is pinned within
+    # 5%. Tighter costs ~1 extra refinement window per halving.
+    open_loop_resolution_pct: float = 5.0
     # Steady-state settling time before each window measures. The
     # orchestrator stretches this toward the measured mean session
     # duration once one is known (equilibrium shifts take about one

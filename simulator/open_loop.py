@@ -365,6 +365,8 @@ class OpenLoopRunner:
         self.stepper = RateStepper(
             initial_rate_per_s=sim.open_loop_initial_rate_per_s,
             max_rate_per_s=sim.open_loop_max_rate_per_s,
+            resolution_ratio=1.0 + max(
+                0.5, getattr(sim, "open_loop_resolution_pct", 5.0)) / 100.0,
         )
         self.pool = WorkerPool(
             base_config={
@@ -671,10 +673,21 @@ class OpenLoopRunner:
         self._last_inflight_mean = inflight_mean
         pool_agg = self.pool.aggregate()
 
+        # KV-pool utilization for THIS window, from the per-second
+        # engine scrape — the closed-loop path always recorded this;
+        # its absence here made the report narrate "KV 0%" while the
+        # bottleneck attributor (reading the raw telemetry) said 98%.
+        kv_vals = [
+            r.get("kv_cache_used_pct") for r in tele_rows
+            if r.get("kv_cache_used_pct") is not None
+        ]
         final_row: dict = {
             "target_pool_size": int(round(active_mean)),
             "measured_avg_pool_size": round(active_mean, 2),
             "measured_avg_in_flight": round(inflight_mean, 2),
+            "avg_kv_cache_pct": (
+                round(sum(kv_vals) / len(kv_vals), 2) if kv_vals else None
+            ),
             "measurement_duration_s": duration,
             "arrival_rate_per_min": round(rate_per_s * 60, 2),
             "stability": stability,

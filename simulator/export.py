@@ -904,6 +904,10 @@ def _summarise_cohort(
         hwj = m.get("hw_rollup") or {}
         entry["avg_in_flight"] = m.get("measured_avg_in_flight")
         entry["hw"] = {
+            # Telemetry-rollup KV% — fallback for rows whose
+            # avg_kv_cache_pct column is NULL (open-loop windows
+            # recorded before the runner wrote it).
+            "kv_cache_pct": tele_r.get("kv"),
             "cpu_util_pct": tele_r.get("cpu"),
             "cpu_bound_pct": tele_r.get("cpu_bound"),
             "cpu_breakdown_pct": hwj.get("cpu_breakdown_pct"),

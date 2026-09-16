@@ -42,11 +42,12 @@ def test_doubles_then_bisects_to_boundary():
     _drive(stepper, _oracle(stability_boundary=10.0, sla_boundary=10.0))
     s = stepper.summary()
     assert s["coverage"] == "full_curve"
-    # Bracket around the true boundary within resolution ratio.
+    # Bracket around the true boundary within the default 5%
+    # resolution — the run only completes once λ_max is pinned tight.
     assert s["rate_max_per_s"] is not None
     assert s["rate_ceiling_per_s"] is not None
     assert s["rate_max_per_s"] <= 10.0 < s["rate_ceiling_per_s"]
-    assert s["rate_ceiling_per_s"] / s["rate_max_per_s"] <= 1.35
+    assert s["rate_ceiling_per_s"] / s["rate_max_per_s"] <= 1.06
     assert not s["rates_are_lower_bounds"]
 
 
@@ -59,7 +60,7 @@ def test_sla_knee_below_stability_knee():
     assert s["rate_max_per_s"] > s["rate_sla_per_s"]
     # SLA bracket refined too: the found λ_sla is within resolution of
     # the true 10/s boundary.
-    assert s["rate_sla_per_s"] >= 10.0 / 1.35
+    assert s["rate_sla_per_s"] >= 10.0 / 1.06
 
 
 def test_capped_at_rail_reports_lower_bound():

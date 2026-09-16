@@ -66,7 +66,11 @@ class RateStepper:
         initial_rate_per_s: float = 1.0,
         max_rate_per_s: float = 256.0,
         min_rate_per_s: float = 0.02,
-        resolution_ratio: float = 1.3,
+        # The search is done when the stable/divergent bracket is
+        # within this ratio — 1.05 = the capacity is pinned to 5%.
+        # Each bisection halves the bracket in log space, so tightening
+        # from 30% to 5% costs ~3 extra windows.
+        resolution_ratio: float = 1.05,
         sla_threshold: float = 0.05,
     ):
         self.initial_rate = _round_rate(initial_rate_per_s)

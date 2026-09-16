@@ -386,7 +386,7 @@ tr.cfg-first td { border-top: 1px solid var(--stroke-strong); }
 .run-row {
   display: grid; align-items: center; gap: 14px; cursor: pointer;
   grid-template-columns: 24px minmax(220px, 2fr) 92px minmax(170px, 1.4fr)
-                         86px 130px;
+                         86px 130px 26px;
   padding: 10px 14px; border: 1px solid var(--stroke); border-radius: 12px;
   background: var(--glass-2); transition: border-color .15s, background .15s;
   font-size: .87rem;
@@ -404,8 +404,13 @@ tr.cfg-first td { border-top: 1px solid var(--stroke-strong); }
 .run-row .r-headline .hint { display: block; font-size: .72rem; }
 .run-row .r-date { color: var(--muted); font-size: .78rem; text-align: right;
   white-space: nowrap; }
+.run-row button.remove {
+  background: none; border: none; color: var(--muted); font-size: 1.05rem;
+  cursor: pointer; padding: 2px 6px; border-radius: 6px;
+}
+.run-row button.remove:hover { color: var(--fail); background: var(--glass-2); }
 @media (max-width: 900px) {
-  .run-row { grid-template-columns: 24px 1fr 86px; }
+  .run-row { grid-template-columns: 24px 1fr 86px 26px; }
   .run-row .r-mode, .run-row .r-headline, .run-row .r-date { display: none; }
 }
 

@@ -325,6 +325,31 @@ def _list_runs(base: Path) -> list[dict]:
     return out
 
 
+def _finalise_orphan_runs(base: Path) -> None:
+    """Stamp 'interrupted' on cohort_run rows left unfinalised by a
+    hard serve kill. Runs at service startup, when nothing can be
+    executing in-process — without this, a killed run reads as
+    'running' in the UI forever."""
+    if not base.exists():
+        return
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    for d in base.glob("run_[0-9]*"):
+        p = d / "run.db"
+        if not p.exists():
+            continue
+        try:
+            conn = sqlite3.connect(p)
+            conn.execute(
+                "UPDATE cohort_run SET final_status = 'interrupted', "
+                "completed_at = COALESCE(completed_at, ?) "
+                "WHERE final_status IS NULL", (now,))
+            conn.commit()
+            conn.close()
+        except sqlite3.Error:
+            continue
+
+
 def create_app(
     runs_base: Path | str = Path("runs"),
     catalog_dir: Path | str | None = None,
@@ -333,6 +358,7 @@ def create_app(
     optimizer_script: Path | str = Path("scripts/engine_optimizer.py"),
 ) -> FastAPI:
     runs_base = Path(runs_base)
+    _finalise_orphan_runs(runs_base)
     catalog_dir = Path(catalog_dir) if catalog_dir is not None else None
     optimizer_script = Path(optimizer_script)
     app = FastAPI(title="capsim", version="0.2.0")
@@ -696,6 +722,68 @@ def create_app(
             if active is not None:
                 active.error = f"{type(e).__name__}: {e}"
             log.exception("run failed")
+
+    @app.delete("/api/runs/{run_name}/cohorts/{cohort_run_id}")
+    async def delete_cohort_run(run_name: str, cohort_run_id: str) -> dict:
+        """Fully delete one cohort run's data — measurements, turns,
+        telemetry, snapshots, users, and the run row. When it was the
+        last cohort in its run_NN dir, the whole dir goes (engine
+        logs included). Refused while any run is active: the runner
+        writes to these tables in-process."""
+        if "/" in run_name or run_name.startswith("."):
+            raise HTTPException(422, "bad run name")
+        active = app.state.active
+        if active is not None and not active.task.done():
+            raise HTTPException(
+                409, "a run is active — deleting run data while the "
+                     "runner writes to it is unsafe; stop it first")
+        d = runs_base / run_name
+        db_path = d / "run.db"
+        if not db_path.exists():
+            raise HTTPException(404, f"no run.db in {d}")
+
+        def _delete() -> dict:
+            import shutil
+            conn = sqlite3.connect(db_path)
+            try:
+                exists = conn.execute(
+                    "SELECT 1 FROM cohort_run WHERE cohort_run_id = ?",
+                    (cohort_run_id,),
+                ).fetchone()
+                if not exists:
+                    raise HTTPException(
+                        404, f"unknown cohort run {cohort_run_id}")
+                mids = [r[0] for r in conn.execute(
+                    "SELECT measurement_id FROM cohort_measurements "
+                    "WHERE cohort_run_id = ?", (cohort_run_id,),
+                ).fetchall()]
+                if mids:
+                    ph = ",".join("?" for _ in mids)
+                    conn.execute(
+                        f"DELETE FROM turn_events WHERE measurement_id IN ({ph})",
+                        mids)
+                    conn.execute(
+                        f"DELETE FROM measurement_telemetry "
+                        f"WHERE measurement_id IN ({ph})", mids)
+                for table in ("cohort_measurements", "simulation_snapshots",
+                              "virtual_users", "cohort_run"):
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE cohort_run_id = ?",
+                        (cohort_run_id,))
+                conn.commit()
+                remaining = conn.execute(
+                    "SELECT COUNT(*) FROM cohort_run").fetchone()[0]
+            finally:
+                conn.close()
+            # Cached exports are stale either way.
+            for p in d.glob("buyer_page_data*.json"):
+                p.unlink(missing_ok=True)
+            run_removed = remaining == 0
+            if run_removed:
+                shutil.rmtree(d, ignore_errors=True)
+            return {"deleted": cohort_run_id, "run_removed": run_removed}
+
+        return await asyncio.to_thread(_delete)
 
     @app.post("/api/runs/stop")
     async def stop_run() -> dict:

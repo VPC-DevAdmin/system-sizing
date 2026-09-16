@@ -183,23 +183,6 @@
     <details id="bench-advanced" style="margin-bottom:14px">
       <summary class="msg" style="cursor:pointer">Advanced</summary>
       <div class="form-grid" style="margin-top:12px">
-        <label>Methodology
-          <select id="mode-select">
-            <option value="open">Open-loop arrival search (recommended)</option>
-            <option value="closed">Closed-loop pool ramp (legacy)</option>
-          </select>
-          <span class="hint">Open-loop feeds sessions at a searched arrival
-          rate and finds where the engine's queue stops being stationary —
-          the capacity of the box, independent of any client pool. The
-          legacy pool ramp is kept for comparison runs.</span>
-        </label>
-        <label class="check"><input type="checkbox" id="adaptive">
-          Adaptive knee search <span class="hint">(closed-loop only;
-          uncheck for a fixed powers-of-2 grid)</span></label>
-        <label>Fixed pool sizes <span class="hint">(closed-loop only;
-          overrides the search, e.g. 256,512,1024)</span>
-          <input id="pool-sizes" placeholder="leave empty for automatic">
-        </label>
         <label class="check"><input type="checkbox" id="custom-toggle">
           Custom engine <span class="hint">(benchmark a downloaded model
           with hand-set settings)</span></label>

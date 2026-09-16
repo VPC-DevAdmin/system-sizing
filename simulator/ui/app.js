@@ -202,8 +202,8 @@ const Control = {
         false, `persona:${p.id}` === prev));
     }
     sel.append(g2);
-    sel.append(new Option(
-      "Everything — every mix and user type (longest run)", "sweep:all"));
+    // The "sweep everything" option is gone with the closed-loop UI —
+    // sweeps run the legacy pool ramp and belong to the API/CLI only.
     if (!prev) sel.value = `cohort:${this.catalogs.cohorts[0]?.id ?? ""}`;
   },
 
@@ -231,8 +231,6 @@ const Control = {
           + `${Math.round(s.output_tokens.median)} out, `
           + `~${Math.round(s.think_gap_s.median)}s between turns`;
       }
-    } else if (w === "sweep:all") {
-      text = "Runs a full capacity curve for every mix and user type in turn.";
     }
     $("#workload-detail").textContent = text;
   },
@@ -261,18 +259,13 @@ const Control = {
     const [kind, id] = w.split(":", 2);
     const workload = kind === "sweep"
       ? { kind, type: id || "all" } : { kind, id };
-    const mode = $("#mode-select").value || "open";
-    const poolRaw = $("#pool-sizes").value.trim();
+    // Open-loop only — the closed-loop pool ramp is no longer offered
+    // from the UI (it can't find the capacity limit; see
+    // docs/algorithm.md). The API keeps mode:"closed" for scripts.
     const body = {
       workload,
       new_run: $("#new-run").checked,
-      mode,
-      // The pool knobs only mean anything closed-loop — sending them
-      // for an open-loop run would silently flip the methodology.
-      adaptive: mode === "closed" && $("#adaptive").checked,
-      pool_sizes: mode === "closed" && poolRaw
-        ? poolRaw.split(",").map(s => parseInt(s.trim(), 10)).filter(Number.isFinite)
-        : null,
+      mode: "open",
     };
     if ($("#custom-toggle").checked) {
       if (!$("#custom-model").value) {
@@ -784,9 +777,13 @@ const Results = {
         Benchmark tab</span>`;
       return;
     }
+    // Only ONE run can be active — the newest unfinalised row. Any
+    // other row without a final status is an orphan from a hard stop
+    // (the server also stamps these 'interrupted' at startup).
+    const newestOpen = this.flat.find(x => !x.final_status);
     for (const e of this.flat) {
       const status = e.final_status
-        ?? (Control.running ? "running" : "incomplete");
+        ?? (Control.running && e === newestOpen ? "running" : "interrupted");
       const cls = STATUS_CLASS[status]
         ?? (status === "running" ? "status-marginal" : "status-error");
       const mode = (e.mode === "open_loop") ? "open-loop"
@@ -803,12 +800,17 @@ const Results = {
         <span class="r-mode">${mode}</span>
         <span class="r-headline">${h.n}<span class="hint">${h.d}</span></span>
         <span class="${cls}">${status}</span>
-        <span class="r-date">${fmt.ts(e.started_at)}</span>`;
+        <span class="r-date">${fmt.ts(e.started_at)}</span>
+        <button class="remove" title="delete this run's data">×</button>`;
       row.querySelector("input").addEventListener("click", (ev) => {
         ev.stopPropagation();
         if (ev.target.checked) this.checked.add(e.cohort_run_id);
         else this.checked.delete(e.cohort_run_id);
         $("#compare-btn").disabled = this.checked.size < 2;
+      });
+      row.querySelector(".remove").addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this.deleteEntry(e);
       });
       row.addEventListener("click", () => this.openEntry(e));
       box.append(row);
@@ -820,6 +822,31 @@ const Results = {
     const el = $("#result-msg");
     el.textContent = text;
     el.className = `msg ${cls}`;
+  },
+
+  async deleteEntry(e) {
+    const label = `${e.cohort_name || e.cohort_id} (${e.run}, `
+      + `${fmt.ts(e.started_at)})`;
+    if (!window.confirm(
+      `Delete "${label}"?\n\nThis permanently removes its measurements, `
+      + `turns and telemetry and cannot be undone.`)) return;
+    try {
+      await api(`/api/runs/${e.run}/cohorts/${e.cohort_run_id}`,
+                { method: "DELETE" });
+    } catch (err) {
+      this.msg(err.message, "error");
+      return;
+    }
+    delete this.exportCache[e.run];
+    this.checked.delete(e.cohort_run_id);
+    if (this.openId === e.cohort_run_id) {
+      this.openId = null;
+      this.cohort = null;
+      $("#result-summary").hidden = true;
+      $("#report").hidden = true;
+    }
+    this.msg(`deleted ${label}`, "ok");
+    Control.refreshRuns();
   },
 
   async loadExport(runName) {

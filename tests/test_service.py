@@ -292,6 +292,75 @@ def test_live_backfill_endpoint(tmp_path) -> None:
         assert s["stability"] is None
 
 
+def test_delete_cohort_run_and_orphan_finalise(tmp_path) -> None:
+    """DELETE removes one cohort run's rows everywhere (and the whole
+    run dir when it was the last one); startup stamps 'interrupted'
+    on rows a hard kill left unfinalised."""
+    from fastapi.testclient import TestClient
+
+    from simulator.database import Database
+    from simulator.service import create_app
+
+    runs = tmp_path / "runs"
+    run_dir = runs / "run_01"
+    run_dir.mkdir(parents=True)
+    db = Database(run_dir / "run.db")
+    for crid, status in (("keep", "ok"), ("orphan", None)):
+        db.insert_run(
+            cohort_run_id=crid, started_at=f"2026-09-16T0{1 if crid=='keep' else 2}:00:00Z",
+            engine_type="mock", model_id="m", cohort_id="c",
+            cohort_definition={"name": "c", "persona_weights": {"p": 1.0}},
+            config={},
+        )
+        if status:
+            db.finalise_run(crid, "2026-09-16T03:00:00Z", status)
+    mid = db.insert_measurement({
+        "cohort_run_id": "keep", "step_index": 0, "target_pool_size": 4,
+        "measured_avg_pool_size": 4.0, "measured_avg_in_flight": 1.0,
+        "measurement_started_at": "t", "measurement_duration_s": 1,
+        "sample_size": 1, "ttft_violation_rate": 0.0,
+        "tpot_violation_rate": 0.0, "combined_violation_rate": 0.0,
+        "violation_rate_ci_lower": 0.0, "violation_rate_ci_upper": 0.0,
+        "capacity_status": "pass",
+    })
+    db.insert_events([{
+        "measurement_id": mid, "persona_id": "p", "user_id": "u",
+        "session_id": "s", "turn_index": 0, "submitted_at_ms": 1,
+        "ttft_ms": 1.0, "completed_at_ms": 2, "input_tokens": 1,
+        "history_tokens": 0, "output_tokens": 1, "tpot_ms": 1.0,
+        "end_to_end_ms": 2.0, "in_flight_at_submit": 1,
+        "sla_ttft_violation": 0, "sla_tpot_violation": 0,
+    }])
+    db.close()
+    (run_dir / "buyer_page_data.json").write_text("{}")
+
+    with TestClient(create_app(runs)) as client:
+        # Startup finalised the orphan.
+        rows = client.get("/api/runs").json()[0]["cohorts"]
+        by_id = {c["cohort_run_id"]: c for c in rows}
+        assert by_id["orphan"]["final_status"] == "interrupted"
+
+        # Unknown cohort → 404; then delete one of two (dir stays).
+        assert client.delete("/api/runs/run_01/cohorts/nope").status_code == 404
+        r = client.delete("/api/runs/run_01/cohorts/keep")
+        assert r.status_code == 200
+        assert r.json() == {"deleted": "keep", "run_removed": False}
+        assert not (run_dir / "buyer_page_data.json").exists()
+        import sqlite3 as _sq
+        conn = _sq.connect(run_dir / "run.db")
+        assert conn.execute(
+            "SELECT COUNT(*) FROM turn_events").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM cohort_run").fetchone()[0] == 1
+        conn.close()
+
+        # Delete the last one → whole dir removed.
+        r = client.delete("/api/runs/run_01/cohorts/orphan")
+        assert r.status_code == 200
+        assert r.json()["run_removed"] is True
+        assert not run_dir.exists()
+
+
 def test_live_backfill_tolerates_pre_v7_db(tmp_path) -> None:
     """The backfill path opens run.db read-only (no migrations), so it
     must not name late-added columns in SQL — a v6-era run.db without

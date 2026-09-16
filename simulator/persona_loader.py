@@ -112,7 +112,7 @@ def parse_persona(persona_id: str, spec: dict):
     if not isinstance(spec, dict):
         raise PersonaSpecError(f"persona {persona_id}: spec must be a mapping")
     unknown = set(spec) - {"name", "description", "sla", "timeouts",
-                           *_DISTRIBUTION_FIELDS}
+                           "ignore_eos", *_DISTRIBUTION_FIELDS}
     if unknown:
         raise PersonaSpecError(
             f"persona {persona_id}: unknown fields {sorted(unknown)}"
@@ -149,6 +149,7 @@ def parse_persona(persona_id: str, spec: dict):
         name=str(spec.get("name") or "")
         or persona_id.replace("_", " ").capitalize(),
         description=str(spec.get("description", "")),
+        ignore_eos=bool(spec.get("ignore_eos", False)),
         **dists,
         **{f: float(sla[f]) for f in _SLA_FIELDS},
         **{f: float(timeouts[f]) for f in _TIMEOUT_FIELDS if f in timeouts},
@@ -162,6 +163,8 @@ def serialize_persona(p) -> dict:
     for f in _DISTRIBUTION_FIELDS:
         out[f] = serialize_distribution(getattr(p, f))
     out["sla"] = {f: getattr(p, f) for f in _SLA_FIELDS}
+    if getattr(p, "ignore_eos", False):
+        out["ignore_eos"] = True
     timeouts = {
         f: getattr(p, f) for f in _TIMEOUT_FIELDS
         if getattr(p, f) != type(p).__dataclass_fields__[f].default

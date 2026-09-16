@@ -338,10 +338,17 @@ async def run_virtual_user(
                 # models, so it's safe to plumb unconditionally — but
                 # we only set it when configured to keep request
                 # bodies minimal.
-                extra_body = (
-                    {"reasoning_effort": reasoning_effort}
-                    if reasoning_effort else None
-                )
+                extra_body: dict | None = {}
+                if reasoning_effort:
+                    extra_body["reasoning_effort"] = reasoning_effort
+                # Headline stress personas force EXACT output lengths:
+                # with real sampling the model often emits EOS well
+                # before the max_tokens budget, silently shrinking the
+                # decode work — vendor benchmarks pin lengths with
+                # ignore_eos, so a comparable number must too.
+                if getattr(persona, "ignore_eos", False):
+                    extra_body["ignore_eos"] = True
+                extra_body = extra_body or None
                 stream_result = await consume_with_tiers(
                     # Bind loop-iteration values as defaults: the
                     # lambda is awaited within this iteration, but

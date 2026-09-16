@@ -31,7 +31,7 @@ def test_packaged_catalog_loads() -> None:
     assert set(personas) == {
         "quick_lookup", "conversational", "writer", "document_qa",
         "code_assist", "long_form_generator",
-        "headline_generation", "headline_ingest",
+        "headline_generation", "headline_ingest", "headline_vendor",
     }
     assert len(cohorts) == 5
     ql = personas["quick_lookup"]
@@ -123,18 +123,32 @@ def test_headline_stress_personas_shape() -> None:
     open-loop arrivals degenerate to a request firehose, so the
     stability boundary IS max sustained throughput."""
     from simulator.personas import PERSONAS
-    for pid in ("headline_generation", "headline_ingest"):
+    for pid in ("headline_generation", "headline_ingest",
+                "headline_vendor"):
         p = PERSONAS[pid]
         assert p.turns_per_session.sample_int(__import__("random").Random(0)) == 1
         assert p.read_time_seconds.sample(__import__("random").Random(0)) == 0
         assert p.active_think_seconds.sample(__import__("random").Random(0)) == 0
+        # Vendor benches pin output length — without ignore_eos, real
+        # sampling stops early and the number underestimates.
+        assert p.ignore_eos is True
         assert "marketing" in p.description.lower() \
-            or "stress" in p.description.lower()
+            or "vendor" in p.description.lower()
     g = PERSONAS["headline_generation"]
     assert g.input_tokens.sample_int(__import__("random").Random(0)) == 32
     assert g.output_tokens.sample_int(__import__("random").Random(0)) == 1024
     i = PERSONAS["headline_ingest"]
     assert i.input_tokens.sample_int(__import__("random").Random(0)) == 4096
+    v = PERSONAS["headline_vendor"]
+    assert v.input_tokens.sample_int(__import__("random").Random(0)) == 128
+    assert v.output_tokens.sample_int(__import__("random").Random(0)) == 128
+    # Round-trips through the editor serializer.
+    from simulator.persona_loader import parse_persona, serialize_persona
+    spec = serialize_persona(v)
+    assert spec["ignore_eos"] is True
+    assert parse_persona("headline_vendor", spec).ignore_eos is True
+    # Real-user personas never pin EOS.
+    assert PERSONAS["conversational"].ignore_eos is False
 
 
 def test_editor_api_create_edit_reject(tmp_path) -> None:

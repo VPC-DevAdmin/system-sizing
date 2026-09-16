@@ -92,6 +92,13 @@ class Persona:
     # is populated (falls back to a humanized id).
     name: str = ""
 
+    # Headline stress personas: pin outputs to exactly the sampled
+    # max_tokens (vLLM ignore_eos) so decode work matches the spec —
+    # real sampling otherwise stops early at EOS and the marketing
+    # number quietly underestimates. Real-user personas leave this
+    # off; early EOS is authentic behavior there.
+    ignore_eos: bool = False
+
     @property
     def pre_ttft_timeout_s(self) -> float:
         return self.ttft_failure_seconds * self.pre_ttft_factor

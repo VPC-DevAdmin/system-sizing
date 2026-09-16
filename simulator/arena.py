@@ -43,7 +43,10 @@ ARENA_CONFIG = Path("config/arena.yaml")
 BATCH_DIMS: dict[str, list] = {
     "max_num_seqs": [64, 128, 256, 512],
     "max_num_batched_tokens": ["default", 2048, 8192],
-    "kv_cache_dtype": ["auto", "fp8"],
+    # nvfp4 KV needs the FlashInfer/TRT-LLM attention path (Blackwell)
+    # — vLLM falls back or errors on older stacks, and the search
+    # simply scores such launches as failed.
+    "kv_cache_dtype": ["auto", "fp8", "nvfp4"],
     "expert_parallel": ["off", "on"],
     "placement": ["pack", "spread"],
 }

@@ -222,7 +222,7 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
     if custom.get("max_num_batched_tokens"):
         flags += ["--max-num-batched-tokens",
                   str(int(custom["max_num_batched_tokens"]))]
-    if custom.get("kv_cache_dtype") in ("fp8",):
+    if custom.get("kv_cache_dtype") in ("fp8", "nvfp4"):
         flags += ["--kv-cache-dtype", str(custom["kv_cache_dtype"])]
     if custom.get("expert_parallel"):
         flags += ["--enable-expert-parallel"]

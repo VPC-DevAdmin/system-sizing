@@ -58,7 +58,7 @@ def test_full_arena_shape(xe7740) -> None:
     # TP capped by the largest DOMAIN (4), dp by the box (8).
     assert a["dimensions"]["tp"] == [1, 2, 4]
     assert a["dimensions"]["dp"] == [1, 2, 4, 8]
-    assert a["dimensions"]["kv_cache_dtype"] == ["auto", "fp8"]
+    assert a["dimensions"]["kv_cache_dtype"] == ["auto", "fp8", "nvfp4"]
     by_id = {m["id"]: m for m in a["models"]}
     assert by_id["org/Small-30B"]["feasible_tps"] == [1, 2, 4]
     # 235B bf16 needs 560 GB; the largest domain gives 4×96=384 —
@@ -187,7 +187,7 @@ def test_summarize_space_doc_counts(xe7740) -> None:
     s = summarize_space_doc(doc)
     # tp1 × dp{1,2} × pack × ep-off × one variant = 2 launch shapes.
     assert s["launch_shapes"] == 2
-    assert s["total_combinations"] == 2 * 4 * 3 * 2   # seqs×mbt×kv
+    assert s["total_combinations"] == 2 * 4 * 3 * 3   # seqs×mbt×kv
     assert s["budget"] == 10
     assert s["estimated_cold_weight_loads"] >= 1
 

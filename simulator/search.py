@@ -55,7 +55,7 @@ KNOWN_DIMENSIONS: dict[str, str] = {
     "max_num_batched_tokens": "ordinal",
     "placement": "categorical",
     # FP8 KV cache halves KV memory/bandwidth (Blackwell-friendly).
-    "kv_cache_dtype": "categorical",         # auto | fp8
+    "kv_cache_dtype": "categorical",         # auto | fp8 | nvfp4
     # Expert parallelism for MoE models — only meaningful when the
     # variant is MoE and tp>1 (normalize() forces "off" otherwise, so
     # infeasible combinations dedupe instead of wasting evaluations).

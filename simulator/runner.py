@@ -152,7 +152,7 @@ async def run_cohort(
         # SGLang FP8 on AMD wastes 10-20 minutes before the assertion.
         preflight_check(cfg.engine.hardware_requirements)
         engine = make_engine(cfg.engine.type, cfg.engine)
-        engine.launch(log_dir=run_dir)
+        await asyncio.to_thread(engine.launch, log_dir=run_dir)
 
     if db_path is None:
         db_path = _run_db_path(run_dir)
@@ -473,7 +473,7 @@ async def run_cohort(
         # spot-check just enriched the cohort_measurements rows.
         db.close()
         if own_engine:
-            engine.shutdown()
+            await asyncio.to_thread(engine.shutdown)
         BUS.publish("run", {
             "event": "finished",
             "cohort_run_id": cohort_run_id,
@@ -623,7 +623,7 @@ async def run_sweep(
 
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
-    engine.launch(log_dir=run_dir)
+    await asyncio.to_thread(engine.launch, log_dir=run_dir)
     if adaptive:
         log.info("Sweep mode: adaptive (TwoKneeStepper)")
     else:
@@ -652,7 +652,7 @@ async def run_sweep(
             )
             paths.append(path)
     finally:
-        engine.shutdown()
+        await asyncio.to_thread(engine.shutdown)
     return paths
 
 
@@ -696,7 +696,7 @@ async def run_spot_check(
 
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
-    engine.launch(log_dir=run_dir)
+    await asyncio.to_thread(engine.launch, log_dir=run_dir)
     paths: list[Path] = []
     try:
         for crid, info in by_crid.items():
@@ -720,5 +720,5 @@ async def run_spot_check(
             )
             paths.append(path)
     finally:
-        engine.shutdown()
+        await asyncio.to_thread(engine.shutdown)
     return paths

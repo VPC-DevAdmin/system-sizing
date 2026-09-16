@@ -931,14 +931,19 @@ const Results = {
       <span class="c">${hint}</span></div>`;
     const sess = last
       ? (last.active_sessions_mean ?? last.pool_size) : null;
+    const gen = last?.avg_in_flight;
     const box = $("#headline-stats");
+    // Total sessions vs sessions actively generating: the gap is the
+    // read/think population whose warm KV sits in the cache between
+    // turns — the very thing that drives KV pressure on this box.
     box.innerHTML =
-      stat("Concurrent users", n(sess),
-           "active sessions at the last stable load") +
-      (isOpen
-        ? stat("New users / min", n(last?.arrival_rate_per_min),
-               "arrival rate the box sustains")
-        : stat("Pool", n(last?.pool_size), "closed-loop user pool")) +
+      stat("Active sessions", n(sess),
+           "in a session at the last stable load") +
+      stat("Generating now", n(gen),
+           gen != null && sess
+             ? `streaming from the engine — the other
+                ${n(sess - gen)} are reading/thinking, their KV held warm`
+             : "requests actively streaming from the engine") +
       stat("Throughput",
            last?.visible_output_tok_per_s != null
              ? `${n(last.visible_output_tok_per_s)} tok/s` : "—",

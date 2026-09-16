@@ -319,6 +319,7 @@ const Control = {
     const pill = $("#status-pill");
     const box = $("#active-run-box");
     const running = !!(active && active.running);
+    this.running = running;
     $("#stop-btn").disabled = !running;
     $("#start-btn").disabled = running;
     if (running) {
@@ -336,10 +337,18 @@ const Control = {
       const w = active.workload;
       const wtxt = w.kind === "sweep" ? `sweep(${w.type})` : `${w.kind} ${w.id}`;
       const since = fmt.clock(active.started_at * 1000);
+      const finished = !running && !active.error && active.result;
       box.innerHTML =
         `<b>${wtxt}</b> · config <b>${active.config}</b> · started ${since}` +
         (active.error ? ` · <span class="status-fail">${active.error}</span>` : "") +
-        (active.result ? ` · db: <b>${active.result}</b>` : "");
+        (finished
+          ? ` · <span class="status-pass">finished</span>
+             <button id="goto-results" class="small"
+               style="margin-left:8px">View results →</button>`
+          : "");
+      box.querySelector("#goto-results")?.addEventListener("click", () => {
+        document.querySelector('#tabs button[data-view="results"]').click();
+      });
     } else {
       box.hidden = true;
     }
@@ -348,23 +357,6 @@ const Control = {
   async refreshRuns() {
     let runs;
     try { runs = await api("/api/runs"); } catch { return; }
-    const tbody = $("#runs-table tbody");
-    tbody.innerHTML = "";
-    for (const run of runs) {
-      if (!run.cohorts.length) {
-        tbody.insertAdjacentHTML("beforeend",
-          `<tr><td>${run.name}</td><td colspan="6" class="msg">empty</td></tr>`);
-      }
-      for (const c of run.cohorts) {
-        const cls = STATUS_CLASS[c.final_status] ?? "status-error";
-        tbody.insertAdjacentHTML("beforeend", `<tr>
-          <td>${run.name}</td><td>${c.cohort_id}</td>
-          <td>${c.engine_type}</td><td>${c.model_id}</td>
-          <td>${c.steps}</td>
-          <td class="${cls}">${c.final_status ?? "running?"}</td>
-          <td>${fmt.ts(c.started_at)}</td></tr>`);
-      }
-    }
     Results.setRuns(runs);
   },
 
@@ -457,7 +449,12 @@ const Live = {
 
   async backfill() {
     let doc;
-    try { doc = await api("/api/live/backfill"); } catch { return; }
+    // 6-hour window: a page opened AFTER a long run finished should
+    // still replay the whole run's history, not stare at empty
+    // charts because the last snapshot is older than ten minutes.
+    try {
+      doc = await api("/api/live/backfill?window_s=21600");
+    } catch { return; }
     if (!doc.run) return;
     for (const t of doc.turns ?? []) this.onTurn(t.completed_at_ms, t);
     for (const s of doc.snapshots ?? []) this.onSnapshot(s.snapshot_at_ms, s);
@@ -702,6 +699,10 @@ const Live = {
     }
     if (r.event === "finished") {
       $("#live-phase").textContent = `finished (${r.final_status})`;
+      // Any export cached mid-run is now stale (the server rebuilds
+      // when run.db is newer, but only if we actually refetch).
+      Results.exportCache = {};
+      Results.openId = null;   // re-open the freshest run on refresh
       Control.refreshRuns();
     }
     Control.pollStatus();
@@ -725,30 +726,94 @@ const Results = {
     Control.refreshRuns();
   },
 
+  flat: [],             // flattened (run, cohort) rows, newest first
+  openId: null,         // cohort_run_id currently displayed
+  checked: new Set(),   // cohort_run_ids ticked for comparison
+
   init() {
-    $("#result-load").addEventListener("click", () => this.load());
-    $("#result-run").addEventListener("change", () => this.load());
-    $("#result-cohort").addEventListener("change", () => this.render());
     $("#result-export-dl").addEventListener("click", () => this.download());
-    $("#compare-add").addEventListener("click", () => this.addCompare());
+    $("#compare-btn").addEventListener("click", () => this.runCompare());
     $("#compare-clear").addEventListener("click", () => {
       this.compare = [];
-      this.renderCompare();
+      this.checked.clear();
+      $("#compare-panel").hidden = true;
+      this.renderList();
     });
   },
 
+  /* One flat list of every cohort run across every run_NN dir,
+   * newest first — what "my runs" actually means to an operator.
+   * Each row is self-describing (workload, model, methodology, date,
+   * headline verdict) so nothing needs a Load button to make sense. */
   setRuns(runs) {
     this.runs = runs.filter(r => r.cohorts.length);
-    const sel = $("#result-run");
-    const prev = sel.value;
-    sel.innerHTML = "";
-    for (const r of this.runs) sel.append(new Option(r.name, r.name));
-    if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
-    this.fillComparePicker();
-    // First data arrival: load it — selecting the only option fires
-    // no change event, so without this the view sits empty until the
-    // user finds the Load button.
-    if (!this.doc && sel.value) this.load();
+    this.flat = this.runs.flatMap(r =>
+      r.cohorts.map(c => ({ run: r.name, ...c })));
+    this.flat.sort((a, b) =>
+      (b.started_at || "").localeCompare(a.started_at || ""));
+    this.renderList();
+    // Auto-open the newest run with data — the page should never sit
+    // blank waiting for the user to find a picker. Prefer the newest
+    // COMPLETED run; fall back to anything with measurements.
+    if (!this.openId) {
+      const first = this.flat.find(e => e.final_status === "ok" && e.steps > 0)
+        ?? this.flat.find(e => e.steps > 0);
+      if (first) this.openEntry(first);
+    }
+  },
+
+  headline(e) {
+    if (e.rate_max_per_min != null) {
+      const rate = e.rate_sla_per_min ?? e.rate_max_per_min;
+      const sess = e.sessions_at_max != null
+        ? ` · ~${Math.round(e.sessions_at_max)} sessions` : "";
+      return { n: `${rate}/min${sess}`,
+               d: "stable arrival rate (open-loop)" };
+    }
+    if (e.capacity_pool != null) {
+      return { n: `≤${e.capacity_pool} users`, d: "pool capacity" };
+    }
+    return { n: "—", d: e.steps > 0 ? "no verdict yet" : "no data" };
+  },
+
+  renderList() {
+    const box = $("#run-list");
+    box.innerHTML = "";
+    if (!this.flat.length) {
+      box.innerHTML = `<span class="msg">no runs yet — start one on the
+        Benchmark tab</span>`;
+      return;
+    }
+    for (const e of this.flat) {
+      const status = e.final_status
+        ?? (Control.running ? "running" : "incomplete");
+      const cls = STATUS_CLASS[status]
+        ?? (status === "running" ? "status-marginal" : "status-error");
+      const mode = (e.mode === "open_loop") ? "open-loop"
+        : e.mode ? "pool ramp" : "pool ramp";
+      const h = this.headline(e);
+      const model = (e.model_id || "").split("/").pop();
+      const row = document.createElement("div");
+      row.className = "run-row"
+        + (e.cohort_run_id === this.openId ? " active" : "");
+      row.innerHTML = `
+        <input type="checkbox" ${this.checked.has(e.cohort_run_id) ? "checked" : ""}>
+        <span class="r-title">${e.cohort_name || e.cohort_id}
+          <span class="hint">${model} · ${e.engine_type} · ${e.run}</span></span>
+        <span class="r-mode">${mode}</span>
+        <span class="r-headline">${h.n}<span class="hint">${h.d}</span></span>
+        <span class="${cls}">${status}</span>
+        <span class="r-date">${fmt.ts(e.started_at)}</span>`;
+      row.querySelector("input").addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (ev.target.checked) this.checked.add(e.cohort_run_id);
+        else this.checked.delete(e.cohort_run_id);
+        $("#compare-btn").disabled = this.checked.size < 2;
+      });
+      row.addEventListener("click", () => this.openEntry(e));
+      box.append(row);
+    }
+    $("#compare-btn").disabled = this.checked.size < 2;
   },
 
   msg(text, cls = "") {
@@ -757,35 +822,34 @@ const Results = {
     el.className = `msg ${cls}`;
   },
 
-  async load() {
-    const run = $("#result-run").value;
-    if (!run) { this.msg("no runs with data yet"); return; }
-    this.msg("loading export… (builds on first request)");
+  async loadExport(runName) {
+    if (!this.exportCache[runName]) {
+      this.exportCache[runName] = await api(`/api/runs/${runName}/export`);
+    }
+    return this.exportCache[runName];
+  },
+
+  async openEntry(entry) {
+    this.msg("loading…");
+    let doc;
     try {
-      this.doc = await api(`/api/runs/${run}/export`);
-      this.msg(`${this.doc.meta.cohort_count} cohort(s), schema ${this.doc.schema_version}`, "ok");
+      doc = await this.loadExport(entry.run);
     } catch (e) {
       this.msg(e.message, "error");
       return;
     }
-    const sel = $("#result-cohort");
-    sel.innerHTML = "";
-    for (const c of this.doc.cohorts) {
-      sel.append(new Option(
-        `${c.name || c.id} (${c.engine})`, c.cohort_run_id));
-    }
+    const c = doc.cohorts.find(x => x.cohort_run_id === entry.cohort_run_id);
+    if (!c) { this.msg("run has no export data yet", "error"); return; }
+    this.doc = doc;
+    this.openId = entry.cohort_run_id;
     $("#result-export-dl").disabled = false;
-    this.render();
-    this.fillComparePicker();
+    this.msg("");
+    this.renderList();
+    this.render(c);
   },
 
-  current() {
-    const id = $("#result-cohort").value;
-    return this.doc?.cohorts.find(c => c.cohort_run_id === id) ?? null;
-  },
-
-  render() {
-    const c = this.current();
+  render(c) {
+    c = c ?? this.cohort;
     if (!c) return;
     this.cohort = c;
     $("#result-summary").hidden = false;
@@ -1004,7 +1068,8 @@ const Results = {
                           { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `capsim_export_${$("#result-run").value}.json`;
+    const entry = this.flat.find(e => e.cohort_run_id === this.openId);
+    a.download = `capsim_export_${entry?.run ?? "run"}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
   },
@@ -1013,56 +1078,55 @@ const Results = {
 
   exportCache: {},      // run name -> export doc
 
-  fillComparePicker() {
-    // Every (run, cohort) pair across ALL runs — the run summaries
-    // from /api/runs carry cohort ids without needing each export.
-    const sel = $("#compare-pick");
-    sel.innerHTML = "";
-    for (const r of this.runs) {
-      for (const c of r.cohorts) {
-        if (c.final_status !== "ok") continue;
-        sel.append(new Option(
-          `${r.name} / ${c.cohort_id} (${c.engine_type})`,
-          `${r.name}::${c.cohort_run_id}`,
-        ));
-      }
-    }
-  },
-
-  async addCompare() {
-    const raw = $("#compare-pick").value;
-    if (!raw) return;
-    const [run, cohortRunId] = raw.split("::");
-    if (!this.exportCache[run]) {
+  async runCompare() {
+    this.compare = [];
+    for (const crid of this.checked) {
+      const entry = this.flat.find(e => e.cohort_run_id === crid);
+      if (!entry) continue;
+      let doc;
       try {
-        this.exportCache[run] = await api(`/api/runs/${run}/export`);
+        doc = await this.loadExport(entry.run);
       } catch (e) {
         this.msg(`compare load failed: ${e.message}`, "error");
         return;
       }
+      const c = doc.cohorts.find(x => x.cohort_run_id === crid);
+      if (!c) continue;
+      const open = c.open_loop != null;
+      // Superseded / client-limited windows carry no engine verdict —
+      // they'd draw misleading dips on a comparison.
+      const curve = c.curve.filter(p =>
+        p.stability !== "superseded" && p.stability !== "client_limited");
+      this.compare.push({
+        label: `${entry.run} · ${c.name || c.id} (${c.model.split("/").pop()})`,
+        open, curve,
+      });
     }
-    const c = this.exportCache[run].cohorts
-      .find(x => x.cohort_run_id === cohortRunId);
-    if (!c) return;
-    const label = `${run}/${c.id} (${c.engine})`;
-    if (this.compare.some(x => x.label === label)) return;
-    this.compare.push({ label, curve: [...c.curve].sort((a, b) => a.pool_size - b.pool_size) });
+    if (this.compare.length < 2) return;
+    $("#compare-panel").hidden = false;
     this.renderCompare();
+    $("#compare-panel").scrollIntoView({ behavior: "smooth" });
   },
 
   renderCompare() {
     this.charts.compare?.destroy();
-    const pools = [...new Set(
-      this.compare.flatMap(c => c.curve.map(p => p.pool_size))
+    if (!this.compare.length) return;
+    // Shared x-axis: arrival rate when every compared run is
+    // open-loop, pool size otherwise (mixing the two on one axis
+    // would compare unlike quantities).
+    const allOpen = this.compare.every(c => c.open);
+    const key = allOpen ? "arrival_rate_per_min" : "pool_size";
+    const xs = [...new Set(
+      this.compare.flatMap(c => c.curve.map(p => p[key]).filter(v => v != null))
     )].sort((a, b) => a - b);
     this.charts.compare = new Chart($("#chart-compare"), {
       type: "line",
       data: {
-        labels: pools,
+        labels: xs,
         datasets: this.compare.map((c, i) => ({
           label: c.label,
-          data: pools.map(pool => {
-            const p = c.curve.find(x => x.pool_size === pool);
+          data: xs.map(x => {
+            const p = c.curve.find(q => q[key] === x);
             return p ? p.violation_rate * 100 : null;
           }),
           borderColor: PALETTE[i % PALETTE.length],
@@ -1072,7 +1136,9 @@ const Results = {
       options: {
         maintainAspectRatio: false,
         scales: {
-          x: { title: { display: true, text: "pool size" } },
+          x: { title: { display: true,
+                        text: allOpen ? "session arrivals / min"
+                                      : "pool size" } },
           y: { beginAtZero: true, title: { display: true, text: "SLA violation %" } },
         },
         plugins: { legend: { position: "bottom" } },

@@ -316,14 +316,18 @@
 <!-- ── 4 · Results ─────────────────────────────────────────────── -->
 <main id="view-results" class="view">
   <section class="panel">
-    <div class="row wrap">
-      <label>Run <select id="result-run"></select></label>
-      <label>Cohort <select id="result-cohort"></select></label>
-      <button id="result-load" class="primary small">Load</button>
-      <button id="result-export-dl" class="small" disabled>Download export JSON</button>
-      <span id="result-msg" class="msg"></span>
-      <button id="runs-refresh" class="small" style="margin-left:auto">Refresh runs</button>
+    <div class="row wrap" style="margin-bottom:12px">
+      <h2 style="margin:0">Runs</h2>
+      <span class="hint">newest first &mdash; click one for its results,
+        check several to compare</span>
+      <span style="margin-left:auto" class="row">
+        <button id="compare-btn" class="small" disabled>Compare selected</button>
+        <button id="result-export-dl" class="small" disabled>Download JSON</button>
+        <button id="runs-refresh" class="small ghost">Refresh</button>
+      </span>
     </div>
+    <div id="run-list" class="run-list"></div>
+    <span id="result-msg" class="msg"></span>
   </section>
 
   <section class="panel" id="result-summary" hidden>
@@ -354,25 +358,15 @@
     <div id="step-detail-out"></div>
   </section>
 
-  <section class="panel">
-    <h2>Compare knee curves</h2>
+  <section class="panel" id="compare-panel" hidden>
     <div class="row wrap">
-      <select id="compare-pick"></select>
-      <button id="compare-add" class="small">Add to comparison</button>
-      <button id="compare-clear" class="small">Clear</button>
+      <h2 style="margin:0">Comparison</h2>
+      <button id="compare-clear" class="small ghost"
+        style="margin-left:auto">Close</button>
     </div>
     <canvas id="chart-compare"></canvas>
-    <div class="chart-note">Overlay runs to compare hosts, engines, precisions, or
-      launch shapes on the same axes — the whole point of keeping the export stable.</div>
-  </section>
-
-  <section class="panel">
-    <h2>Run history</h2>
-    <table id="runs-table">
-      <thead><tr><th>Run</th><th>Cohort</th><th>Engine</th><th>Model</th>
-        <th>Steps</th><th>Status</th><th>Started</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="chart-note">Violation rate across the checked runs on shared
+      axes — hosts, engines, precisions, or launch shapes side by side.</div>
   </section>
 </main>
 

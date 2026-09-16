@@ -341,6 +341,35 @@ canvas { max-height: 280px; }
 tr.cfg-first td { border-top: 1px solid var(--stroke-strong); }
 .dl-tail { font-size: .72rem; max-width: 320px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
+/* ── Results run list ────────────────────────────────────────────── */
+
+.run-list { display: grid; gap: 6px; }
+.run-row {
+  display: grid; align-items: center; gap: 14px; cursor: pointer;
+  grid-template-columns: 24px minmax(220px, 2fr) 92px minmax(170px, 1.4fr)
+                         86px 130px;
+  padding: 10px 14px; border: 1px solid var(--stroke); border-radius: 12px;
+  background: var(--glass-2); transition: border-color .15s, background .15s;
+  font-size: .87rem;
+}
+.run-row:hover { border-color: var(--accent); }
+.run-row.active { border-color: var(--accent); background: rgba(143,211,240,.08); }
+.run-row .r-title { font-weight: 600; }
+.run-row .r-title .hint { display: block; font-weight: 400; font-size: .74rem; }
+.run-row .r-mode {
+  font-size: .7rem; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--muted); border: 1px solid var(--stroke); border-radius: 999px;
+  padding: 2px 8px; text-align: center; white-space: nowrap;
+}
+.run-row .r-headline { color: var(--text); font-variant-numeric: tabular-nums; }
+.run-row .r-headline .hint { display: block; font-size: .72rem; }
+.run-row .r-date { color: var(--muted); font-size: .78rem; text-align: right;
+  white-space: nowrap; }
+@media (max-width: 900px) {
+  .run-row { grid-template-columns: 24px 1fr 86px; }
+  .run-row .r-mode, .run-row .r-headline, .run-row .r-date { display: none; }
+}
+
 /* ── Persona editor ──────────────────────────────────────────────── */
 
 .editor-grid { display: grid; grid-template-columns: 270px 1fr; gap: 22px; }

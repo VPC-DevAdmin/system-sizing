@@ -243,7 +243,13 @@ def _resolve_config_path(req: StartRunRequest) -> Path:
 
 def _list_runs(base: Path) -> list[dict]:
     """run_NN dirs, newest first, with per-cohort summaries from each
-    run.db (read-only; missing/corrupt DBs degrade to an empty list)."""
+    run.db (read-only; missing/corrupt DBs degrade to an empty list).
+
+    Each cohort row carries enough for the Results run list to stand
+    alone: display name, methodology, and a cheap headline verdict
+    (max stable arrival rate for open-loop runs, max passing pool for
+    closed-loop) read straight from the measurements — no export
+    build needed to render the list."""
     out: list[dict] = []
     if not base.exists():
         return out
@@ -254,14 +260,62 @@ def _list_runs(base: Path) -> list[dict]:
             try:
                 conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
                 conn.row_factory = sqlite3.Row
+                m_cols = {
+                    r[1] for r in
+                    conn.execute("PRAGMA table_info(cohort_measurements)")
+                }
+                r_cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(cohort_run)")
+                }
+                mode_sel = ("mode" if "mode" in r_cols else "NULL AS mode")
                 rows = conn.execute(
                     "SELECT cohort_run_id, cohort_id, engine_type, model_id, "
                     "started_at, completed_at, final_status, "
+                    f"cohort_definition_json, {mode_sel}, "
                     "(SELECT COUNT(*) FROM cohort_measurements m "
                     " WHERE m.cohort_run_id = cohort_run.cohort_run_id) AS steps "
                     "FROM cohort_run ORDER BY started_at ASC"
                 ).fetchall()
-                entry["cohorts"] = [dict(r) for r in rows]
+                cohorts = []
+                for r in rows:
+                    c = dict(r)
+                    try:
+                        cdef = json.loads(c.pop("cohort_definition_json") or "{}")
+                        c["cohort_name"] = cdef.get("name") or c["cohort_id"]
+                    except (TypeError, ValueError):
+                        c["cohort_name"] = c["cohort_id"]
+                    crid = c["cohort_run_id"]
+                    # Headline: open-loop rate verdict when present…
+                    if "arrival_rate_per_min" in m_cols:
+                        h = conn.execute(
+                            "SELECT MAX(arrival_rate_per_min) AS rate_max, "
+                            "MAX(CASE WHEN capacity_status='pass' THEN "
+                            "arrival_rate_per_min END) AS rate_sla "
+                            "FROM cohort_measurements WHERE cohort_run_id=? "
+                            "AND stability='stable'", (crid,),
+                        ).fetchone()
+                        c["rate_max_per_min"] = h["rate_max"]
+                        c["rate_sla_per_min"] = h["rate_sla"]
+                        if h["rate_max"] is not None:
+                            s = conn.execute(
+                                "SELECT active_sessions_mean FROM "
+                                "cohort_measurements WHERE cohort_run_id=? "
+                                "AND stability='stable' "
+                                "ORDER BY arrival_rate_per_min DESC LIMIT 1",
+                                (crid,),
+                            ).fetchone()
+                            c["sessions_at_max"] = (
+                                s["active_sessions_mean"] if s else None)
+                    # …and the closed-loop pool verdict as fallback.
+                    p = conn.execute(
+                        "SELECT MAX(CASE WHEN capacity_status='pass' THEN "
+                        "target_pool_size END) AS cap "
+                        "FROM cohort_measurements WHERE cohort_run_id=?",
+                        (crid,),
+                    ).fetchone()
+                    c["capacity_pool"] = p["cap"] if p else None
+                    cohorts.append(c)
+                entry["cohorts"] = cohorts
                 conn.close()
             except sqlite3.Error as e:
                 entry["error"] = str(e)

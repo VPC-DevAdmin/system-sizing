@@ -168,9 +168,13 @@
   <section class="panel">
     <h2>Start a capacity benchmark</h2>
     <div class="form-grid">
-      <label>What to benchmark
-        <select id="profile-select"></select>
-        <span id="profile-detail" class="hint"></span>
+      <label>Model
+        <select id="bench-model"></select>
+        <div class="seg" id="device-seg">
+          <button type="button" data-dev="cpu">CPU only</button>
+          <button type="button" data-dev="gpu">CPU + GPU</button>
+        </div>
+        <span id="model-note" class="hint"></span>
       </label>
       <label>Workload
         <select id="workload-select"></select>
@@ -181,30 +185,35 @@
       </label>
     </div>
     <details id="bench-advanced" style="margin-bottom:14px">
-      <summary class="msg" style="cursor:pointer">Advanced</summary>
-      <div class="form-grid" style="margin-top:12px">
-        <label class="check"><input type="checkbox" id="custom-toggle">
-          Custom engine <span class="hint">(benchmark a downloaded model
-          with hand-set settings)</span></label>
-      </div>
-      <div id="custom-engine" class="form-grid" hidden>
-        <label>Model <span class="hint">(downloaded only)</span>
-          <select id="custom-model"></select></label>
-        <label>Replicas <input id="custom-replicas" type="number"
-          min="1" max="16" value="8" style="width:70px"></label>
-        <label>GPUs per replica (TP) <input id="custom-tp" type="number"
-          min="1" max="8" value="1" style="width:70px"></label>
-        <label>Max sequences / replica
-          <input id="custom-seqs" type="number" placeholder="engine default"
-            style="width:110px"></label>
-        <label>Batched tokens / step
-          <input id="custom-mbt" type="number" placeholder="engine default"
-            style="width:110px"></label>
-        <label>KV cache
-          <select id="custom-kv">
-            <option value="">default</option>
-            <option value="fp8">fp8 (double capacity)</option>
+      <summary class="msg" style="cursor:pointer">Advanced — engine
+        settings</summary>
+      <span id="engine-note" class="hint" style="display:block;
+        margin-top:8px"></span>
+      <div id="engine-form" class="form-grid" style="margin-top:10px">
+        <label>Replicas <span class="hint">(data parallel — independent
+          engine copies)</span>
+          <input id="eng-replicas" type="number" min="1" max="16"></label>
+        <label>GPUs per replica <span class="hint">(tensor parallel)</span>
+          <input id="eng-tp" type="number" min="1" max="8"></label>
+        <label>Placement <span class="hint">(across PCIe domains)</span>
+          <select id="eng-placement">
+            <option value="pack">pack — fill one domain first</option>
+            <option value="spread">spread — balance across domains</option>
           </select></label>
+        <label>GPU memory fraction <span class="hint">(weights + KV pool)</span>
+          <input id="eng-gmu" type="number" step="0.01" min="0.5"
+            max="0.98"></label>
+        <label>Max sequences / replica
+          <input id="eng-mns" type="number" placeholder="engine default"></label>
+        <label>Batched tokens / step
+          <input id="eng-mbt" type="number" placeholder="engine default"></label>
+        <label>KV cache precision
+          <select id="eng-kv">
+            <option value="">auto (model dtype)</option>
+            <option value="fp8">fp8 — double the KV capacity</option>
+          </select></label>
+        <label class="check"><input type="checkbox" id="eng-ep">
+          Expert parallel <span class="hint">(MoE models, TP&gt;1)</span></label>
       </div>
     </details>
     <div class="row wrap">

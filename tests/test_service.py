@@ -292,6 +292,46 @@ def test_live_backfill_endpoint(tmp_path) -> None:
         assert s["stability"] is None
 
 
+def test_hardware_endpoint_and_profile_engine_params(tmp_path) -> None:
+    """/api/hardware answers cheaply (0 GPUs on CI), and profile
+    entries expose the searched engine dimensions so the benchmark
+    form can prefill Advanced from the optimization."""
+    from fastapi.testclient import TestClient
+
+    from simulator.service import create_app
+
+    prof_dir = tmp_path / "config" / "profiles"
+    prof_dir.mkdir(parents=True)
+    (prof_dir / "optimized-x.yaml").write_text("""
+engine:
+  type: vllm_cuda_multi
+  model_id: org/M
+  gpu_memory_utilization: 0.92
+  max_model_len: 16384
+  replica_devices: [[0], [1], [2], [3]]
+  vllm_extra_flags: ["--max-num-seqs", "256",
+                     "--max-num-batched-tokens", "8192",
+                     "--kv-cache-dtype", "fp8"]
+""")
+    import os
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        with TestClient(create_app(tmp_path / "runs")) as client:
+            hw = client.get("/api/hardware").json()
+            assert isinstance(hw["gpus"], int)
+            p = client.get("/api/profiles").json()["optimized-x"]
+            assert p["optimized"] is True
+            e = p["engine"]
+            assert e["replicas"] == 4 and e["tp"] == 1
+            assert e["max_num_seqs"] == "256"
+            assert e["max_num_batched_tokens"] == "8192"
+            assert e["kv_cache_dtype"] == "fp8"
+            assert e["gpu_memory_utilization"] == 0.92
+    finally:
+        os.chdir(cwd)
+
+
 def test_delete_cohort_run_and_orphan_finalise(tmp_path) -> None:
     """DELETE removes one cohort run's rows everywhere (and the whole
     run dir when it was the last one); startup stamps 'interrupted'

@@ -112,17 +112,24 @@ for (const btn of document.querySelectorAll("#tabs button")) {
 
 const Control = {
   catalogs: { profiles: {}, personas: [], cohorts: [] },
+  hw: { gpus: 0 },
+  modelList: [],
+  deviceMode: "gpu",
+  matchedProfile: null,   // {name, ...profile} when an optimization fits
+  engineDefaults: {},     // the values Advanced was prefilled with
+  _dlPoll: null,
 
   async init() {
     await this.loadCatalogs();
     this.refreshRuns();
-    $("#profile-select").addEventListener("change", () => this.showDetails());
+    $("#bench-model").addEventListener("change", () => this.onModelChange());
     $("#workload-select").addEventListener("change", () => this.showDetails());
-    $("#custom-toggle").addEventListener("change", e => {
-      $("#custom-engine").hidden = !e.target.checked;
-      $("#profile-select").disabled = e.target.checked;
-      if (e.target.checked) this.fillCustomModels();
-    });
+    document.querySelectorAll("#device-seg button").forEach(b =>
+      b.addEventListener("click", () => {
+        this.deviceMode = b.dataset.dev;
+        this.renderDeviceSeg();
+        this.onModelChange();
+      }));
     $("#start-btn").addEventListener("click", () => this.start());
     $("#stop-btn").addEventListener("click", () => this.stop());
     $("#runs-refresh").addEventListener("click", () => this.refreshRuns());
@@ -133,52 +140,203 @@ const Control = {
 
   async loadCatalogs() {
     try {
-      const [profiles, personas, cohorts] = await Promise.all([
+      const [profiles, personas, cohorts, models, hw] = await Promise.all([
         api("/api/profiles"), api("/api/personas"), api("/api/cohorts"),
+        api("/api/models").catch(() => ({ models: [] })),
+        api("/api/hardware").catch(() => ({ gpus: 0 })),
       ]);
       this.catalogs = { profiles, personas, cohorts };
-      this.fillProfiles();
+      this.modelList = models.models || [];
+      this.hw = hw;
+      this.deviceMode = hw.gpus > 0 ? "gpu" : "cpu";
+      this.renderDeviceSeg();
+      this.fillModels();
       this.fillWorkloadPicker();
+      this.onModelChange();
       this.showDetails();
     } catch (e) {
       this.msg(`catalog load failed: ${e.message}`, "error");
     }
   },
 
-  /* "What to benchmark": profiles for THIS machine lead, optimized
-   * ones first with a ✓; profiles for other hardware classes are
-   * still reachable but grouped away. Falls back to plain names when
-   * the server predates the metadata. */
-  fillProfiles() {
-    const profiles = this.catalogs.profiles;
-    const sel = $("#profile-select");
+  renderDeviceSeg() {
+    const seg = $("#device-seg");
+    seg.classList.toggle("disabled", !(this.hw.gpus > 0));
+    if (!(this.hw.gpus > 0)) this.deviceMode = "cpu";
+    seg.querySelectorAll("button").forEach(b =>
+      b.classList.toggle("active", b.dataset.dev === this.deviceMode));
+  },
+
+  /* The model IS the choice — profiles are an implementation detail.
+   * Downloaded models lead; the rest are pickable but need a download
+   * first (offered inline). */
+  fillModels() {
+    const sel = $("#bench-model");
     const prev = sel.value;
-    const entries = Object.entries(profiles).map(([name, p]) =>
-      (p && typeof p === "object")
-        ? { name, ...p }
-        : { name, label: name, detail: "", fits_hardware: true,
-            optimized: false });
-    const rank = e => (e.fits_hardware ? 0 : 2) + (e.optimized ? 0 : 1);
-    entries.sort((a, b) => rank(a) - rank(b)
-      || a.label.localeCompare(b.label));
-    const opt = e => new Option(
-      `${e.optimized ? "✓ Optimized · " : ""}${e.label}`,
-      e.name, false, e.name === prev);
     sel.innerHTML = "";
-    const fit = entries.filter(e => e.fits_hardware);
-    const rest = entries.filter(e => !e.fits_hardware);
-    const g1 = document.createElement("optgroup");
-    g1.label = "This machine";
-    fit.forEach(e => g1.append(opt(e)));
-    sel.append(g1);
-    if (rest.length) {
-      const g2 = document.createElement("optgroup");
-      g2.label = "Other hardware";
-      rest.forEach(e => g2.append(opt(e)));
-      sel.append(g2);
+    const cached = this.modelList.filter(m => m.cached);
+    const rest = this.modelList.filter(m => !m.cached);
+    const mkGroup = (label, items) => {
+      if (!items.length) return;
+      const g = document.createElement("optgroup");
+      g.label = label;
+      for (const m of items) {
+        g.append(new Option(m.model, m.model, false, m.model === prev));
+      }
+      sel.append(g);
+    };
+    mkGroup("Downloaded", cached);
+    mkGroup("Not downloaded", rest);
+    if (!prev) {
+      // Default to the optimized model when one exists, else the
+      // first downloaded model.
+      const opt = Object.values(this.catalogs.profiles).find(p =>
+        p?.optimized && p.fits_hardware
+        && cached.some(m => m.model === p.model_id));
+      sel.value = opt?.model_id ?? cached[0]?.model ?? rest[0]?.model ?? "";
     }
-    // Default: the best optimized config for this machine.
-    if (!prev && fit.length) sel.value = fit[0].name;
+  },
+
+  modelEntry() {
+    return this.modelList.find(m => m.model === $("#bench-model").value);
+  },
+
+  /* Conservative fallback when no optimization exists: one replica,
+   * enough TP to fit the weights, stock engine settings. */
+  conservativeDefaults(entry) {
+    let tp = 1;
+    const vram = this.hw.vram_per_gpu_gb;
+    if (entry?.approx_size_gb && vram) {
+      while (tp < Math.max(1, this.hw.gpus)
+             && entry.approx_size_gb > 0.85 * vram * tp) tp *= 2;
+    }
+    return { replicas: 1, tp, placement: "pack",
+             gpu_memory_utilization: 0.9, max_num_seqs: "",
+             max_num_batched_tokens: "", kv_cache_dtype: "",
+             expert_parallel: false };
+  },
+
+  setEngineForm(d) {
+    $("#eng-replicas").value = d.replicas ?? 1;
+    $("#eng-tp").value = d.tp ?? 1;
+    $("#eng-placement").value = d.placement ?? "pack";
+    $("#eng-gmu").value = d.gpu_memory_utilization ?? 0.9;
+    $("#eng-mns").value = d.max_num_seqs ?? "";
+    $("#eng-mbt").value = d.max_num_batched_tokens ?? "";
+    $("#eng-kv").value =
+      (d.kv_cache_dtype && d.kv_cache_dtype !== "auto")
+        ? d.kv_cache_dtype : "";
+    $("#eng-ep").checked = !!d.expert_parallel;
+    this.engineDefaults = this.readEngineForm();
+  },
+
+  readEngineForm() {
+    return {
+      replicas: +$("#eng-replicas").value || 1,
+      tp: +$("#eng-tp").value || 1,
+      placement: $("#eng-placement").value,
+      gpu_memory_utilization: +$("#eng-gmu").value || 0.9,
+      max_num_seqs: $("#eng-mns").value.trim(),
+      max_num_batched_tokens: $("#eng-mbt").value.trim(),
+      kv_cache_dtype: $("#eng-kv").value,
+      expert_parallel: $("#eng-ep").checked,
+    };
+  },
+
+  /* Model or device changed: find a fitting optimization, prefill
+   * Advanced from it (else conservative), and set the note line —
+   * green check, optimize link, or download link. */
+  onModelChange() {
+    const model = $("#bench-model").value;
+    const entry = this.modelEntry();
+    const cpuMode = this.deviceMode === "cpu";
+    const gpuEngines = ["vllm_cuda", "vllm_cuda_multi"];
+    this.matchedProfile = null;
+    for (const [name, p] of Object.entries(this.catalogs.profiles)) {
+      if (!p?.optimized || p.model_id !== model || !p.fits_hardware) continue;
+      const isGpu = gpuEngines.includes(p.engine_type);
+      if (isGpu === !cpuMode) { this.matchedProfile = { name, ...p }; break; }
+    }
+    $("#engine-form").style.display = cpuMode ? "none" : "";
+    $("#engine-note").textContent = cpuMode
+      ? "CPU engine — conservative stock settings (no searched dimensions)."
+      : this.matchedProfile
+        ? "Prefilled from the optimized engine — change anything to run a variant."
+        : "No optimization for this model yet — conservative defaults below.";
+    if (!cpuMode) {
+      this.setEngineForm(this.matchedProfile?.engine
+        ?? this.conservativeDefaults(entry));
+    }
+    this.renderModelNote(model, entry);
+  },
+
+  renderModelNote(model, entry) {
+    const note = $("#model-note");
+    note.innerHTML = "";
+    if (!model) { note.textContent = "no models in the catalog"; return; }
+    if (entry && !entry.cached) {
+      const size = entry.approx_size_gb
+        ? ` (≈${Math.round(entry.approx_size_gb)} GB)` : "";
+      note.innerHTML = `<span id="dl-slot"><button type="button"
+        class="note-link" id="model-dl">⬇ download this model${size}</button>
+        </span>`;
+      $("#model-dl").addEventListener("click", () => this.downloadModel(model));
+      return;
+    }
+    if (this.matchedProfile) {
+      note.innerHTML = `<span class="ok-note">✓ Using optimized engine
+        — ${this.matchedProfile.detail || this.matchedProfile.label}</span>`;
+    } else {
+      note.innerHTML = `<button type="button" class="note-link"
+        id="goto-optimize">No optimized engine for this model yet —
+        run the optimizer →</button>`;
+      $("#goto-optimize").addEventListener("click", () =>
+        document.querySelector('#tabs button[data-view="optimizer"]')?.click());
+    }
+  },
+
+  async downloadModel(model) {
+    try {
+      await api("/api/models/download", {
+        method: "POST", body: JSON.stringify({ model }),
+      });
+    } catch (e) {
+      if (!`${e.message}`.includes("already running")) {
+        this.msg(e.message, "error");
+        return;
+      }
+    }
+    const slot = $("#dl-slot");
+    if (slot) {
+      slot.innerHTML = `downloading<span class="dl-bar"><i
+        id="dl-bar-i" style="width:0%"></i></span><span id="dl-pct">…</span>`;
+    }
+    clearInterval(this._dlPoll);
+    this._dlPoll = setInterval(async () => {
+      let doc;
+      try { doc = await api("/api/models"); } catch { return; }
+      this.modelList = doc.models || [];
+      const e = this.modelList.find(m => m.model === model);
+      const dl = doc.downloads?.[model];
+      if (e?.cached) {
+        clearInterval(this._dlPoll);
+        this.fillModels();
+        this.onModelChange();
+        return;
+      }
+      // hf's progress lines carry percentages — show the last one.
+      const pcts = [...(dl?.log_tail || "").matchAll(/(\d{1,3})%/g)];
+      const pct = pcts.length ? +pcts[pcts.length - 1][1] : null;
+      if (pct != null && $("#dl-bar-i")) {
+        $("#dl-bar-i").style.width = `${pct}%`;
+        $("#dl-pct").textContent = `${pct}%`;
+      }
+      if (dl && !dl.running && !e?.cached) {
+        clearInterval(this._dlPoll);
+        if (slot) slot.innerHTML =
+          `<span class="status-fail">download failed — see Prepare tab</span>`;
+      }
+    }, 2500);
   },
 
   /* One workload picker, in plain language: team mixes first (that's
@@ -208,10 +366,6 @@ const Control = {
   },
 
   showDetails() {
-    const p = this.catalogs.profiles?.[$("#profile-select").value];
-    $("#profile-detail").textContent =
-      p && typeof p === "object"
-        ? [p.detail, p.model_id].filter(Boolean).join(" · ") : "";
     const w = $("#workload-select").value || "";
     let text = "";
     if (w.startsWith("cohort:")) {
@@ -235,19 +389,6 @@ const Control = {
     $("#workload-detail").textContent = text;
   },
 
-  fillCustomModels() {
-    api("/api/models").then(doc => {
-      const sel = $("#custom-model");
-      sel.innerHTML = "";
-      for (const m of doc.models.filter(m => m.cached)) {
-        sel.append(new Option(m.model, m.model));
-      }
-      if (!sel.options.length) {
-        sel.append(new Option("no downloaded models — stage one first", ""));
-      }
-    }).catch(() => {});
-  },
-
   msg(text, cls = "") {
     const el = $("#control-msg");
     el.textContent = text;
@@ -267,21 +408,38 @@ const Control = {
       new_run: $("#new-run").checked,
       mode: "open",
     };
-    if ($("#custom-toggle").checked) {
-      if (!$("#custom-model").value) {
-        this.msg("custom engine needs a downloaded model", "error");
-        return;
-      }
-      body.custom = {
-        model_id: $("#custom-model").value,
-        replicas: +$("#custom-replicas").value || 1,
-        tp: +$("#custom-tp").value || 1,
-        max_num_seqs: +$("#custom-seqs").value || null,
-        max_num_batched_tokens: +$("#custom-mbt").value || null,
-        kv_cache_dtype: $("#custom-kv").value || null,
-      };
+    const model = $("#bench-model").value;
+    const entry = this.modelEntry();
+    if (!model) { this.msg("pick a model first", "error"); return; }
+    if (entry && !entry.cached) {
+      this.msg("that model isn't downloaded yet — use the download "
+        + "link under the picker", "error");
+      return;
+    }
+    if (this.deviceMode === "cpu") {
+      body.custom = { model_id: model, device: "cpu" };
     } else {
-      body.profile = $("#profile-select").value;
+      const form = this.readEngineForm();
+      const untouched = this.matchedProfile
+        && JSON.stringify(form) === JSON.stringify(this.engineDefaults);
+      if (untouched) {
+        // Exactly the optimized launch — run the promoted profile
+        // itself (it may carry settings beyond the searched knobs).
+        body.profile = this.matchedProfile.name;
+      } else {
+        body.custom = {
+          model_id: model,
+          device: "gpu",
+          replicas: form.replicas,
+          tp: form.tp,
+          placement: form.placement,
+          gpu_memory_utilization: form.gpu_memory_utilization,
+          max_num_seqs: +form.max_num_seqs || null,
+          max_num_batched_tokens: +form.max_num_batched_tokens || null,
+          kv_cache_dtype: form.kv_cache_dtype || null,
+          expert_parallel: form.expert_parallel,
+        };
+      }
     }
     try {
       this.msg("starting…");
@@ -2272,8 +2430,13 @@ const Optimizer = {
     const warn = (r.warnings ?? []).length ? ` — NOTE: ${r.warnings[0]}` : "";
     this.msg(`optimized launch saved as profile "${r.profile}" (${r.path})${warn}`, "ok");
     await Control.loadCatalogs();
-    const sel = $("#profile-select");
-    if ([...sel.options].some(o => o.value === r.profile)) sel.value = r.profile;
+    // Hand off: select the promoted profile's model — the benchmark
+    // form finds the optimization itself and shows the green check.
+    const prof = Control.catalogs.profiles?.[r.profile];
+    if (prof?.model_id) {
+      $("#bench-model").value = prof.model_id;
+      Control.onModelChange();
+    }
     document.querySelector('#tabs button[data-view="control"]').click();
   },
 };

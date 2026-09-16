@@ -174,12 +174,35 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
     model_id = str(custom.get("model_id") or "")
     if "/" not in model_id:
         raise HTTPException(422, "custom.model_id must be an org/name id")
+    if custom.get("device") == "cpu":
+        # Conservative CPU-only engine — for boxes without GPUs (or
+        # explicit CPU comparisons). No searched dimensions apply.
+        engine = {
+            "type": "vllm",
+            "model_id": model_id,
+            "max_model_len": int(custom.get("max_model_len") or 8192),
+            "port": 9100,
+            "host": "127.0.0.1",
+            "startup_timeout_s": 1800,
+        }
+        doc = {
+            "engine": engine,
+            "telemetry": {"enable_engine_metrics": True},
+            "output": {"db_directory": str(runs_base)},
+        }
+        import yaml as _yaml
+        out = runs_base / "custom_benchmark.yaml"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(_yaml.safe_dump(doc, sort_keys=False))
+        return out
     replicas = int(custom.get("replicas") or 1)
     tp = int(custom.get("tp") or 1)
+    placement = (custom.get("placement")
+                 if custom.get("placement") in ("pack", "spread") else "pack")
     hw = hardware()
     if not hw["count"]:
         raise HTTPException(422, "custom engine shapes need a GPU host")
-    devices = assign_devices(tp, replicas, "pack", hw["device_groups"])
+    devices = assign_devices(tp, replicas, placement, hw["device_groups"])
     if devices is None:
         raise HTTPException(
             422, f"{replicas} replicas × tp{tp} does not fit "
@@ -192,12 +215,19 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
                   str(int(custom["max_num_batched_tokens"]))]
     if custom.get("kv_cache_dtype") in ("fp8",):
         flags += ["--kv-cache-dtype", str(custom["kv_cache_dtype"])]
+    if custom.get("expert_parallel"):
+        flags += ["--enable-expert-parallel"]
+    gmu = custom.get("gpu_memory_utilization")
+    try:
+        gmu = min(0.98, max(0.5, float(gmu))) if gmu is not None else 0.92
+    except (TypeError, ValueError):
+        gmu = 0.92
     engine: dict = {
         "model_id": model_id,
         "gpu_image": "vllm/vllm-openai:latest",
-        "max_model_len": 16384,
+        "max_model_len": int(custom.get("max_model_len") or 16384),
         "tensor_parallel_size": tp,
-        "gpu_memory_utilization": 0.92,
+        "gpu_memory_utilization": gmu,
         "port": 9100,
         "host": "127.0.0.1",
         "startup_timeout_s": 1800,
@@ -428,6 +458,32 @@ def create_app(
             except Exception:  # noqa: BLE001
                 pass
             gpu_engine = engine_type in ("vllm_cuda", "vllm_cuda_multi")
+            # The searched engine dimensions, extracted so the
+            # benchmark form can prefill its Advanced settings with
+            # exactly what the optimization landed on.
+            params: dict = {}
+            try:
+                flags = [str(f) for f in (eng.get("vllm_extra_flags") or [])]
+                def _flag(key):
+                    return (flags[flags.index(key) + 1]
+                            if key in flags
+                            and flags.index(key) + 1 < len(flags) else None)
+                reps = eng.get("replica_devices") or []
+                params = {
+                    "replicas": len(reps) if reps else 1,
+                    "tp": (max((len(g) for g in reps), default=1) if reps
+                           else int(eng.get("tensor_parallel_size") or 1)),
+                    "gpu_memory_utilization":
+                        eng.get("gpu_memory_utilization"),
+                    "max_model_len": eng.get("max_model_len"),
+                    "max_num_seqs": _flag("--max-num-seqs"),
+                    "max_num_batched_tokens":
+                        _flag("--max-num-batched-tokens"),
+                    "kv_cache_dtype": _flag("--kv-cache-dtype") or "auto",
+                    "expert_parallel": "--enable-expert-parallel" in flags,
+                }
+            except Exception:  # noqa: BLE001
+                params = {}
             return {
                 "path": str(path),
                 "engine_type": engine_type,
@@ -435,6 +491,7 @@ def create_app(
                 "label": label,
                 "detail": detail,
                 "optimized": name.startswith("optimized-"),
+                "engine": params,
                 # Does this profile match THIS machine?
                 "fits_hardware": (
                     has_gpu if gpu_engine
@@ -606,6 +663,20 @@ def create_app(
     async def cohort_save(cohort_id: str, req: SaveSpecRequest) -> dict:
         _save_catalog_entry("cohorts", cohort_id, req.yaml, req.spec)
         return {"saved": cohort_id}
+
+    @app.get("/api/hardware")
+    async def hardware_summary() -> dict:
+        """Tiny hardware probe for the UI — GPU count/names so the
+        benchmark form can gray out the CPU/GPU toggle honestly."""
+        from .arena import hardware as _hw
+        try:
+            hw = await asyncio.to_thread(_hw)
+        except Exception:  # noqa: BLE001
+            hw = {}
+        return {
+            "gpus": hw.get("count", 0) or 0,
+            "vram_per_gpu_gb": hw.get("vram_per_gpu_gb"),
+        }
 
     @app.get("/api/runs")
     async def runs() -> list[dict]:

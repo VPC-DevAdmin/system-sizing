@@ -157,7 +157,8 @@ label { display: flex; flex-direction: column; gap: 6px; font-size: .8rem; color
 label.check { flex-direction: row; align-items: center; gap: 8px; align-self: end; color: var(--text); font-size: .87rem; }
 .hint { color: var(--muted); font-weight: 400; }
 
-select, input[type="text"], input:not([type]), textarea {
+select, input[type="text"], input[type="number"], input:not([type]),
+textarea {
   background: rgba(8, 20, 31, .6); color: var(--text);
   border: 1px solid var(--stroke); border-radius: 10px; padding: 8px 12px;
   font-size: .9rem; width: 100%;
@@ -166,6 +167,36 @@ select, input[type="text"], input:not([type]), textarea {
 select:focus, input:focus, textarea:focus {
   outline: none; border-color: var(--accent);
 }
+
+/* Segmented two-way toggle (CPU only ⟷ CPU+GPU). */
+.seg {
+  display: inline-flex; margin-top: 8px; border: 1px solid var(--stroke);
+  border-radius: 999px; overflow: hidden; width: fit-content;
+}
+.seg button {
+  border: none; border-radius: 0; background: none; color: var(--muted);
+  padding: 5px 16px; font-size: .8rem; backdrop-filter: none;
+}
+.seg button:hover:not(:disabled) { transform: none; color: var(--text); }
+.seg button.active { background: var(--glass-2); color: var(--text);
+  font-weight: 600; }
+.seg.disabled { opacity: .4; pointer-events: none; }
+
+/* Model-note states under the picker. */
+.ok-note { color: var(--ok); font-size: .82rem; }
+.note-link {
+  background: none; border: none; padding: 0; color: var(--accent);
+  font-size: .82rem; cursor: pointer; backdrop-filter: none;
+}
+.note-link:hover:not(:disabled) { text-decoration: underline;
+  transform: none; }
+.dl-bar {
+  display: inline-block; width: 140px; height: 8px; border-radius: 4px;
+  background: rgba(255,255,255,.07); overflow: hidden;
+  vertical-align: middle; margin: 0 8px;
+}
+.dl-bar i { display: block; height: 100%; background: var(--accent);
+  transition: width .5s; }
 input[type="checkbox"] { accent-color: var(--accent); }
 
 button {

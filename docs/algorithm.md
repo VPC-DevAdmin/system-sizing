@@ -2,17 +2,27 @@
 
 End-to-end description of how the persona-capacity simulator drives load, takes measurements, and decides what to measure next. This document is the source-of-truth reference for the algorithm; the code is in `simulator/`.
 
-## 1. The closed-loop model
+## 0. The partly-open model (primary methodology)
 
-The simulator is a **closed-loop** load generator: each virtual user is an independent async task that follows a strict sequence — submit a request, stream the response, read+think, submit the next request. The next request can't start until the previous one finishes, so the system's throughput is what governs request rate, not a fixed RPS dial.
+The primary capacity methodology is **partly-open loop** (`simulator/open_loop.py`), the traffic model real services actually see (Schroeder et al., *Open Versus Closed: A Cautionary Tale*, NSDI'06):
 
-Closed-loop is the right model for chat-style workloads:
+- **Sessions arrive open-loop** — a Poisson process at a controlled rate λ (sessions/min). Arrivals do not care how busy the engine is; that independence is what makes the capacity limit observable at all.
+- **Within a session, behavior is closed-loop** — turn N+1 waits for turn N's response plus the persona's read+think time, exactly as humans behave. The persona/cohort definitions below are unchanged; they parameterize the session generator.
 
-- Real human users don't fire requests at a constant RPS; they wait for the response and then think before composing the next message.
-- When the backend slows down, real users automatically slow their request rate — they can't compose the next message until they've read the previous response. The closed-loop model captures this naturally; an open-loop RPS generator would keep firing requests into a saturated engine and produce nonsense queue depths.
-- This means "pool_size" in the simulator means "concurrent active sessions," not "concurrent in-flight requests." At any moment most users are reading/thinking and only a fraction have a request in flight.
+**Capacity is the stability boundary in rate space.** At λ below capacity, the engine's waiting queue is stationary and concurrency settles at Little's-law equilibrium (L = λ·W). At λ above it, the queue grows without bound. Per measured λ, the per-second engine waiting-queue series gets a statistical verdict (`simulator/stability.py`): Mann-Kendall trend test (is there a confident upward trend?) × Theil-Sen slope (is the projected growth operationally meaningful relative to the active batch?) → `stable` / `divergent` / `inconclusive` (inconclusive extends the window once).
 
-The key consequence: **the simulator's pool_size and the engine's in-flight count are different numbers**. A pool of 64 users with a duty cycle of ~15% (typical for chat) means the engine sees ~8-12 concurrent requests on average, with bursts higher.
+`simulator/rate_search.py` searches λ coarse-to-fine: geometric doubling to bracket the boundary, log-space bisection to tighten it, then a second bisection on the SLA axis inside the stable region. Two knees come out: **λ_max** (highest stable rate; the lowest divergent rate brackets it from above) and **λ_sla** (highest stable rate whose steady-state turns also pass SLA). Concurrent-session capacity is *derived* — λ_sla × measured mean session duration — never assumed.
+
+Load generation shards across worker subprocesses (`simulator/loadgen_worker.py`): superposition of k Poisson processes at λ/k is exactly Poisson(λ), so the generator scales horizontally. Its honesty signal is **arrival tardiness** (scheduled vs actual send time, pinned to the wall clock — no coordinated omission): when arrivals fall behind, the coordinator adds workers, and only a maxed-out generator records `client_limited`.
+
+Why the older closed-loop ramp (below) cannot find this limit: a fixed pool throttles its own offered load — when the engine slows, every user's cycle stretches, arrivals/sec drop, and the queue drains. The queue is bounded at N by construction, so a closed system degrades gracefully forever and never exhibits the collapse that defines capacity (run_02 on the XE7740 reached 2,048 users with zero violations for exactly this reason).
+
+## 1. The closed-loop model (legacy pool ramp)
+
+The original methodology — still available (`mode: "closed"`, and used by sweeps and spot-checks) — is a **closed-loop** pool: each virtual user is an independent async task that submits, streams, reads+thinks, and repeats. The per-session behavior it models is correct (and is reused verbatim inside open-loop sessions); what it cannot do is measure the capacity limit, per the paragraph above. Its results answer "how does latency look with N sessions active?" — a useful curve, but its endpoint is a property of the pool arithmetic and the measuring client, not of the box.
+
+- "pool_size" means "concurrent active sessions," not "concurrent in-flight requests." At any moment most users are reading/thinking and only a fraction have a request in flight.
+- A pool of 64 users with a duty cycle of ~15% (typical for chat) means the engine sees ~8-12 concurrent requests on average, with bursts higher.
 
 ## 2. Distributions
 

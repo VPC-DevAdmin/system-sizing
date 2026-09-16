@@ -263,6 +263,36 @@ class SimulationConfig:
     snapshot_interval_s: int = 1
     request_timeout_s: int = 300
 
+    # ── Open-loop methodology (arrival-rate capacity) ──
+    # Sessions arrive as a Poisson process at a searched rate λ;
+    # capacity is the stability boundary where the engine's waiting
+    # queue transitions from stationary to divergent. See
+    # simulator/open_loop.py for the orchestration and
+    # simulator/stability.py for the statistics.
+    open_loop_initial_rate_per_s: float = 1.0
+    # SAFETY RAIL like max_pool_size — high enough that no plausible
+    # host reaches it; hitting it reports rates as lower bounds.
+    open_loop_max_rate_per_s: float = 256.0
+    # Coarse-phase measurement window. Refinement windows near the
+    # boundary are longer — slow divergence needs more samples to
+    # distinguish from noise.
+    open_loop_window_s: int = 120
+    open_loop_refine_window_s: int = 240
+    # Steady-state settling time before each window measures. The
+    # orchestrator stretches this toward the measured mean session
+    # duration once one is known (equilibrium shifts take about one
+    # session length to propagate).
+    open_loop_warmup_s: int = 90
+    # After a divergent window the accumulated backlog must clear
+    # before the next rate is meaningful.
+    open_loop_drain_timeout_s: int = 240
+    # Generator scale-out: one worker process comfortably owns this
+    # many concurrent streams; the coordinator adds workers when the
+    # projected in-flight count (or observed arrival tardiness) says
+    # the current set can't keep arrivals on schedule.
+    open_loop_inflight_per_worker: int = 256
+    open_loop_max_workers: int = 8
+
 
 @dataclass
 class TelemetryConfig:

@@ -73,7 +73,7 @@ from .prefix_cache import (
 # the document's structure needs a version bump there and here, plus a
 # green run of the schema-validation tests. Patch = additive optional
 # fields; minor = additive required fields; major = anything breaking.
-EXPORT_SCHEMA_VERSION = "1.1.0"
+EXPORT_SCHEMA_VERSION = "1.2.0"
 
 EXPORT_SCHEMA_PATH = Path(__file__).parent / "export_schema" / "buyer_page_data.schema.json"
 
@@ -661,6 +661,120 @@ def _capacity_and_knee(
     return capacity, knee_pool
 
 
+def _open_loop_summary(measurements: list[dict]) -> dict | None:
+    """Arrival-rate capacity verdict for an open-loop run.
+
+    The capacity story in rate space: **rate_max** (highest stable
+    arrival rate — the stability boundary from below), **rate_sla**
+    (highest stable rate whose steady-state turns also pass SLA) and
+    **rate_ceiling** (lowest rate observed to diverge — the boundary
+    from above; rate_max and rate_ceiling bracket the true limit).
+    Concurrency is *derived*, not assumed: Little's law at the SLA
+    point (λ × mean session duration) plus the measured concurrent
+    sessions at the highest stable rate.
+    """
+    rated = [
+        m for m in measurements
+        if m.get("arrival_rate_per_min") is not None and m.get("stability")
+    ]
+    if not rated:
+        return None
+    rated = sorted(rated, key=lambda m: m["arrival_rate_per_min"])
+    stable = [m for m in rated if m["stability"] == "stable"]
+    divergent = [m for m in rated if m["stability"] == "divergent"]
+    limited = [m for m in rated if m["stability"] == "client_limited"]
+
+    rate_max = max(
+        (m["arrival_rate_per_min"] for m in stable), default=None)
+    sla_passes = [
+        m for m in stable
+        if m.get("capacity_status") == "pass" and (m.get("sample_size") or 0) > 0
+    ]
+    rate_sla = max(
+        (m["arrival_rate_per_min"] for m in sla_passes), default=None)
+    ceiling = min(
+        (m["arrival_rate_per_min"] for m in divergent + limited
+         if rate_max is None or m["arrival_rate_per_min"] > rate_max),
+        default=None,
+    )
+
+    if not stable and (divergent or limited):
+        coverage = "exceeds_hardware" if divergent else "client_limited"
+    elif len(rated) <= 1:
+        coverage = "single_point"
+    elif divergent and ceiling is not None:
+        coverage = "full_curve"
+    elif limited:
+        coverage = "client_limited"
+    else:
+        coverage = "capped"
+    lower_bound = coverage in ("capped", "client_limited")
+
+    def _at_rate(rate):
+        return next(
+            (m for m in reversed(rated)
+             if m["arrival_rate_per_min"] == rate), None,
+        )
+
+    derived_sessions = None
+    mean_session_s = None
+    sla_step = _at_rate(rate_sla) if rate_sla is not None else None
+    if sla_step is not None:
+        mean_session_s = sla_step.get("mean_session_duration_s")
+        if mean_session_s:
+            # Little's law: L = λ · W.
+            derived_sessions = round(
+                (rate_sla / 60.0) * float(mean_session_s))
+    max_step = _at_rate(rate_max) if rate_max is not None else None
+    sessions_at_max = (
+        max_step.get("active_sessions_mean") if max_step else None)
+
+    def _fmt(rate):
+        return f"{rate:g}" if rate is not None else "?"
+
+    zones = {
+        "fast": (
+            (f"≥{_fmt(rate_sla)} session arrivals/min sustained with SLA "
+             f"met — the TRUE limit was NOT found"
+             if lower_bound else
+             f"≤{_fmt(rate_sla)} session arrivals/min — steady state, "
+             f"SLA met"
+             + (f" (≈{derived_sessions} concurrent sessions)"
+                if derived_sessions else ""))
+            if rate_sla is not None
+            else "no SLA-clean stable rate observed"
+        ),
+        "acceptable": (
+            (f"≥{_fmt(rate_max)}/min — stable, limit not found"
+             if lower_bound else
+             f"≤{_fmt(rate_max)}/min — queue stays stationary; some "
+             f"turns exceed the target")
+            if rate_max is not None
+            else "no stable operating rate found"
+        ),
+        "degraded": (
+            f"≥{_fmt(ceiling)}/min — the queue grows without bound "
+            f"(sessions arrive faster than the box completes them)"
+            if ceiling is not None and divergent
+            else ("the generator saturated before the engine — "
+                  "collapse point not reached"
+                  if limited else
+                  "no divergent rate observed within the search range")
+        ),
+    }
+    return {
+        "rate_sla_per_min": rate_sla,
+        "rate_max_per_min": rate_max,
+        "rate_ceiling_per_min": ceiling,
+        "rates_are_lower_bounds": lower_bound,
+        "coverage": coverage,
+        "derived_concurrent_sessions_at_sla": derived_sessions,
+        "mean_session_duration_s": mean_session_s,
+        "measured_concurrent_sessions_at_max": sessions_at_max,
+        "zones": zones,
+    }
+
+
 def _summarise_cohort(
     run: dict, prefix_cache: dict | None, slim: bool = False,
 ) -> dict:
@@ -715,6 +829,21 @@ def _summarise_cohort(
             "measurement_started_at": m.get("measurement_started_at"),
             "measurement_duration_s": m.get("measurement_duration_s"),
         }
+        # Open-loop fields (NULL on closed-loop rows). ``pool_size``
+        # above already carries the measured mean concurrent sessions
+        # for open-loop windows, so legacy consumers stay sensible.
+        if m.get("arrival_rate_per_min") is not None:
+            entry["arrival_rate_per_min"] = m["arrival_rate_per_min"]
+            entry["stability"] = m.get("stability")
+            entry["queue_depth_mean"] = m.get("queue_depth_mean")
+            entry["queue_depth_slope_per_min"] = m.get(
+                "queue_depth_slope_per_min")
+            entry["active_sessions_mean"] = m.get("active_sessions_mean")
+            entry["arrival_tardiness_p99_ms"] = m.get(
+                "arrival_tardiness_p99_ms")
+            entry["load_workers"] = m.get("load_workers")
+            entry["mean_session_duration_s"] = m.get(
+                "mean_session_duration_s")
         # Token-volume + per-second rates for this step. Always in
         # the export (slim or full) — small per-step overhead, big
         # value for buyer-page throughput sizing. Reasoning tokens
@@ -870,13 +999,33 @@ def _summarise_cohort(
             pass
 
     cohort_def = json.loads(run["cohort_definition_json"])
+    # Open-loop runs: the authoritative capacity story lives in rate
+    # space. Bottleneck attribution walks measurements in RATE order
+    # (bisection makes step order non-monotonic), and coverage /
+    # lower-bound semantics come from the rate search.
+    methodology = (
+        "open_loop"
+        if (run.get("mode") == "open_loop"
+            or any(m.get("arrival_rate_per_min") is not None
+                   for m in measurements))
+        else "closed_loop"
+    )
+    open_loop = (
+        _open_loop_summary(measurements)
+        if methodology == "open_loop" else None
+    )
+    attr_src = (
+        sorted(measurements,
+               key=lambda m: m.get("arrival_rate_per_min") or 0)
+        if methodology == "open_loop" else measurements
+    )
     # Two parallel bottleneck attributions — what limits SLA capacity
     # vs what limits premium-quality capacity. They can differ; if
     # they do, the buyer page can show "first thing to bend = X,
     # hard ceiling reason = Y" — sharper diagnostic than one label.
-    bottleneck, evidence = _bottleneck(measurements)
+    bottleneck, evidence = _bottleneck(attr_src)
     target_bottleneck, target_evidence = _attribute_bottleneck(
-        measurements,
+        attr_src,
         status_field="target_status",
         ttft_rate_field="ttft_target_miss_rate",
         tpot_rate_field="tpot_target_miss_rate",
@@ -888,7 +1037,12 @@ def _summarise_cohort(
     client_lag = run.get("client_max_lag_ms")
     if coverage == "capped" and client_lag and float(client_lag) >= 1000.0:
         coverage = "client_limited"
-    capacity_is_lower_bound = coverage in ("capped", "client_limited")
+    if open_loop is not None:
+        coverage = open_loop["coverage"]
+    capacity_is_lower_bound = (
+        open_loop["rates_are_lower_bounds"] if open_loop is not None
+        else coverage in ("capped", "client_limited")
+    )
 
     # Attribution honesty: a bottleneck can only be named at a knee.
     # With no failure knee observed, attributing anything blames some
@@ -936,11 +1090,18 @@ def _summarise_cohort(
         "cliff_pool_size": cliff_pool,
         "deployment_band_shape": band_shape,
         "measurement_coverage": coverage,
+        # Methodology marker + the rate-space verdict for open-loop
+        # runs (None for closed-loop). When present, ``open_loop`` is
+        # the authoritative capacity story; the pool-size fields above
+        # still carry measured mean concurrent sessions per window so
+        # legacy consumers keep working.
+        "methodology": methodology,
+        "open_loop": open_loop,
         # Self-documenting band labels so the buyer page can render
         # the three-zone narrative without hardcoding the language
         # in the frontend.
         "capacity_is_lower_bound": capacity_is_lower_bound,
-        "capacity_landing_zones": {
+        "capacity_landing_zones": open_loop["zones"] if open_loop else {
             "fast": (
                 (f"≥{capacity_pool} concurrent users with zero SLA "
                  f"violations — the TRUE limit was NOT found "

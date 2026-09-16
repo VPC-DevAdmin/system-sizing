@@ -261,12 +261,16 @@ const Control = {
     const [kind, id] = w.split(":", 2);
     const workload = kind === "sweep"
       ? { kind, type: id || "all" } : { kind, id };
+    const mode = $("#mode-select").value || "open";
     const poolRaw = $("#pool-sizes").value.trim();
     const body = {
       workload,
       new_run: $("#new-run").checked,
-      adaptive: $("#adaptive").checked,
-      pool_sizes: poolRaw
+      mode,
+      // The pool knobs only mean anything closed-loop — sending them
+      // for an open-loop run would silently flip the methodology.
+      adaptive: mode === "closed" && $("#adaptive").checked,
+      pool_sizes: mode === "closed" && poolRaw
         ? poolRaw.split(",").map(s => parseInt(s.trim(), 10)).filter(Number.isFinite)
         : null,
     };
@@ -408,10 +412,11 @@ const Live = {
 
   init() {
     this.charts.pool = makeLiveChart("#chart-pool", [
-      { label: "pool size", data: [], borderColor: C.muted, stepped: true,
+      { label: "sessions", data: [], borderColor: C.muted, stepped: true,
         borderDash: [5, 4] },
       { label: "in flight", data: [], borderColor: C.gold, fill: true,
         backgroundColor: fill(C.gold) },
+      { label: "queue waiting", data: [], borderColor: C.fail },
     ]);
     this.charts.ttft = makeLiveChart("#chart-ttft", [
       { label: "p50", data: [], borderColor: C.blue, fill: true,
@@ -496,6 +501,12 @@ const Live = {
     $("#live-inflight").textContent = s.in_flight;
     $("#live-completed").textContent = s.requests_completed;
     $("#live-errors").textContent = s.errors;
+    // Open-loop pressure stats (null on closed-loop snapshots).
+    $("#live-rate").textContent =
+      s.arrival_rate_per_min != null
+        ? `${s.arrival_rate_per_min}/min` : "—";
+    $("#live-queue").textContent =
+      s.queue_depth != null ? `${s.queue_depth}` : "—";
     if (s.warm_kv_tokens != null) {
       const t = s.warm_kv_tokens;
       $("#live-warmkv").textContent =
@@ -511,7 +522,8 @@ const Live = {
       $("#live-progress").textContent = "—";
       $("#live-progress-bar").style.width = "0";
     }
-    this.push(this.charts.pool, fmt.clock(ts), [s.pool_size, s.in_flight]);
+    this.push(this.charts.pool, fmt.clock(ts),
+      [s.pool_size, s.in_flight, s.queue_depth ?? null]);
     if (s.prefill_in_flight != null) {
       this.push(this.charts.sessions, fmt.clock(ts), [
         s.prefill_in_flight, s.decode_in_flight,
@@ -611,12 +623,22 @@ const Live = {
     if (this.stepsSeen.has(key)) return;
     this.stepsSeen.add(key);
     const cls = STATUS_CLASS[s.capacity_status] ?? "";
+    // Open-loop steps: the control variable is the arrival rate; the
+    // pool column shows it with the measured concurrency alongside,
+    // and the verdict column leads with stability.
+    const load = s.arrival_rate_per_min != null
+      ? `${s.arrival_rate_per_min}/min (${s.pool_size})`
+      : `${s.pool_size}`;
+    const verdictCls = s.stability === "divergent" ? "status-fail"
+      : s.stability === "client_limited" ? "status-marginal" : cls;
+    const verdict = s.stability
+      ? `${s.stability} · ${s.capacity_status}` : s.capacity_status;
     $("#steps-table tbody").insertAdjacentHTML("afterbegin", `<tr>
-      <td>${s.step_index}</td><td>${s.pool_size}</td><td>${s.sample_size}</td>
+      <td>${s.step_index}</td><td>${load}</td><td>${s.sample_size}</td>
       <td>${fmt.pct(s.combined_violation_rate)}</td>
       <td>${fmt.pct(s.combined_target_miss_rate)}</td>
       <td>${fmt.ms(s.ttft_p95_ms)}</td><td>${fmt.ms(s.tpot_p95_ms)}</td>
-      <td class="${cls}">${s.capacity_status}</td></tr>`);
+      <td class="${verdictCls}">${verdict}</td></tr>`);
   },
 
   onRun(r) {
@@ -715,34 +737,76 @@ const Results = {
     $("#step-detail-panel").hidden = true;
 
     $("#result-title").textContent =
-      `${c.name || c.id} — ${c.engine} / ${c.model}`;
-    const zones = [
-      ["fast", c.capacity_pool_size, c.capacity_landing_zones.fast],
-      ["acceptable", c.soft_capacity_pool_size, c.capacity_landing_zones.acceptable],
-      ["degraded", c.fail_pool_size, c.capacity_landing_zones.degraded],
-    ];
+      `${c.name || c.id} — ${c.engine} / ${c.model}` +
+      (c.methodology === "open_loop" ? " · open-loop" : "");
+    const ol = c.open_loop;
+    const zones = ol
+      ? [
+          ["fast", ol.rate_sla_per_min != null
+            ? `${ol.rate_sla_per_min}/min` : null, c.capacity_landing_zones.fast],
+          ["acceptable", ol.rate_max_per_min != null
+            ? `${ol.rate_max_per_min}/min` : null, c.capacity_landing_zones.acceptable],
+          ["degraded", ol.rate_ceiling_per_min != null
+            ? `${ol.rate_ceiling_per_min}/min` : null, c.capacity_landing_zones.degraded],
+        ]
+      : [
+          ["fast", c.capacity_pool_size, c.capacity_landing_zones.fast],
+          ["acceptable", c.soft_capacity_pool_size, c.capacity_landing_zones.acceptable],
+          ["degraded", c.fail_pool_size, c.capacity_landing_zones.degraded],
+        ];
     $("#landing-zones").innerHTML = zones.map(([cls, n, t]) =>
       `<div class="zone ${cls}"><div class="n">${n ?? "—"}</div>
        <div class="t">${t}</div></div>`).join("");
     const tp = c.capacity_throughput;
-    $("#throughput-line").innerHTML = tp
-      ? `At the capacity pool of <b>${tp.pool_size}</b>: ` +
-        `<b>${tp.visible_output_tok_per_s ?? "—"}</b> output tok/s, ` +
-        `<b>${tp.prompt_tok_per_s ?? "—"}</b> prompt tok/s ` +
-        `(${tp.sample_size} turns over ${tp.measurement_duration_s}s). ` +
-        `Band shape: <b>${c.deployment_band_shape}</b>, ` +
-        `coverage: <b>${c.measurement_coverage}</b>.`
-      : `No clean-pass operating point located. Band shape: ` +
-        `<b>${c.deployment_band_shape}</b>, coverage: <b>${c.measurement_coverage}</b>.`;
+    if (ol) {
+      const derived = ol.derived_concurrent_sessions_at_sla;
+      const sess = ol.mean_session_duration_s;
+      $("#throughput-line").innerHTML =
+        `Capacity is measured in <b>session arrivals per minute</b> — the ` +
+        `rate at which the engine's queue stays stationary. ` +
+        (derived != null
+          ? `At the SLA-clean rate that sustains ≈<b>${derived}</b> concurrent ` +
+            `sessions (Little's law: rate × ${Math.round(sess)}s mean session). `
+          : ``) +
+        (tp ? `Throughput there: <b>${tp.visible_output_tok_per_s ?? "—"}</b> ` +
+              `output tok/s, <b>${tp.prompt_tok_per_s ?? "—"}</b> prompt tok/s. `
+            : ``) +
+        `Coverage: <b>${c.measurement_coverage}</b>` +
+        (ol.rates_are_lower_bounds
+          ? ` — rates are <b>lower bounds</b>, the true limit was not reached.`
+          : `.`);
+    } else {
+      $("#throughput-line").innerHTML = tp
+        ? `At the capacity pool of <b>${tp.pool_size}</b>: ` +
+          `<b>${tp.visible_output_tok_per_s ?? "—"}</b> output tok/s, ` +
+          `<b>${tp.prompt_tok_per_s ?? "—"}</b> prompt tok/s ` +
+          `(${tp.sample_size} turns over ${tp.measurement_duration_s}s). ` +
+          `Band shape: <b>${c.deployment_band_shape}</b>, ` +
+          `coverage: <b>${c.measurement_coverage}</b>.`
+        : `No clean-pass operating point located. Band shape: ` +
+          `<b>${c.deployment_band_shape}</b>, coverage: <b>${c.measurement_coverage}</b>.`;
+    }
 
     this.renderKnee(c);
     this.renderLatency(c);
     this.renderBottleneck(c);
   },
 
+  // Open-loop curves are indexed by arrival rate (bisection makes
+  // step order non-monotonic in every other field); closed-loop by
+  // pool size. One accessor keeps both chart renderers honest.
+  xAxis(c) {
+    const open = c.open_loop != null
+      && c.curve.some(p => p.arrival_rate_per_min != null);
+    return open
+      ? { key: "arrival_rate_per_min", label: "session arrivals / min" }
+      : { key: "pool_size", label: "pool size (concurrent sessions)" };
+  },
+
   renderKnee(c) {
-    const curve = [...c.curve].sort((a, b) => a.pool_size - b.pool_size);
-    const x = curve.map(p => p.pool_size);
+    const ax = this.xAxis(c);
+    const curve = [...c.curve].sort((a, b) => (a[ax.key] ?? 0) - (b[ax.key] ?? 0));
+    const x = curve.map(p => p[ax.key]);
     const mk = (label, key, color, extra = {}) => ({
       label, data: curve.map(p => p[key] == null ? null : p[key] * 100),
       borderColor: color, pointRadius: 3, pointBackgroundColor: color, ...extra,
@@ -765,13 +829,19 @@ const Results = {
       options: {
         maintainAspectRatio: false,
         animation: { duration: 450, easing: "easeOutQuart" },
-        zoneLines: [
-          { value: c.capacity_pool_size, color: C.ok, label: "capacity" },
-          { value: c.soft_capacity_pool_size, color: C.warn, label: "soft cap" },
-          { value: c.fail_pool_size, color: C.fail, label: "fail" },
-        ],
+        zoneLines: c.open_loop
+          ? [
+              { value: c.open_loop.rate_sla_per_min, color: C.ok, label: "SLA rate" },
+              { value: c.open_loop.rate_max_per_min, color: C.warn, label: "stable max" },
+              { value: c.open_loop.rate_ceiling_per_min, color: C.fail, label: "collapse" },
+            ]
+          : [
+              { value: c.capacity_pool_size, color: C.ok, label: "capacity" },
+              { value: c.soft_capacity_pool_size, color: C.warn, label: "soft cap" },
+              { value: c.fail_pool_size, color: C.fail, label: "fail" },
+            ],
         scales: {
-          x: { title: { display: true, text: "pool size (concurrent sessions)" } },
+          x: { title: { display: true, text: ax.label } },
           y: { beginAtZero: true, title: { display: true, text: "% of turns" } },
         },
         plugins: {
@@ -787,12 +857,13 @@ const Results = {
   },
 
   renderLatency(c) {
-    const curve = [...c.curve].sort((a, b) => a.pool_size - b.pool_size);
+    const ax = this.xAxis(c);
+    const curve = [...c.curve].sort((a, b) => (a[ax.key] ?? 0) - (b[ax.key] ?? 0));
     this.charts.latency?.destroy();
     this.charts.latency = new Chart($("#chart-latency"), {
       type: "line",
       data: {
-        labels: curve.map(p => p.pool_size),
+        labels: curve.map(p => p[ax.key]),
         datasets: [
           { label: "TTFT p50 (ms)", data: curve.map(p => p.ttft_p50_ms),
             borderColor: C.blue, pointRadius: 3, fill: true,
@@ -807,7 +878,7 @@ const Results = {
         maintainAspectRatio: false,
         animation: { duration: 450, easing: "easeOutQuart" },
         scales: {
-          x: { title: { display: true, text: "pool size" } },
+          x: { title: { display: true, text: ax.label } },
           y: { beginAtZero: true, title: { display: true, text: "TTFT ms" } },
           y2: { beginAtZero: true, position: "right",
                 grid: { drawOnChartArea: false },
@@ -838,8 +909,10 @@ const Results = {
 
   showStepDetail(p) {
     $("#step-detail-panel").hidden = false;
-    $("#step-detail-title").textContent =
-      `Step ${p.step_index} — pool ${p.pool_size} (${p.status})`;
+    $("#step-detail-title").textContent = p.arrival_rate_per_min != null
+      ? `Step ${p.step_index} — ${p.arrival_rate_per_min}/min ` +
+        `(${p.stability ?? p.status})`
+      : `Step ${p.step_index} — pool ${p.pool_size} (${p.status})`;
     const fields = {
       samples: p.sample_size,
       "violation rate": fmt.pct(p.violation_rate),
@@ -853,6 +926,15 @@ const Results = {
       "duration": `${p.measurement_duration_s ?? "—"}s`,
       "turns captured": p.turns ? p.turns.length : "(slim export)",
     };
+    if (p.arrival_rate_per_min != null) {
+      fields["sessions (mean)"] = p.active_sessions_mean ?? "—";
+      fields["queue depth (mean)"] = p.queue_depth_mean ?? "—";
+      fields["queue slope"] = p.queue_depth_slope_per_min != null
+        ? `${p.queue_depth_slope_per_min}/min` : "—";
+      fields["arrival tardiness p99"] = p.arrival_tardiness_p99_ms != null
+        ? fmt.ms(p.arrival_tardiness_p99_ms) : "—";
+      fields["load workers"] = p.load_workers ?? "—";
+    }
     $("#step-detail-out").innerHTML = `<div class="kv-grid">${
       Object.entries(fields).map(([k, v]) =>
         `<div><span class="k">${k}</span><span>${v}</span></div>`).join("")

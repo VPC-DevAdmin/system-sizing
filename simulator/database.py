@@ -22,7 +22,7 @@ from typing import Any, Iterable
 # The version is stamped into SQLite's ``PRAGMA user_version``; DBs from
 # before versioning existed read as 0 and get every migration (each one
 # is idempotent, so a partially-lifted legacy DB is fine too).
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cohort_run (
@@ -50,7 +50,12 @@ CREATE TABLE IF NOT EXISTS cohort_run (
     collectors_json TEXT,
     -- v6: run-level max event-loop lag of the measuring client — the
     -- export downgrades a capped curve to client_limited past 1s.
-    client_max_lag_ms REAL
+    client_max_lag_ms REAL,
+    -- v7: which methodology produced this run. 'closed_loop' (fixed
+    -- user pool, the original model) or 'open_loop' (Poisson session
+    -- arrivals, queue-stability capacity). NULL on legacy rows ==
+    -- closed_loop.
+    mode TEXT
 );
 
 -- One row per ramp step. Measurement-window aggregates (PMU, IMC
@@ -143,7 +148,21 @@ CREATE TABLE IF NOT EXISTS cohort_measurements (
     gpu_power_w_peak REAL,
     gpu_sm_clock_mhz_avg REAL,
     gpu_sm_clock_mhz_min REAL,
-    gpu_throttle_fraction REAL
+    gpu_throttle_fraction REAL,
+    -- v7: open-loop methodology fields. For open-loop windows,
+    -- ``target_pool_size`` holds the *mean concurrent sessions*
+    -- observed (so legacy consumers still read a sensible
+    -- concurrency), and these carry the real control variable and
+    -- verdict. NULL on closed-loop rows.
+    arrival_rate_per_min REAL,
+    stability TEXT,                     -- stable | divergent | client_limited
+    stability_detail TEXT,              -- JSON StabilityVerdict
+    queue_depth_mean REAL,
+    queue_depth_slope_per_min REAL,
+    arrival_tardiness_p99_ms REAL,
+    load_workers INTEGER,
+    active_sessions_mean REAL,
+    mean_session_duration_s REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_measurements_run ON cohort_measurements(cohort_run_id);
@@ -222,7 +241,13 @@ CREATE TABLE IF NOT EXISTS simulation_snapshots (
     warm_kv_tokens INTEGER,
     -- v6: how late the 1 Hz snapshot loop woke — the client-
     -- saturation signal (see runner.CLIENT_SATURATION_LAG_MS).
-    loop_lag_ms REAL
+    loop_lag_ms REAL,
+    -- v7: open-loop live view — the commanded arrival rate, the
+    -- engine's waiting-queue depth (the pressure signal), and the
+    -- number of in-progress sessions. NULL on closed-loop snapshots.
+    arrival_rate_per_min REAL,
+    queue_depth INTEGER,
+    active_sessions INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_run_time ON simulation_snapshots(cohort_run_id, snapshot_at_ms);
@@ -486,6 +511,32 @@ def _migrate_legacy_aggregate(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE measurement_aggregate")
 
 
+def _migration_7_open_loop(conn: sqlite3.Connection) -> None:
+    """Open-loop methodology: Poisson session arrivals with queue-
+    stability capacity. Arrival-rate + stability verdict columns on
+    measurements, live pressure fields on snapshots, and a run-level
+    mode marker."""
+    _ensure_columns(conn, "cohort_run", [("mode", "TEXT")])
+    _ensure_columns(
+        conn, "cohort_measurements",
+        [("arrival_rate_per_min", "REAL"),
+         ("stability", "TEXT"),
+         ("stability_detail", "TEXT"),
+         ("queue_depth_mean", "REAL"),
+         ("queue_depth_slope_per_min", "REAL"),
+         ("arrival_tardiness_p99_ms", "REAL"),
+         ("load_workers", "INTEGER"),
+         ("active_sessions_mean", "REAL"),
+         ("mean_session_duration_s", "REAL")],
+    )
+    _ensure_columns(
+        conn, "simulation_snapshots",
+        [("arrival_rate_per_min", "REAL"),
+         ("queue_depth", "INTEGER"),
+         ("active_sessions", "INTEGER")],
+    )
+
+
 MIGRATIONS: list[tuple[int, str, Any]] = [
     (1, "consolidate pre-versioning column lifts", _migration_1_pre_versioning_lifts),
     (2, "cohort_run.collectors_json", _migration_2_collectors_json),
@@ -494,6 +545,8 @@ MIGRATIONS: list[tuple[int, str, Any]] = [
      _migration_4_deep_telemetry),
     (5, "token-weighted warm KV hot set", _migration_5_warm_kv_tokens),
     (6, "client-saturation lag columns", _migration_6_client_saturation),
+    (7, "open-loop methodology (arrival rate + queue stability)",
+     _migration_7_open_loop),
 ]
 assert [v for v, _, _ in MIGRATIONS] == list(range(1, SCHEMA_VERSION + 1)), (
     "MIGRATIONS must be contiguous 1..SCHEMA_VERSION"

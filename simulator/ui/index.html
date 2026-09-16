@@ -181,11 +181,21 @@
     <details id="bench-advanced" style="margin-bottom:14px">
       <summary class="msg" style="cursor:pointer">Advanced</summary>
       <div class="form-grid" style="margin-top:12px">
-        <label class="check"><input type="checkbox" id="adaptive" checked>
-          Adaptive knee search <span class="hint">(uncheck for a fixed
-          powers-of-2 grid)</span></label>
-        <label>Fixed pool sizes <span class="hint">(overrides the search,
-          e.g. 256,512,1024)</span>
+        <label>Methodology
+          <select id="mode-select">
+            <option value="open">Open-loop arrival search (recommended)</option>
+            <option value="closed">Closed-loop pool ramp (legacy)</option>
+          </select>
+          <span class="hint">Open-loop feeds sessions at a searched arrival
+          rate and finds where the engine's queue stops being stationary —
+          the capacity of the box, independent of any client pool. The
+          legacy pool ramp is kept for comparison runs.</span>
+        </label>
+        <label class="check"><input type="checkbox" id="adaptive">
+          Adaptive knee search <span class="hint">(closed-loop only;
+          uncheck for a fixed powers-of-2 grid)</span></label>
+        <label>Fixed pool sizes <span class="hint">(closed-loop only;
+          overrides the search, e.g. 256,512,1024)</span>
           <input id="pool-sizes" placeholder="leave empty for automatic">
         </label>
         <label class="check"><input type="checkbox" id="custom-toggle">
@@ -222,7 +232,11 @@
 
   <section class="panel statusbar">
     <div class="stat"><span class="k">Phase</span><span id="live-phase" class="v">&mdash;</span>
-      <span class="c">ramp &rarr; stabilize &rarr; measure</span></div>
+      <span class="c">warmup &rarr; measure &rarr; verdict</span></div>
+    <div class="stat"><span class="k">Arrival rate</span><span id="live-rate" class="v">&mdash;</span>
+      <span class="c">sessions/min offered (open-loop)</span></div>
+    <div class="stat"><span class="k">Queue</span><span id="live-queue" class="v">&mdash;</span>
+      <span class="c">requests waiting at the engine</span></div>
     <div class="stat"><span class="k">Pool</span><span id="live-pool" class="v">&mdash;</span>
       <span class="c">concurrent sessions</span></div>
     <div class="stat"><span class="k">In flight</span><span id="live-inflight" class="v">&mdash;</span>
@@ -242,11 +256,13 @@
   </section>
 
   <div class="chart-grid">
-    <section class="panel"><h2>Pool &amp; in-flight requests</h2>
+    <section class="panel"><h2>Sessions, in-flight &amp; queue</h2>
       <canvas id="chart-pool"></canvas>
-      <div class="chart-note">Closed-loop load: most of the pool is reading or thinking
-        at any moment, so in-flight sits well below pool size. The gap between the two
-        lines <b>is</b> the workload's duty cycle.</div></section>
+      <div class="chart-note">Most sessions are reading or thinking at any moment, so
+        in-flight sits well below the session count. The <b>queue</b> line is the
+        engine's own waiting-request gauge — flat or empty means stationary; a steady
+        climb at fixed arrival rate is the collapse signature the open-loop search
+        hunts for.</div></section>
     <section class="panel"><h2>Time to first token &middot; rolling p50 / p95</h2>
       <canvas id="chart-ttft"></canvas>
       <div class="chart-note">Computed over the trailing turns of the measuring window.
@@ -285,9 +301,9 @@
   <section class="panel">
     <h2>Completed steps</h2>
     <table id="steps-table">
-      <thead><tr><th>Step</th><th>Pool</th><th>Samples</th>
+      <thead><tr><th>Step</th><th>Load</th><th>Samples</th>
         <th>Violation %</th><th>Target miss %</th>
-        <th>TTFT p95</th><th>TPOT p95</th><th>Status</th></tr></thead>
+        <th>TTFT p95</th><th>TPOT p95</th><th>Verdict</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>

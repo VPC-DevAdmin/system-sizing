@@ -88,6 +88,12 @@ class StartRunRequest(BaseModel):
     new_run: bool = False
     pool_sizes: Optional[list[int]] = None
     adaptive: bool = False
+    # Methodology. "open" (default) — open-loop Poisson session
+    # arrivals; capacity is the arrival rate where the engine's queue
+    # turns divergent. "closed" — the legacy fixed-pool ramp (kept for
+    # comparison runs and for the pool_sizes / adaptive knobs, which
+    # only apply there). Sweeps always run closed-loop.
+    mode: str = "open"
 
 
 class ExportRequest(BaseModel):
@@ -588,12 +594,22 @@ def create_app(
                 "config": str(config_path)}
 
     def _cohort_coro(cfg, cohort, req: StartRunRequest):
-        from .runner import run_cohort
-        return lambda: run_cohort(
-            cfg, cohort,
-            new_run=req.new_run,
-            adaptive=req.adaptive,
-            fixed_grid_pool_sizes=req.pool_sizes,
+        # Explicit closed-loop knobs (pool grid / adaptive stepper)
+        # imply the legacy methodology even if mode wasn't set.
+        closed = (
+            req.mode == "closed" or req.adaptive or bool(req.pool_sizes)
+        )
+        if closed:
+            from .runner import run_cohort
+            return lambda: run_cohort(
+                cfg, cohort,
+                new_run=req.new_run,
+                adaptive=req.adaptive,
+                fixed_grid_pool_sizes=req.pool_sizes,
+            )
+        from .open_loop import run_cohort_open_loop
+        return lambda: run_cohort_open_loop(
+            cfg, cohort, new_run=req.new_run,
         )
 
     async def _supervise(app_ref, coro_factory) -> None:
@@ -1515,7 +1531,15 @@ def create_app(
             raise HTTPException(404, f"no run.db in {d}")
         fname = "buyer_page_data_slim.json" if slim else "buyer_page_data.json"
         p = d / fname
-        if not p.exists():
+        # Rebuild when the DB has newer data than the cached export —
+        # a Results tab opened mid-run builds a partial export, and
+        # serving that snapshot forever would freeze the run at
+        # whatever step it happened to be on.
+        stale = (
+            p.exists()
+            and p.stat().st_mtime < (d / "run.db").stat().st_mtime
+        )
+        if not p.exists() or stale:
             from .export import export_dir
             try:
                 await asyncio.to_thread(export_dir, d, p, slim=slim)
@@ -1558,7 +1582,8 @@ def create_app(
                     "SELECT step_index, target_pool_size AS pool_size, "
                     "sample_size, combined_violation_rate, "
                     "combined_target_miss_rate, ttft_p95_ms, tpot_p95_ms, "
-                    "capacity_status FROM cohort_measurements WHERE "
+                    "capacity_status, arrival_rate_per_min, stability "
+                    "FROM cohort_measurements WHERE "
                     "cohort_run_id = ? ORDER BY step_index",
                     (crid,)).fetchall()]
                 mids = [r[0] for r in conn.execute(

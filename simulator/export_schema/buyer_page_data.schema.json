@@ -4,7 +4,11 @@
   "title": "Persona Capacity Simulator export (buyer_page_data / buyer_page_data_slim)",
   "description": "Contract for the JSON produced by `simulator export`. One schema covers both the full and slim documents: slim omits the per-step time-series fields (curve[i].telemetry_samples / turns / timeline), which are optional here. The document's schema_version must equal EXPORT_SCHEMA_VERSION in simulator/export.py; structural changes bump both. Consumers should tolerate unknown additional fields (additive optional fields are a patch bump).",
   "type": "object",
-  "required": ["schema_version", "meta", "cohorts"],
+  "required": [
+    "schema_version",
+    "meta",
+    "cohorts"
+  ],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
@@ -23,23 +27,59 @@
         "engine_config"
       ],
       "properties": {
-        "generated_at": { "type": "string" },
-        "engines": { "type": "array", "items": { "type": "string" } },
-        "models": { "type": "array", "items": { "type": "string" } },
-        "source_dir": { "type": "string" },
-        "cohort_count": { "type": "integer", "minimum": 0 },
-        "slim": { "type": "boolean" },
-        "engine_config": { "type": ["object", "null"] }
+        "generated_at": {
+          "type": "string"
+        },
+        "engines": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source_dir": {
+          "type": "string"
+        },
+        "cohort_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "slim": {
+          "type": "boolean"
+        },
+        "engine_config": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
       }
     },
     "cohorts": {
       "type": "array",
-      "items": { "$ref": "#/$defs/cohort" }
+      "items": {
+        "$ref": "#/$defs/cohort"
+      }
     }
   },
   "$defs": {
-    "nullableNumber": { "type": ["number", "null"] },
-    "nullableInteger": { "type": ["integer", "null"] },
+    "nullableNumber": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "nullableInteger": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "cohort": {
       "type": "object",
       "required": [
@@ -76,60 +116,203 @@
         "capacity_throughput"
       ],
       "properties": {
-        "id": { "type": "string" },
-        "cohort_run_id": { "type": "string" },
-        "name": { "type": "string" },
-        "description": { "type": "string" },
-        "category": { "type": "string" },
+        "id": {
+          "type": "string"
+        },
+        "cohort_run_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
         "persona_weights": {
           "type": "object",
-          "additionalProperties": { "type": "number" }
+          "additionalProperties": {
+            "type": "number"
+          }
         },
-        "engine": { "type": "string" },
-        "model": { "type": "string" },
-        "started_at": { "type": "string" },
-        "completed_at": { "type": ["string", "null"] },
-        "final_status": { "type": ["string", "null"] },
-        "capacity_pool_size": { "$ref": "#/$defs/nullableInteger" },
-        "soft_capacity_pool_size": { "$ref": "#/$defs/nullableInteger" },
-        "fail_pool_size": { "$ref": "#/$defs/nullableInteger" },
-        "target_capacity_pool_size": { "$ref": "#/$defs/nullableInteger" },
-        "target_soft_capacity_pool_size": { "$ref": "#/$defs/nullableInteger" },
-        "target_fail_pool_size": { "$ref": "#/$defs/nullableInteger" },
-        "headroom_pool_size": { "$ref": "#/$defs/nullableInteger" },
-        "cliff_pool_size": { "$ref": "#/$defs/nullableInteger" },
+        "engine": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "final_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capacity_pool_size": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "soft_capacity_pool_size": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "fail_pool_size": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "target_capacity_pool_size": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "target_soft_capacity_pool_size": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "target_fail_pool_size": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "headroom_pool_size": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "cliff_pool_size": {
+          "$ref": "#/$defs/nullableInteger"
+        },
         "deployment_band_shape": {
-          "enum": ["graceful", "moderate", "sharp", "unbounded", "unmeasured"]
+          "enum": [
+            "graceful",
+            "moderate",
+            "sharp",
+            "unbounded",
+            "unmeasured"
+          ]
         },
         "measurement_coverage": {
-          "enum": ["full_curve", "downward_search", "single_point", "capped", "client_limited", "exceeds_hardware"]
+          "enum": [
+            "full_curve",
+            "downward_search",
+            "single_point",
+            "capped",
+            "client_limited",
+            "exceeds_hardware"
+          ]
         },
         "capacity_landing_zones": {
           "type": "object",
-          "required": ["fast", "acceptable", "degraded"],
+          "required": [
+            "fast",
+            "acceptable",
+            "degraded"
+          ],
           "properties": {
-            "fast": { "type": "string" },
-            "acceptable": { "type": "string" },
-            "degraded": { "type": "string" }
+            "fast": {
+              "type": "string"
+            },
+            "acceptable": {
+              "type": "string"
+            },
+            "degraded": {
+              "type": "string"
+            }
           }
         },
         "curve": {
           "type": "array",
-          "items": { "$ref": "#/$defs/curveEntry" }
+          "items": {
+            "$ref": "#/$defs/curveEntry"
+          }
         },
-        "bottleneck": { "type": "string" },
-        "capacity_is_lower_bound": { "type": "boolean" },
-        "bottleneck_evidence": { "type": "object" },
-        "target_bottleneck": { "type": "string" },
-        "target_bottleneck_evidence": { "type": "object" },
-        "hardware_recommendation": { "type": "string" },
+        "bottleneck": {
+          "type": "string"
+        },
+        "capacity_is_lower_bound": {
+          "type": "boolean"
+        },
+        "bottleneck_evidence": {
+          "type": "object"
+        },
+        "target_bottleneck": {
+          "type": "string"
+        },
+        "target_bottleneck_evidence": {
+          "type": "object"
+        },
+        "hardware_recommendation": {
+          "type": "string"
+        },
         "collectors": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "description": "Telemetry-collector status summary recorded at end of run ({collector_name: 'ok' | 'no_data' | 'disabled' | collector-specific error}). null on runs from before the collectors_json column existed.",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
-        "prefix_cache": { "type": ["object", "null"] },
-        "capacity_throughput": { "type": ["object", "null"] }
+        "prefix_cache": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "capacity_throughput": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "methodology": {
+          "type": "string",
+          "enum": [
+            "closed_loop",
+            "open_loop"
+          ],
+          "description": "Which measurement methodology produced this cohort's curve. closed_loop: fixed user pool ramped over pool sizes. open_loop: Poisson session arrivals searched over rate; capacity is the queue-stability boundary."
+        },
+        "open_loop": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Rate-space capacity verdict for open-loop runs (null for closed_loop). rate_max_per_min is the highest stable arrival rate, rate_ceiling_per_min the lowest divergent one (they bracket the true stability boundary); rate_sla_per_min is the highest stable rate whose steady-state turns also pass SLA. Concurrency is derived via Little's law, not assumed.",
+          "properties": {
+            "rate_sla_per_min": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "rate_max_per_min": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "rate_ceiling_per_min": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "rates_are_lower_bounds": {
+              "type": "boolean"
+            },
+            "coverage": {
+              "type": "string"
+            },
+            "derived_concurrent_sessions_at_sla": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "mean_session_duration_s": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "measured_concurrent_sessions_at_max": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "zones": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        }
       }
     },
     "curveEntry": {
@@ -150,49 +333,156 @@
         "total_visible_output_tokens"
       ],
       "properties": {
-        "step_index": { "type": "integer" },
-        "pool_size": { "type": "integer" },
-        "sample_size": { "type": "integer" },
-        "violation_rate": { "type": "number" },
-        "ttft_violation_rate": { "type": "number" },
-        "tpot_violation_rate": { "type": "number" },
-        "target_miss_rate": { "$ref": "#/$defs/nullableNumber" },
-        "ttft_target_miss_rate": { "$ref": "#/$defs/nullableNumber" },
-        "tpot_target_miss_rate": { "$ref": "#/$defs/nullableNumber" },
-        "ci_lower": { "type": "number" },
-        "ci_upper": { "type": "number" },
-        "ttft_p50_ms": { "$ref": "#/$defs/nullableNumber" },
-        "ttft_p95_ms": { "$ref": "#/$defs/nullableNumber" },
-        "tpot_p50_ms": { "$ref": "#/$defs/nullableNumber" },
-        "tpot_p95_ms": { "$ref": "#/$defs/nullableNumber" },
-        "ttfct_p50_ms": { "$ref": "#/$defs/nullableNumber" },
-        "ttfct_p95_ms": { "$ref": "#/$defs/nullableNumber" },
-        "avg_reasoning_tokens": { "$ref": "#/$defs/nullableNumber" },
-        "kv_cache_used_pct": { "$ref": "#/$defs/nullableNumber" },
-        "status": { "type": "string" },
-        "target_status": { "type": ["string", "null"] },
-        "measurement_started_at": { "type": ["string", "null"] },
-        "measurement_duration_s": { "$ref": "#/$defs/nullableNumber" },
-        "prompt_tokens": { "type": "integer" },
-        "content_tokens": { "type": "integer" },
-        "reasoning_tokens": { "type": "integer" },
-        "total_visible_output_tokens": { "type": "integer" },
-        "prompt_tok_per_s": { "$ref": "#/$defs/nullableNumber" },
-        "content_tok_per_s": { "$ref": "#/$defs/nullableNumber" },
-        "visible_output_tok_per_s": { "$ref": "#/$defs/nullableNumber" },
+        "step_index": {
+          "type": "integer"
+        },
+        "pool_size": {
+          "type": "integer"
+        },
+        "sample_size": {
+          "type": "integer"
+        },
+        "violation_rate": {
+          "type": "number"
+        },
+        "ttft_violation_rate": {
+          "type": "number"
+        },
+        "tpot_violation_rate": {
+          "type": "number"
+        },
+        "target_miss_rate": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "ttft_target_miss_rate": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "tpot_target_miss_rate": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "ci_lower": {
+          "type": "number"
+        },
+        "ci_upper": {
+          "type": "number"
+        },
+        "ttft_p50_ms": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "ttft_p95_ms": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "tpot_p50_ms": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "tpot_p95_ms": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "ttfct_p50_ms": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "ttfct_p95_ms": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "avg_reasoning_tokens": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "kv_cache_used_pct": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "status": {
+          "type": "string"
+        },
+        "target_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "measurement_started_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "measurement_duration_s": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "prompt_tokens": {
+          "type": "integer"
+        },
+        "content_tokens": {
+          "type": "integer"
+        },
+        "reasoning_tokens": {
+          "type": "integer"
+        },
+        "total_visible_output_tokens": {
+          "type": "integer"
+        },
+        "prompt_tok_per_s": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "content_tok_per_s": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "visible_output_tok_per_s": {
+          "$ref": "#/$defs/nullableNumber"
+        },
         "telemetry_samples": {
           "type": "array",
           "description": "Full export only (absent in slim): per-second within-window samples.",
-          "items": { "type": "object" }
+          "items": {
+            "type": "object"
+          }
         },
         "turns": {
           "type": "array",
           "description": "Full export only (absent in slim): per-turn events captured in the window.",
-          "items": { "type": "object" }
+          "items": {
+            "type": "object"
+          }
         },
         "timeline": {
           "type": "object",
           "description": "Full export only (absent in slim): per-second phase-distribution timeline."
+        },
+        "arrival_rate_per_min": {
+          "$ref": "#/$defs/nullableNumber",
+          "description": "Open-loop control variable: commanded session-arrival rate for this window. Absent/null on closed-loop rows (where pool_size is the control)."
+        },
+        "stability": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "stable",
+            "divergent",
+            "client_limited",
+            null
+          ],
+          "description": "Open-loop window verdict: stationary queue, unbounded growth, or the load generator saturated (even after scaling out workers)."
+        },
+        "queue_depth_mean": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "queue_depth_slope_per_min": {
+          "$ref": "#/$defs/nullableNumber",
+          "description": "Theil-Sen slope of the engine waiting-queue depth over the window. Meaningfully positive + Mann-Kendall-significant == divergent."
+        },
+        "active_sessions_mean": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "arrival_tardiness_p99_ms": {
+          "$ref": "#/$defs/nullableNumber",
+          "description": "p99 lateness of arrivals vs their wall-clock schedule \u2014 the generator's honesty signal."
+        },
+        "load_workers": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "mean_session_duration_s": {
+          "$ref": "#/$defs/nullableNumber"
         }
       }
     }

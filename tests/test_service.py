@@ -609,3 +609,38 @@ def test_headline_shape_endpoints(tmp_path) -> None:
             assert gen["summary"]["output_tokens"]["median"] == 2048
     finally:
         reload_personas()
+
+
+def test_optimizer_log_heartbeat(tmp_path, monkeypatch) -> None:
+    """The heartbeat narrates the log tail: config N of M, current
+    phase with elapsed time, last measured cell."""
+    import time as _time
+
+    from simulator.service import _log_heartbeat
+
+    log = tmp_path / "optimizer_x.log"
+    now = _time.localtime()
+    stamp = f"[{now.tm_hour:02d}:{now.tm_min:02d}:{now.tm_sec:02d}]"
+    log.write_text(f"""\
+[23:13:54] === Config 2/43: s001_qwen3.6-35b-a3b-nvfp4_tp1dp8_spread ===
+[23:15:12] phase: launching
+[23:19:08] phase: cell ladder_c0512 (in=512 out=256 c=512 ttft<120s)
+[23:19:31] ladder_c0512: n=512 err=0 timeouts=0 ttft_p95=2278ms tpot_p95=57ms tok/s=8362.6
+[23:19:31] phase: cleanup
+[23:19:37] === Config 3/43: s002_qwen3.6-35b-a3b-nvfp4_tp1dp8_pack ===
+{stamp} phase: waiting for health
+""")
+    hb = _log_heartbeat(log)
+    assert hb["config"] == 3 and hb["configs_total"] == 43
+    assert hb["config_name"].endswith("tp1dp8_pack")
+    assert hb["phase"] == "waiting for health"
+    assert 0 <= hb["phase_elapsed_s"] <= 5
+    assert hb["last_measure"].startswith("ladder_c0512:")
+    assert "tok/s=8362.6" in hb["last_measure"]
+    assert hb["last_activity_s"] <= 5
+
+    # Missing/empty logs degrade to None, never an exception.
+    assert _log_heartbeat(tmp_path / "nope.log") is None
+    empty = tmp_path / "empty.log"
+    empty.write_text("")
+    assert _log_heartbeat(empty) is None

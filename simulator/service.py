@@ -364,6 +364,57 @@ def _list_runs(base: Path) -> list[dict]:
     return out
 
 
+def _log_heartbeat(log_path) -> Optional[dict]:
+    """Live progress derived from the optimizer's own log tail: which
+    config of how many, which phase and for how long, and the last
+    measured cell — so the UI shows a heartbeat through the
+    minutes-long engine launches instead of dead air."""
+    import re
+    try:
+        p = Path(log_path)
+        with p.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 32768))
+            tail = f.read().decode("utf-8", "replace")
+        mtime = p.stat().st_mtime
+    except OSError:
+        return None
+    lines = [ln for ln in tail.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    hb: dict = {
+        "last_line": lines[-1][-220:],
+        "last_activity_s": max(0, round(time.time() - mtime)),
+    }
+    cfg_re = re.compile(r"=== Config (\d+)/(\d+): (\S+) ===")
+    ph_re = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] phase: (.+)$")
+    meas_re = re.compile(r"\] (ladder_\S+: .*tok/s=[\d.]+.*)$")
+    for ln in reversed(lines):
+        m = cfg_re.search(ln)
+        if m and "config" not in hb:
+            hb["config"] = int(m.group(1))
+            hb["configs_total"] = int(m.group(2))
+            hb["config_name"] = m.group(3)
+        m = ph_re.match(ln)
+        if m and "phase" not in hb:
+            hb["phase"] = m.group(4)
+            # Log stamps are host-local HH:MM:SS; the service runs on
+            # the same host, so a wall-clock diff is exact (with a
+            # midnight wrap guard).
+            now = time.localtime()
+            dt = (now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec
+                  - (int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                     + int(m.group(3))))
+            hb["phase_elapsed_s"] = dt + 86400 if dt < 0 else dt
+        m = meas_re.search(ln)
+        if m and "last_measure" not in hb:
+            hb["last_measure"] = m.group(1)[:160]
+        if all(k in hb for k in ("config", "phase", "last_measure")):
+            break
+    return hb
+
+
 def _finalise_orphan_runs(base: Path) -> None:
     """Stamp 'interrupted' on cohort_run rows left unfinalised by a
     hard serve kill. Runs at service startup, when nothing can be
@@ -1627,6 +1678,9 @@ def create_app(
                 "external": True,
                 "pid": ext.get("pid"),
             }
+        if out["running"] and out.get("active", {}).get("log"):
+            out["active"]["heartbeat"] = await asyncio.to_thread(
+                _log_heartbeat, out["active"]["log"])
         return out
 
     @app.post("/api/optimizer/start", status_code=202)

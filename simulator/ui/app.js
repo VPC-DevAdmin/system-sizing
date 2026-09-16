@@ -2246,10 +2246,12 @@ const Optimizer = {
     if (status.running) {
       this.msg(`running (${status.active.profile}${status.active.external
         ? " — attached to in-flight run" : ""}) — log: ${status.active.log}`);
+      this.renderHeartbeat(status.active);
       if (!this.polling) {
         this.polling = setInterval(() => this.refresh(), 4000);
       }
     } else {
+      $("#opt-heartbeat").hidden = true;
       if (this.polling) { clearInterval(this.polling); this.polling = null; }
       if (status.active && status.active.exit_code !== null) {
         this.msg(
@@ -2310,6 +2312,49 @@ const Optimizer = {
     }
     this.renderResults(showSearch ? null : rr);
     this.renderSearch(showSearch ? sr : null);
+  },
+
+  /* Live pulse while the optimizer runs. Each candidate is minutes of
+   * silent engine launch before seconds of measurement — narrate the
+   * phase and its elapsed time (from the server's log-tail heartbeat)
+   * so the launch quiet never reads as a hang. */
+  renderHeartbeat(active) {
+    const box = $("#opt-heartbeat");
+    if (!box) return;
+    const hb = active?.heartbeat;
+    box.hidden = !hb;
+    if (!hb) return;
+    const mmss = s => (s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`);
+    const PHASES = [
+      [/^launching/, () => "launching engine containers"],
+      [/^waiting for health/, () => `engine replicas loading the model &
+        compiling — the quiet minutes are normal (typically 3–5 min)`],
+      [/^probing/, () => "probing replicas"],
+      [/^warmup/, () => "warming up"],
+      [/^cell \S*c0*(\d+)/, m => `measuring at ${m[1]} concurrent streams`],
+      [/^cleanup/, () => "tearing down engines"],
+    ];
+    let phase = hb.phase || "…";
+    for (const [re, label] of PHASES) {
+      const m = phase.match(re);
+      if (m) { phase = label(m); break; }
+    }
+    const pct = hb.configs_total
+      ? Math.round(100 * ((hb.config || 1) - 1) / hb.configs_total) : 0;
+    const stale = (hb.last_activity_s ?? 0) > 600;
+    box.innerHTML = `
+      <span class="pulse${stale ? " stale" : ""}"></span>
+      <b>Config ${hb.config ?? "?"} of ${hb.configs_total ?? "?"}</b>
+      ${hb.config_name
+        ? `<code>${hb.config_name.replace(/^s\d+_/, "")}</code>` : ""}
+      <span class="dl-bar"><i style="width:${pct}%"></i></span>${pct}%
+      <div class="hb-line">${phase}${hb.phase_elapsed_s != null
+        ? ` · ${mmss(hb.phase_elapsed_s)} in this phase` : ""}
+        · last log activity ${mmss(hb.last_activity_s ?? 0)} ago${stale
+        ? ' — <span class="status-fail">unusually quiet — check the log</span>'
+        : ""}</div>
+      ${hb.last_measure ? `<div class="hb-line msg">last measurement:
+        <code>${hb.last_measure}</code></div>` : ""}`;
   },
 
   historyView: null,       // archive file name being viewed, or null

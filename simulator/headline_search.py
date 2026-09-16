@@ -20,9 +20,11 @@ from the ENGINE'S OWN counters (token totals + num_running), so
 client-side lag cannot distort the measurement. ~35-45 seconds per
 cell → a 12-cell hill-climb finishes in minutes.
 
-The winning shape is saved as the persona ``headline_best`` for a
-full-resolution open-loop capacity run afterwards, and a summary of
-every cell lands in ``run_NN/headline_search.json``.
+The winning shape becomes the DEFAULT of the "Headline: Generation"
+workload (its persona overlay is rewritten in place) and is recorded
+per MODEL FAMILY in ``config/headline_shapes.json`` — pick a sibling
+model later and the UI offers to load the family's optimum. A summary
+of every cell lands in ``run_NN/headline_search.json``.
 
 Caveat the summary states explicitly: concurrency is capped by the
 ENGINE shape (max_num_seqs × replicas) — this search finds the best
@@ -54,7 +56,6 @@ LATTICE_IN = [32, 64, 128, 256, 512, 1024, 2048, 4096]
 LATTICE_OUT = [64, 128, 256, 512, 1024, 2048, 4096]
 
 CELL_PERSONA_ID = "headline_cell"
-WINNER_PERSONA_ID = "headline_best"
 
 # Saturation-pressure controller bounds.
 INITIAL_OUTSTANDING = 512
@@ -368,27 +369,34 @@ async def run_headline_search(
             (c for c in cells
              if (c.input_tokens, c.output_tokens) == best), None,
         ) if best else None
+        family = None
         if winner and winner.objective > 0:
-            _write_persona_overlay(
-                catalog_dir, WINNER_PERSONA_ID,
-                _cell_persona_spec(
-                    winner.input_tokens, winner.output_tokens,
-                    name=(f"Headline: best shape "
-                          f"({winner.input_tokens}→{winner.output_tokens})"),
-                    description=(
-                        f"Shape found by the headline search: jointly "
-                        f"maximizes concurrency (~{winner.in_flight:.0f} "
-                        f"running) and output throughput "
-                        f"(~{winner.out_tok_s:.0f} tok/s) on this engine. "
-                        f"Re-run this workload for the full-resolution "
-                        f"headline numbers. Marketing stress test — says "
-                        f"nothing about real users."),
-                ))
+            # The winner becomes the Headline: Generation default AND
+            # the model family's stored optimum, so siblings of this
+            # model can load it later without re-searching.
+            from .headline_shapes import (
+                apply_shape_to_generation,
+                save_shape,
+                shapes_path,
+            )
+            apply_shape_to_generation(
+                catalog_dir, winner.input_tokens, winner.output_tokens)
+            family = save_shape(
+                shapes_path(catalog_dir), cfg.engine.model_id, {
+                    "input_tokens": winner.input_tokens,
+                    "output_tokens": winner.output_tokens,
+                    "in_flight": winner.in_flight,
+                    "out_tok_s": winner.out_tok_s,
+                    "objective": round(winner.objective, 1),
+                    "found_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                })
         else:
             reload_personas()
         summary = {
             "winner": asdict(winner) if winner else None,
-            "saved_persona": WINNER_PERSONA_ID if winner else None,
+            "applied_to": (
+                {"persona": "headline_generation", "family": family}
+                if winner and winner.objective > 0 else None),
             "outstanding": outstanding,
             "cells": [asdict(c) for c in cells],
             "duration_s": round(time.monotonic() - started),

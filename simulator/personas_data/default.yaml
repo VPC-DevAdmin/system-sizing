@@ -148,12 +148,13 @@ personas:
   # not an experience knee.
 
   headline_generation:
-    name: "Headline: max generation"
+    name: "Headline: Generation"
     description: >-
       Marketing-number stress test — zero-think request firehose with
-      small prompts and exactly-1K-token answers (EOS ignored, like
-      vendor benches). Maximizes OUTPUT tokens/sec; says nothing about
-      real users.
+      fixed-size prompts and answers (EOS ignored, like vendor
+      benches). Maximizes concurrency and OUTPUT tokens/sec; the shape
+      search saves its winning input/output sizes here. Says nothing
+      about real users.
     ignore_eos: true
     input_tokens: {constant: 32}
     output_tokens: {constant: 1024}
@@ -169,7 +170,7 @@ personas:
       tpot_failure_ms: 2000.0
 
   headline_ingest:
-    name: "Headline: max ingest"
+    name: "Headline: Ingest"
     description: >-
       Marketing-number stress test — zero-think firehose with 4K-token
       prompts and tiny answers. Maximizes TOTAL tokens/sec through the
@@ -177,28 +178,6 @@ personas:
     ignore_eos: true
     input_tokens: {constant: 4096}
     output_tokens: {constant: 64}
-    turns_per_session: {constant: 1}
-    sessions_before_leaving: {constant: 1}
-    inter_session_gap_seconds: {constant: 1}
-    read_time_seconds: {constant: 0}
-    active_think_seconds: {constant: 0}
-    sla:
-      ttft_target_seconds: 30.0
-      ttft_failure_seconds: 120.0
-      tpot_target_ms: 500.0
-      tpot_failure_ms: 2000.0
-
-  headline_vendor:
-    name: "Headline: vendor 128/128"
-    description: >-
-      The exact convention vendor blogs use (128 tokens in, exactly
-      128 out, EOS ignored, zero think): tiny KV per request makes the
-      "concurrent users" count maximal, and with input = output half
-      the quoted tokens/sec is cheap prefill. Run this for the
-      apples-to-apples comparison against published tables.
-    ignore_eos: true
-    input_tokens: {constant: 128}
-    output_tokens: {constant: 128}
     turns_per_session: {constant: 1}
     sessions_before_leaving: {constant: 1}
     inter_session_gap_seconds: {constant: 1}

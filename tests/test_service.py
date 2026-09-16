@@ -564,3 +564,48 @@ def test_distribution_summaries() -> None:
 
     s = summarize(Constant(7))
     assert s == {"median": 7, "mean": 7, "p90": 7}
+
+
+def test_headline_shape_endpoints(tmp_path) -> None:
+    """Per-family shape store: nothing stored → 404 on apply; stored →
+    the apply endpoint rewrites Headline: Generation and the GET
+    reports it active. Internal search personas never appear in the
+    catalog listing."""
+    from simulator.headline_shapes import save_shape, shapes_path
+    from simulator.personas import reload_personas
+    from simulator.service import create_app
+
+    catalog = tmp_path / "personas"
+    catalog.mkdir()
+    try:
+        with TestClient(create_app(tmp_path / "runs",
+                                   catalog_dir=catalog)) as client:
+            ids = {p["id"] for p in client.get("/api/personas").json()}
+            assert "headline_generation" in ids and "headline_ingest" in ids
+            assert "headline_cell" not in ids and "headline_best" not in ids
+
+            model = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+            r = client.get("/api/headline-shape", params={"model": model})
+            assert r.json()["shape"] is None
+            r = client.post("/api/headline-shape/apply",
+                            json={"model": model})
+            assert r.status_code == 404
+
+            save_shape(shapes_path(catalog), model + "-FP8",
+                       {"input_tokens": 256, "output_tokens": 2048})
+            r = client.get("/api/headline-shape",
+                           params={"model": model}).json()
+            assert r["shape"]["input_tokens"] == 256
+            assert r["active"] is False
+            r = client.post("/api/headline-shape/apply",
+                            json={"model": model})
+            assert r.status_code == 200
+            r = client.get("/api/headline-shape",
+                           params={"model": model}).json()
+            assert r["active"] is True
+            gen = next(p for p in client.get("/api/personas").json()
+                       if p["id"] == "headline_generation")
+            assert gen["summary"]["input_tokens"]["median"] == 256
+            assert gen["summary"]["output_tokens"]["median"] == 2048
+    finally:
+        reload_personas()

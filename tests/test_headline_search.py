@@ -89,6 +89,54 @@ def test_cell_result_objective_roundtrip():
     assert r.objective == (800.0 * 20000.0) ** 0.5
 
 
+def test_model_family_strips_org_and_quantization():
+    from simulator.headline_shapes import model_family
+    assert model_family("Qwen/Qwen3-30B-A3B-Instruct-2507") \
+        == model_family("Qwen/Qwen3-30B-A3B-Instruct-2507-FP8") \
+        == "qwen3-30b-a3b-instruct-2507"
+    assert model_family("meta-llama/Llama-3.1-70B-Instruct-AWQ") \
+        == model_family("other-org/Llama-3.1-70B-Instruct")
+    # Different sizes are different families.
+    assert model_family("Qwen/Qwen3-30B-A3B") != model_family("Qwen/Qwen3-4B")
+
+
+def test_shape_store_roundtrip(tmp_path):
+    from simulator.headline_shapes import save_shape, shape_for
+    path = tmp_path / "headline_shapes.json"
+    fam = save_shape(path, "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+                     {"input_tokens": 256, "output_tokens": 1024,
+                      "objective": 4000.0})
+    assert fam == "qwen3-30b-a3b-instruct-2507"
+    # The auto sibling resolves to the same stored optimum.
+    got = shape_for(path, "Qwen/Qwen3-30B-A3B-Instruct-2507")
+    assert got["input_tokens"] == 256 and got["output_tokens"] == 1024
+    assert got["model_id"].endswith("-FP8")
+    assert shape_for(path, "Qwen/Qwen3-4B") is None
+
+
+def test_apply_shape_updates_generation_persona(tmp_path):
+    """The winner lands IN Headline: Generation — same id, new
+    token distributions, everything else preserved."""
+    import random
+
+    from simulator.headline_shapes import (
+        apply_shape_to_generation,
+        generation_shape,
+    )
+    from simulator.personas import PERSONAS, reload_personas
+    try:
+        apply_shape_to_generation(tmp_path, 512, 2048)
+        p = PERSONAS["headline_generation"]
+        rng = random.Random(0)
+        assert p.input_tokens.sample_int(rng) == 512
+        assert p.output_tokens.sample_int(rng) == 2048
+        assert p.ignore_eos is True                  # preserved
+        assert p.name == "Headline: Generation"      # preserved
+        assert generation_shape() == (512, 2048)
+    finally:
+        reload_personas()
+
+
 def test_outstanding_mode_holds_and_respawns(monkeypatch):
     """Saturation mode: the launcher keeps exactly N sessions active,
     respawning as each finishes — the fast shape search's pressure

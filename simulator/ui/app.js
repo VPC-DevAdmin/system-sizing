@@ -298,6 +298,19 @@ const Control = {
         ?? this.conservativeDefaults(entry));
     }
     this.renderModelNote(model, entry);
+    this.fetchHeadlineShape();
+  },
+
+  /* Does this model's FAMILY have a stored optimal shape? Cached on
+   * the controller; the workload note reads it. */
+  async fetchHeadlineShape() {
+    const model = $("#bench-model").value;
+    if (!model) { this.headlineShape = null; return; }
+    try {
+      this.headlineShape = await api(
+        `/api/headline-shape?model=${encodeURIComponent(model)}`);
+    } catch { this.headlineShape = null; }
+    this.updateWorkloadNote();
   },
 
   renderModelNote(model, entry) {
@@ -508,16 +521,17 @@ const Control = {
     }
   },
 
-  /* The "Optimize the shape" affordance under headline workloads —
-   * mirrors the engine-optimizer link on the model side. Running →
-   * completion bar (cells done / budget, current shape); finished →
-   * the winner is saved as the "Headline: best shape" workload. */
+  /* The shape affordance under Headline: Generation — mirrors the
+   * engine-optimizer note on the model side. Running → completion bar
+   * (cells done / budget, current shape); the winner becomes THIS
+   * workload's shape and is remembered per model family, so picking a
+   * sibling model later offers a one-click "load the optimal shape". */
   updateWorkloadNote() {
     const note = $("#workload-note");
     if (!note) return;
     const w = $("#workload-select").value || "";
     const pid = w.startsWith("persona:") ? w.slice(8) : "";
-    if (!pid.startsWith("headline_")) { note.innerHTML = ""; return; }
+    if (pid !== "headline_generation") { note.innerHTML = ""; return; }
     const active = this.lastActive;
     const searching = active?.running
       && active.workload?.kind === "headline_search";
@@ -532,26 +546,40 @@ const Control = {
         <span class="dl-bar"><i style="width:${pct}%"></i></span>${pct}%`;
       return;
     }
-    const best = this.catalogs.personas
-      .find(p => p.id === "headline_best");
-    note.innerHTML =
-      (best && pid === "headline_best"
-        ? `<span class="ok-note">✓ Shape-optimized workload — found by
-           the shape search on this engine</span> `
-        : best
-          ? `<span class="ok-note">✓ Optimized shape saved as
-             "${best.name}"</span>
-             <button type="button" class="note-link"
-               id="use-best-shape">use it →</button> `
-          : "")
+    const hs = this.headlineShape;
+    const stored = hs?.shape;
+    const fam = hs?.family || "this model family";
+    let html = "";
+    if (stored && hs.active) {
+      html = `<span class="ok-note">✓ Using the optimized shape for
+        ${fam} (${stored.input_tokens} in → ${stored.output_tokens}
+        out)</span> `;
+    } else if (stored) {
+      html = `<button type="button" class="note-link"
+        id="load-best-shape">⚡ Load the optimal shape for ${fam}
+        (${stored.input_tokens} in → ${stored.output_tokens}
+        out)</button> `;
+    }
+    note.innerHTML = html
       + `<button type="button" class="note-link" id="optimize-shape">⚙
          Optimize the shape</button>`;
-    $("#use-best-shape")?.addEventListener("click", () => {
-      $("#workload-select").value = "persona:headline_best";
-      this.showDetails();
-    });
+    $("#load-best-shape")?.addEventListener("click", () =>
+      this.applyHeadlineShape());
     $("#optimize-shape")?.addEventListener("click", () =>
       this.startShapeSearch());
+  },
+
+  async applyHeadlineShape() {
+    const model = $("#bench-model").value;
+    try {
+      await api("/api/headline-shape/apply", {
+        method: "POST", body: JSON.stringify({ model }),
+      });
+      await this.loadCatalogs();   // refreshed medians → green check
+      this.msg("optimal shape loaded into Headline: Generation", "ok");
+    } catch (e) {
+      this.msg(e.message, "error");
+    }
   },
 
   async startShapeSearch() {
@@ -561,8 +589,8 @@ const Control = {
     try {
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
       this.msg("shape search started — shapes change on the fly at "
-        + "saturation, ~40s per cell, done in minutes; the bar under "
-        + "the workload tracks it", "ok");
+        + "saturation, ~40s per cell, done in minutes; the winner "
+        + "becomes Headline: Generation's shape", "ok");
       this._shapeSearchWas = true;
       this.pollStatus();
     } catch (e) {

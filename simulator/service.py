@@ -406,6 +406,19 @@ def create_app(
     app.state.optimizer_catalog: Optional[dict] = None
     app.state.model_downloads: dict = {}             # model -> {proc, log, started_at}
 
+    # A previous release saved the shape-search winner as its own
+    # "headline_best" persona; the winner now lands IN the Headline:
+    # Generation workload, so retire any stale overlay.
+    if catalog_dir is None:
+        from .persona_loader import USER_CATALOG_DIR as _ucd
+        _stale = _ucd / "headline_best.yaml"
+    else:
+        _stale = catalog_dir / "headline_best.yaml"
+    if _stale.exists():
+        _stale.unlink()
+        from .personas import reload_personas as _rp
+        _rp(user_dir=catalog_dir)
+
     # ── introspection ─────────────────────────────────────────────
 
     @app.get("/api/status")
@@ -534,6 +547,10 @@ def create_app(
         return {"input_tokens": inp, "output_tokens": out,
                 "turns_per_session": turns, "think_gap_s": gap}
 
+    # Working personas of the shape search — real registry entries
+    # (workers must resolve them) but not workloads a user picks.
+    _INTERNAL_PERSONAS = {"headline_cell", "headline_best"}
+
     @app.get("/api/personas")
     async def personas() -> list[dict]:
         from .personas import PERSONAS
@@ -549,6 +566,7 @@ def create_app(
                 "summary": _persona_summary(p),
             }
             for p in PERSONAS.values()
+            if p.id not in _INTERNAL_PERSONAS
         ]
 
     @app.get("/api/cohorts")
@@ -672,6 +690,48 @@ def create_app(
     async def cohort_save(cohort_id: str, req: SaveSpecRequest) -> dict:
         _save_catalog_entry("cohorts", cohort_id, req.yaml, req.spec)
         return {"saved": cohort_id}
+
+    # ── headline shape store ──────────────────────────────────────
+    # The shape search's winner is stored per MODEL FAMILY; the UI
+    # asks whether the selected model's family has one, and can apply
+    # it to the Headline: Generation workload with one click.
+
+    @app.get("/api/headline-shape")
+    async def headline_shape(model: str) -> dict:
+        from .headline_shapes import (
+            generation_shape,
+            model_family,
+            shape_for,
+            shapes_path,
+        )
+        stored = shape_for(shapes_path(_catalog_dir()), model)
+        current = generation_shape()
+        return {
+            "family": model_family(model),
+            "shape": stored,
+            "active": bool(
+                stored and current
+                and current == (stored.get("input_tokens"),
+                                stored.get("output_tokens"))),
+        }
+
+    @app.post("/api/headline-shape/apply")
+    async def headline_shape_apply(req: dict) -> dict:
+        from .headline_shapes import (
+            apply_shape_to_generation,
+            shape_for,
+            shapes_path,
+        )
+        model = str(req.get("model") or "")
+        stored = shape_for(shapes_path(_catalog_dir()), model)
+        if not stored:
+            raise HTTPException(
+                404, f"no optimized shape stored for '{model}' — run "
+                     "the shape search first")
+        await asyncio.to_thread(
+            apply_shape_to_generation, _catalog_dir(),
+            stored["input_tokens"], stored["output_tokens"])
+        return {"applied": True, "shape": stored}
 
     @app.get("/api/hardware")
     async def hardware_summary() -> dict:

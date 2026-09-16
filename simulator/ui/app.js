@@ -332,7 +332,24 @@ const Live = {
       { label: "warm think", data: [], borderColor: C.gold },
       { label: "cold", data: [], borderColor: C.muted, borderDash: [4, 4] },
     ]);
-    this.connect();
+    // Backfill BEFORE the live stream: a page opened mid-run replays
+    // the run's recent history (snapshots, telemetry, turns, steps)
+    // through the same handlers, so it shows where the run IS and
+    // what it has done — not just what happens after load.
+    this.backfill().finally(() => this.connect());
+  },
+
+  async backfill() {
+    let doc;
+    try { doc = await api("/api/live/backfill"); } catch { return; }
+    if (!doc.run) return;
+    for (const t of doc.turns ?? []) this.onTurn(t.completed_at_ms, t);
+    for (const s of doc.snapshots ?? []) this.onSnapshot(s.snapshot_at_ms, s);
+    for (const t of doc.telemetry ?? []) this.onTelemetry(t.sampled_at_ms, t);
+    for (const s of doc.steps ?? []) this.onStep(s);
+    if (doc.run.final_status) {
+      $("#live-phase").textContent = `finished (${doc.run.final_status})`;
+    }
   },
 
   connect() {

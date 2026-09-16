@@ -1346,6 +1346,68 @@ def create_app(
                 raise HTTPException(500, f"export failed: {e}") from e
         return json.loads(p.read_text())
 
+    @app.get("/api/live/backfill")
+    async def live_backfill(window_s: int = 600) -> dict:
+        """History for the newest cohort run, shaped like the live
+        WS events — a page opened mid-run (or after) replays this
+        into the same chart handlers, so the view shows where the
+        run IS and what it has done, not just what happens next."""
+        from .runs import latest_run_dir
+
+        def _read() -> dict:
+            d = latest_run_dir(runs_base)
+            if d is None or not (d / "run.db").exists():
+                return {"run": None, "snapshots": [], "telemetry": [],
+                        "turns": [], "steps": []}
+            conn = sqlite3.connect(f"file:{d / 'run.db'}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            try:
+                run = conn.execute(
+                    "SELECT cohort_run_id, cohort_id, engine_type, "
+                    "model_id, started_at, completed_at, final_status "
+                    "FROM cohort_run ORDER BY started_at DESC LIMIT 1"
+                ).fetchone()
+                if run is None:
+                    return {"run": None, "snapshots": [], "telemetry": [],
+                            "turns": [], "steps": []}
+                crid = run["cohort_run_id"]
+                cutoff = int((time.time() - window_s) * 1000)
+                snapshots = [dict(r) for r in conn.execute(
+                    "SELECT * FROM simulation_snapshots WHERE "
+                    "cohort_run_id = ? AND snapshot_at_ms > ? "
+                    "ORDER BY snapshot_at_ms DESC LIMIT 600",
+                    (crid, cutoff)).fetchall()][::-1]
+                steps = [dict(r) for r in conn.execute(
+                    "SELECT step_index, target_pool_size AS pool_size, "
+                    "sample_size, combined_violation_rate, "
+                    "combined_target_miss_rate, ttft_p95_ms, tpot_p95_ms, "
+                    "capacity_status FROM cohort_measurements WHERE "
+                    "cohort_run_id = ? ORDER BY step_index",
+                    (crid,)).fetchall()]
+                mids = [r[0] for r in conn.execute(
+                    "SELECT measurement_id FROM cohort_measurements "
+                    "WHERE cohort_run_id = ?", (crid,)).fetchall()]
+                telemetry, turns = [], []
+                if mids:
+                    ph = ",".join("?" for _ in mids)
+                    telemetry = [dict(r) for r in conn.execute(
+                        f"SELECT * FROM measurement_telemetry WHERE "
+                        f"measurement_id IN ({ph}) AND sampled_at_ms > ? "
+                        f"ORDER BY sampled_at_ms DESC LIMIT 300",
+                        (*mids, cutoff)).fetchall()][::-1]
+                    turns = [dict(r) for r in conn.execute(
+                        f"SELECT completed_at_ms, ttft_ms, tpot_ms, "
+                        f"error FROM turn_events WHERE "
+                        f"measurement_id IN ({ph}) "
+                        f"ORDER BY completed_at_ms DESC LIMIT 40",
+                        (*mids,)).fetchall()][::-1]
+                return {"run": dict(run), "snapshots": snapshots,
+                        "telemetry": telemetry, "turns": turns,
+                        "steps": steps}
+            finally:
+                conn.close()
+        return await asyncio.to_thread(_read)
+
     # ── live telemetry ────────────────────────────────────────────
 
     @app.websocket("/ws/telemetry")

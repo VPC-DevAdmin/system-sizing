@@ -212,3 +212,82 @@ def test_ui_served_and_per_run_export(tmp_path, fast_persona) -> None:
         assert doc2["schema_version"] == doc["schema_version"]
         # Path traversal refused.
         assert client.get("/api/runs/..%2Fsecrets/export").status_code in (404, 422)
+
+
+def test_live_backfill_endpoint(tmp_path) -> None:
+    """A page opened mid-run (or after) gets the run's recent history
+    shaped like the live WS events: snapshots, telemetry, turns, and
+    the completed steps."""
+    import time as _t
+
+    from fastapi.testclient import TestClient
+
+    from simulator.database import Database
+    from simulator.service import create_app
+
+    runs = tmp_path / "runs"
+    run_dir = runs / "run_01"
+    run_dir.mkdir(parents=True)
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-09-16T00:00:00Z",
+        engine_type="vllm_cuda_multi", model_id="org/M",
+        cohort_id="chat_heavy",
+        cohort_definition={"name": "c", "description": "",
+                           "persona_weights": {"p": 1.0}},
+        config={"engine": {"type": "vllm_cuda_multi"}},
+    )
+    now_ms = int(_t.time() * 1000)
+    db.insert_snapshot({
+        "cohort_run_id": "crid", "snapshot_at_ms": now_ms - 5000,
+        "phase": "measuring", "pool_size": 2048, "in_flight": 130,
+        "prefill_in_flight": 10, "decode_in_flight": 120,
+        "sessions_warm": 900, "sessions_cold": 1018,
+        "warm_kv_tokens": 412000, "requests_completed": 5000,
+        "errors": 0, "step_samples": 250, "step_target_samples": 500,
+        "loop_lag_ms": 12.0,
+    })
+    mid = db.insert_measurement({
+        "cohort_run_id": "crid", "step_index": 0,
+        "target_pool_size": 1024, "measured_avg_pool_size": 1024.0,
+        "measured_avg_in_flight": 60.0,
+        "measurement_started_at": "2026-09-16T00:05:00Z",
+        "measurement_duration_s": 60, "sample_size": 500,
+        "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+        "combined_violation_rate": 0.0,
+        "combined_target_miss_rate": 0.0,
+        "violation_rate_ci_lower": 0.0, "violation_rate_ci_upper": 0.01,
+        "ttft_p95_ms": 620.0, "tpot_p95_ms": 26.0,
+        "capacity_status": "pass",
+    })
+    db.insert_telemetry([{
+        "measurement_id": mid, "sampled_at_ms": now_ms - 4000,
+        "kv_cache_used_pct": 22.0, "cpu_util_bound_avg": 40.0,
+        "gpu_sm_util_pct": 55.0, "prefill_tok_s": 15000.0,
+        "decode_tok_s": 3500.0,
+    }])
+    db.insert_events([{
+        "measurement_id": mid, "persona_id": "p", "user_id": "u",
+        "session_id": "s", "turn_index": 0,
+        "submitted_at_ms": now_ms - 6000, "ttft_ms": 300.0,
+        "completed_at_ms": now_ms - 4500, "input_tokens": 100,
+        "history_tokens": 0, "output_tokens": 80, "tpot_ms": 18.0,
+        "end_to_end_ms": 1500.0, "in_flight_at_submit": 50,
+        "sla_ttft_violation": 0, "sla_tpot_violation": 0,
+    }])
+    db.close()
+
+    with TestClient(create_app(runs)) as client:
+        doc = client.get("/api/live/backfill").json()
+        assert doc["run"]["cohort_id"] == "chat_heavy"
+        assert doc["snapshots"][0]["pool_size"] == 2048
+        assert doc["snapshots"][0]["warm_kv_tokens"] == 412000
+        assert doc["telemetry"][0]["decode_tok_s"] == 3500.0
+        assert doc["turns"][0]["ttft_ms"] == 300.0
+        s = doc["steps"][0]
+        assert s["pool_size"] == 1024 and s["capacity_status"] == "pass"
+
+        # Empty runs dir degrades to an empty (not erroring) shape.
+        empty = create_app(tmp_path / "none")
+        with TestClient(empty) as c2:
+            assert c2.get("/api/live/backfill").json()["run"] is None

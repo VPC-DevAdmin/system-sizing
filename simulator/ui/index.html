@@ -168,29 +168,50 @@
   <section class="panel">
     <h2>Start a capacity benchmark</h2>
     <div class="form-grid">
-      <label>Profile
+      <label>What to benchmark
         <select id="profile-select"></select>
+        <span id="profile-detail" class="hint"></span>
       </label>
-      <label>Workload kind
-        <select id="workload-kind">
-          <option value="cohort">Cohort (team mix)</option>
-          <option value="persona">Persona (single archetype)</option>
-          <option value="sweep">Sweep (many workloads)</option>
-        </select>
+      <label>Workload
+        <select id="workload-select"></select>
+        <span id="workload-detail" class="hint"></span>
       </label>
-      <label id="workload-id-wrap">Workload
-        <select id="workload-id"></select>
-      </label>
-      <label id="sweep-type-wrap" hidden>Sweep type
-        <input id="sweep-type" value="all"
-               placeholder="all | personas | cohorts | a,b,c">
-      </label>
-      <label>Pool sizes <span class="hint">(optional, e.g. 8,16,32)</span>
-        <input id="pool-sizes" placeholder="default: powers of 2">
-      </label>
-      <label class="check"><input type="checkbox" id="adaptive" checked> Adaptive two-knee stepper</label>
-      <label class="check"><input type="checkbox" id="new-run"> New run dir (don't resume)</label>
+      <label class="check"><input type="checkbox" id="new-run"> Fresh run (don't resume)</label>
     </div>
+    <details id="bench-advanced" style="margin-bottom:14px">
+      <summary class="msg" style="cursor:pointer">Advanced</summary>
+      <div class="form-grid" style="margin-top:12px">
+        <label class="check"><input type="checkbox" id="adaptive" checked>
+          Adaptive knee search <span class="hint">(uncheck for a fixed
+          powers-of-2 grid)</span></label>
+        <label>Fixed pool sizes <span class="hint">(overrides the search,
+          e.g. 256,512,1024)</span>
+          <input id="pool-sizes" placeholder="leave empty for automatic">
+        </label>
+        <label class="check"><input type="checkbox" id="custom-toggle">
+          Custom engine <span class="hint">(benchmark a downloaded model
+          with hand-set settings)</span></label>
+      </div>
+      <div id="custom-engine" class="form-grid" hidden>
+        <label>Model <span class="hint">(downloaded only)</span>
+          <select id="custom-model"></select></label>
+        <label>Replicas <input id="custom-replicas" type="number"
+          min="1" max="16" value="8" style="width:70px"></label>
+        <label>GPUs per replica (TP) <input id="custom-tp" type="number"
+          min="1" max="8" value="1" style="width:70px"></label>
+        <label>Max sequences / replica
+          <input id="custom-seqs" type="number" placeholder="engine default"
+            style="width:110px"></label>
+        <label>Batched tokens / step
+          <input id="custom-mbt" type="number" placeholder="engine default"
+            style="width:110px"></label>
+        <label>KV cache
+          <select id="custom-kv">
+            <option value="">default</option>
+            <option value="fp8">fp8 (double capacity)</option>
+          </select></label>
+      </div>
+    </details>
     <div class="row">
       <button id="start-btn" class="primary">Start run</button>
       <button id="stop-btn" class="danger" disabled>Stop run</button>

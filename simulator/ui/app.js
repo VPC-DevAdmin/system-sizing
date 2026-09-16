@@ -116,7 +116,13 @@ const Control = {
   async init() {
     await this.loadCatalogs();
     this.refreshRuns();
-    $("#workload-kind").addEventListener("change", () => this.fillWorkloads());
+    $("#profile-select").addEventListener("change", () => this.showDetails());
+    $("#workload-select").addEventListener("change", () => this.showDetails());
+    $("#custom-toggle").addEventListener("change", e => {
+      $("#custom-engine").hidden = !e.target.checked;
+      $("#profile-select").disabled = e.target.checked;
+      if (e.target.checked) this.fillCustomModels();
+    });
     $("#start-btn").addEventListener("click", () => this.start());
     $("#stop-btn").addEventListener("click", () => this.stop());
     $("#runs-refresh").addEventListener("click", () => this.refreshRuns());
@@ -131,16 +137,106 @@ const Control = {
         api("/api/profiles"), api("/api/personas"), api("/api/cohorts"),
       ]);
       this.catalogs = { profiles, personas, cohorts };
-      const sel = $("#profile-select");
-      const prev = sel.value;
-      sel.innerHTML = "";
-      for (const name of Object.keys(profiles)) {
-        sel.append(new Option(name, name, false, name === (prev || "mock")));
-      }
-      this.fillWorkloads();
+      this.fillProfiles();
+      this.fillWorkloadPicker();
+      this.showDetails();
     } catch (e) {
       this.msg(`catalog load failed: ${e.message}`, "error");
     }
+  },
+
+  /* "What to benchmark": profiles for THIS machine lead, optimized
+   * ones first with a ✓; profiles for other hardware classes are
+   * still reachable but grouped away. Falls back to plain names when
+   * the server predates the metadata. */
+  fillProfiles() {
+    const profiles = this.catalogs.profiles;
+    const sel = $("#profile-select");
+    const prev = sel.value;
+    const entries = Object.entries(profiles).map(([name, p]) =>
+      (p && typeof p === "object")
+        ? { name, ...p }
+        : { name, label: name, detail: "", fits_hardware: true,
+            optimized: false });
+    const rank = e => (e.fits_hardware ? 0 : 2) + (e.optimized ? 0 : 1);
+    entries.sort((a, b) => rank(a) - rank(b)
+      || a.label.localeCompare(b.label));
+    const opt = e => new Option(
+      `${e.optimized ? "✓ Optimized · " : ""}${e.label}`,
+      e.name, false, e.name === prev);
+    sel.innerHTML = "";
+    const fit = entries.filter(e => e.fits_hardware);
+    const rest = entries.filter(e => !e.fits_hardware);
+    const g1 = document.createElement("optgroup");
+    g1.label = "This machine";
+    fit.forEach(e => g1.append(opt(e)));
+    sel.append(g1);
+    if (rest.length) {
+      const g2 = document.createElement("optgroup");
+      g2.label = "Other hardware";
+      rest.forEach(e => g2.append(opt(e)));
+      sel.append(g2);
+    }
+    // Default: the best optimized config for this machine.
+    if (!prev && fit.length) sel.value = fit[0].name;
+  },
+
+  /* One workload picker, in plain language: team mixes first (that's
+   * what capacity questions are usually about), single user types
+   * for isolation, and "everything" spelled out honestly. */
+  fillWorkloadPicker() {
+    const sel = $("#workload-select");
+    const prev = sel.value;
+    sel.innerHTML = "";
+    const g1 = document.createElement("optgroup");
+    g1.label = "Team workload mixes";
+    for (const c of this.catalogs.cohorts) {
+      g1.append(new Option(`${c.name}`, `cohort:${c.id}`, false,
+        `cohort:${c.id}` === prev));
+    }
+    sel.append(g1);
+    const g2 = document.createElement("optgroup");
+    g2.label = "Single user type";
+    for (const p of this.catalogs.personas) {
+      g2.append(new Option(p.id.replaceAll("_", " "), `persona:${p.id}`,
+        false, `persona:${p.id}` === prev));
+    }
+    sel.append(g2);
+    sel.append(new Option(
+      "Everything — every mix and user type (longest run)", "sweep:all"));
+    if (!prev) sel.value = `cohort:${this.catalogs.cohorts[0]?.id ?? ""}`;
+  },
+
+  showDetails() {
+    const p = this.catalogs.profiles?.[$("#profile-select").value];
+    $("#profile-detail").textContent =
+      p && typeof p === "object"
+        ? [p.detail, p.model_id].filter(Boolean).join(" · ") : "";
+    const w = $("#workload-select").value || "";
+    let text = "";
+    if (w.startsWith("cohort:")) {
+      const c = this.catalogs.cohorts.find(x => x.id === w.slice(7));
+      text = c?.description ?? "";
+    } else if (w.startsWith("persona:")) {
+      const per = this.catalogs.personas.find(x => x.id === w.slice(8));
+      text = per?.description ?? "";
+    } else if (w === "sweep:all") {
+      text = "Runs a full capacity curve for every mix and user type in turn.";
+    }
+    $("#workload-detail").textContent = text;
+  },
+
+  fillCustomModels() {
+    api("/api/models").then(doc => {
+      const sel = $("#custom-model");
+      sel.innerHTML = "";
+      for (const m of doc.models.filter(m => m.cached)) {
+        sel.append(new Option(m.model, m.model));
+      }
+      if (!sel.options.length) {
+        sel.append(new Option("no downloaded models — stage one first", ""));
+      }
+    }).catch(() => {});
   },
 
   msg(text, cls = "") {
@@ -149,27 +245,13 @@ const Control = {
     el.className = `msg ${cls}`;
   },
 
-  fillWorkloads() {
-    const kind = $("#workload-kind").value;
-    $("#workload-id-wrap").hidden = kind === "sweep";
-    $("#sweep-type-wrap").hidden = kind !== "sweep";
-    const sel = $("#workload-id");
-    sel.innerHTML = "";
-    const items = kind === "cohort" ? this.catalogs.cohorts : this.catalogs.personas;
-    for (const item of items) {
-      const label = item.name ? `${item.id} — ${item.name}` : item.id;
-      sel.append(new Option(label, item.id));
-    }
-  },
-
   async start() {
-    const kind = $("#workload-kind").value;
+    const w = $("#workload-select").value || "";
+    const [kind, id] = w.split(":", 2);
     const workload = kind === "sweep"
-      ? { kind, type: $("#sweep-type").value.trim() || "all" }
-      : { kind, id: $("#workload-id").value };
+      ? { kind, type: id || "all" } : { kind, id };
     const poolRaw = $("#pool-sizes").value.trim();
     const body = {
-      profile: $("#profile-select").value,
       workload,
       new_run: $("#new-run").checked,
       adaptive: $("#adaptive").checked,
@@ -177,6 +259,22 @@ const Control = {
         ? poolRaw.split(",").map(s => parseInt(s.trim(), 10)).filter(Number.isFinite)
         : null,
     };
+    if ($("#custom-toggle").checked) {
+      if (!$("#custom-model").value) {
+        this.msg("custom engine needs a downloaded model", "error");
+        return;
+      }
+      body.custom = {
+        model_id: $("#custom-model").value,
+        replicas: +$("#custom-replicas").value || 1,
+        tp: +$("#custom-tp").value || 1,
+        max_num_seqs: +$("#custom-seqs").value || null,
+        max_num_batched_tokens: +$("#custom-mbt").value || null,
+        kv_cache_dtype: $("#custom-kv").value || null,
+      };
+    } else {
+      body.profile = $("#profile-select").value;
+    }
     try {
       this.msg("starting…");
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });

@@ -76,6 +76,12 @@ class ActiveRun:
 class StartRunRequest(BaseModel):
     profile: Optional[str] = None
     config: Optional[str] = None
+    # Advanced: benchmark a downloaded model with hand-set engine
+    # shape instead of a saved profile. {"model_id", "replicas",
+    # "tp", "max_num_seqs"?, "max_num_batched_tokens"?,
+    # "kv_cache_dtype"?} — devices are assigned from this machine's
+    # detected topology.
+    custom: Optional[dict] = None
     # {"kind": "cohort"|"persona", "id": "..."} or {"kind": "sweep",
     # "type": "all"|"personas"|"cohorts"|"a,b,c"}
     workload: dict
@@ -145,6 +151,67 @@ class OptimizerStartRequest(BaseModel):
     arena: Optional[dict] = None
     budget: Optional[int] = None       # arena mode: evaluation budget
     new_run: bool = False
+
+
+def _build_custom_config(custom: dict, runs_base: Path) -> Path:
+    """Advanced path: a downloaded model + hand-set engine shape →
+    a generated config file (same schema as promoted profiles).
+    Devices come from the detected topology; infeasible shapes are
+    refused with the reason."""
+    from .arena import hardware
+    from .search import assign_devices
+
+    model_id = str(custom.get("model_id") or "")
+    if "/" not in model_id:
+        raise HTTPException(422, "custom.model_id must be an org/name id")
+    replicas = int(custom.get("replicas") or 1)
+    tp = int(custom.get("tp") or 1)
+    hw = hardware()
+    if not hw["count"]:
+        raise HTTPException(422, "custom engine shapes need a GPU host")
+    devices = assign_devices(tp, replicas, "pack", hw["device_groups"])
+    if devices is None:
+        raise HTTPException(
+            422, f"{replicas} replicas × tp{tp} does not fit "
+                 f"{hw['count']} GPUs in domains {hw['device_groups']}")
+    flags: list[str] = []
+    if custom.get("max_num_seqs"):
+        flags += ["--max-num-seqs", str(int(custom["max_num_seqs"]))]
+    if custom.get("max_num_batched_tokens"):
+        flags += ["--max-num-batched-tokens",
+                  str(int(custom["max_num_batched_tokens"]))]
+    if custom.get("kv_cache_dtype") in ("fp8",):
+        flags += ["--kv-cache-dtype", str(custom["kv_cache_dtype"])]
+    engine: dict = {
+        "model_id": model_id,
+        "gpu_image": "vllm/vllm-openai:latest",
+        "max_model_len": 16384,
+        "tensor_parallel_size": tp,
+        "gpu_memory_utilization": 0.92,
+        "port": 9100,
+        "host": "127.0.0.1",
+        "startup_timeout_s": 1800,
+    }
+    if replicas > 1:
+        engine["type"] = "vllm_cuda_multi"
+        engine["replica_devices"] = devices
+    else:
+        engine["type"] = "vllm_cuda"
+        engine["gpu_device_ids"] = devices[0]
+    if flags:
+        engine["vllm_extra_flags"] = flags
+    doc = {
+        "engine": engine,
+        "telemetry": {"enable_pmu": True, "enable_memory_bandwidth": True,
+                      "enable_power": True, "enable_engine_metrics": True,
+                      "enable_gpu": True},
+        "output": {"db_directory": str(runs_base)},
+    }
+    import yaml as _yaml
+    out = runs_base / "custom_benchmark.yaml"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(_yaml.safe_dump(doc, sort_keys=False))
+    return out
 
 
 def _resolve_config_path(req: StartRunRequest) -> Path:
@@ -223,8 +290,75 @@ def create_app(
 
     @app.get("/api/profiles")
     async def profiles() -> dict:
+        """Profiles with operator-facing metadata: what model/shape
+        each one runs, whether it matches THIS machine's hardware,
+        and whether it came from the optimizer — so the Benchmark
+        picker can lead with relevant, plainly-labeled choices
+        instead of a flat list of filenames."""
+        import yaml as _yaml
+
+        from .arena import hardware
         from .config import list_profiles
-        return {name: str(path) for name, path in list_profiles().items()}
+
+        hw = await asyncio.to_thread(hardware)
+        has_gpu = bool(hw["count"])
+        _CPU_ENGINES = ("vllm", "sglang", "vllm_dual_socket")
+
+        def _describe(name: str, path) -> Optional[dict]:
+            engine_type, model, label, detail = "?", "", name, ""
+            try:
+                raw = _yaml.safe_load(Path(path).read_text()) or {}
+                eng = raw.get("engine") or {}
+                if not eng:
+                    # Not a benchmark profile (e.g. config/arena.yaml,
+                    # the hardware-hints file) — keep it out of the
+                    # picker entirely.
+                    return None
+                engine_type = str(eng.get("type", "?"))
+                model = str(eng.get("model_id") or eng.get("model") or "")
+                short = model.split("/")[-1] if model else ""
+                if engine_type == "vllm_cuda_multi":
+                    reps = eng.get("replica_devices") or []
+                    tp = max((len(g) for g in reps), default=1)
+                    label = f"{short} — whole box, {len(reps)} replicas"
+                    detail = (f"tp{tp} per replica"
+                              if tp > 1 else "one GPU per replica")
+                elif engine_type == "vllm_cuda":
+                    tp = eng.get("tensor_parallel_size", 1)
+                    label = f"{short} — single engine"
+                    detail = f"tp{tp}" if tp and tp > 1 else "one GPU"
+                elif engine_type in _CPU_ENGINES:
+                    label = f"{short} — CPU engine"
+                    detail = engine_type
+                elif engine_type == "mock":
+                    label = "Self-test (mock engine)"
+                    detail = "no hardware needed — verifies the pipeline"
+                elif engine_type == "remote":
+                    label = f"Remote endpoint{' — ' + short if short else ''}"
+            except Exception:  # noqa: BLE001
+                pass
+            gpu_engine = engine_type in ("vllm_cuda", "vllm_cuda_multi")
+            return {
+                "path": str(path),
+                "engine_type": engine_type,
+                "model_id": model,
+                "label": label,
+                "detail": detail,
+                "optimized": name.startswith("optimized-"),
+                # Does this profile match THIS machine?
+                "fits_hardware": (
+                    has_gpu if gpu_engine
+                    else (not has_gpu) if engine_type in _CPU_ENGINES
+                    else True   # mock / remote / unknown: always usable
+                ),
+            }
+
+        out = {}
+        for name, path in list_profiles().items():
+            entry = await asyncio.to_thread(_describe, name, path)
+            if entry is not None:
+                out[name] = entry
+        return out
 
     @app.get("/api/personas")
     async def personas() -> list[dict]:
@@ -363,7 +497,11 @@ def create_app(
                 409, "the engine optimizer is running — it owns the "
                      "engines/GPUs; stop it first (POST /api/optimizer/stop)",
             )
-        config_path = _resolve_config_path(req)
+        if req.custom is not None:
+            config_path = await asyncio.to_thread(
+                _build_custom_config, req.custom, runs_base)
+        else:
+            config_path = _resolve_config_path(req)
 
         from .config import load_config
         from .personas import COHORTS, PERSONAS, cohort_from_persona

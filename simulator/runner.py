@@ -303,8 +303,21 @@ async def run_cohort(
         stepper = None
         override_iter = iter(pool_size_override)
     elif adaptive:
+        # Hardware-recognizing starting point: beginning at 4 users on
+        # a multi-GPU box wastes early windows measuring nothing (the
+        # first knee-relevant pool is hundreds of users away). GPU
+        # engines start at 32; multi-replica at 16 per replica. The
+        # downward-search phase still recovers gracefully if even the
+        # start already violates.
+        initial = cfg.simulation.initial_pool_size
+        etype = getattr(cfg.engine, "type", "")
+        if etype == "vllm_cuda_multi":
+            n_rep = len(getattr(cfg.engine, "replica_devices", None) or [1])
+            initial = max(initial, 16 * n_rep)
+        elif etype == "vllm_cuda":
+            initial = max(initial, 32)
         stepper = TwoKneeStepper(
-            initial_pool_size=cfg.simulation.initial_pool_size,
+            initial_pool_size=initial,
             max_pool_size=cfg.simulation.max_pool_size,
             stop_violation_threshold=cfg.simulation.stop_violation_threshold,
         )

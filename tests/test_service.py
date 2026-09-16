@@ -291,3 +291,56 @@ def test_live_backfill_endpoint(tmp_path) -> None:
         empty = create_app(tmp_path / "none")
         with TestClient(empty) as c2:
             assert c2.get("/api/live/backfill").json()["run"] is None
+
+
+def test_profiles_metadata_and_custom_run(tmp_path, monkeypatch) -> None:
+    """Profiles carry operator-facing metadata (label, hardware fit,
+    optimized marker); a custom engine shape builds a valid config
+    and refuses infeasible topologies."""
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from simulator import arena as arena_mod
+    from simulator.service import create_app
+
+    monkeypatch.chdir(Path(__file__).parent.parent)  # repo profiles
+    monkeypatch.setattr(arena_mod, "detect_gpus", lambda: [96.0] * 8)
+    cfg = tmp_path / "arena.yaml"
+    cfg.write_text("device_groups: [[0, 1, 2, 3], [4, 5, 6, 7]]\n")
+    monkeypatch.setattr(arena_mod, "ARENA_CONFIG", cfg)
+
+    with TestClient(create_app(tmp_path / "runs")) as client:
+        profiles = client.get("/api/profiles").json()
+        gpu = profiles["xeon-gpu-qwen3-30b"]
+        assert gpu["engine_type"] == "vllm_cuda"
+        assert gpu["fits_hardware"] is True
+        assert "Qwen3-30B" in gpu["label"]
+        assert gpu["optimized"] is False
+        mock = profiles["mock"]
+        assert mock["fits_hardware"] is True       # utility: always usable
+        assert "Self-test" in mock["label"]
+
+        # Infeasible custom shape: refused with the reason.
+        r = client.post("/api/runs", json={
+            "custom": {"model_id": "org/M", "replicas": 8, "tp": 4},
+            "workload": {"kind": "cohort", "id": "chat_heavy"},
+        })
+        assert r.status_code == 422
+        assert "does not fit" in r.json()["detail"]
+
+        # Feasible custom shape: generated config accepted (run will
+        # fail later at docker launch in this env — acceptance is
+        # what's under test) and the file round-trips the loader.
+        r = client.post("/api/runs", json={
+            "custom": {"model_id": "org/M", "replicas": 8, "tp": 1,
+                       "max_num_seqs": 256, "kv_cache_dtype": "fp8"},
+            "workload": {"kind": "cohort", "id": "chat_heavy"},
+        })
+        assert r.status_code == 202, r.text
+        from simulator.config import load_config
+        c = load_config(tmp_path / "runs" / "custom_benchmark.yaml")
+        assert c.engine.type == "vllm_cuda_multi"
+        assert len(c.engine.replica_devices) == 8
+        assert "--kv-cache-dtype" in c.engine.vllm_extra_flags
+        client.post("/api/runs/stop")

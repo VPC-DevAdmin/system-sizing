@@ -332,26 +332,80 @@
 
   <section class="panel" id="result-summary" hidden>
     <h2 id="result-title"></h2>
-    <div id="landing-zones" class="zones"></div>
-    <div id="throughput-line" class="throughput"></div>
+    <div id="headline-stats" class="statusbar" style="background:none;
+      border:none;box-shadow:none;padding:0;backdrop-filter:none"></div>
+    <div id="headline-verdict" class="throughput"></div>
   </section>
 
-  <div class="chart-grid" id="result-charts" hidden>
-    <section class="panel"><h2>Capacity knee &middot; violation rate vs pool size</h2>
-      <canvas id="chart-knee"></canvas>
-      <div class="chart-note">The shaded band is the Wilson confidence interval — how
-        sure the measurement is at this sample size. Dashed verticals mark the
-        capacity / soft-cap / fail boundaries. Click a point for the full step detail.</div></section>
-    <section class="panel"><h2>Latency vs pool size</h2>
-      <canvas id="chart-latency"></canvas>
-      <div class="chart-note">How response feel degrades as concurrency grows —
-        TTFT on the left axis, per-token pacing on the right.</div></section>
+  <div id="report" hidden>
+    <details class="panel report-sec" id="sec-ux" open>
+      <summary><span class="sec-title">User experience</span>
+        <span class="sec-take" id="take-ux"></span></summary>
+      <div class="sec-grid">
+        <div class="quad">
+          <div class="q"><h3>SLA violations vs load</h3>
+            <canvas id="chart-knee"></canvas></div>
+          <div class="q"><h3>Latency vs load</h3>
+            <canvas id="chart-latency"></canvas></div>
+          <div class="q"><h3>Queue &amp; requests in flight</h3>
+            <canvas id="chart-queue"></canvas></div>
+          <div class="q"><h3>Token throughput</h3>
+            <canvas id="chart-throughput"></canvas></div>
+        </div>
+        <div class="sec-narrative" id="narr-ux"></div>
+      </div>
+    </details>
+
+    <details class="panel report-sec" id="sec-gpu" open>
+      <summary><span class="sec-title">GPUs</span>
+        <span class="sec-take" id="take-gpu"></span></summary>
+      <div class="sec-grid">
+        <div class="quad">
+          <div class="q"><h3>Compute &middot; SM utilization</h3>
+            <canvas id="chart-gpu-sm"></canvas></div>
+          <div class="q"><h3>Memory pressure &middot; KV cache &amp; DRAM busy</h3>
+            <canvas id="chart-gpu-mem"></canvas></div>
+          <div class="q"><h3>VRAM capacity</h3>
+            <canvas id="chart-gpu-vram"></canvas></div>
+          <div class="q"><h3>Power &amp; clocks</h3>
+            <canvas id="chart-gpu-power"></canvas></div>
+        </div>
+        <div class="sec-narrative" id="narr-gpu"></div>
+      </div>
+    </details>
+
+    <details class="panel report-sec" id="sec-cpu" open>
+      <summary><span class="sec-title">CPU &amp; host memory</span>
+        <span class="sec-take" id="take-cpu"></span></summary>
+      <div class="sec-grid">
+        <div class="quad">
+          <div class="q"><h3>CPU utilization</h3>
+            <canvas id="chart-cpu-util"></canvas></div>
+          <div class="q"><h3>What the cycles went to</h3>
+            <canvas id="chart-cpu-breakdown"></canvas></div>
+          <div class="q"><h3>Per-core utilization at peak stable load</h3>
+            <canvas id="chart-cores"></canvas></div>
+          <div class="q"><h3>Memory capacity &amp; bandwidth</h3>
+            <canvas id="chart-mem"></canvas></div>
+        </div>
+        <div class="sec-narrative" id="narr-cpu"></div>
+      </div>
+    </details>
+
+    <details class="panel report-sec" id="sec-power" open>
+      <summary><span class="sec-title">Power</span>
+        <span class="sec-take" id="take-power"></span></summary>
+      <div class="sec-grid">
+        <div class="quad duo">
+          <div class="q"><h3>Draw by component</h3>
+            <canvas id="chart-power"></canvas></div>
+          <div class="q"><h3>Efficiency &middot; output tokens per joule</h3>
+            <canvas id="chart-efficiency"></canvas></div>
+        </div>
+        <div class="sec-narrative" id="narr-power"></div>
+      </div>
+    </details>
   </div>
-
-  <section class="panel" id="bottleneck-panel" hidden>
-    <h2>Bottleneck</h2>
-    <div id="bottleneck-out"></div>
-  </section>
 
   <section class="panel" id="step-detail-panel" hidden>
     <h2 id="step-detail-title">Step detail</h2>

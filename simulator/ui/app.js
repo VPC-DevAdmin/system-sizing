@@ -853,64 +853,390 @@ const Results = {
     if (!c) return;
     this.cohort = c;
     $("#result-summary").hidden = false;
-    $("#result-charts").hidden = false;
-    $("#bottleneck-panel").hidden = false;
+    $("#report").hidden = false;
     $("#step-detail-panel").hidden = true;
-
+    const ctx = this.analyze(c);
     $("#result-title").textContent =
-      `${c.name || c.id} — ${c.engine} / ${c.model}` +
-      (c.methodology === "open_loop" ? " · open-loop" : "");
-    const ol = c.open_loop;
-    const zones = ol
-      ? [
-          ["fast", ol.rate_sla_per_min != null
-            ? `${ol.rate_sla_per_min}/min` : null, c.capacity_landing_zones.fast],
-          ["acceptable", ol.rate_max_per_min != null
-            ? `${ol.rate_max_per_min}/min` : null, c.capacity_landing_zones.acceptable],
-          ["degraded", ol.rate_ceiling_per_min != null
-            ? `${ol.rate_ceiling_per_min}/min` : null, c.capacity_landing_zones.degraded],
-        ]
-      : [
-          ["fast", c.capacity_pool_size, c.capacity_landing_zones.fast],
-          ["acceptable", c.soft_capacity_pool_size, c.capacity_landing_zones.acceptable],
-          ["degraded", c.fail_pool_size, c.capacity_landing_zones.degraded],
-        ];
-    $("#landing-zones").innerHTML = zones.map(([cls, n, t]) =>
-      `<div class="zone ${cls}"><div class="n">${n ?? "—"}</div>
-       <div class="t">${t}</div></div>`).join("");
-    const tp = c.capacity_throughput;
-    if (ol) {
-      const derived = ol.derived_concurrent_sessions_at_sla;
-      const sess = ol.mean_session_duration_s;
-      $("#throughput-line").innerHTML =
-        `Capacity is measured in <b>session arrivals per minute</b> — the ` +
-        `rate at which the engine's queue stays stationary. ` +
-        (derived != null
-          ? `At the SLA-clean rate that sustains ≈<b>${derived}</b> concurrent ` +
-            `sessions (Little's law: rate × ${Math.round(sess)}s mean session). `
-          : ``) +
-        (tp ? `Throughput there: <b>${tp.visible_output_tok_per_s ?? "—"}</b> ` +
-              `output tok/s, <b>${tp.prompt_tok_per_s ?? "—"}</b> prompt tok/s. `
-            : ``) +
-        `Coverage: <b>${c.measurement_coverage}</b>` +
-        (ol.rates_are_lower_bounds
-          ? ` — rates are <b>lower bounds</b>, the true limit was not reached.`
-          : `.`);
-    } else {
-      $("#throughput-line").innerHTML = tp
-        ? `At the capacity pool of <b>${tp.pool_size}</b>: ` +
-          `<b>${tp.visible_output_tok_per_s ?? "—"}</b> output tok/s, ` +
-          `<b>${tp.prompt_tok_per_s ?? "—"}</b> prompt tok/s ` +
-          `(${tp.sample_size} turns over ${tp.measurement_duration_s}s). ` +
-          `Band shape: <b>${c.deployment_band_shape}</b>, ` +
-          `coverage: <b>${c.measurement_coverage}</b>.`
-        : `No clean-pass operating point located. Band shape: ` +
-          `<b>${c.deployment_band_shape}</b>, coverage: <b>${c.measurement_coverage}</b>.`;
-    }
+      `${c.name || c.id} — ${(c.model || "").split("/").pop()}` +
+      (ctx.isOpen ? " · open-loop" : " · pool ramp");
+    this.renderHeadline(c, ctx);
+    this.renderUX(c, ctx);
+    this.renderGPU(c, ctx);
+    this.renderCPU(c, ctx);
+    this.renderPower(c, ctx);
+  },
 
-    this.renderKnee(c);
-    this.renderLatency(c);
-    this.renderBottleneck(c);
+  /* One pass over the curve that every section shares: clean points
+   * (superseded / client-limited windows excluded — they measured
+   * the generator, not the engine), the LAST STABLE operating point
+   * (the number the report is anchored on) and the knee. */
+  analyze(c) {
+    const ax = this.xAxis(c);
+    const pts = [...c.curve]
+      .filter(p => p.stability !== "superseded"
+                && p.stability !== "client_limited")
+      .sort((a, b) => (a[ax.key] ?? 0) - (b[ax.key] ?? 0));
+    const isOpen = c.open_loop != null
+      && pts.some(p => p.arrival_rate_per_min != null);
+    const stable = pts.filter(p =>
+      isOpen ? p.stability === "stable" : p.status === "pass");
+    const last = stable.length ? stable[stable.length - 1]
+      : (pts.length ? pts[pts.length - 1] : null);
+    const knee = pts.find(p =>
+      isOpen ? p.stability === "divergent" : p.status === "fail") ?? null;
+    const xOf = p => p ? `${p[ax.key]}${isOpen ? "/min" : " users"}` : "—";
+    return { ax, pts, isOpen, last, knee, xOf, ol: c.open_loop };
+  },
+
+  /* Bottleneck evidence → a human phrase ("KV cache at 97%, GPU DRAM
+   * controllers 82% busy") so the headline says WHY, not just what. */
+  bottleneckWhy(c) {
+    const ev = c.bottleneck_evidence || {};
+    const parts = [];
+    const p = (cond, s) => { if (cond != null) parts.push(s); };
+    p(ev.kv_cache_used_pct, `KV cache at ${Math.round(ev.kv_cache_used_pct)}%`);
+    p(ev.gpu_sm_util_pct_avg, `GPU SM ${Math.round(ev.gpu_sm_util_pct_avg)}%`);
+    if (ev.gpu_throttle_fraction > 0.05) {
+      parts.push(`${Math.round(ev.gpu_throttle_fraction * 100)}% of samples throttled`);
+    }
+    p(ev.memory_bw_total_gb_s, `${Math.round(ev.memory_bw_total_gb_s)} GB/s DRAM`);
+    if (ev.ttft_violation_rate != null && ev.tpot_violation_rate != null) {
+      parts.push(ev.ttft_violation_rate > ev.tpot_violation_rate * 1.5
+        ? "first-token waits break before streaming pace"
+        : "streaming pace breaks alongside first-token waits");
+    }
+    if (ev.note) parts.push(ev.note);
+    return parts.slice(0, 3).join(" · ") || "no evidence recorded";
+  },
+
+  prettyBottleneck(b) {
+    return {
+      kv_cache: "KV cache capacity", gpu_compute: "GPU compute",
+      gpu_throttled: "GPU thermal/power throttling",
+      memory_bandwidth: "memory bandwidth",
+      prefill_throughput: "prefill throughput",
+      decode_throughput: "decode throughput",
+      frequency_droop: "CPU frequency droop",
+      amx_underutilised: "AMX under-utilisation",
+      none_observed: "none observed", unknown: "unknown",
+    }[b] ?? b;
+  },
+
+  renderHeadline(c, ctx) {
+    const { last, knee, isOpen, ol, xOf } = ctx;
+    const n = v => v == null ? "—"
+      : v >= 1000 ? Math.round(v).toLocaleString() : `${Math.round(v)}`;
+    const stat = (k, v, hint) => `<div class="stat"><span class="k">${k}</span>
+      <span class="v" style="font-size:1.3rem">${v}</span>
+      <span class="c">${hint}</span></div>`;
+    const sess = last
+      ? (last.active_sessions_mean ?? last.pool_size) : null;
+    const box = $("#headline-stats");
+    box.innerHTML =
+      stat("Concurrent users", n(sess),
+           "active sessions at the last stable load") +
+      (isOpen
+        ? stat("New users / min", n(last?.arrival_rate_per_min),
+               "arrival rate the box sustains")
+        : stat("Pool", n(last?.pool_size), "closed-loop user pool")) +
+      stat("Throughput",
+           last?.visible_output_tok_per_s != null
+             ? `${n(last.visible_output_tok_per_s)} tok/s` : "—",
+           `answers out · ${n(last?.prompt_tok_per_s)} tok/s prompts in`) +
+      stat("Experience",
+           last ? `${fmt.ms(last.ttft_p95_ms)} / ${fmt.ms(last.tpot_p95_ms)}`
+                : "—",
+           "TTFT p95 / per-token p95 at that load") +
+      stat("Bottleneck", this.prettyBottleneck(c.bottleneck),
+           this.bottleneckWhy(c));
+    const cap = c.capacity_is_lower_bound
+      ? ` These figures are <b>lower bounds</b> — the true limit was not
+         reached (${c.measurement_coverage.replaceAll("_", " ")}).`
+      : "";
+    $("#headline-verdict").innerHTML = last == null
+      ? "No usable measurements in this run."
+      : (knee
+        ? `Held <b>${xOf(last)}</b> in steady state; pushed to
+           <b>${xOf(knee)}</b> the queue grew without bound
+           (${knee.queue_depth_slope_per_min ?? "?"} requests/min) and
+           ${fmt.pct(knee.violation_rate)} of turns broke SLA — that
+           collapse is the capacity boundary.` + cap
+        : `Stable at every load tested, up to <b>${xOf(last)}</b> —
+           no collapse point observed.` + cap);
+  },
+
+  /* Shared small-chart helper for the report quads. */
+  xy(id, labels, datasets, { ytitle, y2title, stacked, type = "line" } = {}) {
+    this.charts[id]?.destroy();
+    const el = $("#" + id);
+    if (!el) return;
+    const scales = {
+      x: { ticks: { font: { size: 10 } } },
+      y: { beginAtZero: true, stacked: !!stacked,
+           ticks: { font: { size: 10 } },
+           title: { display: !!ytitle, text: ytitle, font: { size: 10 } } },
+    };
+    if (y2title) {
+      scales.y2 = { beginAtZero: true, position: "right",
+        grid: { drawOnChartArea: false }, ticks: { font: { size: 10 } },
+        title: { display: true, text: y2title, font: { size: 10 } } };
+    }
+    this.charts[id] = new Chart(el, {
+      type, data: { labels, datasets },
+      options: {
+        maintainAspectRatio: false, animation: { duration: 300 },
+        scales,
+        plugins: { legend: { position: "bottom",
+          labels: { boxWidth: 9, font: { size: 10 } } } },
+      },
+    });
+  },
+
+  ds(label, data, color, extra = {}) {
+    return { label, data, borderColor: color, backgroundColor: color,
+             pointRadius: 2, borderWidth: 2, spanGaps: true, ...extra };
+  },
+
+  renderUX(c, ctx) {
+    const { pts, ax, last, knee, isOpen, xOf } = ctx;
+    const x = pts.map(p => p[ax.key]);
+    this.renderKnee(c, ctx);
+    this.renderLatency(c, ctx);
+    this.xy("chart-queue", x, [
+      this.ds("queue waiting", pts.map(p => p.queue_depth_mean), C.fail),
+      this.ds("requests in flight", pts.map(p => p.avg_in_flight), C.gold),
+    ], { ytitle: "requests" });
+    this.xy("chart-throughput", x, [
+      this.ds("prompts in tok/s", pts.map(p => p.prompt_tok_per_s), C.blue,
+        { fill: true, backgroundColor: fill(C.blue, "1c") }),
+      this.ds("answers out tok/s",
+        pts.map(p => p.visible_output_tok_per_s), C.teal,
+        { fill: true, backgroundColor: fill(C.teal, "1c") }),
+    ], { ytitle: "tokens / s" });
+
+    $("#take-ux").textContent = last == null ? "no data" :
+      `SLA-clean to ${xOf(last)} · ` + (knee
+        ? `collapse at ${xOf(knee)} (TTFT p95 ${fmt.ms(knee.ttft_p95_ms)})`
+        : "no collapse observed");
+    $("#narr-ux").innerHTML = last == null ? "" : `
+      <p>At the last stable load (<b>${xOf(last)}</b>,
+      <b>${Math.round(last.active_sessions_mean ?? last.pool_size)}</b>
+      concurrent users) a user waited <b>${fmt.ms(last.ttft_p50_ms)}</b>
+      for the answer to start (p95 <b>${fmt.ms(last.ttft_p95_ms)}</b>)
+      and tokens streamed every <b>${fmt.ms(last.tpot_p50_ms)}</b>
+      (p95 ${fmt.ms(last.tpot_p95_ms)}); <b>${fmt.pct(last.violation_rate)}</b>
+      of ${last.sample_size.toLocaleString()} turns broke SLA.</p>
+      ${knee ? `<p>At <b>${xOf(knee)}</b> the system tipped over:
+        the waiting queue grew <b>${knee.queue_depth_slope_per_min}</b>
+        requests/min without bound, first-token waits stretched to
+        <b>${fmt.ms(knee.ttft_p95_ms)}</b> p95 and
+        <b>${fmt.pct(knee.violation_rate)}</b> of turns violated SLA.
+        ${isOpen ? `Sessions arrive faster than the box completes
+        them — that is the capacity boundary.` : ""}</p>`
+      : `<p>No overload point was observed in the tested range — the
+        capacity figures are lower bounds.</p>`}
+      ${c.open_loop ? `<p class="no-data">${c.capacity_landing_zones.fast}</p>` : ""}`;
+  },
+
+  renderGPU(c, ctx) {
+    const { pts, ax, last, knee, xOf } = ctx;
+    const hw = p => p.hw || {};
+    const x = pts.map(p => p[ax.key]);
+    const has = pts.some(p => hw(p).gpu_sm_pct != null);
+    $("#sec-gpu .quad").style.display = has ? "" : "none";
+    if (!has) {
+      $("#sec-gpu").open = false;
+      $("#take-gpu").textContent = "no GPU telemetry on this run";
+      $("#narr-gpu").innerHTML =
+        `<p class="no-data">The GPU collector produced no data for this
+         run (older export or CPU-only host).</p>`;
+      return;
+    }
+    this.xy("chart-gpu-sm", x, [
+      this.ds("SM util %", pts.map(p => hw(p).gpu_sm_pct), C.purple,
+        { fill: true, backgroundColor: fill(C.purple, "1c") }),
+      this.ds("throttled samples %",
+        pts.map(p => hw(p).gpu_throttle_fraction != null
+          ? hw(p).gpu_throttle_fraction * 100 : null),
+        C.fail, { borderDash: [5, 4] }),
+    ], { ytitle: "%" });
+    this.xy("chart-gpu-mem", x, [
+      this.ds("KV cache used %", pts.map(p => p.kv_cache_used_pct), C.gold),
+      this.ds("DRAM controllers busy %",
+        pts.map(p => hw(p).gpu_mem_busy_pct), C.teal),
+    ], { ytitle: "%" });
+    const vramTotal = hw(last ?? pts[0]).gpu_vram_total_gb;
+    this.xy("chart-gpu-vram", x, [
+      this.ds("VRAM used GB", pts.map(p => hw(p).gpu_vram_gb), C.blue,
+        { fill: true, backgroundColor: fill(C.blue, "1c") }),
+      ...(vramTotal ? [this.ds("total", pts.map(() => vramTotal), C.muted,
+        { borderDash: [4, 4], pointRadius: 0 })] : []),
+    ], { ytitle: "GB" });
+    this.xy("chart-gpu-power", x, [
+      this.ds("power W (all GPUs)", pts.map(p => hw(p).gpu_power_w), C.gold),
+      this.ds("SM clock MHz", pts.map(p => hw(p).gpu_clock_mhz), C.muted,
+        { yAxisID: "y2", borderDash: [4, 4] }),
+    ], { ytitle: "W", y2title: "MHz" });
+
+    const L = hw(last ?? {});
+    const K = hw(knee ?? {});
+    $("#take-gpu").textContent = last == null ? "no data" :
+      `SM ${Math.round(L.gpu_sm_pct ?? 0)}% · DRAM busy
+       ${Math.round(L.gpu_mem_busy_pct ?? 0)}% · KV
+       ${Math.round(last.kv_cache_used_pct ?? 0)}% at the last stable load`;
+    $("#narr-gpu").innerHTML = last == null ? "" : `
+      <p>At <b>${xOf(last)}</b> the GPUs averaged
+      <b>${Math.round(L.gpu_sm_pct ?? 0)}%</b> SM utilization with DRAM
+      controllers <b>${Math.round(L.gpu_mem_busy_pct ?? 0)}%</b> busy —
+      decode is memory-bandwidth-bound, so the DRAM line is the truer
+      "how full is the box" signal. The KV cache held
+      <b>${Math.round(last.kv_cache_used_pct ?? 0)}%</b> of its pool and
+      VRAM sat at <b>${Math.round(L.gpu_vram_gb ?? 0)}</b>${vramTotal
+        ? ` of ${Math.round(vramTotal)}` : ""} GB (vLLM pre-allocates —
+      capacity pressure shows in KV%, not raw VRAM).</p>
+      ${knee ? `<p>At the collapse point the same gauges read SM
+        <b>${Math.round(K.gpu_sm_pct ?? 0)}%</b>, DRAM
+        <b>${Math.round(K.gpu_mem_busy_pct ?? 0)}%</b>, KV
+        <b>${Math.round(knee.kv_cache_used_pct ?? 0)}%</b> —
+        whichever moved hardest with load is the resource that ran
+        out.</p>` : ""}
+      ${L.gpu_temp_c_max != null ? `<p>Hottest device:
+        <b>${Math.round(L.gpu_temp_c_max)}°C</b>${
+        (L.gpu_throttle_fraction ?? 0) > 0.05
+          ? ` with <b>${Math.round(L.gpu_throttle_fraction * 100)}%</b>
+             of samples throttled — cooling is shaping these numbers`
+          : " — no thermal throttling observed"}.</p>` : ""}`;
+  },
+
+  renderCPU(c, ctx) {
+    const { pts, ax, last, xOf } = ctx;
+    const hw = p => p.hw || {};
+    const x = pts.map(p => p[ax.key]);
+    const has = pts.some(p => hw(p).cpu_util_pct != null);
+    $("#sec-cpu .quad").style.display = has ? "" : "none";
+    if (!has) {
+      $("#sec-cpu").open = false;
+      $("#take-cpu").textContent = "no CPU telemetry on this run";
+      $("#narr-cpu").innerHTML =
+        `<p class="no-data">No host telemetry in this export (older run
+         or remote target).</p>`;
+      return;
+    }
+    this.xy("chart-cpu-util", x, [
+      this.ds("host CPU %", pts.map(p => hw(p).cpu_util_pct), C.teal,
+        { fill: true, backgroundColor: fill(C.teal, "1c") }),
+      this.ds("engine bound-set %", pts.map(p => hw(p).cpu_bound_pct),
+        C.gold),
+    ], { ytitle: "%" });
+    const bd = k => pts.map(p => hw(p).cpu_breakdown_pct?.[k]);
+    this.xy("chart-cpu-breakdown", x, [
+      this.ds("user", bd("user"), C.blue,
+        { fill: true, backgroundColor: fill(C.blue, "44") }),
+      this.ds("system", bd("system"), C.gold,
+        { fill: true, backgroundColor: fill(C.gold, "44") }),
+      this.ds("iowait", bd("iowait"), C.fail,
+        { fill: true, backgroundColor: fill(C.fail, "44") }),
+    ], { ytitle: "% of all cycles", stacked: true });
+    const cores = hw(last ?? {}).cores_util_pct || [];
+    this.xy("chart-cores", cores.map((_, i) => i), [
+      this.ds("core util %", cores, C.teal, { borderWidth: 0 }),
+    ], { ytitle: "%", type: "bar" });
+    const hasBw = pts.some(p => hw(p).mem_bw_read_gb_s != null);
+    this.xy("chart-mem", x, [
+      this.ds("host memory GB", pts.map(p => hw(p).mem_used_gb), C.blue),
+      this.ds("engine RSS GB", pts.map(p => hw(p).engine_rss_gb), C.purple),
+      ...(hasBw ? [
+        this.ds("DDR read GB/s", pts.map(p => hw(p).mem_bw_read_gb_s),
+          C.gold, { yAxisID: "y2", borderDash: [4, 4] }),
+        this.ds("DDR write GB/s", pts.map(p => hw(p).mem_bw_write_gb_s),
+          C.fail, { yAxisID: "y2", borderDash: [4, 4] }),
+      ] : []),
+    ], { ytitle: "GB", ...(hasBw ? { y2title: "GB/s" } : {}) });
+
+    const L = hw(last ?? {});
+    const busy = cores.filter(v => v != null && v > 50).length;
+    $("#take-cpu").textContent = last == null ? "no data" :
+      `${Math.round(L.cpu_util_pct ?? 0)}% host CPU ·
+       ${busy}/${cores.length || "?"} cores busy ·
+       ${Math.round(L.mem_used_gb ?? 0)} GB memory`;
+    const bdl = L.cpu_breakdown_pct || {};
+    $("#narr-cpu").innerHTML = last == null ? "" : `
+      <p>At <b>${xOf(last)}</b> the host ran at
+      <b>${Math.round(L.cpu_util_pct ?? 0)}%</b> CPU overall —
+      <b>${busy}</b> of ${cores.length || "?"} cores above 50%. The
+      cycles went <b>${bdl.user ?? "?"}%</b> to user space (the engine
+      and the load generator), <b>${bdl.system ?? "?"}%</b> to the
+      kernel and <b>${bdl.iowait ?? "?"}%</b> to iowait${
+        (bdl.iowait ?? 0) > 5
+          ? " — storage is in the request path, worth investigating"
+          : " — storage is not a factor"}.</p>
+      <p>Memory: <b>${Math.round(L.mem_used_gb ?? 0)} GB</b> used on the
+      host, of which the engine held
+      <b>${Math.round(L.engine_rss_gb ?? 0)} GB</b> RSS.
+      ${hasBw ? `DDR traffic peaked at
+        <b>${Math.round(Math.max(...pts.map(p =>
+          (hw(p).mem_bw_read_gb_s ?? 0) + (hw(p).mem_bw_write_gb_s ?? 0))))}
+        GB/s</b>.`
+      : `<span class="no-data">DDR bandwidth counters were not available
+        on this run (perf uncore access).</span>`}</p>`;
+  },
+
+  renderPower(c, ctx) {
+    const { pts, ax, last, xOf } = ctx;
+    const hw = p => p.hw || {};
+    const x = pts.map(p => p[ax.key]);
+    const total = p => {
+      const g = hw(p).gpu_power_w, cpu = hw(p).cpu_power_w,
+            sys = hw(p).system_power_w;
+      if (sys != null) return sys;
+      if (g == null && cpu == null) return null;
+      return (g ?? 0) + (cpu ?? 0);
+    };
+    const hasAny = pts.some(p => total(p) != null);
+    $("#sec-power .quad").style.display = hasAny ? "" : "none";
+    if (!hasAny) {
+      $("#sec-power").open = false;
+      $("#take-power").textContent = "no power telemetry on this run";
+      $("#narr-power").innerHTML = `<p class="no-data">No power data in
+        this export — GPU power needs NVML, CPU package power needs
+        RAPL, chassis power needs ipmitool.</p>`;
+      return;
+    }
+    const hasSys = pts.some(p => hw(p).system_power_w != null);
+    this.xy("chart-power", x, [
+      this.ds("GPUs W", pts.map(p => hw(p).gpu_power_w), C.gold,
+        { fill: true, backgroundColor: fill(C.gold, "1c") }),
+      this.ds("CPU package W", pts.map(p => hw(p).cpu_power_w), C.teal),
+      ...(hasSys ? [this.ds("chassis W (IPMI)",
+        pts.map(p => hw(p).system_power_w), C.text)] : []),
+      this.ds(hasSys ? "total (chassis)" : "measured total W",
+        pts.map(total), C.muted, { borderDash: [5, 4] }),
+    ], { ytitle: "W" });
+    this.xy("chart-efficiency", x, [
+      this.ds("output tokens / joule", pts.map(p => {
+        const w = total(p);
+        return (w && p.visible_output_tok_per_s != null)
+          ? p.visible_output_tok_per_s / w : null;
+      }), C.ok),
+    ], { ytitle: "tok/J" });
+
+    const lastW = total(last ?? {});
+    const eff = (lastW && last?.visible_output_tok_per_s)
+      ? (last.visible_output_tok_per_s / lastW).toFixed(2) : null;
+    $("#take-power").textContent = lastW == null ? "no data" :
+      `${Math.round(lastW)} W ${hasSys ? "chassis" : "measured"} at the
+       last stable load${eff ? ` · ${eff} tok/J` : ""}`;
+    $("#narr-power").innerHTML = `
+      <p>At <b>${xOf(last)}</b> the ${hasSys ? "chassis drew" :
+      "measured components drew"} <b>${Math.round(lastW ?? 0)} W</b>
+      (GPUs <b>${Math.round(hw(last ?? {}).gpu_power_w ?? 0)} W</b>${
+        hw(last ?? {}).cpu_power_w != null
+          ? `, CPU package ${Math.round(hw(last ?? {}).cpu_power_w)} W`
+          : ""}) — <b>${eff ?? "?"}</b> output tokens per joule.</p>
+      ${hasSys ? "" : `<p class="no-data">Chassis wall power is not
+        measured on this host (needs ipmitool + /dev/ipmi0 access) —
+        the total shown is the sum of measured components and excludes
+        fans, DIMMs, NICs and PSU losses.</p>`}`;
   },
 
   // Open-loop curves are indexed by arrival rate (bisection makes
@@ -924,9 +1250,10 @@ const Results = {
       : { key: "pool_size", label: "pool size (concurrent sessions)" };
   },
 
-  renderKnee(c) {
-    const ax = this.xAxis(c);
-    const curve = [...c.curve].sort((a, b) => (a[ax.key] ?? 0) - (b[ax.key] ?? 0));
+  renderKnee(c, ctx) {
+    const ax = ctx?.ax ?? this.xAxis(c);
+    const curve = ctx?.pts
+      ?? [...c.curve].sort((a, b) => (a[ax.key] ?? 0) - (b[ax.key] ?? 0));
     const x = curve.map(p => p[ax.key]);
     const mk = (label, key, color, extra = {}) => ({
       label, data: curve.map(p => p[key] == null ? null : p[key] * 100),
@@ -977,9 +1304,10 @@ const Results = {
     });
   },
 
-  renderLatency(c) {
-    const ax = this.xAxis(c);
-    const curve = [...c.curve].sort((a, b) => (a[ax.key] ?? 0) - (b[ax.key] ?? 0));
+  renderLatency(c, ctx) {
+    const ax = ctx?.ax ?? this.xAxis(c);
+    const curve = ctx?.pts
+      ?? [...c.curve].sort((a, b) => (a[ax.key] ?? 0) - (b[ax.key] ?? 0));
     this.charts.latency?.destroy();
     this.charts.latency = new Chart($("#chart-latency"), {
       type: "line",
@@ -1008,24 +1336,6 @@ const Results = {
         plugins: { legend: { position: "bottom" } },
       },
     });
-  },
-
-  renderBottleneck(c) {
-    const kv = (obj) => Object.entries(obj || {}).map(([k, v]) =>
-      `<div><span class="k">${k}</span><span>${
-        typeof v === "number" ? +v.toFixed(3) : v}</span></div>`).join("");
-    const collectors = c.collectors
-      ? Object.entries(c.collectors).map(([k, v]) =>
-          `<span class="${v === "ok" ? "d-ok" : "d-skip"}">${k}: ${v}</span>`).join("")
-      : "not recorded (older run)";
-    $("#bottleneck-out").innerHTML = `
-      <div class="kv-grid">
-        <div><span class="k">SLA-capacity bottleneck</span><b>${c.bottleneck}</b></div>
-        <div><span class="k">quality bottleneck</span><b>${c.target_bottleneck}</b></div>
-      </div>
-      <div class="kv-grid" style="margin-top:10px">${kv(c.bottleneck_evidence)}</div>
-      <div class="reco">${c.hardware_recommendation}</div>
-      <div class="collectors">Evidence collectors — ${collectors}</div>`;
   },
 
   showStepDetail(p) {

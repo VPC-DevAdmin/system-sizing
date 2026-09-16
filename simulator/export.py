@@ -244,6 +244,72 @@ def _present_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {r[1] for r in rows}
 
 
+def _hw_json_rollup(conn: sqlite3.Connection, measurement_id: int) -> dict:
+    """Window means from the per-second JSON telemetry blobs — CPU
+    cycle breakdown, per-core utilization, GPU DRAM-controller busy%,
+    chassis power. Bounded to ~50 samples per window so a full export
+    stays cheap; the per-second raw rows remain available in
+    telemetry_samples for anyone who wants the fine grain."""
+    try:
+        rows = conn.execute(
+            "SELECT host_json, gpu_devices_json FROM measurement_telemetry "
+            "WHERE measurement_id = ? AND "
+            "(host_json IS NOT NULL OR gpu_devices_json IS NOT NULL) "
+            "ORDER BY sampled_at_ms LIMIT 50",
+            (measurement_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    if not rows:
+        return {}
+    bd_acc: dict[str, list] = {}
+    cores_acc: dict[int, list] = {}
+    membusy: list[float] = []
+    temps: list[float] = []
+    sys_power: list[float] = []
+    for r in rows:
+        try:
+            h = json.loads(r["host_json"]) if r["host_json"] else {}
+        except (TypeError, ValueError):
+            h = {}
+        for k, v in (h.get("cpu_breakdown_pct") or {}).items():
+            bd_acc.setdefault(k, []).append(v)
+        for i, v in enumerate(h.get("cores_util_pct") or []):
+            if v is not None:
+                cores_acc.setdefault(i, []).append(v)
+        if h.get("system_power_w") is not None:
+            sys_power.append(float(h["system_power_w"]))
+        try:
+            devs = (json.loads(r["gpu_devices_json"])
+                    if r["gpu_devices_json"] else [])
+        except (TypeError, ValueError):
+            devs = []
+        per_dev = [d.get("mem_util_pct") for d in devs
+                   if d.get("mem_util_pct") is not None]
+        if per_dev:
+            membusy.append(sum(per_dev) / len(per_dev))
+        per_temp = [d.get("temperature_c") for d in devs
+                    if d.get("temperature_c") is not None]
+        if per_temp:
+            temps.append(max(per_temp))
+    def _mean(vals):
+        return round(sum(vals) / len(vals), 1) if vals else None
+    out: dict = {}
+    if bd_acc:
+        out["cpu_breakdown_pct"] = {k: _mean(v) for k, v in bd_acc.items()}
+    if cores_acc:
+        out["cores_util_pct"] = [
+            _mean(cores_acc[i]) for i in sorted(cores_acc)
+        ]
+    if membusy:
+        out["gpu_mem_busy_pct"] = _mean(membusy)
+    if temps:
+        out["gpu_temp_c_max"] = _mean(temps)
+    if sys_power:
+        out["system_power_w"] = _mean(sys_power)
+    return out
+
+
 def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
     run = dict(run_row)
     # Window aggregates (PMU / BW / power / AMX / freq) live as columns
@@ -284,6 +350,7 @@ def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
             rollup_cols.append("AVG(cpu_util_bound_avg) AS cpu_bound")
         rollup_cols += [
             "AVG(engine_rss_gb) AS engine_rss_gb_avg",
+            "AVG(memory_used_gb) AS mem_used_gb_avg",
             "AVG(freq_mhz_mean) AS freq_mhz_avg",
         ]
         if "gpu_sm_util_pct" in tele_present:
@@ -298,6 +365,7 @@ def _read_cohort_run(conn: sqlite3.Connection, run_row: sqlite3.Row) -> dict:
             (m["measurement_id"],),
         ).fetchone()
         m["telemetry"] = dict(tele) if tele else {}
+        m["hw_rollup"] = _hw_json_rollup(conn, m["measurement_id"])
         # Raw per-second telemetry samples (drives in-window time-series
         # charts on the website).
         tele_cols_sql = ", ".join(tele_sample_cols)
@@ -828,6 +896,32 @@ def _summarise_cohort(
             "target_status": m.get("target_status"), # target-bound
             "measurement_started_at": m.get("measurement_started_at"),
             "measurement_duration_s": m.get("measurement_duration_s"),
+        }
+        # Per-window hardware picture — the Results report's CPU / GPU
+        # / power sections plot these against load. Column aggregates
+        # + JSON-blob rollups, all nullable (collectors vary by host).
+        tele_r = m.get("telemetry") or {}
+        hwj = m.get("hw_rollup") or {}
+        entry["avg_in_flight"] = m.get("measured_avg_in_flight")
+        entry["hw"] = {
+            "cpu_util_pct": tele_r.get("cpu"),
+            "cpu_bound_pct": tele_r.get("cpu_bound"),
+            "cpu_breakdown_pct": hwj.get("cpu_breakdown_pct"),
+            "cores_util_pct": hwj.get("cores_util_pct"),
+            "mem_used_gb": tele_r.get("mem_used_gb_avg"),
+            "engine_rss_gb": tele_r.get("engine_rss_gb_avg"),
+            "mem_bw_read_gb_s": m.get("memory_bw_read_gb_s_avg"),
+            "mem_bw_write_gb_s": m.get("memory_bw_write_gb_s_avg"),
+            "gpu_sm_pct": m.get("gpu_sm_util_pct_avg"),
+            "gpu_mem_busy_pct": hwj.get("gpu_mem_busy_pct"),
+            "gpu_vram_gb": m.get("gpu_vram_used_gb_avg"),
+            "gpu_vram_total_gb": m.get("gpu_vram_total_gb"),
+            "gpu_power_w": m.get("gpu_power_w_avg"),
+            "gpu_clock_mhz": m.get("gpu_sm_clock_mhz_avg"),
+            "gpu_throttle_fraction": m.get("gpu_throttle_fraction"),
+            "gpu_temp_c_max": hwj.get("gpu_temp_c_max"),
+            "cpu_power_w": m.get("power_w_avg"),
+            "system_power_w": hwj.get("system_power_w"),
         }
         # Open-loop fields (NULL on closed-loop rows). ``pool_size``
         # above already carries the measured mean concurrent sessions

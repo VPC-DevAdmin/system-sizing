@@ -68,6 +68,61 @@ TARDY_MIN_COUNT = 5
 WORKER_LAG_LIMIT_MS = 1000.0
 
 
+class EngineBrokenError(RuntimeError):
+    """The engine is up but cannot serve — surfaced to the user with
+    the engine's own error instead of an endless error counter."""
+
+
+def _engine_broken(errors: int, completions: int) -> bool:
+    """Runaway-error fuse. A broken engine fails every request almost
+    instantly, so nothing would ever stop the run on its own — the
+    queue stays empty (stable!) while errors pile up forever. Trip
+    when a window has failures and NOTHING completing, or when
+    failures dwarf completions. Genuine overload never looks like
+    this: at a real knee, thousands of turns still complete alongside
+    the timeouts."""
+    return (errors >= 25 and completions == 0) or \
+           (errors >= 100 and errors > 4 * completions)
+
+
+async def smoke_test_engine(engine, timeout_s: float = 180.0) -> None:
+    """One real (tiny) completion against EVERY replica before load
+    starts. /health only proves the server process is up — an engine
+    launched with an unsupported flag combination (e.g. a
+    kv-cache-dtype the model's attention backend rejects) passes
+    health and then 500s every request. This is the preflight that
+    catches it, with the engine's own error text."""
+    import httpx
+    for url in engine.replica_urls:
+        def _probe(u: str = url):
+            r = httpx.post(
+                f"{u}/chat/completions",
+                json={
+                    "model": engine.api_model_name,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 8,
+                },
+                headers={"Authorization": f"Bearer {engine.api_key}"},
+                timeout=timeout_s,
+            )
+            if r.status_code != 200:
+                raise EngineBrokenError(
+                    f"engine at {u} is up but cannot serve requests "
+                    f"(HTTP {r.status_code}): {r.text[:500]}"
+                )
+        try:
+            await asyncio.to_thread(_probe)
+        except EngineBrokenError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise EngineBrokenError(
+                f"smoke request to {url} failed before any load was "
+                f"offered: {e}"
+            ) from e
+    log.info("engine smoke test passed on %d replica(s)",
+             len(engine.replica_urls))
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -479,10 +534,37 @@ class OpenLoopRunner:
             "rate %.3g/s (%.1f/min): warmup %.0fs, window %ds, workers=%d",
             rate_per_s, rate_per_s * 60, warmup, window_s, self.pool.size,
         )
+
+        # Runaway-error fuse state: cumulative counters at phase
+        # start; checked every tick in warmup AND measurement.
+        fuse_agg = self.pool.aggregate()
+        fuse_err0 = fuse_agg.get("errors", 0) if fuse_agg else 0
+        fuse_comp0 = fuse_agg.get("completed", 0) if fuse_agg else 0
+        last_error: list[str] = []
+
+        def _check_fuse(fresh_turns: list[dict]) -> None:
+            for t in fresh_turns:
+                if t.get("error"):
+                    last_error.append(str(t["error"]))
+                    del last_error[:-3]
+            agg_now = self.pool.aggregate()
+            if not agg_now:
+                return
+            err_d = agg_now.get("errors", 0) - fuse_err0
+            comp_d = agg_now.get("completed", 0) - fuse_comp0
+            if _engine_broken(err_d, comp_d):
+                raise EngineBrokenError(
+                    f"aborting run: {err_d} failed requests against "
+                    f"{comp_d} completions at {rate_per_s * 60:.0f}/min — "
+                    f"the engine is rejecting the load, not serving it "
+                    f"(recent errors: {', '.join(last_error) or 'unknown'}). "
+                    f"Check the engine log in the run directory."
+                )
+
         warm_end = time.monotonic() + warmup
         while time.monotonic() < warm_end:
             await self._sample_engine()
-            self.pool.drain_turn_queue()  # discard settling-phase turns
+            _check_fuse(self.pool.drain_turn_queue())  # discard settling turns
             await asyncio.sleep(1.0)
 
         self.phase = "measuring"
@@ -539,6 +621,7 @@ class OpenLoopRunner:
                         max_tardiness, agg.get("tardiness_p99_ms", 0.0))
                     max_lag = max(max_lag, agg.get("loop_lag_ms", 0.0))
                 fresh = self.pool.drain_turn_queue()
+                _check_fuse(fresh)
                 turns.extend(fresh)
                 for t in fresh:
                     BUS.publish("turn", {
@@ -847,14 +930,19 @@ class OpenLoopRunner:
         # Snapshots first, workers second: worker spawn loads a
         # tokenizer and can take tens of seconds — the live view
         # should say so rather than sit on the previous run's charts.
-        self.phase = "starting load workers"
+        self.phase = "verifying engine — smoke request"
         self._snapshot_task = asyncio.create_task(self._snapshot_loop())
-        await self.pool.scale_to(1)
         final_status = "ok"
         run_started = time.monotonic()
         max_total_s = sim.max_total_duration_minutes * 60
         last_rate = 0.0
         try:
+            # Real preflight: a broken-but-healthy engine fails HERE,
+            # with its own error text, instead of drowning the run in
+            # errors (inside try so cleanup still runs on failure).
+            await smoke_test_engine(self.engine)
+            self.phase = "starting load workers"
+            await self.pool.scale_to(1)
             while (rate := self.stepper.next_rate()) is not None:
                 if time.monotonic() - run_started > max_total_s:
                     log.warning("max run duration reached; stopping search")

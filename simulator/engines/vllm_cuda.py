@@ -35,6 +35,34 @@ from .base import Engine
 log = logging.getLogger(__name__)
 
 
+def remove_stale_engine_containers() -> None:
+    """rm -f any leftover ``vllm-*`` container before launching.
+
+    A hard-killed serve leaves its engine containers RUNNING — the
+    next launch then dies with "address already in use" while the
+    health check happily gets 200s from the OLD engine on the same
+    port, and every request 404s against the wrong model. The
+    ``vllm-`` name prefix is exclusively capsim-owned (same contract
+    the optimizer's cleanup uses), and benchmark launches are
+    mutually exclusive with the optimizer, so removal here is safe.
+    """
+    try:
+        res = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", "name=vllm-"],
+            capture_output=True, text=True, timeout=30,
+        )
+        cids = res.stdout.split()
+        if cids:
+            log.warning(
+                "removing %d stale vllm-* container(s) from a previous "
+                "run before launch", len(cids),
+            )
+            subprocess.run(["docker", "rm", "-f", *cids],
+                           capture_output=True, timeout=120)
+    except Exception as e:  # noqa: BLE001
+        log.debug("stale-container sweep failed: %s", e)
+
+
 class VllmCudaEngine(Engine):
     """Launches CUDA vLLM in a Docker container with --gpus."""
 
@@ -53,6 +81,7 @@ class VllmCudaEngine(Engine):
                 "docker not found on PATH; the vllm_cuda engine runs the "
                 "upstream CUDA image in Docker (needs nvidia-container-toolkit)."
             )
+        remove_stale_engine_containers()
 
         Path(log_dir).mkdir(parents=True, exist_ok=True)
         log_path = Path(log_dir) / f"engine_vllm_cuda_{int(time.time())}.log"

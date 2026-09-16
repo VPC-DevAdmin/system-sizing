@@ -86,6 +86,35 @@ def test_open_loop_summary_none_for_closed_loop_rows():
     assert _open_loop_summary([{"target_pool_size": 8}]) is None
 
 
+def test_engine_broken_fuse_thresholds():
+    from simulator.open_loop import _engine_broken
+    # All-failure, zero completions: trips fast.
+    assert _engine_broken(25, 0)
+    assert not _engine_broken(24, 0)
+    # Mostly-failure trips even with some completions.
+    assert _engine_broken(500, 100)
+    # Genuine overload (timeouts amid thousands of completions) never
+    # looks like a broken engine.
+    assert not _engine_broken(500, 5000)
+    assert not _engine_broken(0, 0)
+
+
+def test_smoke_test_surfaces_engine_error():
+    """A dead/unreachable engine fails the smoke preflight with a
+    message pointing at the replica, before any load is generated."""
+    import pytest
+
+    from simulator.open_loop import EngineBrokenError, smoke_test_engine
+
+    class FakeEngine:
+        replica_urls = ["http://127.0.0.1:9"]  # discard port — refuses
+        api_model_name = "m"
+        api_key = "EMPTY"
+
+    with pytest.raises(EngineBrokenError, match="smoke request"):
+        asyncio.run(smoke_test_engine(FakeEngine(), timeout_s=2.0))
+
+
 def test_fresh_db_has_v7_columns(tmp_path):
     from simulator.database import Database
     db = Database(tmp_path / "t.db")

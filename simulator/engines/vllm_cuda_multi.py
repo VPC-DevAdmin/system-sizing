@@ -104,6 +104,10 @@ class VllmCudaMultiEngine(Engine):
             raise RuntimeError(
                 f"replica_devices assigns a GPU twice: {groups}"
             )
+        # Leftover replicas from a hard-killed run would hold our
+        # ports and answer health checks for the WRONG model.
+        from .vllm_cuda import remove_stale_engine_containers
+        remove_stale_engine_containers()
 
         log_dir = Path(log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)

@@ -101,7 +101,11 @@ class ExportRequest(BaseModel):
 
 
 class SaveSpecRequest(BaseModel):
-    yaml: str
+    # Either form saves the same catalog entry. The graphical designer
+    # sends ``spec`` (structured JSON — the UI has no YAML anywhere);
+    # ``yaml`` remains for API users and older clients.
+    yaml: Optional[str] = None
+    spec: Optional[dict] = None
 
 
 class ModelDownloadRequest(BaseModel):
@@ -443,7 +447,10 @@ def create_app(
         from .persona_loader import USER_CATALOG_DIR
         return catalog_dir if catalog_dir is not None else USER_CATALOG_DIR
 
-    def _save_catalog_entry(kind: str, entry_id: str, spec_yaml: str) -> None:
+    def _save_catalog_entry(
+        kind: str, entry_id: str,
+        spec_yaml: Optional[str] = None, spec: Optional[dict] = None,
+    ) -> None:
         import yaml as _yaml
 
         from .persona_loader import PersonaSpecError, load_catalog
@@ -451,12 +458,15 @@ def create_app(
 
         if not entry_id.replace("_", "").replace("-", "").isalnum():
             raise HTTPException(422, "id must be alphanumeric/_/-")
-        try:
-            spec = _yaml.safe_load(spec_yaml)
-        except _yaml.YAMLError as e:
-            raise HTTPException(422, f"invalid YAML: {e}") from e
+        if spec is None:
+            if spec_yaml is None:
+                raise HTTPException(422, "pass spec or yaml")
+            try:
+                spec = _yaml.safe_load(spec_yaml)
+            except _yaml.YAMLError as e:
+                raise HTTPException(422, f"invalid YAML: {e}") from e
         if not isinstance(spec, dict):
-            raise HTTPException(422, "spec must be a YAML mapping")
+            raise HTTPException(422, "spec must be a mapping")
 
         target = _catalog_dir() / f"{entry_id}.yaml"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -492,7 +502,7 @@ def create_app(
 
     @app.put("/api/personas/{persona_id}")
     async def persona_save(persona_id: str, req: SaveSpecRequest) -> dict:
-        _save_catalog_entry("personas", persona_id, req.yaml)
+        _save_catalog_entry("personas", persona_id, req.yaml, req.spec)
         return {"saved": persona_id}
 
     @app.get("/api/cohorts/{cohort_id}")
@@ -513,7 +523,7 @@ def create_app(
 
     @app.put("/api/cohorts/{cohort_id}")
     async def cohort_save(cohort_id: str, req: SaveSpecRequest) -> dict:
-        _save_catalog_entry("cohorts", cohort_id, req.yaml)
+        _save_catalog_entry("cohorts", cohort_id, req.yaml, req.spec)
         return {"saved": cohort_id}
 
     @app.get("/api/runs")

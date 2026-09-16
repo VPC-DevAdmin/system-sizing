@@ -118,6 +118,8 @@ async def _amain(config: dict) -> None:
             elif cmd == "drain":
                 launcher.set_rate(0.0)
                 launcher.cancel_active_sessions()
+            elif cmd == "trim":
+                launcher.trim_active(int(msg.get("target") or 0))
             elif cmd == "stop":
                 stop_event.set()
                 return
@@ -144,6 +146,7 @@ async def _amain(config: dict) -> None:
                 "worker": config.get("worker_index", 0),
                 "at_ms": int(time.time() * 1000),
                 "arrivals_total": s.arrivals_total,
+                "tardy_total": s.tardy_total,
                 "sessions_active": s.sessions_active,
                 "sessions_done": s.sessions_done,
                 "in_flight": state.in_flight,

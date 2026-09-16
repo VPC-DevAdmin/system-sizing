@@ -175,6 +175,8 @@
       <label>Workload
         <select id="workload-select"></select>
         <span id="workload-detail" class="hint"></span>
+        <span class="hint"><a href="#" id="workload-edit-link">create or
+          modify workloads &rarr;</a></span>
       </label>
       <label class="check"><input type="checkbox" id="new-run"> Fresh run (don't resume)</label>
     </div>
@@ -375,11 +377,11 @@
 <!-- ── 5 · Workloads ───────────────────────────────────────────── -->
 <main id="view-personas" class="view">
   <section class="panel">
-    <h2>Persona &amp; cohort catalog</h2>
-    <p class="msg">The packaged catalog ships with capsim; edits save as overlay files under
-    <code>config/personas/</code> and take effect immediately (the next run picks them up).
-    Specs are YAML &mdash; distributions as <code>{lognormal: {median, sigma}}</code>,
-    <code>{discrete: {value: weight}}</code>, or <code>{constant: x}</code>.</p>
+    <h2>Workload designer</h2>
+    <p class="msg">Personas describe one kind of user &mdash; how much they ask,
+    how much they get back, how long they read and think. Cohorts mix personas
+    into the traffic a real deployment sees. Edits save immediately and the next
+    benchmark run picks them up.</p>
     <div class="editor-grid">
       <div>
         <h3>Personas</h3>
@@ -397,12 +399,7 @@
           <button id="editor-save" class="primary small">Save</button>
           <span id="editor-msg" class="msg"></span>
         </div>
-        <details id="editor-advanced">
-          <summary class="msg" style="cursor:pointer">Advanced — raw
-            definition (YAML)</summary>
-          <textarea id="editor-yaml" spellcheck="false"
-                    placeholder="Select an entry on the left, or New persona / New cohort."></textarea>
-        </details>
+        <div id="editor-form" class="editor-form"></div>
       </div>
     </div>
   </section>

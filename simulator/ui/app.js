@@ -654,26 +654,42 @@ const Live = {
   },
 
   onStep(s) {
-    const key = `${s.step_index}:${s.pool_size}`;
-    if (this.stepsSeen.has(key)) return;
-    this.stepsSeen.add(key);
     const cls = STATUS_CLASS[s.capacity_status] ?? "";
     // Open-loop steps: the control variable is the arrival rate; the
     // pool column shows it with the measured concurrency alongside,
-    // and the verdict column leads with stability.
+    // and the verdict column leads with stability. client_limited and
+    // superseded windows carry no SLA verdict (their samples were
+    // inflated by the lagging GENERATOR, not the engine) so they
+    // never pair with pass/fail.
     const load = s.arrival_rate_per_min != null
       ? `${s.arrival_rate_per_min}/min (${s.pool_size})`
       : `${s.pool_size}`;
     const verdictCls = s.stability === "divergent" ? "status-fail"
-      : s.stability === "client_limited" ? "status-marginal" : cls;
-    const verdict = s.stability
-      ? `${s.stability} · ${s.capacity_status}` : s.capacity_status;
-    $("#steps-table tbody").insertAdjacentHTML("afterbegin", `<tr>
-      <td>${s.step_index}</td><td>${load}</td><td>${s.sample_size}</td>
-      <td>${fmt.pct(s.combined_violation_rate)}</td>
-      <td>${fmt.pct(s.combined_target_miss_rate)}</td>
-      <td>${fmt.ms(s.ttft_p95_ms)}</td><td>${fmt.ms(s.tpot_p95_ms)}</td>
-      <td class="${verdictCls}">${verdict}</td></tr>`);
+      : (s.stability === "client_limited"
+         || s.stability === "superseded") ? "status-marginal" : cls;
+    const verdict =
+      s.stability === "client_limited"
+        ? "client limited — generator maxed, not the engine"
+      : s.stability === "superseded"
+        ? "superseded — rerun with more load workers"
+      : s.stability
+        ? `${s.stability} · ${s.capacity_status}`
+        : s.capacity_status;
+    const row = `<tr data-step="${s.step_index}">
+      <td>${s.step_index}</td><td>${load}</td><td>${s.sample_size ?? "—"}</td>
+      <td>${s.combined_violation_rate != null
+            ? fmt.pct(s.combined_violation_rate) : "—"}</td>
+      <td>${s.combined_target_miss_rate != null
+            ? fmt.pct(s.combined_target_miss_rate) : "—"}</td>
+      <td>${s.ttft_p95_ms != null ? fmt.ms(s.ttft_p95_ms) : "—"}</td>
+      <td>${s.tpot_p95_ms != null ? fmt.ms(s.tpot_p95_ms) : "—"}</td>
+      <td class="${verdictCls}">${verdict}</td></tr>`;
+    // A step can be re-reported (a client-saturated attempt gets
+    // re-labeled "superseded" once its retry starts) — update the
+    // existing row in place rather than duplicating it.
+    const existing = $(`#steps-table tbody tr[data-step="${s.step_index}"]`);
+    if (existing) existing.outerHTML = row;
+    else $("#steps-table tbody").insertAdjacentHTML("afterbegin", row);
   },
 
   onRun(r) {
@@ -2195,40 +2211,52 @@ const Models = {
 
 /* ══ Persona / cohort editor ══════════════════════════════════── */
 
-const PERSONA_TEMPLATE = `description: "What this archetype does"
-input_tokens: {lognormal: {median: 400, sigma: 0.5}}
-output_tokens: {lognormal: {median: 200, sigma: 0.4}}
-turns_per_session: {discrete: {1: 0.6, 2: 0.3, 4: 0.1}}
-sessions_before_leaving: {discrete: {3: 0.5, 6: 0.5}}
-inter_session_gap_seconds: {lognormal: {median: 600, sigma: 1.0}}
-read_time_seconds: {lognormal: {median: 25, sigma: 0.5}}
-active_think_seconds: {lognormal: {median: 30, sigma: 0.6}}
-sla:
-  ttft_target_seconds: 10.0
-  ttft_failure_seconds: 30.0
-  tpot_target_ms: 150.0
-  tpot_failure_ms: 225.0
-`;
+/* Fresh-persona starting point for "New persona" — a moderate
+ * conversational user. The deprecated distribution fields
+ * (sessions_before_leaving / inter_session_gap) must exist for the
+ * schema but no longer drive runtime; they're carried, never shown. */
+const PERSONA_DEFAULT_SPEC = {
+  description: "",
+  input_tokens: { lognormal: { median: 400, sigma: 0.5 } },
+  output_tokens: { lognormal: { median: 200, sigma: 0.4 } },
+  turns_per_session: { discrete: { 1: 0.6, 2: 0.3, 4: 0.1 } },
+  sessions_before_leaving: { constant: 1 },
+  inter_session_gap_seconds: { constant: 60 },
+  read_time_seconds: { lognormal: { median: 25, sigma: 0.5 } },
+  active_think_seconds: { lognormal: { median: 30, sigma: 0.6 } },
+  sla: {
+    ttft_target_seconds: 10, ttft_failure_seconds: 30,
+    tpot_target_ms: 150, tpot_failure_ms: 225,
+  },
+};
 
-const COHORT_TEMPLATE = `name: "My team"
-description: "What this team does"
-persona_weights:
-  quick_lookup: 0.5
-  conversational: 0.5
-`;
+/* Log-scale slider mapping: range inputs run 0..1000, values are
+ * ratio-scaled (tokens, seconds) so linear sliders would waste 90% of
+ * their travel on the top decade. */
+const logTo = (pos, min, max) =>
+  min * Math.exp((pos / 1000) * Math.log(max / min));
+const logFrom = (v, min, max) =>
+  1000 * Math.log(Math.max(min, Math.min(max, v)) / min) / Math.log(max / min);
+const fmtNum = (v, dec) =>
+  dec === 0 ? String(Math.round(v)) : String(+(+v).toFixed(dec));
 
 const Editor = {
   kind: "personas",    // "personas" | "cohorts"
   editing: null,       // id being edited, null for new
+  spec: null,          // working persona spec (mutated by sliders)
+  mix: [],             // working cohort rows [{pid, share}]
 
   init() {
     $("#editor-save").addEventListener("click", () => this.save());
-    $("#persona-new").addEventListener("click", () =>
-      this.startNew("personas", PERSONA_TEMPLATE));
-    $("#cohort-new").addEventListener("click", () =>
-      this.startNew("cohorts", COHORT_TEMPLATE));
+    $("#persona-new").addEventListener("click", () => this.startNewPersona());
+    $("#cohort-new").addEventListener("click", () => this.startNewCohort());
     document.querySelector('#tabs button[data-view="personas"]')
       .addEventListener("click", () => this.refreshLists());
+    // Benchmark form → designer jump.
+    $("#workload-edit-link").addEventListener("click", (e) => {
+      e.preventDefault();
+      document.querySelector('#tabs button[data-view="personas"]').click();
+    });
   },
 
   msg(text, cls = "") {
@@ -2262,9 +2290,17 @@ const Editor = {
     this.editing = id;
     const detail = await api(`/api/${kind}/${id}`);
     $("#editor-id").value = id;
-    $("#editor-yaml").value = detail.yaml;
     $("#editor-kind-badge").textContent = kind.slice(0, -1);
-    this.msg(`editing ${id} — saves to ${detail.editable_file}`);
+    this.msg(`editing ${id} — changes apply to the next run`);
+    if (kind === "personas") {
+      this.spec = detail.spec;
+      this.buildPersonaForm();
+    } else {
+      this.spec = detail.spec;
+      this.mix = Object.entries(detail.spec.persona_weights || {})
+        .map(([pid, w]) => ({ pid, share: Math.round(w * 1000) / 10 }));
+      this.buildCohortForm();
+    }
     this.renderCard(kind, id);
     this.refreshLists();
   },
@@ -2337,30 +2373,389 @@ const Editor = {
     }
   },
 
-  startNew(kind, template) {
-    this.kind = kind;
+  startNewPersona() {
+    this.kind = "personas";
     this.editing = null;
+    this.spec = structuredClone(PERSONA_DEFAULT_SPEC);
     $("#workload-card").hidden = true;
-    $("#editor-advanced").open = true;
     $("#editor-id").value = "";
-    $("#editor-yaml").value = template;
-    $("#editor-kind-badge").textContent = kind.slice(0, -1);
-    this.msg("set an id and Save");
+    $("#editor-kind-badge").textContent = "persona";
+    this.msg("shape the persona, set an id, Save");
+    this.buildPersonaForm();
     this.refreshLists();
+  },
+
+  startNewCohort() {
+    this.kind = "cohorts";
+    this.editing = null;
+    const ids = (Control.catalogs.personas || []).map(p => p.id);
+    this.spec = { name: "", description: "" };
+    this.mix = ids.slice(0, 2).map(pid => ({ pid, share: 50 }));
+    $("#workload-card").hidden = true;
+    $("#editor-id").value = "";
+    $("#editor-kind-badge").textContent = "cohort";
+    this.msg("mix the personas, set an id, Save");
+    this.buildCohortForm();
+    this.refreshLists();
+  },
+
+  /* ── form primitives ─────────────────────────────────────────── */
+
+  el(html) {
+    const t = document.createElement("template");
+    t.innerHTML = html.trim();
+    return t.content.firstElementChild;
+  },
+
+  /* One slider + synced number input. ``get``/``set`` read and write
+   * the working spec so every control is live against one object. */
+  sliderRow({ label, hint, unit, min, max, log = false, dec = 0,
+              get, set }) {
+    const v = get();
+    const pos = log ? logFrom(v, min, max)
+                    : 1000 * (v - min) / (max - min);
+    const row = this.el(`<div class="slider-row">
+      <span class="sl-label">${label}
+        ${hint ? `<span class="hint">${hint}</span>` : ""}</span>
+      <input type="range" min="0" max="1000" value="${Math.round(pos)}">
+      <span class="sl-num"><input type="text" value="${fmtNum(v, dec)}">
+        <span class="unit">${unit ?? ""}</span></span>
+    </div>`);
+    const range = row.querySelector("input[type=range]");
+    const num = row.querySelector(".sl-num input");
+    range.addEventListener("input", () => {
+      const val = log ? logTo(+range.value, min, max)
+                      : min + (+range.value / 1000) * (max - min);
+      num.value = fmtNum(val, dec);
+      set(+num.value);
+    });
+    num.addEventListener("change", () => {
+      let val = parseFloat(num.value);
+      if (!Number.isFinite(val)) { num.value = fmtNum(get(), dec); return; }
+      val = Math.max(min, Math.min(max, val));
+      num.value = fmtNum(val, dec);
+      range.value = Math.round(
+        log ? logFrom(val, min, max) : 1000 * (val - min) / (max - min));
+      set(val);
+    });
+    return row;
+  },
+
+  /* Distribution accessors: lognormal edits its median, constant its
+   * value. Discrete distributions get their own row editor. */
+  distMedian(d) {
+    if (d.lognormal) return d.lognormal.median;
+    if (d.constant != null) return d.constant;
+    if (d.discrete) {
+      const e = Object.entries(d.discrete);
+      const tot = e.reduce((a, [, w]) => a + +w, 0) || 1;
+      return e.reduce((a, [v, w]) => a + (+v) * (+w), 0) / tot;
+    }
+    return 0;
+  },
+  setDistMedian(d, v) {
+    if (d.lognormal) d.lognormal.median = v;
+    else if (d.constant != null) d.constant = v;
+  },
+
+  discreteEditor(field, label) {
+    const d = this.spec[field].discrete;
+    const box = this.el(`<div><h4>${label} — value distribution</h4>
+      <span class="hint">weighted choice: each row is (value, relative
+      weight)</span><div class="disc-rows"></div></div>`);
+    const rowsEl = box.querySelector(".disc-rows");
+    const render = () => {
+      rowsEl.innerHTML = "";
+      for (const [val, w] of Object.entries(d)) {
+        const r = this.el(`<div class="disc-row">
+          <input type="text" value="${val}" title="value">
+          <input type="text" value="${w}" title="weight">
+          <button class="remove" title="remove">×</button></div>`);
+        const [vi, wi] = r.querySelectorAll("input");
+        const commit = () => {
+          delete d[val];
+          const nv = parseFloat(vi.value), nw = parseFloat(wi.value);
+          if (Number.isFinite(nv) && Number.isFinite(nw) && nw > 0) {
+            d[Number.isInteger(nv) ? nv : nv] = nw;
+          }
+          render();
+        };
+        vi.addEventListener("change", commit);
+        wi.addEventListener("change", commit);
+        r.querySelector(".remove").addEventListener("click", () => {
+          if (Object.keys(d).length > 1) { delete d[val]; render(); }
+        });
+        rowsEl.append(r);
+      }
+      const add = this.el(
+        `<button class="dotted-add" style="max-width:290px">+ add value</button>`);
+      add.addEventListener("click", () => {
+        const vals = Object.keys(d).map(Number);
+        d[Math.round(Math.max(...vals, 0) + 1)] = 0.1;
+        render();
+      });
+      rowsEl.append(add);
+    };
+    render();
+    return box;
+  },
+
+  /* ── persona form ────────────────────────────────────────────── */
+
+  buildPersonaForm() {
+    const form = $("#editor-form");
+    form.innerHTML = "";
+    const s = this.spec;
+
+    const desc = this.el(`<label style="display:block;margin-bottom:6px">
+      Description <input id="pf-desc" style="width:100%"
+      placeholder="What this kind of user does"></label>`);
+    desc.querySelector("input").value = s.description || "";
+    desc.querySelector("input").addEventListener("input",
+      (e) => { s.description = e.target.value; });
+    form.append(desc);
+
+    form.append(this.el(`<h4>What this user does</h4>`));
+    const dists = [
+      { f: "input_tokens", label: "Question size", unit: "tok",
+        min: 8, max: 32768, log: true,
+        hint: "tokens sent per turn (with history on top)" },
+      { f: "output_tokens", label: "Answer size", unit: "tok",
+        min: 8, max: 32768, log: true,
+        hint: "tokens the model streams back" },
+      { f: "turns_per_session", label: "Turns per session", unit: "",
+        min: 1, max: 50, log: false,
+        hint: "back-and-forth before the user leaves" },
+      { f: "read_time_seconds", label: "Reading time", unit: "s",
+        min: 0.5, max: 600, log: true, dec: 1,
+        hint: "catching up after the stream ends" },
+      { f: "active_think_seconds", label: "Thinking time", unit: "s",
+        min: 0.5, max: 900, log: true, dec: 1,
+        hint: "composing the next message" },
+    ];
+    const discreteFields = [];
+    for (const cfg of dists) {
+      const d = s[cfg.f];
+      if (d.discrete) {
+        // A shaped (discrete) distribution has no single knob — show
+        // its mean read-only here, edit the shape in Advanced.
+        const mean = this.distMedian(d);
+        form.append(this.el(`<div class="slider-row">
+          <span class="sl-label">${cfg.label}
+            <span class="hint">${cfg.hint}</span></span>
+          <span class="msg">shaped distribution — mean
+            ${fmtNum(mean, 1)}${cfg.unit} · edit values under Advanced</span>
+          <span></span></div>`));
+        discreteFields.push(cfg);
+      } else {
+        form.append(this.sliderRow({
+          ...cfg,
+          get: () => this.distMedian(d),
+          set: (v) => this.setDistMedian(d, v),
+        }));
+      }
+    }
+
+    form.append(this.el(`<h4>Experience thresholds</h4>`));
+    form.append(this.sliderRow({
+      label: "Feels slow at", unit: "s", min: 0.2, max: 60, log: true,
+      dec: 1, hint: "first-token wait past this misses the target",
+      get: () => s.sla.ttft_target_seconds,
+      set: (v) => {
+        s.sla.ttft_target_seconds = v;
+        if (s.sla.ttft_failure_seconds < v) s.sla.ttft_failure_seconds = v;
+      },
+    }));
+    form.append(this.sliderRow({
+      label: "Gives up at", unit: "s", min: 0.5, max: 180, log: true,
+      dec: 1, hint: "the hard SLA bar — capacity is gated on this",
+      get: () => s.sla.ttft_failure_seconds,
+      set: (v) => {
+        s.sla.ttft_failure_seconds =
+          Math.max(v, s.sla.ttft_target_seconds);
+      },
+    }));
+
+    const adv = this.el(`<details class="adv-block">
+      <summary class="msg">Advanced — variability, per-token SLA,
+      timeouts</summary><div class="adv-body"></div></details>`);
+    const body = adv.querySelector(".adv-body");
+    body.append(this.el(`<h4>Variability</h4>`));
+    for (const cfg of dists) {
+      const d = s[cfg.f];
+      if (!d.lognormal) continue;
+      body.append(this.sliderRow({
+        label: `${cfg.label} spread`, unit: "σ", min: 0.1, max: 1.3,
+        dec: 2, hint: "0.35 tight · 0.5 typical · 0.7+ heavy-tailed",
+        get: () => d.lognormal.sigma,
+        set: (v) => { d.lognormal.sigma = v; },
+      }));
+    }
+    for (const cfg of discreteFields) {
+      body.append(this.discreteEditor(cfg.f, cfg.label));
+    }
+    body.append(this.el(`<h4>Per-token SLA</h4>`));
+    body.append(this.sliderRow({
+      label: "Feels slow per token", unit: "ms", min: 5, max: 500,
+      log: true, hint: "streaming pace target",
+      get: () => s.sla.tpot_target_ms,
+      set: (v) => {
+        s.sla.tpot_target_ms = v;
+        if (s.sla.tpot_failure_ms < v) s.sla.tpot_failure_ms = v;
+      },
+    }));
+    body.append(this.sliderRow({
+      label: "Gives up per token", unit: "ms", min: 10, max: 1000,
+      log: true, hint: "streaming pace failure bar",
+      get: () => s.sla.tpot_failure_ms,
+      set: (v) => {
+        s.sla.tpot_failure_ms = Math.max(v, s.sla.tpot_target_ms);
+      },
+    }));
+    body.append(this.el(`<h4>Abort timeouts</h4>`));
+    s.timeouts = s.timeouts || {};
+    const t = s.timeouts;
+    body.append(this.sliderRow({
+      label: "Hard request ceiling", unit: "s", min: 60, max: 3600,
+      log: true, hint: "abort any request past this wall time",
+      get: () => t.hard_timeout_s ?? 900,
+      set: (v) => { t.hard_timeout_s = Math.round(v); },
+    }));
+    form.append(adv);
+  },
+
+  /* ── cohort form ─────────────────────────────────────────────── */
+
+  buildCohortForm() {
+    const form = $("#editor-form");
+    form.innerHTML = "";
+    const s = this.spec;
+    const personaIds = (Control.catalogs.personas || []).map(p => p.id);
+
+    const head = this.el(`<div>
+      <label style="display:block;margin-bottom:6px">Name
+        <input id="cf-name" style="width:100%" placeholder="Customer support team">
+      </label>
+      <label style="display:block;margin-bottom:6px">Description
+        <input id="cf-desc" style="width:100%"
+          placeholder="What this team does all day"></label></div>`);
+    head.querySelector("#cf-name").value = s.name || "";
+    head.querySelector("#cf-desc").value = s.description || "";
+    head.querySelector("#cf-name").addEventListener("input",
+      (e) => { s.name = e.target.value; });
+    head.querySelector("#cf-desc").addEventListener("input",
+      (e) => { s.description = e.target.value; });
+    form.append(head);
+
+    form.append(this.el(`<h4>Traffic mix</h4>`));
+    const mixBox = this.el(`<div class="mix-box"></div>`);
+    form.append(mixBox);
+    const foot = this.el(`<span class="hint"></span>`);
+    form.append(foot);
+
+    const render = () => {
+      mixBox.innerHTML = "";
+      const total = this.mix.reduce((a, r) => a + (+r.share || 0), 0);
+      this.mix.forEach((row, i) => {
+        const pct = total > 0 ? Math.round(100 * (+row.share || 0) / total) : 0;
+        const opts = personaIds.map(pid =>
+          `<option value="${pid}" ${pid === row.pid ? "selected" : ""}>
+             ${pid.replaceAll("_", " ")}</option>`).join("");
+        const r = this.el(`<div class="mix-row">
+          <select>${opts}</select>
+          <input type="range" min="0" max="100" value="${row.share}">
+          <span class="mix-share">${pct}% of traffic</span>
+          <button class="remove" title="remove persona">×</button></div>`);
+        r.querySelector("select").addEventListener("change", (e) => {
+          row.pid = e.target.value;
+        });
+        r.querySelector("input[type=range]").addEventListener("input", (e) => {
+          row.share = +e.target.value;
+          renderShares();
+        });
+        r.querySelector(".remove").addEventListener("click", () => {
+          this.mix.splice(i, 1);
+          render();
+        });
+        mixBox.append(r);
+      });
+      const add = this.el(`<button class="dotted-add">+ add persona
+        to the mix</button>`);
+      add.addEventListener("click", () => {
+        const used = new Set(this.mix.map(r => r.pid));
+        const next = personaIds.find(pid => !used.has(pid)) || personaIds[0];
+        if (next) this.mix.push({ pid: next, share: 20 });
+        render();
+      });
+      mixBox.append(add);
+      renderShares();
+    };
+    const renderShares = () => {
+      const total = this.mix.reduce((a, r) => a + (+r.share || 0), 0);
+      mixBox.querySelectorAll(".mix-row").forEach((r, i) => {
+        const pct = total > 0
+          ? Math.round(100 * (+this.mix[i].share || 0) / total) : 0;
+        r.querySelector(".mix-share").textContent = `${pct}% of traffic`;
+      });
+      foot.textContent = "Shares are relative — they normalize to 100% "
+        + "when you save.";
+    };
+    render();
   },
 
   async save() {
     const id = $("#editor-id").value.trim();
     if (!id) { this.msg("id required", "error"); return; }
+    let spec;
+    if (this.kind === "personas") {
+      spec = this.spec;
+      if (!spec) { this.msg("nothing to save", "error"); return; }
+      if (spec.timeouts && !Object.keys(spec.timeouts).length) {
+        delete spec.timeouts;
+      }
+    } else {
+      const seen = new Set();
+      for (const r of this.mix) {
+        if (seen.has(r.pid)) {
+          this.msg(`"${r.pid}" appears twice in the mix — remove one`,
+                   "error");
+          return;
+        }
+        seen.add(r.pid);
+      }
+      const rows = this.mix.filter(r => (+r.share || 0) > 0);
+      if (!rows.length) {
+        this.msg("the mix needs at least one persona with a share",
+                 "error");
+        return;
+      }
+      const total = rows.reduce((a, r) => a + +r.share, 0);
+      const weights = {};
+      // Normalize to exactly 1.0 — the server validates the sum, and
+      // rounding dust would bounce the save.
+      let acc = 0;
+      rows.forEach((r, i) => {
+        const w = i === rows.length - 1
+          ? +(1 - acc).toFixed(6)
+          : +((+r.share) / total).toFixed(6);
+        acc += w;
+        weights[r.pid] = w;
+      });
+      spec = {
+        name: this.spec.name || id,
+        description: this.spec.description || "",
+        persona_weights: weights,
+      };
+    }
     try {
       await api(`/api/${this.kind}/${id}`, {
-        method: "PUT",
-        body: JSON.stringify({ yaml: $("#editor-yaml").value }),
+        method: "PUT", body: JSON.stringify({ spec }),
       });
       this.editing = id;
-      this.msg(`saved ${id}`, "ok");
+      this.msg(`saved ${id} — the next run uses it`, "ok");
+      await Control.loadCatalogs();  // refresh pickers + card numbers
+      this.renderCard(this.kind, id);
       this.refreshLists();
-      Control.loadCatalogs();  // refresh workload pickers with the new entry
     } catch (e) {
       this.msg(e.message, "error");
     }

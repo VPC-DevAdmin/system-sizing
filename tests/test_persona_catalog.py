@@ -176,3 +176,31 @@ persona_weights: {ghost: 1.0}
         assert r.status_code == 422
         assert "missing" in r.json()["detail"]
         assert "support_bot" in PERSONAS   # still intact
+
+        # Structured-JSON save — what the graphical designer sends
+        # (the UI has no YAML anywhere). Same validation path.
+        detail = client.get("/api/personas/support_bot").json()
+        spec = detail["spec"]
+        spec["input_tokens"] = {"lognormal": {"median": 500, "sigma": 0.4}}
+        r = client.put("/api/personas/support_bot", json={"spec": spec})
+        assert r.status_code == 200, r.text
+        got = client.get("/api/personas/support_bot").json()["spec"]
+        assert got["input_tokens"]["lognormal"]["median"] == 500
+
+        r = client.put("/api/cohorts/support_team", json={"spec": {
+            "name": "Support", "description": "via spec JSON",
+            "persona_weights": {"support_bot": 1.0},
+        }})
+        assert r.status_code == 200, r.text
+
+        # Structured save with bad weights rejected the same way.
+        r = client.put("/api/cohorts/support_team", json={"spec": {
+            "name": "Support", "description": "bad",
+            "persona_weights": {"support_bot": 0.4},
+        }})
+        assert r.status_code == 422
+        assert "sum" in r.json()["detail"]
+
+        # Neither yaml nor spec → explicit 422.
+        r = client.put("/api/personas/support_bot", json={})
+        assert r.status_code == 422

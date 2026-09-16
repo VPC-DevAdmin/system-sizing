@@ -283,15 +283,21 @@ class SimulationConfig:
     # duration once one is known (equilibrium shifts take about one
     # session length to propagate).
     open_loop_warmup_s: int = 90
-    # After a divergent window the accumulated backlog must clear
-    # before the next rate is meaningful.
+    # After overshooting the knee the search reverts to the last
+    # stable rate and trims only the excess sessions; this caps how
+    # long it waits for the queue to fall back to stable density
+    # (also the full-drain cap when no stable point exists yet).
     open_loop_drain_timeout_s: int = 240
     # Generator scale-out: one worker process comfortably owns this
     # many concurrent streams; the coordinator adds workers when the
     # projected in-flight count (or observed arrival tardiness) says
     # the current set can't keep arrivals on schedule.
-    open_loop_inflight_per_worker: int = 256
-    open_loop_max_workers: int = 8
+    # The XE7740 run showed one worker comfortable to ~180 concurrent
+    # streams and lagging past ~350; a whole-box engine can want
+    # thousands in flight, so the ceiling errs high — workers are
+    # cheap subprocesses and only spawn when tardiness demands them.
+    open_loop_inflight_per_worker: int = 192
+    open_loop_max_workers: int = 16
 
 
 @dataclass

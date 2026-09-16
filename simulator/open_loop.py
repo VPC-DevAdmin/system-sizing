@@ -56,9 +56,13 @@ from .telemetry import MeasurementTelemetry
 
 log = logging.getLogger(__name__)
 
-# Arrival lateness past which the generator is judged to be falling
-# behind its own schedule — scale out, or report client_limited.
-TARDINESS_LIMIT_MS = 500.0
+# Fraction of a window's arrivals allowed to be tardy (later than
+# arrivals.TARDY_THRESHOLD_MS vs their wall-clock schedule) before the
+# generator is judged saturated. Computed from cumulative counters so
+# the verdict is strictly PER WINDOW — one bad burst can't smear into
+# later windows the way a trailing-percentile buffer does.
+TARDY_FRACTION_LIMIT = 0.02
+TARDY_MIN_COUNT = 5
 # Worker event-loop lag limit (same meaning as the closed-loop
 # CLIENT_SATURATION_LAG_MS: past this, latencies measure the client).
 WORKER_LAG_LIMIT_MS = 1000.0
@@ -175,6 +179,15 @@ class WorkerPool:
         for w in self._workers:
             await self._send(w, {"cmd": "drain"})
 
+    async def trim(self, target_total: int) -> None:
+        """Cancel newest sessions across workers down to
+        ``target_total`` active (evenly split)."""
+        if not self._workers:
+            return
+        per = max(0, int(target_total)) // len(self._workers)
+        for w in self._workers:
+            await self._send(w, {"cmd": "trim", "target": per})
+
     def drain_turn_queue(self) -> list[dict]:
         out: list[dict] = []
         while True:
@@ -195,6 +208,7 @@ class WorkerPool:
         return {
             "workers": len(self._workers),
             "arrivals_total": sum(s.get("arrivals_total", 0) for s in stats),
+            "tardy_total": sum(s.get("tardy_total", 0) for s in stats),
             "sessions_active": sum(s.get("sessions_active", 0) for s in stats),
             "sessions_done": sum(s.get("sessions_done", 0) for s in stats),
             "in_flight": sum(s.get("in_flight", 0) for s in stats),
@@ -244,6 +258,7 @@ class _WindowResult:
     sample_size: int
     client_saturated: bool
     measurement_id: int | None
+    active_sessions_mean: float = 0.0
 
 
 def _summarize_turns(turns: list[dict]) -> dict:
@@ -388,6 +403,7 @@ class OpenLoopRunner:
         self._last_engine_metrics: dict = {}
         self._snapshot_task: asyncio.Task | None = None
         self._last_inflight_mean: float | None = None
+        self._last_stable: dict | None = None  # {rate, sessions}
         self._queue_gauge_seen = False
 
     # ── Engine pressure sampling ────────────────────────────────────
@@ -499,6 +515,11 @@ class OpenLoopRunner:
         max_lag = 0.0
         extended = False
         verdict = None
+        # Window-scoped tardy accounting: deltas of the workers'
+        # cumulative counters between window start and end.
+        agg0 = self.pool.aggregate()
+        arrivals0 = agg0.get("arrivals_total", 0) if agg0 else 0
+        tardy0 = agg0.get("tardy_total", 0) if agg0 else 0
 
         try:
             remaining = window_s
@@ -598,9 +619,18 @@ class OpenLoopRunner:
             else "client_in_flight"
         )
 
+        agg1 = self.pool.aggregate()
+        d_arrivals = max(0, (agg1.get("arrivals_total", 0) if agg1 else 0)
+                         - arrivals0)
+        d_tardy = max(0, (agg1.get("tardy_total", 0) if agg1 else 0) - tardy0)
+        tardy_fraction = d_tardy / max(1, d_arrivals)
         client_saturated = (
-            max_tardiness > TARDINESS_LIMIT_MS or max_lag > WORKER_LAG_LIMIT_MS
+            (d_tardy >= TARDY_MIN_COUNT
+             and tardy_fraction > TARDY_FRACTION_LIMIT)
+            or max_lag > WORKER_LAG_LIMIT_MS
         )
+        verdict_dict["tardy_fraction"] = round(tardy_fraction, 4)
+        verdict_dict["tardy_arrivals"] = d_tardy
         self.client_max_lag_ms = max(self.client_max_lag_ms, max_lag)
 
         # Final verdict mapping. An inconclusive verdict that survived
@@ -674,6 +704,13 @@ class OpenLoopRunner:
         if stability == DIVERGENT:
             final_row["capacity_status"] = "fail"
             final_row["target_status"] = "fail"
+        # A client-limited window's samples are tainted — the lagging
+        # GENERATOR inflated them. "pending", never "pass": pairing
+        # "client_limited · pass" would claim an SLA verdict this
+        # window cannot honestly give.
+        if stability == CLIENT_LIMITED:
+            final_row["capacity_status"] = "pending"
+            final_row["target_status"] = "pending"
         self.db.update_measurement(measurement_id, final_row)
         if turns:
             self.db.insert_events(
@@ -704,11 +741,67 @@ class OpenLoopRunner:
             sample_size=summary.get("sample_size", 0),
             client_saturated=client_saturated,
             measurement_id=measurement_id,
+            active_sessions_mean=active_mean,
         )
 
+    def _mark_superseded(self, measurement_id: int | None) -> None:
+        """Re-label a client-saturated attempt that is being re-run
+        with more workers: it is not a ceiling, it's a discarded
+        measurement of the generator."""
+        if measurement_id is None:
+            return
+        try:
+            row = self.db.fetchone(
+                "SELECT step_index, target_pool_size, stability_detail "
+                "FROM cohort_measurements WHERE measurement_id = ?",
+                (measurement_id,),
+            )
+            self.db.update_measurement(measurement_id, {
+                "stability": "superseded",
+                "capacity_status": "pending",
+                "target_status": "pending",
+            })
+            if row is not None:
+                BUS.publish("step", {
+                    "step_index": row["step_index"],
+                    "pool_size": row["target_pool_size"],
+                    "stability": "superseded",
+                    "capacity_status": "pending",
+                })
+        except Exception:
+            log.debug("supersede mark failed", exc_info=True)
+
+    async def _revert_to_stable(self) -> None:
+        """Fall back after overshooting the knee — WITHOUT tearing the
+        population to zero. Arrivals continue at the last known-stable
+        rate; only the EXCESS sessions are cancelled (newest first) so
+        the queue drains back to the stable density; the bisection then
+        probes smaller increments from a warm system. Rebuilding from
+        an empty pool would waste a full session-length ramp per
+        divergent probe. A divergent FIRST window has no stable point
+        to fall back to — full drain then."""
+        st = self._last_stable
+        if st is None:
+            await self._drain()
+            return
+        self.phase = "reverting to last stable rate"
+        self.current_rate = st["rate"]
+        await self.pool.set_rate(st["rate"])
+        await self.pool.trim(int(st["sessions"]))
+        deadline = (time.monotonic()
+                    + self.cfg.simulation.open_loop_drain_timeout_s)
+        threshold = max(5.0, 0.05 * st["sessions"])
+        while time.monotonic() < deadline:
+            m = await self._sample_engine()
+            qd = m.get("queue_depth")
+            if qd is None or qd <= threshold:
+                break
+            await asyncio.sleep(2.0)
+        self.phase = "idle"
+
     async def _drain(self) -> None:
-        """Clear the backlog after a divergent window — the next rate
-        is only meaningful from an empty queue."""
+        """Full teardown fallback — only when there is no stable
+        operating point to revert to."""
         self.phase = "draining"
         self.current_rate = 0.0
         await self.pool.drain()
@@ -764,10 +857,14 @@ class OpenLoopRunner:
                     self.phase = "starting load workers"
                 await self.pool.scale_to(planned)
                 result = await self._measure_window(rate, window_s)
-                # Generator fell behind: add a worker and re-run this
-                # rate once — only an already-maxed generator records
+                # Generator fell behind: keep adding workers and
+                # re-running this rate until the generator keeps up or
+                # is genuinely maxed — ONLY a maxed generator records
                 # client_limited (the honest "the tool gave out" mark).
-                if (
+                # Each superseded attempt is re-labeled so it never
+                # counts as a ceiling in the export or reads as a
+                # verdict in the UI.
+                while (
                     result.client_saturated
                     and self.pool.size < sim.open_loop_max_workers
                 ):
@@ -776,6 +873,8 @@ class OpenLoopRunner:
                         "scaling out and re-measuring",
                         rate, self.pool.size,
                     )
+                    self._mark_superseded(result.measurement_id)
+                    self.phase = "starting load workers"
                     await self.pool.scale_to(self.pool.size + 1)
                     result = await self._measure_window(rate, window_s)
                 self.stepper.record(RateStep(
@@ -787,8 +886,13 @@ class OpenLoopRunner:
                     sample_size=result.sample_size,
                 ))
                 last_rate = rate
+                if result.stability == STABLE:
+                    self._last_stable = {
+                        "rate": rate,
+                        "sessions": result.active_sessions_mean,
+                    }
                 if result.stability in (DIVERGENT, CLIENT_LIMITED):
-                    await self._drain()
+                    await self._revert_to_stable()
         except (KeyboardInterrupt, asyncio.CancelledError):
             final_status = "cancelled"
             raise

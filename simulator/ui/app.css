@@ -327,11 +327,56 @@ tr.cfg-first td { border-top: 1px solid var(--stroke-strong); }
 }
 .entry-list li:hover { background: var(--glass-2); }
 .entry-list li.active { background: var(--glass-2); color: var(--accent); }
-#editor-yaml {
-  min-height: 420px; margin-top: 12px; resize: vertical;
-  font: .84rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
 #editor-id { width: 190px; }
+
+/* Graphical workload designer — sliders, mix rows, no YAML. */
+.editor-form { margin-top: 14px; }
+.editor-form h4 {
+  margin: 18px 0 6px; font-size: .78rem; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted); font-weight: 600;
+}
+.slider-row {
+  display: grid; grid-template-columns: 185px 1fr 96px;
+  gap: 14px; align-items: center; margin: 7px 0;
+}
+.slider-row .sl-label { font-size: .86rem; }
+.slider-row .sl-label .hint { display: block; font-size: .72rem; }
+.slider-row input[type=range] {
+  width: 100%; accent-color: var(--accent); margin: 0;
+}
+.slider-row .sl-num {
+  display: flex; align-items: baseline; gap: 4px; justify-content: flex-end;
+}
+.slider-row .sl-num input {
+  width: 64px; text-align: right; padding: 4px 6px; font-size: .84rem;
+  font-variant-numeric: tabular-nums;
+}
+.slider-row .sl-num .unit { color: var(--muted); font-size: .74rem; }
+details.adv-block { margin-top: 14px; }
+details.adv-block > summary { cursor: pointer; }
+.mix-row {
+  display: grid; grid-template-columns: minmax(150px, 230px) 1fr 96px 30px;
+  gap: 12px; align-items: center; margin: 7px 0;
+}
+.mix-row .mix-share { color: var(--muted); font-size: .78rem;
+  text-align: right; font-variant-numeric: tabular-nums; }
+.mix-row button.remove {
+  background: none; border: none; color: var(--muted); font-size: 1.05rem;
+  cursor: pointer; padding: 2px 6px; border-radius: 6px;
+}
+.mix-row button.remove:hover { color: var(--fail); background: var(--glass-2); }
+.dotted-add {
+  display: block; width: 100%; margin-top: 10px; padding: 11px;
+  border: 1.5px dashed var(--stroke); border-radius: 12px;
+  background: none; color: var(--muted); font-size: .86rem; cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.dotted-add:hover { color: var(--text); border-color: var(--accent); }
+.disc-row {
+  display: grid; grid-template-columns: 120px 120px 30px; gap: 10px;
+  align-items: center; margin: 5px 0; font-size: .84rem;
+}
+.disc-row input { padding: 4px 6px; font-size: .84rem; text-align: right; }
 code {
   background: rgba(8, 20, 31, .6); border: 1px solid var(--stroke);
   padding: 1px 6px; border-radius: 6px; font-size: .84em;

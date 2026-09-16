@@ -35,10 +35,19 @@ from .virtual_user import SharedState, UserStats, _now_ms, run_virtual_user
 log = logging.getLogger(__name__)
 
 
+# An arrival this late (vs its wall-clock schedule) counts as tardy —
+# the generator, not the engine, is falling behind. Cumulative tardy
+# counts let the coordinator compute an honest PER-WINDOW tardy
+# fraction (a trailing-percentile buffer would smear one bad burst
+# across several windows).
+TARDY_THRESHOLD_MS = 500.0
+
+
 @dataclass
 class ArrivalStats:
     """Live counters the worker reports to the coordinator each second."""
     arrivals_total: int = 0
+    tardy_total: int = 0        # cumulative arrivals later than TARDY_THRESHOLD_MS
     sessions_active: int = 0
     sessions_done: int = 0
     # Recent arrival-lateness samples (ms): actual spawn − scheduled.
@@ -118,6 +127,25 @@ class SessionArrivalLauncher:
         for ev in self._cancel_events.values():
             ev.set()
 
+    def trim_active(self, target: int) -> int:
+        """Cancel the NEWEST sessions beyond ``target`` active.
+
+        Used after overshooting the stability knee: fall back to a
+        known-stable operating point without tearing the population
+        down to zero. Newest first — they have the least conversation
+        history invested, and their queued/in-flight requests are
+        exactly the excess the engine is choking on (an aborted HTTP
+        request is cancelled inside the engine, freeing its queue
+        slot)."""
+        excess = len(self._sessions) - max(0, int(target))
+        if excess <= 0:
+            return 0
+        for user_id in list(self._sessions.keys())[-excess:]:
+            ev = self._cancel_events.get(user_id)
+            if ev is not None:
+                ev.set()
+        return excess
+
     async def stop(self) -> None:
         self._stopped = True
         self._rate_changed.set()
@@ -176,6 +204,8 @@ class SessionArrivalLauncher:
             # that the CLIENT (not the engine) is falling behind.
             lateness_ms = max(0.0, (time.monotonic() - next_at) * 1000.0)
             self.stats.tardiness_ms.append(lateness_ms)
+            if lateness_ms > TARDY_THRESHOLD_MS:
+                self.stats.tardy_total += 1
             self._spawn_session()
             next_at += self._rng.expovariate(rate)
 

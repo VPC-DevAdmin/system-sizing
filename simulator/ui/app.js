@@ -657,11 +657,7 @@ const Live = {
   connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws/telemetry`);
-    ws.onopen = () => { $("#ws-state").textContent = "live"; };
-    ws.onclose = () => {
-      $("#ws-state").textContent = "reconnecting…";
-      setTimeout(() => this.connect(), 2000);
-    };
+    ws.onclose = () => setTimeout(() => this.connect(), 2000);
     ws.onmessage = (m) => {
       const { topic, ts, data } = JSON.parse(m.data);
       if (topic === "snapshot") this.onSnapshot(ts, data);
@@ -698,8 +694,6 @@ const Live = {
                       "live-warmkv"]) {
       $(`#${id}`).textContent = "—";
     }
-    $("#live-progress").textContent = "—";
-    $("#live-progress-bar").style.width = "0";
   },
 
   onSnapshot(ts, s) {
@@ -733,15 +727,6 @@ const Live = {
       $("#live-warmkv").textContent =
         t >= 1e6 ? `${(t / 1e6).toFixed(1)}M` :
         t >= 1e3 ? `${(t / 1e3).toFixed(1)}k` : `${t}`;
-    }
-    const target = s.step_target_samples || 0;
-    if (target > 0) {
-      $("#live-progress").textContent = `${s.step_samples} / ${target} samples`;
-      $("#live-progress-bar").style.width =
-        `${Math.min(100, 100 * s.step_samples / target)}%`;
-    } else {
-      $("#live-progress").textContent = "—";
-      $("#live-progress-bar").style.width = "0";
     }
     this.push(this.charts.pool, fmt.clock(ts),
       [s.pool_size, s.in_flight, s.queue_depth ?? null]);

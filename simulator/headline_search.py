@@ -8,21 +8,21 @@ scheduling so generated tokens/sec climbs (throughput ↑) — until KV
 capacity and the batch cap bite. Somewhere on that surface is the
 shape that makes BOTH numbers as large as they can jointly be.
 
-This module hill-climbs a power-of-two lattice of shapes. Each cell:
+The search is FAST because ranking shapes needs saturation, not a
+capacity search. One engine launch; the generator holds a fixed
+number of outstanding zero-think requests (classic max-throughput
+closed loop — self-throttling is exactly right here, it keeps the
+engine perfectly fed); shapes change ON THE FLY (the cell persona
+overlay is rewritten and workers reload their registry — spawns pick
+up the new shape immediately); a few seconds clear the pipe of
+old-shape requests; then throughput and running-batch size are read
+from the ENGINE'S OWN counters (token totals + num_running), so
+client-side lag cannot distort the measurement. ~35-45 seconds per
+cell → a 12-cell hill-climb finishes in minutes.
 
-  1. writes an ephemeral zero-think, EOS-pinned persona for the shape
-     (as a catalog overlay, so load-generator worker subprocesses see
-     it too),
-  2. runs a COARSE open-loop rate search against the already-running
-     engine (short windows, ~15% bracket — the point is ranking cells,
-     not pinning them),
-  3. reads back the stability boundary's concurrency (mean in-flight)
-     and output tokens/sec, scored as √(C × T).
-
-Climbing stops when no lattice neighbor improves the score or the
-cell budget runs out. The winning shape is saved as the persona
-``headline_best`` so it can be re-run at full 5% resolution like any
-other workload, and a summary lands in ``run_NN/headline_search.json``.
+The winning shape is saved as the persona ``headline_best`` for a
+full-resolution open-loop capacity run afterwards, and a summary of
+every cell lands in ``run_NN/headline_search.json``.
 
 Caveat the summary states explicitly: concurrency is capped by the
 ENGINE shape (max_num_seqs × replicas) — this search finds the best
@@ -32,10 +32,9 @@ workload shape GIVEN the engine it runs against.
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import logging
-import sqlite3
+import statistics
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -45,7 +44,7 @@ import yaml
 from .bus import BUS
 from .config import Config
 from .engines import make_engine
-from .personas import Cohort, reload_personas
+from .personas import reload_personas
 from .preflight import preflight_check
 from .runs import resolve_run_dir
 
@@ -57,22 +56,27 @@ LATTICE_OUT = [64, 128, 256, 512, 1024, 2048, 4096]
 CELL_PERSONA_ID = "headline_cell"
 WINNER_PERSONA_ID = "headline_best"
 
+# Saturation-pressure controller bounds.
+INITIAL_OUTSTANDING = 512
+MAX_OUTSTANDING = 8192
+STREAMS_PER_WORKER = 512
+
 
 @dataclass
 class CellResult:
     input_tokens: int
     output_tokens: int
-    rate_max_per_min: float | None
     out_tok_s: float | None
-    in_flight: float | None
+    prompt_tok_s: float | None
+    in_flight: float | None          # engine num_running, mean
+    queue_depth: float | None        # engine waiting, mean
     objective: float
-    cohort_run_id: str | None = None
 
 
 def objective(in_flight: float | None, out_tok_s: float | None) -> float:
     """√(concurrency × output tok/s) — the symmetric joint score. A
     cell that trades all of one for the other scores worse than a
-    balanced one; a cell with no stable boundary scores zero."""
+    balanced one; a cell that produced nothing scores zero."""
     if not in_flight or not out_tok_s or in_flight <= 0 or out_tok_s <= 0:
         return 0.0
     return (in_flight * out_tok_s) ** 0.5
@@ -154,54 +158,17 @@ def _cell_persona_spec(inp: int, out: int, *, name: str,
 
 
 def _write_persona_overlay(catalog_dir: Path, pid: str, spec: dict) -> Path:
-    """Overlay file + registry reload — an overlay (not an in-memory
-    persona) because the load-generator WORKER SUBPROCESSES resolve
-    personas from the catalog at startup."""
+    """Overlay file + coordinator registry reload. The overlay (not an
+    in-memory persona) matters because load-generator WORKER
+    subprocesses resolve personas from the catalog — they get a
+    ``reload_personas`` command after each rewrite and pick the new
+    shape up at their next spawn."""
     catalog_dir.mkdir(parents=True, exist_ok=True)
     path = catalog_dir / f"{pid}.yaml"
     path.write_text(yaml.safe_dump(
         {"personas": {pid: spec}}, sort_keys=False))
     reload_personas()
     return path
-
-
-def _read_cell_metrics(db_path: Path, cohort_id: str) -> dict:
-    """Boundary metrics for the newest cohort_run with this id:
-    concurrency = mean in-flight at the highest stable rate, output
-    tok/s summed from that window's turns."""
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        run = conn.execute(
-            "SELECT cohort_run_id FROM cohort_run WHERE cohort_id = ? "
-            "ORDER BY started_at DESC LIMIT 1", (cohort_id,),
-        ).fetchone()
-        if run is None:
-            return {}
-        m = conn.execute(
-            "SELECT measurement_id, arrival_rate_per_min, "
-            "measured_avg_in_flight, measurement_duration_s "
-            "FROM cohort_measurements WHERE cohort_run_id = ? "
-            "AND stability = 'stable' "
-            "ORDER BY arrival_rate_per_min DESC LIMIT 1",
-            (run["cohort_run_id"],),
-        ).fetchone()
-        if m is None:
-            return {"cohort_run_id": run["cohort_run_id"]}
-        tok = conn.execute(
-            "SELECT COALESCE(SUM(output_tokens + reasoning_tokens), 0) AS t "
-            "FROM turn_events WHERE measurement_id = ?",
-            (m["measurement_id"],),
-        ).fetchone()
-        dur = m["measurement_duration_s"] or 0
-        return {
-            "cohort_run_id": run["cohort_run_id"],
-            "rate_max_per_min": m["arrival_rate_per_min"],
-            "in_flight": m["measured_avg_in_flight"],
-            "out_tok_s": (tok["t"] / dur) if dur else None,
-        }
-    finally:
-        conn.close()
 
 
 async def run_headline_search(
@@ -215,12 +182,14 @@ async def run_headline_search(
     progress: dict | None = None,
 ) -> Path:
     """Run the shape search end-to-end. Returns the summary JSON path."""
-    from .open_loop import run_cohort_open_loop
+    from .open_loop import WorkerPool
     from .persona_loader import USER_CATALOG_DIR
 
     catalog_dir = Path(catalog_dir) if catalog_dir else USER_CATALOG_DIR
     if run_dir is None:
         run_dir = resolve_run_dir(cfg.output.db_directory, new=new_run)
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
     sim = cfg.simulation
 
     preflight_check(cfg.engine.hardware_requirements)
@@ -236,10 +205,123 @@ async def run_headline_search(
     climb = ShapeClimb(budget=sim.headline_cell_budget)
     cells: list[CellResult] = []
     cell_overlay: Path | None = None
-    prev: CellResult | None = None
+    outstanding = INITIAL_OUTSTANDING
     started = time.monotonic()
+
+    async def _metrics() -> dict:
+        try:
+            return await asyncio.to_thread(engine.get_metrics)
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _snapshot(phase: str, m: dict, active: int) -> None:
+        BUS.publish("snapshot", {
+            "snapshot_at_ms": int(time.time() * 1000),
+            "phase": phase,
+            "pool_size": active,
+            "in_flight": int(m.get("num_running") or 0),
+            "queue_depth": (int(m["queue_depth"])
+                            if m.get("queue_depth") is not None else None),
+            "requests_completed": 0, "errors": 0,
+            "arrival_rate_per_min": None,
+            "active_sessions": active,
+        })
+
+    pool = WorkerPool(
+        base_config={
+            "persona_weights": {CELL_PERSONA_ID: 1.0},
+            "replica_urls": engine.replica_urls,
+            "api_key": engine.api_key,
+            "api_model_name": engine.api_model_name,
+            "model_id": cfg.engine.model_id,
+            "request_timeout_s": sim.request_timeout_s,
+            "reasoning_effort": None,
+            "seed": 0xC0FFEE,
+        },
+        log_dir=run_dir,
+        max_workers=sim.open_loop_max_workers,
+    )
+
+    async def _apply_pressure(n: int) -> None:
+        import math
+        await pool.scale_to(
+            min(sim.open_loop_max_workers,
+                max(1, math.ceil(n / STREAMS_PER_WORKER))))
+        await pool.set_outstanding(n)
+
+    async def _measure_cell(inp: int, out: int, phase: str) -> CellResult:
+        nonlocal outstanding
+        for attempt in (0, 1):
+            # Clear the pipe: old-shape requests finish and the batch
+            # refills with the new shape.
+            clear_end = time.monotonic() + sim.headline_clear_s
+            while time.monotonic() < clear_end:
+                m = await _metrics()
+                pool.drain_turn_queue()
+                _snapshot(f"{phase} — clearing pipe", m,
+                          pool.aggregate().get("sessions_active", 0))
+                await asyncio.sleep(1.0)
+            # Measure on the ENGINE's counters.
+            m0 = await _metrics()
+            t0 = time.monotonic()
+            running: list[float] = []
+            waiting: list[float] = []
+            for _ in range(sim.headline_measure_s):
+                await asyncio.sleep(1.0)
+                m = await _metrics()
+                pool.drain_turn_queue()
+                if m.get("num_running") is not None:
+                    running.append(float(m["num_running"]))
+                if m.get("queue_depth") is not None:
+                    waiting.append(float(m["queue_depth"]))
+                _snapshot(f"{phase} — measuring", m,
+                          pool.aggregate().get("sessions_active", 0))
+            m1 = await _metrics()
+            dt = max(1e-3, time.monotonic() - t0)
+            gen = ((m1.get("generation_tokens_total") or 0)
+                   - (m0.get("generation_tokens_total") or 0))
+            prm = ((m1.get("prompt_tokens_total") or 0)
+                   - (m0.get("prompt_tokens_total") or 0))
+            c_mean = statistics.fmean(running) if running else None
+            q_mean = statistics.fmean(waiting) if waiting else None
+            # Under-pressure check: the engine has headroom (empty
+            # queue, batch ≈ everything we offered) — double the
+            # outstanding load and re-measure once so small shapes
+            # aren't unfairly starved.
+            underfed = (
+                attempt == 0
+                and (q_mean is None or q_mean < 1.0)
+                and c_mean is not None
+                and c_mean >= 0.9 * outstanding
+                and outstanding < MAX_OUTSTANDING
+            )
+            if underfed:
+                outstanding = min(MAX_OUTSTANDING, outstanding * 2)
+                log.info("engine underfed at %d outstanding — raising "
+                         "to %d and re-measuring", c_mean, outstanding)
+                await _apply_pressure(outstanding)
+                continue
+            return CellResult(
+                input_tokens=inp, output_tokens=out,
+                out_tok_s=round(gen / dt, 1) if gen else None,
+                prompt_tok_s=round(prm / dt, 1) if prm else None,
+                in_flight=round(c_mean, 1) if c_mean is not None else None,
+                queue_depth=round(q_mean, 1) if q_mean is not None else None,
+                objective=objective(c_mean, gen / dt if gen else None),
+            )
+        raise AssertionError("unreachable")
+
     try:
-        while (shape := climb.propose()) is not None:
+        # Initial persona + pressure before the first cell.
+        first = climb.propose()
+        assert first is not None
+        cell_overlay = _write_persona_overlay(
+            catalog_dir, CELL_PERSONA_ID,
+            _cell_persona_spec(*first, name="Headline cell",
+                               description="shape-search cell"))
+        await _apply_pressure(outstanding)
+        shape: tuple[int, int] | None = first
+        while shape is not None:
             inp, out = shape
             n = len(climb.scores) + 1
             if progress is not None:
@@ -247,8 +329,8 @@ async def run_headline_search(
                     "cell": n, "budget": sim.headline_cell_budget,
                     "shape": [inp, out], "done": False,
                 })
-            log.info("headline cell %d/%d: shape %d→%d",
-                     n, sim.headline_cell_budget, inp, out)
+            log.info("headline cell %d/%d: shape %d→%d (outstanding=%d)",
+                     n, sim.headline_cell_budget, inp, out, outstanding)
             cell_overlay = _write_persona_overlay(
                 catalog_dir, CELL_PERSONA_ID,
                 _cell_persona_spec(
@@ -257,46 +339,11 @@ async def run_headline_search(
                     description=(f"shape-search cell {n}: {inp} tokens "
                                  f"in, exactly {out} out, zero think"),
                 ))
-            cohort = Cohort(
-                id=f"headline_{inp}x{out}",
-                name=f"Headline shape {inp}→{out}",
-                description=f"shape-search cell: {inp} in / {out} out",
-                persona_weights={CELL_PERSONA_ID: 1.0},
-                category="persona",
-            )
-            cfg2 = copy.deepcopy(cfg)
-            s2 = cfg2.simulation
-            s2.open_loop_window_s = sim.headline_cell_window_s
-            s2.open_loop_refine_window_s = sim.headline_cell_window_s
-            s2.open_loop_warmup_s = 25
-            s2.open_loop_resolution_pct = sim.headline_resolution_pct
-            s2.open_loop_drain_timeout_s = 60
-            # Seed the rate search near the expected boundary: the
-            # previous cell's boundary scaled by output-length ratio
-            # (decode-bound λ ∝ 1/output_len) — saves 2-4 doubling
-            # windows per cell.
-            if prev and prev.rate_max_per_min:
-                seed = (prev.rate_max_per_min / 60.0
-                        * (prev.output_tokens / out) * 0.5)
-                s2.open_loop_initial_rate_per_s = min(64.0, max(0.5, seed))
-            else:
-                s2.open_loop_initial_rate_per_s = 2.0
-            db_path = await run_cohort_open_loop(
-                cfg2, cohort, engine=engine, run_dir=run_dir,
-            )
-            metrics = _read_cell_metrics(Path(db_path), cohort.id)
-            result = CellResult(
-                input_tokens=inp, output_tokens=out,
-                rate_max_per_min=metrics.get("rate_max_per_min"),
-                out_tok_s=metrics.get("out_tok_s"),
-                in_flight=metrics.get("in_flight"),
-                objective=objective(metrics.get("in_flight"),
-                                    metrics.get("out_tok_s")),
-                cohort_run_id=metrics.get("cohort_run_id"),
-            )
+            await pool.reload_personas()
+            result = await _measure_cell(
+                inp, out, f"shape search {inp}→{out} (cell {n})")
             cells.append(result)
             climb.record(shape, result.objective)
-            prev = result
             if progress is not None:
                 b = climb.best()
                 progress["best"] = {
@@ -304,12 +351,14 @@ async def run_headline_search(
                     "objective": round(climb.scores.get(b, 0)) if b else 0,
                 }
             log.info(
-                "headline cell %d→%d: C=%.0f in-flight, T=%.0f out tok/s "
+                "headline cell %d→%d: C=%.0f running, T=%.0f out tok/s "
                 "→ score %.0f", inp, out,
                 result.in_flight or 0, result.out_tok_s or 0,
                 result.objective,
             )
+            shape = climb.propose()
     finally:
+        await pool.stop()
         await asyncio.to_thread(engine.shutdown)
         if cell_overlay is not None:
             cell_overlay.unlink(missing_ok=True)
@@ -329,7 +378,7 @@ async def run_headline_search(
                     description=(
                         f"Shape found by the headline search: jointly "
                         f"maximizes concurrency (~{winner.in_flight:.0f} "
-                        f"in flight) and output throughput "
+                        f"running) and output throughput "
                         f"(~{winner.out_tok_s:.0f} tok/s) on this engine. "
                         f"Re-run this workload for the full-resolution "
                         f"headline numbers. Marketing stress test — says "
@@ -340,13 +389,14 @@ async def run_headline_search(
         summary = {
             "winner": asdict(winner) if winner else None,
             "saved_persona": WINNER_PERSONA_ID if winner else None,
+            "outstanding": outstanding,
             "cells": [asdict(c) for c in cells],
             "duration_s": round(time.monotonic() - started),
             "note": ("concurrency is capped by the engine shape "
                      "(max_num_seqs × replicas) — this is the best "
                      "workload shape for the engine it ran against"),
         }
-        out_path = Path(run_dir) / "headline_search.json"
+        out_path = run_dir / "headline_search.json"
         out_path.write_text(json.dumps(summary, indent=2))
         if progress is not None:
             progress["done"] = True
@@ -356,5 +406,6 @@ async def run_headline_search(
             "cohort_id": "headline_search",
             "final_status": "ok" if winner else "no_result",
         })
-        log.info("headline search done: %s", summary.get("winner"))
+        log.info("headline search done in %ds: %s",
+                 summary["duration_s"], summary.get("winner"))
     return out_path

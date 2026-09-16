@@ -304,12 +304,15 @@ class SimulationConfig:
     open_loop_max_workers: int = 16
 
     # ── Headline shape search ──
-    # Outer hill-climb over (input, output) firehose shapes, scoring
-    # each cell's stability boundary on √(concurrency × output tok/s).
-    # Cells are deliberately coarse — the winner can be re-measured at
-    # full resolution afterwards (it is saved as a persona).
-    headline_cell_window_s: int = 60
-    headline_resolution_pct: float = 15.0
+    # Hill-climb over (input, output) firehose shapes at SATURATION:
+    # the engine is kept fully fed (fixed outstanding requests), the
+    # shape changes on the fly, the pipe clears for a few seconds,
+    # then throughput and running-batch size are read from the
+    # engine's own counters. ~35-45s per cell — the whole search runs
+    # in minutes, and the winner is saved as a persona for a
+    # full-resolution capacity run afterwards.
+    headline_clear_s: int = 10
+    headline_measure_s: int = 25
     headline_cell_budget: int = 12
 
 

@@ -120,6 +120,18 @@ async def _amain(config: dict) -> None:
                 launcher.cancel_active_sessions()
             elif cmd == "trim":
                 launcher.trim_active(int(msg.get("target") or 0))
+            elif cmd == "outstanding":
+                launcher.set_outstanding(int(msg.get("n") or 0))
+            elif cmd == "reload_personas":
+                # Shape search rewrites the cell persona overlay and
+                # changes shape ON THE FLY — the launcher looks the
+                # persona up fresh at every spawn, so a registry
+                # reload is all a shape change needs.
+                from .personas import reload_personas
+                try:
+                    reload_personas()
+                except Exception as e:  # noqa: BLE001
+                    print(f"persona reload failed: {e}", file=sys.stderr)
             elif cmd == "stop":
                 stop_event.set()
                 return

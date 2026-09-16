@@ -103,6 +103,7 @@ class SessionArrivalLauncher:
         self._capture = capture_token_timestamps
 
         self._rate_per_s: float = 0.0
+        self._outstanding: int = 0
         self._rate_changed = asyncio.Event()
         self._stopped = False
         self._sessions: dict[str, asyncio.Task] = {}
@@ -118,8 +119,27 @@ class SessionArrivalLauncher:
             self._task = asyncio.create_task(self._arrival_loop())
 
     def set_rate(self, per_s: float) -> None:
+        self._outstanding = 0          # rate mode cancels saturation mode
         self._rate_per_s = max(0.0, float(per_s))
         self._rate_changed.set()
+
+    def set_outstanding(self, n: int) -> None:
+        """Saturation mode: keep exactly ``n`` sessions active —
+        spawn up to ``n`` now, respawn as each finishes. With
+        zero-think single-turn personas this is the classic
+        max-throughput benchmark loop (closed-loop self-throttling is
+        exactly what we want here: the engine stays fully fed and
+        measurement happens on ITS counters)."""
+        self._rate_per_s = 0.0
+        self._rate_changed.set()       # stop scheduled arrivals
+        self._outstanding = max(0, int(n))
+        self._refill()
+
+    def _refill(self) -> None:
+        target = getattr(self, "_outstanding", 0)
+        while not self._stopped and len(self._sessions) < target:
+            self.stats.tardiness_ms.append(0.0)
+            self._spawn_session()
 
     def cancel_active_sessions(self) -> None:
         """Abort in-flight sessions (drain aid — aborted HTTP requests
@@ -254,6 +274,10 @@ class SessionArrivalLauncher:
                 self._sessions.pop(user_id, None)
                 self._cancel_events.pop(user_id, None)
                 self.stats.sessions_active = len(self._sessions)
+                # Saturation mode: replace the finished session so the
+                # outstanding count holds.
+                if getattr(self, "_outstanding", 0) > 0:
+                    self._refill()
 
         task = asyncio.create_task(_session(), name=f"ol:{persona_id}:{user_id[:8]}")
         self._sessions[user_id] = task

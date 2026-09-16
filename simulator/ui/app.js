@@ -560,9 +560,9 @@ const Control = {
     delete body.engineDesc;
     try {
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
-      this.msg("shape search started — hill-climbing input/output "
-        + "shapes for the joint concurrency × throughput optimum "
-        + "(~1.5–3 h); the bar under the workload tracks it", "ok");
+      this.msg("shape search started — shapes change on the fly at "
+        + "saturation, ~40s per cell, done in minutes; the bar under "
+        + "the workload tracks it", "ok");
       this._shapeSearchWas = true;
       this.pollStatus();
     } catch (e) {

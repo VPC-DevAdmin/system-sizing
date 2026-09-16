@@ -243,6 +243,22 @@ class WorkerPool:
         for w in self._workers:
             await self._send(w, {"cmd": "trim", "target": per})
 
+    async def set_outstanding(self, total: int) -> None:
+        """Saturation mode: hold ``total`` sessions active across the
+        workers (each respawns as its sessions finish)."""
+        self._rate_total = 0.0
+        if not self._workers:
+            return
+        k = len(self._workers)
+        base, rem = divmod(max(0, int(total)), k)
+        for i, w in enumerate(self._workers):
+            await self._send(w, {"cmd": "outstanding",
+                                 "n": base + (1 if i < rem else 0)})
+
+    async def reload_personas(self) -> None:
+        for w in self._workers:
+            await self._send(w, {"cmd": "reload_personas"})
+
     def drain_turn_queue(self) -> list[dict]:
         out: list[dict] = []
         while True:

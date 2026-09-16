@@ -83,6 +83,48 @@ def test_cell_persona_spec_parses():
 
 def test_cell_result_objective_roundtrip():
     r = CellResult(input_tokens=128, output_tokens=512,
-                   rate_max_per_min=600.0, out_tok_s=20000.0,
-                   in_flight=800.0, objective=objective(800.0, 20000.0))
+                   out_tok_s=20000.0, prompt_tok_s=1200.0,
+                   in_flight=800.0, queue_depth=40.0,
+                   objective=objective(800.0, 20000.0))
     assert r.objective == (800.0 * 20000.0) ** 0.5
+
+
+def test_outstanding_mode_holds_and_respawns(monkeypatch):
+    """Saturation mode: the launcher keeps exactly N sessions active,
+    respawning as each finishes — the fast shape search's pressure
+    source."""
+    import asyncio
+
+    import simulator.arrivals as arrivals_mod
+    from simulator.arrivals import SessionArrivalLauncher
+    from simulator.virtual_user import SharedState
+
+    spawned = []
+
+    async def fake_run_virtual_user(**kw):
+        spawned.append(kw["stats"].persona_id)
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(arrivals_mod, "run_virtual_user",
+                        fake_run_virtual_user)
+
+    async def main():
+        launcher = SessionArrivalLauncher(
+            persona_weights={"quick_lookup": 1.0},
+            clients=[object()], model_id="m", corpus=None,
+            state=SharedState(), request_timeout_s=5,
+        )
+        launcher.start()
+        launcher.set_outstanding(8)
+        await asyncio.sleep(0.01)
+        held = launcher.stats.sessions_active
+        await asyncio.sleep(0.15)   # several respawn generations
+        held2 = launcher.stats.sessions_active
+        done = launcher.stats.sessions_done
+        await launcher.stop()
+        return held, held2, done
+
+    held, held2, done = asyncio.run(main())
+    assert held == 8 and held2 == 8
+    assert done >= 16          # respawned repeatedly
+    assert len(spawned) >= 24

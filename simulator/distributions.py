@@ -58,3 +58,38 @@ class Constant(Distribution):
 
     def sample(self, rng: random.Random) -> float:
         return self.value
+
+
+def summarize(dist: Distribution) -> dict:
+    """Analytic {median, mean, p90} for a distribution — the numbers a
+    HUMAN needs to understand what a persona means ("~400-token
+    questions, occasionally 1200") without reading YAML or sampling.
+
+    LogNormal: median = e^mu, mean = e^(mu+sigma^2/2),
+    p90 = e^(mu + 1.2816*sigma) (clamped to the distribution's caps).
+    Discrete: weighted median / mean / p90 over the pmf.
+    """
+    if isinstance(dist, LogNormal):
+        clamp = lambda v: max(dist.min_value, min(dist.max_value, v))  # noqa: E731
+        return {
+            "median": clamp(math.exp(dist.mu)),
+            "mean": clamp(math.exp(dist.mu + dist.sigma ** 2 / 2)),
+            "p90": clamp(math.exp(dist.mu + 1.2816 * dist.sigma)),
+        }
+    if isinstance(dist, Discrete):
+        items = sorted(dist.weights.items())
+        total = sum(w for _, w in items) or 1.0
+        mean = sum(v * w for v, w in items) / total
+        def _quantile(q: float) -> float:
+            acc = 0.0
+            for v, w in items:
+                acc += w / total
+                if acc >= q - 1e-9:      # float-sum tolerance
+                    return float(v)
+            return float(items[-1][0])
+        return {"median": _quantile(0.5), "mean": mean,
+                "p90": _quantile(0.9)}
+    if isinstance(dist, Constant):
+        return {"median": dist.value, "mean": dist.value,
+                "p90": dist.value}
+    return {"median": None, "mean": None, "p90": None}

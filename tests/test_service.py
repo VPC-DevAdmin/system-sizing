@@ -344,3 +344,52 @@ def test_profiles_metadata_and_custom_run(tmp_path, monkeypatch) -> None:
         assert len(c.engine.replica_devices) == 8
         assert "--kv-cache-dtype" in c.engine.vllm_extra_flags
         client.post("/api/runs/stop")
+
+
+def test_persona_and_cohort_summaries(tmp_path, monkeypatch) -> None:
+    """The catalog endpoints carry human-readable summaries: analytic
+    token/turn/think numbers per persona, weight-blended per cohort."""
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from simulator.service import create_app
+
+    monkeypatch.chdir(Path(__file__).parent.parent)
+    with TestClient(create_app(tmp_path / "runs")) as client:
+        personas = client.get("/api/personas").json()
+        p = next(x for x in personas if x["id"] == "quick_lookup")
+        s = p["summary"]
+        assert s["input_tokens"]["median"] > 0
+        assert s["input_tokens"]["p90"] >= s["input_tokens"]["median"]
+        assert s["output_tokens"]["median"] > 0
+        assert s["turns_per_session"]["mean"] >= 1
+        # Think gap = read + active think, summed per quantile.
+        assert s["think_gap_s"]["median"] > 0
+
+        cohorts = client.get("/api/cohorts").json()
+        c = next(x for x in cohorts if x["id"] == "chat_heavy")
+        b = c["blended"]
+        assert b and b["input_tokens"] > 0 and b["think_gap_s"] > 0
+
+
+def test_distribution_summaries() -> None:
+    import math
+
+    from simulator.distributions import (
+        Constant,
+        Discrete,
+        LogNormal,
+        summarize,
+    )
+    s = summarize(LogNormal.from_median(400, 0.5))
+    assert s["median"] == pytest.approx(400)
+    assert s["mean"] == pytest.approx(400 * math.exp(0.125))
+    assert s["p90"] == pytest.approx(400 * math.exp(1.2816 * 0.5))
+
+    s = summarize(Discrete({1: 0.6, 2: 0.3, 4: 0.1}))
+    assert s["median"] == 1 and s["p90"] == 2
+    assert s["mean"] == pytest.approx(1.6)
+
+    s = summarize(Constant(7))
+    assert s == {"median": 7, "mean": 7, "p90": 7}

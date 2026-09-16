@@ -360,6 +360,24 @@ def create_app(
                 out[name] = entry
         return out
 
+    def _persona_summary(p) -> dict:
+        """The numbers a human needs to know what a persona MEANS:
+        question/answer sizes, session length, and the read/think gap
+        between turns — analytic, not sampled."""
+        from .distributions import summarize
+        inp = summarize(p.input_tokens)
+        out = summarize(p.output_tokens)
+        turns = summarize(p.turns_per_session)
+        read = summarize(p.read_time_seconds)
+        think = summarize(p.active_think_seconds)
+        gap = {
+            k: ((read[k] or 0) + (think[k] or 0))
+            if read[k] is not None and think[k] is not None else None
+            for k in ("median", "mean", "p90")
+        }
+        return {"input_tokens": inp, "output_tokens": out,
+                "turns_per_session": turns, "think_gap_s": gap}
+
     @app.get("/api/personas")
     async def personas() -> list[dict]:
         from .personas import PERSONAS
@@ -371,19 +389,40 @@ def create_app(
                 "ttft_failure_s": p.ttft_failure_seconds,
                 "tpot_target_ms": p.tpot_target_ms,
                 "tpot_failure_ms": p.tpot_failure_ms,
+                "summary": _persona_summary(p),
             }
             for p in PERSONAS.values()
         ]
 
     @app.get("/api/cohorts")
     async def cohorts() -> list[dict]:
-        from .personas import COHORTS
+        from .personas import COHORTS, PERSONAS
+
+        def _blended(c) -> Optional[dict]:
+            """Weight-averaged medians across the mix — 'what a
+            typical turn of this team looks like'."""
+            total = sum(c.persona_weights.values()) or 1.0
+            acc = {"input_tokens": 0.0, "output_tokens": 0.0,
+                   "turns_per_session": 0.0, "think_gap_s": 0.0}
+            for pid, w in c.persona_weights.items():
+                p = PERSONAS.get(pid)
+                if p is None:
+                    return None
+                s = _persona_summary(p)
+                acc["input_tokens"] += (s["input_tokens"]["median"] or 0) * w
+                acc["output_tokens"] += (s["output_tokens"]["median"] or 0) * w
+                acc["turns_per_session"] += (
+                    s["turns_per_session"]["mean"] or 0) * w
+                acc["think_gap_s"] += (s["think_gap_s"]["median"] or 0) * w
+            return {k: round(v / total, 1) for k, v in acc.items()}
+
         return [
             {
                 "id": c.id,
                 "name": c.name,
                 "description": c.description,
                 "persona_weights": c.persona_weights,
+                "blended": _blended(c),
             }
             for c in COHORTS.values()
         ]

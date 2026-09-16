@@ -217,9 +217,20 @@ const Control = {
     if (w.startsWith("cohort:")) {
       const c = this.catalogs.cohorts.find(x => x.id === w.slice(7));
       text = c?.description ?? "";
+      if (c?.blended) {
+        const b = c.blended;
+        text += ` · typical turn ~${b.input_tokens} tok in → `
+          + `${b.output_tokens} out, ~${b.think_gap_s}s between turns`;
+      }
     } else if (w.startsWith("persona:")) {
       const per = this.catalogs.personas.find(x => x.id === w.slice(8));
       text = per?.description ?? "";
+      const s = per?.summary;
+      if (s) {
+        text += ` · ~${Math.round(s.input_tokens.median)} tok in → `
+          + `${Math.round(s.output_tokens.median)} out, `
+          + `~${Math.round(s.think_gap_s.median)}s between turns`;
+      }
     } else if (w === "sweep:all") {
       text = "Runs a full capacity curve for every mix and user type in turn.";
     }
@@ -2132,12 +2143,83 @@ const Editor = {
     $("#editor-yaml").value = detail.yaml;
     $("#editor-kind-badge").textContent = kind.slice(0, -1);
     this.msg(`editing ${id} — saves to ${detail.editable_file}`);
+    this.renderCard(kind, id);
     this.refreshLists();
+  },
+
+  /* The readable card: what this workload MEANS — question/answer
+   * sizes, session shape, the read/think gap, SLA bars — so the
+   * operator understands the run without parsing YAML. */
+  renderCard(kind, id) {
+    const card = $("#workload-card");
+    const n = v => (v == null ? "—"
+      : v >= 100 ? Math.round(v).toLocaleString() : (+v).toFixed(1) * 1);
+    const stat = (k, v, c) => `<div class="stat"><span class="k">${k}</span>
+      <span class="v" style="font-size:1.15rem">${v}</span>
+      <span class="c">${c}</span></div>`;
+    if (kind === "personas") {
+      const p = Control.catalogs.personas.find(x => x.id === id);
+      const s = p?.summary;
+      if (!p || !s) { card.hidden = true; return; }
+      card.hidden = false;
+      card.innerHTML = `<b>${p.description || id}</b>
+        <div class="statusbar" style="margin-top:10px;background:none;
+          border:none;box-shadow:none;padding:0;backdrop-filter:none">
+          ${stat("Question", `${n(s.input_tokens.median)} tok`,
+                 `typical · heavy ${n(s.input_tokens.p90)}`)}
+          ${stat("Answer", `${n(s.output_tokens.median)} tok`,
+                 `typical · long ${n(s.output_tokens.p90)}`)}
+          ${stat("Session", `${n(s.turns_per_session.mean)} turns`,
+                 "back-and-forth before leaving")}
+          ${stat("Between turns", `${n(s.think_gap_s.median)}s`,
+                 `reading + thinking · slow ${n(s.think_gap_s.p90)}s`)}
+          ${stat("Feels slow at", `${p.ttft_target_s}s / ${p.tpot_target_ms}ms`,
+                 "first token / per token")}
+          ${stat("Gives up at", `${p.ttft_failure_s}s / ${p.tpot_failure_ms}ms`,
+                 "the SLA failure bar")}
+        </div>
+        <span class="msg">In a run, each simulated user of this type asks a
+        ~${n(s.input_tokens.median)}-token question, streams a
+        ~${n(s.output_tokens.median)}-token answer, then spends
+        ~${n(s.think_gap_s.median)}s reading and composing before the next
+        turn — the engine only works during the streaming slice, which is
+        why pool size can far exceed in-flight requests.</span>`;
+    } else {
+      const c = Control.catalogs.cohorts.find(x => x.id === id);
+      if (!c) { card.hidden = true; return; }
+      card.hidden = false;
+      const total = Object.values(c.persona_weights)
+        .reduce((a, b) => a + b, 0) || 1;
+      const rows = Object.entries(c.persona_weights)
+        .sort((a, b) => b[1] - a[1])
+        .map(([pid, w]) => {
+          const pct = Math.round(100 * w / total);
+          return `<div class="gpu-row" style="grid-template-columns:
+              160px minmax(80px,1fr) 40px">
+            <span class="g-id" style="cursor:pointer" title="open persona"
+              data-open-persona="${pid}">${pid.replaceAll("_", " ")}</span>
+            <span class="g-bar"><i style="width:${pct}%"></i></span>
+            <span class="g-num">${pct}%</span></div>`;
+        }).join("");
+      const b = c.blended;
+      card.innerHTML = `<b>${c.name}</b> — <span class="msg">${c.description}</span>
+        <div class="gpu-grid" style="margin-top:10px">${rows}</div>
+        ${b ? `<span class="msg">A typical turn of this mix:
+          ~${b.input_tokens} tokens in → ~${b.output_tokens} out,
+          ~${b.turns_per_session} turns per session,
+          ~${b.think_gap_s}s of reading/thinking between turns.
+          Click a persona for its full card.</span>` : ""}`;
+      card.querySelectorAll("[data-open-persona]").forEach(el =>
+        el.addEventListener("click",
+          () => this.open("personas", el.dataset.openPersona)));
+    }
   },
 
   startNew(kind, template) {
     this.kind = kind;
     this.editing = null;
+    $("#workload-card").hidden = true;
+    $("#editor-advanced").open = true;
     $("#editor-id").value = "";
     $("#editor-yaml").value = template;
     $("#editor-kind-badge").textContent = kind.slice(0, -1);

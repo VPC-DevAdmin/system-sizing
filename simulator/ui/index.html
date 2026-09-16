@@ -374,14 +374,19 @@
         <button id="cohort-new" class="small">New cohort</button>
       </div>
       <div>
+        <div id="workload-card" class="callout" hidden></div>
         <div class="row wrap">
           <label>Id <input id="editor-id" placeholder="my_persona"></label>
           <span id="editor-kind-badge" class="pill">persona</span>
           <button id="editor-save" class="primary small">Save</button>
           <span id="editor-msg" class="msg"></span>
         </div>
-        <textarea id="editor-yaml" spellcheck="false"
-                  placeholder="Select an entry on the left, or New persona / New cohort."></textarea>
+        <details id="editor-advanced">
+          <summary class="msg" style="cursor:pointer">Advanced — raw
+            definition (YAML)</summary>
+          <textarea id="editor-yaml" spellcheck="false"
+                    placeholder="Select an entry on the left, or New persona / New cohort."></textarea>
+        </details>
       </div>
     </div>
   </section>

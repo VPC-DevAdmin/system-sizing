@@ -293,7 +293,9 @@ const Control = {
     try {
       this.msg("starting…");
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
-      this.msg("run started — see Live telemetry", "ok");
+      this.msg(
+        "run started — engine launch can take several minutes on big "
+        + "models; the Phase readout below tracks it", "ok");
       this.pollStatus();
     } catch (e) {
       this.msg(e.message, "error");
@@ -495,8 +497,41 @@ const Live = {
     chart.update("none");
   },
 
+  // A new run must not inherit the previous run's lines — stale
+  // charts read as "nothing is happening" or "it resumed the old
+  // run" when a fresh run is actually launching.
+  resetCharts() {
+    for (const chart of Object.values(this.charts)) {
+      chart.data.labels = [];
+      chart.data.datasets.forEach(ds => { ds.data = []; });
+      chart.update("none");
+    }
+    this.turns = [];
+    for (const id of ["live-rate", "live-queue", "live-pool",
+                      "live-inflight", "live-completed", "live-errors",
+                      "live-warmkv"]) {
+      $(`#${id}`).textContent = "—";
+    }
+    $("#live-progress").textContent = "—";
+    $("#live-progress-bar").style.width = "0";
+  },
+
   onSnapshot(ts, s) {
-    $("#live-phase").textContent = s.phase;
+    // Phase + how long it's been in that phase — "launching engine
+    // (3m 40s)" tells the user a big model is still loading; a bare
+    // phase name can't distinguish progress from a hang. Elapsed is
+    // computed from snapshot timestamps so backfill replays show the
+    // true duration too.
+    if (s.phase !== this._phaseName) {
+      this._phaseName = s.phase;
+      this._phaseSinceTs = ts;
+    }
+    const inPhase = Math.max(0, Math.round((ts - this._phaseSinceTs) / 1000));
+    const el = inPhase >= 5
+      ? ` · ${inPhase >= 60 ? `${Math.floor(inPhase / 60)}m ${inPhase % 60}s`
+                            : `${inPhase}s`}`
+      : "";
+    $("#live-phase").textContent = s.phase + el;
     $("#live-pool").textContent = s.pool_size;
     $("#live-inflight").textContent = s.in_flight;
     $("#live-completed").textContent = s.requests_completed;
@@ -645,9 +680,14 @@ const Live = {
     if (r.event === "started") {
       $("#steps-table tbody").innerHTML = "";
       this.stepsSeen.clear();
-      this.turns = [];
+      this.resetCharts();
+      this._phaseName = null;
+      $("#live-phase").textContent = "starting…";
     }
-    if (r.event === "finished") Control.refreshRuns();
+    if (r.event === "finished") {
+      $("#live-phase").textContent = `finished (${r.final_status})`;
+      Control.refreshRuns();
+    }
     Control.pollStatus();
   },
 };

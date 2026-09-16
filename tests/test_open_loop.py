@@ -169,6 +169,13 @@ def test_open_loop_end_to_end_mock(tmp_path, monkeypatch):
         "SELECT COUNT(*) AS n FROM simulation_snapshots "
         "WHERE arrival_rate_per_min IS NOT NULL")
     assert snap["n"] > 0
+    # The engine-launch phase is visible in snapshots — a page opened
+    # (or backfilled) during a slow model load must show "launching",
+    # not the previous run's charts.
+    launch = db.fetchone(
+        "SELECT COUNT(*) AS n FROM simulation_snapshots "
+        "WHERE phase LIKE 'launching engine%'")
+    assert launch["n"] > 0
     db.close()
 
     doc, _ = export_dir(cfg.output.db_directory)

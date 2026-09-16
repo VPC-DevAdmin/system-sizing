@@ -738,8 +738,12 @@ class OpenLoopRunner:
 
     async def run(self) -> str:
         sim = self.cfg.simulation
-        await self.pool.scale_to(1)
+        # Snapshots first, workers second: worker spawn loads a
+        # tokenizer and can take tens of seconds — the live view
+        # should say so rather than sit on the previous run's charts.
+        self.phase = "starting load workers"
         self._snapshot_task = asyncio.create_task(self._snapshot_loop())
+        await self.pool.scale_to(1)
         final_status = "ok"
         run_started = time.monotonic()
         max_total_s = sim.max_total_duration_minutes * 60
@@ -755,7 +759,10 @@ class OpenLoopRunner:
                     if self.stepper.in_refinement
                     else sim.open_loop_window_s
                 )
-                await self.pool.scale_to(self._plan_workers(rate, last_rate))
+                planned = self._plan_workers(rate, last_rate)
+                if planned > self.pool.size:
+                    self.phase = "starting load workers"
+                await self.pool.scale_to(planned)
                 result = await self._measure_window(rate, window_s)
                 # Generator fell behind: add a worker and re-run this
                 # rate once — only an already-maxed generator records
@@ -831,14 +838,15 @@ async def run_cohort_open_loop(
     if run_dir is None:
         run_dir = resolve_run_dir(cfg.output.db_directory, new=new_run)
     own_engine = engine is None
-    if own_engine:
-        preflight_check(cfg.engine.hardware_requirements)
-        engine = make_engine(cfg.engine.type, cfg.engine)
-        await asyncio.to_thread(engine.launch, log_dir=run_dir)
     if db_path is None:
         run_dir.mkdir(parents=True, exist_ok=True)
         db_path = run_dir / "run.db"
 
+    # The run row, the "started" event, and a launch heartbeat all go
+    # out BEFORE the engine launches. An 8-replica engine spends 5-10
+    # minutes loading weights; without these, that whole phase is
+    # silent — the live page keeps replaying the PREVIOUS run and the
+    # user can't tell "loading" from "hung" from "resumed".
     db = Database(db_path)
     cohort_run_id = uuid.uuid4().hex
     db.insert_run(
@@ -866,14 +874,57 @@ async def run_cohort_open_loop(
         "run_dir": str(run_dir),
         "mode": "open_loop",
     })
-    runner = OpenLoopRunner(cfg, cohort, engine, db, cohort_run_id, run_dir)
+
+    runner = None
     final_status = "error"
     try:
+        if own_engine:
+            preflight_check(cfg.engine.hardware_requirements)
+            engine = make_engine(cfg.engine.type, cfg.engine)
+            launch_phase = (
+                f"launching engine — loading {cfg.engine.model_id} weights"
+            )
+            hb_stop = asyncio.Event()
+
+            async def _launch_heartbeat() -> None:
+                # 2 s snapshots so both the live stream AND a page
+                # opened mid-launch (backfill) show the real phase.
+                while not hb_stop.is_set():
+                    row = {
+                        "cohort_run_id": cohort_run_id,
+                        "snapshot_at_ms": _now_ms(),
+                        "phase": launch_phase,
+                        "pool_size": 0, "in_flight": 0,
+                        "requests_completed": 0, "errors": 0,
+                    }
+                    try:
+                        db.insert_snapshot(row)
+                    except Exception:
+                        pass
+                    BUS.publish("snapshot", row)
+                    try:
+                        await asyncio.wait_for(hb_stop.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
+
+            hb = asyncio.create_task(_launch_heartbeat())
+            try:
+                await asyncio.to_thread(engine.launch, log_dir=run_dir)
+            finally:
+                hb_stop.set()
+                await hb
+        runner = OpenLoopRunner(cfg, cohort, engine, db, cohort_run_id, run_dir)
         final_status = await runner.run()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        final_status = "cancelled"
+        raise
+    except Exception as e:  # noqa: BLE001
+        final_status = f"error: {type(e).__name__}"
+        raise
     finally:
         # End-of-run engine prefix-cache scrape (same as closed loop).
         try:
-            m = engine.get_metrics()
+            m = engine.get_metrics() if engine is not None else {}
             if m.get("prefix_cache_hit_rate") is not None:
                 db.update_cohort_run(cohort_run_id, {
                     "prefix_cache_engine_hits": (
@@ -889,7 +940,7 @@ async def run_cohort_open_loop(
                 })
         except Exception:
             log.debug("end-of-run metrics scrape failed", exc_info=True)
-        if runner.telemetry.collector_statuses:
+        if runner is not None and runner.telemetry.collector_statuses:
             try:
                 db.update_cohort_run(cohort_run_id, {
                     "collectors_json": json.dumps(
@@ -903,7 +954,7 @@ async def run_cohort_open_loop(
             status=final_status,
         )
         db.close()
-        if own_engine:
+        if own_engine and engine is not None:
             await asyncio.to_thread(engine.shutdown)
         BUS.publish("run", {
             "event": "finished",

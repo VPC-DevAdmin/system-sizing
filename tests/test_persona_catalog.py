@@ -31,6 +31,7 @@ def test_packaged_catalog_loads() -> None:
     assert set(personas) == {
         "quick_lookup", "conversational", "writer", "document_qa",
         "code_assist", "long_form_generator",
+        "headline_generation", "headline_ingest",
     }
     assert len(cohorts) == 5
     ql = personas["quick_lookup"]
@@ -115,6 +116,25 @@ personas:
 """)
     with pytest.raises(PersonaSpecError, match="persona half: missing"):
         load_catalog(user_dir=tmp_path)
+
+
+def test_headline_stress_personas_shape() -> None:
+    """The marketing-number generators: single turn, zero think —
+    open-loop arrivals degenerate to a request firehose, so the
+    stability boundary IS max sustained throughput."""
+    from simulator.personas import PERSONAS
+    for pid in ("headline_generation", "headline_ingest"):
+        p = PERSONAS[pid]
+        assert p.turns_per_session.sample_int(__import__("random").Random(0)) == 1
+        assert p.read_time_seconds.sample(__import__("random").Random(0)) == 0
+        assert p.active_think_seconds.sample(__import__("random").Random(0)) == 0
+        assert "marketing" in p.description.lower() \
+            or "stress" in p.description.lower()
+    g = PERSONAS["headline_generation"]
+    assert g.input_tokens.sample_int(__import__("random").Random(0)) == 32
+    assert g.output_tokens.sample_int(__import__("random").Random(0)) == 1024
+    i = PERSONAS["headline_ingest"]
+    assert i.input_tokens.sample_int(__import__("random").Random(0)) == 4096
 
 
 def test_editor_api_create_edit_reject(tmp_path) -> None:

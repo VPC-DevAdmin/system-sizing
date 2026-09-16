@@ -137,6 +137,54 @@ personas:
       tpot_target_ms: 180.0
       tpot_failure_ms: 270.0
 
+  # ── Headline stress generators ────────────────────────────────────
+  # NOT capacity models. Zero think time, single turn, fixed sizes —
+  # the request-generator workload vendor benchmarks use (Metrum/
+  # MLPerf-style). Run through the same open-loop search, the
+  # stability boundary IS the maximum sustained throughput, and
+  # "concurrent users" degenerates to in-flight requests — the
+  # apples-to-apples number for marketing comparisons. SLA thresholds
+  # are deliberately loose so the search finds the throughput wall,
+  # not an experience knee.
+
+  headline_generation:
+    name: "Headline: max generation"
+    description: >-
+      Marketing-number stress test — zero-think request firehose with
+      small prompts and 1K-token answers. Maximizes OUTPUT tokens/sec;
+      says nothing about real users.
+    input_tokens: {constant: 32}
+    output_tokens: {constant: 1024}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 1}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    sla:
+      ttft_target_seconds: 30.0
+      ttft_failure_seconds: 120.0
+      tpot_target_ms: 500.0
+      tpot_failure_ms: 2000.0
+
+  headline_ingest:
+    name: "Headline: max ingest"
+    description: >-
+      Marketing-number stress test — zero-think firehose with 4K-token
+      prompts and tiny answers. Maximizes TOTAL tokens/sec through the
+      prefill path; says nothing about real users.
+    input_tokens: {constant: 4096}
+    output_tokens: {constant: 64}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 1}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    sla:
+      ttft_target_seconds: 30.0
+      ttft_failure_seconds: 120.0
+      tpot_target_ms: 500.0
+      tpot_failure_ms: 2000.0
+
 # Cohorts are *team mixes* — blended workloads representing realistic
 # business types. Weights must sum to 1.0. Single-persona runs use the
 # run-persona verb (ephemeral cohort), not entries here.

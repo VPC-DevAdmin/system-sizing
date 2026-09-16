@@ -385,11 +385,20 @@ const Control = {
     sel.append(g1);
     const g2 = document.createElement("optgroup");
     g2.label = "Single user type";
+    const headline = [];
     for (const p of this.catalogs.personas) {
-      g2.append(new Option(p.name || p.id.replaceAll("_", " "), `persona:${p.id}`,
-        false, `persona:${p.id}` === prev));
+      const opt = new Option(p.name || p.id.replaceAll("_", " "),
+        `persona:${p.id}`, false, `persona:${p.id}` === prev);
+      if (p.id.startsWith("headline_")) headline.push(opt);
+      else g2.append(opt);
     }
     sel.append(g2);
+    if (headline.length) {
+      const g3 = document.createElement("optgroup");
+      g3.label = "Headline stress — marketing numbers, not capacity";
+      headline.forEach(o => g3.append(o));
+      sel.append(g3);
+    }
     // The "sweep everything" option is gone with the closed-loop UI —
     // sweeps run the legacy pool ramp and belong to the API/CLI only.
     if (!prev) sel.value = `cohort:${this.catalogs.cohorts[0]?.id ?? ""}`;

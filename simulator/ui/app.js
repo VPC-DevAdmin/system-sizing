@@ -130,6 +130,16 @@ const Control = {
         this.renderDeviceSeg();
         this.onModelChange();
       }));
+    // Any hand edit to the engine settings is STICKY: nothing may
+    // silently reset the form after the user shaped it (a reverted
+    // KV dropdown once ran "auto" when the user meant fp8).
+    for (const id of ["eng-replicas", "eng-tp", "eng-placement",
+                      "eng-gmu", "eng-mns", "eng-mbt", "eng-kv",
+                      "eng-ep"]) {
+      $("#" + id).addEventListener("input", () => {
+        this._engineDirty = true;
+      });
+    }
     $("#start-btn").addEventListener("click", () => this.start());
     $("#stop-btn").addEventListener("click", () => this.stop());
     $("#runs-refresh").addEventListener("click", () => this.refreshRuns());
@@ -226,8 +236,9 @@ const Control = {
     $("#eng-kv").value =
       (d.kv_cache_dtype && d.kv_cache_dtype !== "auto")
         ? d.kv_cache_dtype : "";
-    $("#eng-ep").checked = !!d.expert_parallel;
+    $("#eng-ep").value = d.expert_parallel ? "on" : "off";
     this.engineDefaults = this.readEngineForm();
+    this._engineDirty = false;
   },
 
   readEngineForm() {
@@ -239,8 +250,20 @@ const Control = {
       max_num_seqs: $("#eng-mns").value.trim(),
       max_num_batched_tokens: $("#eng-mbt").value.trim(),
       kv_cache_dtype: $("#eng-kv").value,
-      expert_parallel: $("#eng-ep").checked,
+      expert_parallel: $("#eng-ep").value === "on",
     };
+  },
+
+  /* Human summary of what an engine form means — echoed at start and
+   * in the run banner so there is never doubt about what's running. */
+  engineSummary(form) {
+    return `${form.replicas}×tp${form.tp} ${form.placement}`
+      + ` · gmu ${form.gpu_memory_utilization}`
+      + (form.max_num_seqs ? ` · mns ${form.max_num_seqs}` : "")
+      + (form.max_num_batched_tokens
+          ? ` · mbt ${form.max_num_batched_tokens}` : "")
+      + ` · KV ${form.kv_cache_dtype || "auto"}`
+      + (form.expert_parallel ? " · EP on" : "");
   },
 
   /* Model or device changed: find a fitting optimization, prefill
@@ -263,7 +286,14 @@ const Control = {
       : this.matchedProfile
         ? "Prefilled from the optimized engine — change anything to run a variant."
         : "No optimization for this model yet — conservative defaults below.";
-    if (!cpuMode) {
+    // Reset the engine form ONLY when the model/device actually
+    // changed, or the user hasn't touched it. A hand-shaped form
+    // (say, KV set to fp8) must survive every incidental refresh —
+    // silently reverting it once launched the wrong engine.
+    const key = `${model}|${this.deviceMode}`;
+    const keyChanged = key !== this._formKey;
+    this._formKey = key;
+    if (!cpuMode && (keyChanged || !this._engineDirty)) {
       this.setEngineForm(this.matchedProfile?.engine
         ?? this.conservativeDefaults(entry));
     }
@@ -416,8 +446,10 @@ const Control = {
         + "link under the picker", "error");
       return;
     }
+    let engineDesc;
     if (this.deviceMode === "cpu") {
       body.custom = { model_id: model, device: "cpu" };
+      engineDesc = "CPU engine, stock settings";
     } else {
       const form = this.readEngineForm();
       const untouched = this.matchedProfile
@@ -426,6 +458,7 @@ const Control = {
         // Exactly the optimized launch — run the promoted profile
         // itself (it may carry settings beyond the searched knobs).
         body.profile = this.matchedProfile.name;
+        engineDesc = `the optimized engine (${this.engineSummary(form)})`;
       } else {
         body.custom = {
           model_id: model,
@@ -439,14 +472,15 @@ const Control = {
           kv_cache_dtype: form.kv_cache_dtype || null,
           expert_parallel: form.expert_parallel,
         };
+        engineDesc = `a custom variant (${this.engineSummary(form)})`;
       }
     }
     try {
       this.msg("starting…");
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
       this.msg(
-        "run started — engine launch can take several minutes on big "
-        + "models; the Phase readout below tracks it", "ok");
+        `run started with ${engineDesc} — engine launch can take `
+        + `several minutes; the Phase readout below tracks it`, "ok");
       this.pollStatus();
     } catch (e) {
       this.msg(e.message, "error");
@@ -490,7 +524,11 @@ const Control = {
       const since = fmt.clock(active.started_at * 1000);
       const finished = !running && !active.error && active.result;
       box.innerHTML =
-        `<b>${wtxt}</b> · config <b>${active.config}</b> · started ${since}` +
+        `<b>${wtxt}</b>` +
+        (active.engine_summary
+          ? ` · engine: <b>${active.engine_summary}</b>`
+          : ` · config <b>${active.config}</b>`) +
+        ` · started ${since}` +
         (active.error ? ` · <span class="status-fail">${active.error}</span>` : "") +
         (finished
           ? ` · <span class="status-pass">finished</span>

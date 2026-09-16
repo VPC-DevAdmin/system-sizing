@@ -168,6 +168,9 @@ select:focus, input:focus, textarea:focus {
   outline: none; border-color: var(--accent);
 }
 
+.field { display: flex; flex-direction: column; gap: 6px;
+  font-size: .8rem; color: var(--muted); }
+
 /* Segmented two-way toggle (CPU only ⟷ CPU+GPU). */
 .seg {
   display: inline-flex; margin-top: 8px; border: 1px solid var(--stroke);

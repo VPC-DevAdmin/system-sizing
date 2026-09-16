@@ -168,14 +168,16 @@
   <section class="panel">
     <h2>Start a capacity benchmark</h2>
     <div class="form-grid">
-      <label>Model
-        <select id="bench-model"></select>
+      <div class="field">
+        <label>Model
+          <select id="bench-model"></select>
+        </label>
         <div class="seg" id="device-seg">
           <button type="button" data-dev="cpu">CPU only</button>
           <button type="button" data-dev="gpu">CPU + GPU</button>
         </div>
         <span id="model-note" class="hint"></span>
-      </label>
+      </div>
       <label>Workload
         <select id="workload-select"></select>
         <span id="workload-detail" class="hint"></span>
@@ -212,8 +214,11 @@
             <option value="">auto (model dtype)</option>
             <option value="fp8">fp8 — double the KV capacity</option>
           </select></label>
-        <label class="check"><input type="checkbox" id="eng-ep">
-          Expert parallel <span class="hint">(MoE models, TP&gt;1)</span></label>
+        <label>Expert parallel <span class="hint">(MoE models, TP&gt;1)</span>
+          <select id="eng-ep">
+            <option value="off">off</option>
+            <option value="on">on</option>
+          </select></label>
       </div>
     </details>
     <div class="row wrap">

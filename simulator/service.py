@@ -61,6 +61,10 @@ class ActiveRun:
     started_at: float
     error: Optional[str] = None
     result: Optional[str] = None          # str(db_path) on success
+    # Human summary of the engine actually launched ("custom: 8×tp1
+    # pack · KV fp8" / "optimized profile x") — the banner's answer to
+    # "what exactly is running?", surviving page reloads.
+    engine_summary: Optional[str] = None
 
     def describe(self) -> dict:
         return {
@@ -70,6 +74,7 @@ class ActiveRun:
             "running": not self.task.done(),
             "error": self.error,
             "result": self.result,
+            "engine_summary": self.engine_summary,
         }
 
 
@@ -745,15 +750,35 @@ def create_app(
                 422, "workload.kind must be cohort | persona | sweep",
             )
 
+        if req.custom is not None:
+            c = req.custom
+            summary = (
+                "custom CPU engine" if c.get("device") == "cpu"
+                else "custom: "
+                + f"{c.get('replicas') or 1}×tp{c.get('tp') or 1}"
+                + f" {c.get('placement') or 'pack'}"
+                + f" · gmu {c.get('gpu_memory_utilization') or 0.92}"
+                + (f" · mns {c['max_num_seqs']}"
+                   if c.get("max_num_seqs") else "")
+                + (f" · mbt {c['max_num_batched_tokens']}"
+                   if c.get("max_num_batched_tokens") else "")
+                + f" · KV {c.get('kv_cache_dtype') or 'auto'}"
+                + (" · EP on" if c.get("expert_parallel") else "")
+            )
+        elif req.profile:
+            summary = f"profile {req.profile}"
+        else:
+            summary = f"config {config_path.name}"
         active = ActiveRun(
             task=asyncio.create_task(_supervise(app, coro_factory)),
             workload=req.workload,
             config_path=str(config_path),
             started_at=time.time(),
+            engine_summary=summary,
         )
         app.state.active = active
         return {"accepted": True, "workload": req.workload,
-                "config": str(config_path)}
+                "config": str(config_path), "engine_summary": summary}
 
     def _cohort_coro(cfg, cohort, req: StartRunRequest):
         # Explicit closed-loop knobs (pool grid / adaptive stepper)

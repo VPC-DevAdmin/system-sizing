@@ -1578,14 +1578,31 @@ def create_app(
                     "cohort_run_id = ? AND snapshot_at_ms > ? "
                     "ORDER BY snapshot_at_ms DESC LIMIT 600",
                     (crid, cutoff)).fetchall()][::-1]
-                steps = [dict(r) for r in conn.execute(
-                    "SELECT step_index, target_pool_size AS pool_size, "
-                    "sample_size, combined_violation_rate, "
-                    "combined_target_miss_rate, ttft_p95_ms, tpot_p95_ms, "
-                    "capacity_status, arrival_rate_per_min, stability "
-                    "FROM cohort_measurements WHERE "
-                    "cohort_run_id = ? ORDER BY step_index",
-                    (crid,)).fetchall()]
+                # SELECT * + shape in Python: the DB is opened
+                # read-only (no migrations), so naming late-added
+                # columns (e.g. v7's arrival_rate_per_min) would 500
+                # on any pre-migration run.db.
+                steps = []
+                for r in conn.execute(
+                    "SELECT * FROM cohort_measurements WHERE "
+                    "cohort_run_id = ? ORDER BY step_index", (crid,),
+                ).fetchall():
+                    row = dict(r)
+                    steps.append({
+                        "step_index": row.get("step_index"),
+                        "pool_size": row.get("target_pool_size"),
+                        "sample_size": row.get("sample_size"),
+                        "combined_violation_rate":
+                            row.get("combined_violation_rate"),
+                        "combined_target_miss_rate":
+                            row.get("combined_target_miss_rate"),
+                        "ttft_p95_ms": row.get("ttft_p95_ms"),
+                        "tpot_p95_ms": row.get("tpot_p95_ms"),
+                        "capacity_status": row.get("capacity_status"),
+                        "arrival_rate_per_min":
+                            row.get("arrival_rate_per_min"),
+                        "stability": row.get("stability"),
+                    })
                 mids = [r[0] for r in conn.execute(
                     "SELECT measurement_id FROM cohort_measurements "
                     "WHERE cohort_run_id = ?", (crid,)).fetchall()]

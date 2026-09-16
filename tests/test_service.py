@@ -286,6 +286,68 @@ def test_live_backfill_endpoint(tmp_path) -> None:
         assert doc["turns"][0]["ttft_ms"] == 300.0
         s = doc["steps"][0]
         assert s["pool_size"] == 1024 and s["capacity_status"] == "pass"
+        # Closed-loop rows carry null open-loop fields (present, not
+        # crashing — the read-only path must tolerate any schema age).
+        assert s["arrival_rate_per_min"] is None
+        assert s["stability"] is None
+
+
+def test_live_backfill_tolerates_pre_v7_db(tmp_path) -> None:
+    """The backfill path opens run.db read-only (no migrations), so it
+    must not name late-added columns in SQL — a v6-era run.db without
+    the open-loop columns has to backfill cleanly, not 500."""
+    import sqlite3 as _sq
+    import time as _t
+
+    from fastapi.testclient import TestClient
+
+    from simulator.service import create_app
+
+    runs = tmp_path / "runs"
+    run_dir = runs / "run_01"
+    run_dir.mkdir(parents=True)
+    conn = _sq.connect(run_dir / "run.db")
+    conn.executescript("""
+      CREATE TABLE cohort_run (
+        cohort_run_id TEXT PRIMARY KEY, started_at TEXT, completed_at TEXT,
+        engine_type TEXT, model_id TEXT, cohort_id TEXT,
+        cohort_definition_json TEXT, config_json TEXT, final_status TEXT);
+      CREATE TABLE cohort_measurements (
+        measurement_id INTEGER PRIMARY KEY, cohort_run_id TEXT,
+        step_index INTEGER, target_pool_size INTEGER, sample_size INTEGER,
+        combined_violation_rate REAL, combined_target_miss_rate REAL,
+        ttft_p95_ms REAL, tpot_p95_ms REAL, capacity_status TEXT);
+      CREATE TABLE simulation_snapshots (
+        snapshot_id INTEGER PRIMARY KEY, cohort_run_id TEXT,
+        snapshot_at_ms INTEGER, phase TEXT, pool_size INTEGER,
+        in_flight INTEGER, requests_completed INTEGER, errors INTEGER);
+      CREATE TABLE measurement_telemetry (
+        telemetry_id INTEGER PRIMARY KEY, measurement_id INTEGER,
+        sampled_at_ms INTEGER, kv_cache_used_pct REAL);
+      CREATE TABLE turn_events (
+        event_id INTEGER PRIMARY KEY, measurement_id INTEGER,
+        completed_at_ms INTEGER, ttft_ms REAL, tpot_ms REAL, error TEXT);
+    """)
+    conn.execute(
+        "INSERT INTO cohort_run VALUES ('crid','2026-09-16T00:00:00Z',"
+        "NULL,'vllm_cuda','org/M','chat_heavy','{}','{}','ok')")
+    conn.execute(
+        "INSERT INTO cohort_measurements VALUES "
+        "(1,'crid',0,512,500,0.0,0.0,400.0,20.0,'pass')")
+    conn.execute(
+        "INSERT INTO simulation_snapshots VALUES "
+        f"(1,'crid',{int(_t.time() * 1000)},'measuring',512,40,900,0)")
+    conn.commit()
+    conn.close()
+
+    with TestClient(create_app(runs)) as client:
+        r = client.get("/api/live/backfill")
+        assert r.status_code == 200
+        doc = r.json()
+        s = doc["steps"][0]
+        assert s["pool_size"] == 512
+        assert s["arrival_rate_per_min"] is None
+        assert doc["snapshots"][0]["pool_size"] == 512
 
         # Empty runs dir degrades to an empty (not erroring) shape.
         empty = create_app(tmp_path / "none")

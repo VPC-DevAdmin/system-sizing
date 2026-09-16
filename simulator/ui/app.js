@@ -198,7 +198,7 @@ const Control = {
     const g2 = document.createElement("optgroup");
     g2.label = "Single user type";
     for (const p of this.catalogs.personas) {
-      g2.append(new Option(p.id.replaceAll("_", " "), `persona:${p.id}`,
+      g2.append(new Option(p.name || p.id.replaceAll("_", " "), `persona:${p.id}`,
         false, `persona:${p.id}` === prev));
     }
     sel.append(g2);
@@ -771,7 +771,8 @@ const Results = {
     const sel = $("#result-cohort");
     sel.innerHTML = "";
     for (const c of this.doc.cohorts) {
-      sel.append(new Option(`${c.id} (${c.engine})`, c.cohort_run_id));
+      sel.append(new Option(
+        `${c.name || c.id} (${c.engine})`, c.cohort_run_id));
     }
     $("#result-export-dl").disabled = false;
     this.render();
@@ -2216,6 +2217,7 @@ const Models = {
  * (sessions_before_leaving / inter_session_gap) must exist for the
  * schema but no longer drive runtime; they're carried, never shown. */
 const PERSONA_DEFAULT_SPEC = {
+  name: "",
   description: "",
   input_tokens: { lognormal: { median: 400, sigma: 0.5 } },
   output_tokens: { lognormal: { median: 200, sigma: 0.4 } },
@@ -2274,7 +2276,7 @@ const Editor = {
       ul.innerHTML = "";
       for (const item of items) {
         const li = document.createElement("li");
-        li.textContent = item.id;
+        li.textContent = item.name || item.id;
         li.classList.toggle(
           "active", this.kind === kind && this.editing === item.id);
         li.addEventListener("click", () => this.open(kind, item.id));
@@ -2320,7 +2322,8 @@ const Editor = {
       const s = p?.summary;
       if (!p || !s) { card.hidden = true; return; }
       card.hidden = false;
-      card.innerHTML = `<b>${p.description || id}</b>
+      card.innerHTML = `<b>${p.name || id}</b> —
+        <span class="msg">${p.description}</span>
         <div class="statusbar" style="margin-top:10px;background:none;
           border:none;box-shadow:none;padding:0;backdrop-filter:none">
           ${stat("Question", `${n(s.input_tokens.median)} tok`,
@@ -2348,6 +2351,9 @@ const Editor = {
       card.hidden = false;
       const total = Object.values(c.persona_weights)
         .reduce((a, b) => a + b, 0) || 1;
+      const pname = pid =>
+        Control.catalogs.personas.find(p => p.id === pid)?.name
+        || pid.replaceAll("_", " ");
       const rows = Object.entries(c.persona_weights)
         .sort((a, b) => b[1] - a[1])
         .map(([pid, w]) => {
@@ -2355,7 +2361,7 @@ const Editor = {
           return `<div class="gpu-row" style="grid-template-columns:
               160px minmax(80px,1fr) 40px">
             <span class="g-id" style="cursor:pointer" title="open persona"
-              data-open-persona="${pid}">${pid.replaceAll("_", " ")}</span>
+              data-open-persona="${pid}">${pname(pid)}</span>
             <span class="g-bar"><i style="width:${pct}%"></i></span>
             <span class="g-num">${pct}%</span></div>`;
         }).join("");
@@ -2502,10 +2508,27 @@ const Editor = {
 
   /* ── persona form ────────────────────────────────────────────── */
 
+  /* Human name → stable backend id. Users never type (or see) the
+   * underscored id; it's derived once at creation and stays fixed. */
+  slug(name) {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  },
+
   buildPersonaForm() {
     const form = $("#editor-form");
     form.innerHTML = "";
     const s = this.spec;
+
+    const nameEl = this.el(`<label style="display:block;margin-bottom:6px">
+      Name <input id="pf-name" style="width:100%"
+      placeholder="Long-form generator"></label>`);
+    nameEl.querySelector("input").value = s.name || "";
+    nameEl.querySelector("input").addEventListener("input", (e) => {
+      s.name = e.target.value;
+      if (!this.editing) $("#editor-id").value = this.slug(e.target.value);
+    });
+    form.append(nameEl);
 
     const desc = this.el(`<label style="display:block;margin-bottom:6px">
       Description <input id="pf-desc" style="width:100%"
@@ -2630,7 +2653,10 @@ const Editor = {
     const form = $("#editor-form");
     form.innerHTML = "";
     const s = this.spec;
-    const personaIds = (Control.catalogs.personas || []).map(p => p.id);
+    const catalog = Control.catalogs.personas || [];
+    const personaIds = catalog.map(p => p.id);
+    const pname = pid =>
+      catalog.find(p => p.id === pid)?.name || pid.replaceAll("_", " ");
 
     const head = this.el(`<div>
       <label style="display:block;margin-bottom:6px">Name
@@ -2641,8 +2667,10 @@ const Editor = {
           placeholder="What this team does all day"></label></div>`);
     head.querySelector("#cf-name").value = s.name || "";
     head.querySelector("#cf-desc").value = s.description || "";
-    head.querySelector("#cf-name").addEventListener("input",
-      (e) => { s.name = e.target.value; });
+    head.querySelector("#cf-name").addEventListener("input", (e) => {
+      s.name = e.target.value;
+      if (!this.editing) $("#editor-id").value = this.slug(e.target.value);
+    });
     head.querySelector("#cf-desc").addEventListener("input",
       (e) => { s.description = e.target.value; });
     form.append(head);
@@ -2660,7 +2688,7 @@ const Editor = {
         const pct = total > 0 ? Math.round(100 * (+row.share || 0) / total) : 0;
         const opts = personaIds.map(pid =>
           `<option value="${pid}" ${pid === row.pid ? "selected" : ""}>
-             ${pid.replaceAll("_", " ")}</option>`).join("");
+             ${pname(pid)}</option>`).join("");
         const r = this.el(`<div class="mix-row">
           <select>${opts}</select>
           <input type="range" min="0" max="100" value="${row.share}">

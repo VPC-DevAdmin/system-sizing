@@ -394,6 +394,7 @@ def create_app(
         return [
             {
                 "id": p.id,
+                "name": getattr(p, "name", "") or p.id,
                 "description": p.description,
                 "ttft_target_s": p.ttft_target_seconds,
                 "ttft_failure_s": p.ttft_failure_seconds,

@@ -185,6 +185,30 @@ button.primary {
 button.primary:hover:not(:disabled) { background: linear-gradient(180deg, #a2dcf5, #79c4e6); }
 button.danger { color: var(--fail); border-color: rgba(224, 101, 101, .45); background: none; }
 button.small { padding: 5px 13px; font-size: .8rem; }
+/* Quiet inline action (e.g. "Edit workloads" on the benchmark form):
+ * present but subordinate to the primary controls. */
+button.ghost {
+  background: none; color: var(--muted); backdrop-filter: none;
+}
+button.ghost:hover:not(:disabled) { color: var(--text); transform: none; }
+
+/* Themed checkboxes — the native white box fights the glass panels. */
+input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 16px; height: 16px; flex: none; margin: 0;
+  border: 1px solid var(--stroke); border-radius: 5px;
+  background: rgba(8, 20, 31, .6); cursor: pointer; position: relative;
+  transition: border-color .15s, background .15s;
+}
+input[type="checkbox"]:hover { border-color: var(--accent); }
+input[type="checkbox"]:checked {
+  background: var(--accent); border-color: var(--accent);
+}
+input[type="checkbox"]:checked::after {
+  content: "✓"; position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center;
+  color: #06121e; font-size: 11px; font-weight: 800; line-height: 1;
+}
 
 .row { display: flex; align-items: center; gap: 12px; }
 .row.wrap { flex-wrap: wrap; }

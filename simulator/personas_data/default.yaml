@@ -29,6 +29,7 @@
 
 personas:
   quick_lookup:
+    name: "Quick lookup"
     description: "Short factual queries with brief responses; FAQ-style"
     input_tokens: {lognormal: {median: 350, sigma: 0.35}}
     output_tokens: {lognormal: {median: 60, sigma: 0.4}}
@@ -45,6 +46,7 @@ personas:
       tpot_failure_ms: 225.0
 
   conversational:
+    name: "Conversational chat"
     description: "Multi-turn back-and-forth with growing chat history"
     input_tokens: {lognormal: {median: 180, sigma: 0.5}}
     output_tokens: {lognormal: {median: 220, sigma: 0.45}}
@@ -61,6 +63,7 @@ personas:
       tpot_failure_ms: 225.0
 
   writer:
+    name: "Writer"
     description: "Drafting emails, content, and other prose; no long source documents"
     input_tokens: {lognormal: {median: 500, sigma: 0.5}}
     output_tokens: {lognormal: {median: 350, sigma: 0.4}}
@@ -77,6 +80,7 @@ personas:
       tpot_failure_ms: 270.0
 
   document_qa:
+    name: "Document Q&A"
     description: "Question answering over 4K+ token source documents"
     input_tokens: {lognormal: {median: 3500, sigma: 0.5}}
     output_tokens: {lognormal: {median: 280, sigma: 0.4}}
@@ -93,6 +97,7 @@ personas:
       tpot_failure_ms: 300.0
 
   code_assist:
+    name: "Code assistant"
     description: "Pair-programming with code context in the prompt"
     input_tokens: {lognormal: {median: 1200, sigma: 0.6}}
     output_tokens: {lognormal: {median: 450, sigma: 0.5}}
@@ -110,6 +115,7 @@ personas:
       tpot_failure_ms: 330.0
 
   long_form_generator:
+    name: "Long-form generator"
     # Decode-stress counterweight to document_qa: short input, very
     # long output, so cohorts mixing both exercise both halves of the
     # engine pipeline.

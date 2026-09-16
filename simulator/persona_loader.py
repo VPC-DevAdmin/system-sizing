@@ -111,7 +111,8 @@ def parse_persona(persona_id: str, spec: dict):
 
     if not isinstance(spec, dict):
         raise PersonaSpecError(f"persona {persona_id}: spec must be a mapping")
-    unknown = set(spec) - {"description", "sla", "timeouts", *_DISTRIBUTION_FIELDS}
+    unknown = set(spec) - {"name", "description", "sla", "timeouts",
+                           *_DISTRIBUTION_FIELDS}
     if unknown:
         raise PersonaSpecError(
             f"persona {persona_id}: unknown fields {sorted(unknown)}"
@@ -143,6 +144,10 @@ def parse_persona(persona_id: str, spec: dict):
     }
     return Persona(
         id=persona_id,
+        # Display name: explicit, or a humanized id — the UI never
+        # shows raw underscored ids.
+        name=str(spec.get("name") or "")
+        or persona_id.replace("_", " ").capitalize(),
         description=str(spec.get("description", "")),
         **dists,
         **{f: float(sla[f]) for f in _SLA_FIELDS},
@@ -152,7 +157,8 @@ def parse_persona(persona_id: str, spec: dict):
 
 def serialize_persona(p) -> dict:
     """Persona → YAML-able spec (the editor's round-trip)."""
-    out: dict = {"description": p.description}
+    out: dict = {"name": getattr(p, "name", "") or p.id,
+                 "description": p.description}
     for f in _DISTRIBUTION_FIELDS:
         out[f] = serialize_distribution(getattr(p, f))
     out["sla"] = {f: getattr(p, f) for f in _SLA_FIELDS}

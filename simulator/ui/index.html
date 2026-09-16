@@ -175,10 +175,10 @@
       <label>Workload
         <select id="workload-select"></select>
         <span id="workload-detail" class="hint"></span>
-        <span class="hint"><a href="#" id="workload-edit-link">create or
-          modify workloads &rarr;</a></span>
+        <span style="margin-top:2px"><button type="button"
+          id="workload-edit-link" class="small ghost">&#9998;&ensp;Edit
+          workloads</button></span>
       </label>
-      <label class="check"><input type="checkbox" id="new-run"> Fresh run (don't resume)</label>
     </div>
     <details id="bench-advanced" style="margin-bottom:14px">
       <summary class="msg" style="cursor:pointer">Advanced</summary>
@@ -224,9 +224,11 @@
           </select></label>
       </div>
     </details>
-    <div class="row">
+    <div class="row wrap">
       <button id="start-btn" class="primary">Start run</button>
       <button id="stop-btn" class="danger" disabled>Stop run</button>
+      <label class="check"><input type="checkbox" id="new-run">
+        Fresh run <span class="hint">(don't resume)</span></label>
       <span id="control-msg" class="msg"></span>
     </div>
     <div id="active-run-box" class="callout" hidden></div>

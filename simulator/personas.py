@@ -86,6 +86,12 @@ class Persona:
     inter_token_factor: float = 20.0
     hard_timeout_s: float = 900.0
 
+    # Human-facing display name ("Long-form generator"). The id stays
+    # the stable backend key (overlay filenames, cohort weights, DB
+    # rows); the UI shows names everywhere. The loader guarantees this
+    # is populated (falls back to a humanized id).
+    name: str = ""
+
     @property
     def pre_ttft_timeout_s(self) -> float:
         return self.ttft_failure_seconds * self.pre_ttft_factor
@@ -158,7 +164,7 @@ def cohort_from_persona(persona_id: str) -> Cohort:
     persona = get_persona(persona_id)
     return Cohort(
         id=persona_id,
-        name=f"Persona: {persona.id}",
+        name=f"Persona: {persona.name or persona.id}",
         description=persona.description,
         persona_weights={persona_id: 1.0},
         category="persona",

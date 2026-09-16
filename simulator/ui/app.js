@@ -515,10 +515,10 @@ const Results = {
   _shown: false,
 
   onShow() {
-    if (!this._shown) {
-      this._shown = true;
-      Control.refreshRuns();
-    }
+    // Refresh EVERY visit — a once-only guard here meant a Results
+    // tab opened before the first run finished cached an empty
+    // picker forever.
+    Control.refreshRuns();
   },
 
   init() {
@@ -541,6 +541,10 @@ const Results = {
     for (const r of this.runs) sel.append(new Option(r.name, r.name));
     if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
     this.fillComparePicker();
+    // First data arrival: load it — selecting the only option fires
+    // no change event, so without this the view sits empty until the
+    // user finds the Load button.
+    if (!this.doc && sel.value) this.load();
   },
 
   msg(text, cls = "") {

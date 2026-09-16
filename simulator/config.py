@@ -303,6 +303,15 @@ class SimulationConfig:
     open_loop_inflight_per_worker: int = 192
     open_loop_max_workers: int = 16
 
+    # ── Headline shape search ──
+    # Outer hill-climb over (input, output) firehose shapes, scoring
+    # each cell's stability boundary on √(concurrency × output tok/s).
+    # Cells are deliberately coarse — the winner can be re-measured at
+    # full resolution afterwards (it is saved as a persona).
+    headline_cell_window_s: int = 60
+    headline_resolution_pct: float = 15.0
+    headline_cell_budget: int = 12
+
 
 @dataclass
 class TelemetryConfig:

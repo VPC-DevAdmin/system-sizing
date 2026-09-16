@@ -731,6 +731,11 @@ def create_app(
             if wid not in PERSONAS:
                 raise HTTPException(404, f"unknown persona '{wid}'")
             coro_factory = _cohort_coro(cfg, cohort_from_persona(wid), req)
+        elif kind == "headline_search":
+            from .headline_search import run_headline_search
+            coro_factory = lambda: run_headline_search(  # noqa: E731
+                cfg, new_run=req.new_run,
+            )
         elif kind == "sweep":
             from .personas import resolve_workload_group
             try:
@@ -747,7 +752,8 @@ def create_app(
             )
         else:
             raise HTTPException(
-                422, "workload.kind must be cohort | persona | sweep",
+                422, "workload.kind must be cohort | persona | "
+                     "headline_search | sweep",
             )
 
         if req.custom is not None:

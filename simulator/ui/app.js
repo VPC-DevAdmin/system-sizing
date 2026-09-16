@@ -397,6 +397,8 @@ const Control = {
       const g3 = document.createElement("optgroup");
       g3.label = "Headline stress — marketing numbers, not capacity";
       headline.forEach(o => g3.append(o));
+      g3.append(new Option("Headline: find the best shape (auto-search)",
+        "headline_search:", false, prev === "headline_search:"));
       sel.append(g3);
     }
     // The "sweep everything" option is gone with the closed-loop UI —
@@ -424,6 +426,12 @@ const Control = {
           + `${Math.round(s.output_tokens.median)} out, `
           + `~${Math.round(s.think_gap_s.median)}s between turns`;
       }
+    } else if (w.startsWith("headline_search")) {
+      text = "Hill-climbs input/output shapes (coarse rate search per "
+        + "cell, one engine launch) to find the shape that jointly "
+        + "maximizes concurrency and output tokens/sec. Saves the "
+        + "winner as \"Headline: best shape\" for a full-resolution "
+        + "re-run. Expect ~1.5–3 hours.";
     }
     $("#workload-detail").textContent = text;
   },

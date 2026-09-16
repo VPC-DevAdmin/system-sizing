@@ -397,8 +397,6 @@ const Control = {
       const g3 = document.createElement("optgroup");
       g3.label = "Headline stress — marketing numbers, not capacity";
       headline.forEach(o => g3.append(o));
-      g3.append(new Option("Headline: find the best shape (auto-search)",
-        "headline_search:", false, prev === "headline_search:"));
       sel.append(g3);
     }
     // The "sweep everything" option is gone with the closed-loop UI —
@@ -426,14 +424,9 @@ const Control = {
           + `${Math.round(s.output_tokens.median)} out, `
           + `~${Math.round(s.think_gap_s.median)}s between turns`;
       }
-    } else if (w.startsWith("headline_search")) {
-      text = "Hill-climbs input/output shapes (coarse rate search per "
-        + "cell, one engine launch) to find the shape that jointly "
-        + "maximizes concurrency and output tokens/sec. Saves the "
-        + "winner as \"Headline: best shape\" for a full-resolution "
-        + "re-run. Expect ~1.5–3 hours.";
     }
     $("#workload-detail").textContent = text;
+    this.updateWorkloadNote();
   },
 
   msg(text, cls = "") {
@@ -442,11 +435,11 @@ const Control = {
     el.className = `msg ${cls}`;
   },
 
-  async start() {
-    const w = $("#workload-select").value || "";
-    const [kind, id] = w.split(":", 2);
-    const workload = kind === "sweep"
-      ? { kind, type: id || "all" } : { kind, id };
+  /* One body builder for anything that launches the engine (a
+   * benchmark run or the headline shape search): validates the model,
+   * then profile-vs-custom exactly as Start does. Returns null (with
+   * a message shown) when the form can't launch. */
+  buildRunBody(workload) {
     // Open-loop only — the closed-loop pool ramp is no longer offered
     // from the UI (it can't find the capacity limit; see
     // docs/algorithm.md). The API keeps mode:"closed" for scripts.
@@ -457,47 +450,120 @@ const Control = {
     };
     const model = $("#bench-model").value;
     const entry = this.modelEntry();
-    if (!model) { this.msg("pick a model first", "error"); return; }
+    if (!model) { this.msg("pick a model first", "error"); return null; }
     if (entry && !entry.cached) {
       this.msg("that model isn't downloaded yet — use the download "
         + "link under the picker", "error");
-      return;
+      return null;
     }
-    let engineDesc;
     if (this.deviceMode === "cpu") {
       body.custom = { model_id: model, device: "cpu" };
-      engineDesc = "CPU engine, stock settings";
-    } else {
-      const form = this.readEngineForm();
-      const untouched = this.matchedProfile
-        && JSON.stringify(form) === JSON.stringify(this.engineDefaults);
-      if (untouched) {
-        // Exactly the optimized launch — run the promoted profile
-        // itself (it may carry settings beyond the searched knobs).
-        body.profile = this.matchedProfile.name;
-        engineDesc = `the optimized engine (${this.engineSummary(form)})`;
-      } else {
-        body.custom = {
-          model_id: model,
-          device: "gpu",
-          replicas: form.replicas,
-          tp: form.tp,
-          placement: form.placement,
-          gpu_memory_utilization: form.gpu_memory_utilization,
-          max_num_seqs: +form.max_num_seqs || null,
-          max_num_batched_tokens: +form.max_num_batched_tokens || null,
-          kv_cache_dtype: form.kv_cache_dtype || null,
-          expert_parallel: form.expert_parallel,
-        };
-        engineDesc = `a custom variant (${this.engineSummary(form)})`;
-      }
+      body.engineDesc = "CPU engine, stock settings";
+      return body;
     }
+    const form = this.readEngineForm();
+    const untouched = this.matchedProfile
+      && JSON.stringify(form) === JSON.stringify(this.engineDefaults);
+    if (untouched) {
+      // Exactly the optimized launch — run the promoted profile
+      // itself (it may carry settings beyond the searched knobs).
+      body.profile = this.matchedProfile.name;
+      body.engineDesc = `the optimized engine (${this.engineSummary(form)})`;
+    } else {
+      body.custom = {
+        model_id: model,
+        device: "gpu",
+        replicas: form.replicas,
+        tp: form.tp,
+        placement: form.placement,
+        gpu_memory_utilization: form.gpu_memory_utilization,
+        max_num_seqs: +form.max_num_seqs || null,
+        max_num_batched_tokens: +form.max_num_batched_tokens || null,
+        kv_cache_dtype: form.kv_cache_dtype || null,
+        expert_parallel: form.expert_parallel,
+      };
+      body.engineDesc = `a custom variant (${this.engineSummary(form)})`;
+    }
+    return body;
+  },
+
+  async start() {
+    const w = $("#workload-select").value || "";
+    const [kind, id] = w.split(":", 2);
+    const workload = kind === "sweep"
+      ? { kind, type: id || "all" } : { kind, id };
+    const body = this.buildRunBody(workload);
+    if (!body) return;
+    const engineDesc = body.engineDesc;
+    delete body.engineDesc;
     try {
       this.msg("starting…");
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
       this.msg(
         `run started with ${engineDesc} — engine launch can take `
         + `several minutes; the Phase readout below tracks it`, "ok");
+      this.pollStatus();
+    } catch (e) {
+      this.msg(e.message, "error");
+    }
+  },
+
+  /* The "Optimize the shape" affordance under headline workloads —
+   * mirrors the engine-optimizer link on the model side. Running →
+   * completion bar (cells done / budget, current shape); finished →
+   * the winner is saved as the "Headline: best shape" workload. */
+  updateWorkloadNote() {
+    const note = $("#workload-note");
+    if (!note) return;
+    const w = $("#workload-select").value || "";
+    const pid = w.startsWith("persona:") ? w.slice(8) : "";
+    if (!pid.startsWith("headline_")) { note.innerHTML = ""; return; }
+    const active = this.lastActive;
+    const searching = active?.running
+      && active.workload?.kind === "headline_search";
+    if (searching) {
+      const p = active.progress || {};
+      const pct = p.budget ? Math.round(100 * ((p.cell || 1) - 1) / p.budget) : 0;
+      const shape = p.shape ? `${p.shape[0]}→${p.shape[1]}` : "…";
+      const best = p.best?.shape
+        ? ` · best so far ${p.best.shape[0]}→${p.best.shape[1]}` : "";
+      note.innerHTML = `optimizing shape — cell ${p.cell ?? 1} of
+        ${p.budget ?? "?"} (${shape})${best}
+        <span class="dl-bar"><i style="width:${pct}%"></i></span>${pct}%`;
+      return;
+    }
+    const best = this.catalogs.personas
+      .find(p => p.id === "headline_best");
+    note.innerHTML =
+      (best && pid === "headline_best"
+        ? `<span class="ok-note">✓ Shape-optimized workload — found by
+           the shape search on this engine</span> `
+        : best
+          ? `<span class="ok-note">✓ Optimized shape saved as
+             "${best.name}"</span>
+             <button type="button" class="note-link"
+               id="use-best-shape">use it →</button> `
+          : "")
+      + `<button type="button" class="note-link" id="optimize-shape">⚙
+         Optimize the shape</button>`;
+    $("#use-best-shape")?.addEventListener("click", () => {
+      $("#workload-select").value = "persona:headline_best";
+      this.showDetails();
+    });
+    $("#optimize-shape")?.addEventListener("click", () =>
+      this.startShapeSearch());
+  },
+
+  async startShapeSearch() {
+    const body = this.buildRunBody({ kind: "headline_search" });
+    if (!body) return;
+    delete body.engineDesc;
+    try {
+      await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
+      this.msg("shape search started — hill-climbing input/output "
+        + "shapes for the joint concurrency × throughput optimum "
+        + "(~1.5–3 h); the bar under the workload tracks it", "ok");
+      this._shapeSearchWas = true;
       this.pollStatus();
     } catch (e) {
       this.msg(e.message, "error");
@@ -522,6 +588,17 @@ const Control = {
     const box = $("#active-run-box");
     const running = !!(active && active.running);
     this.running = running;
+    this.lastActive = active;
+    // Shape-search lifecycle: live progress while it climbs; when it
+    // completes, refresh the catalog so "Headline: best shape"
+    // appears and the note flips to the green check.
+    const searching = running && active?.workload?.kind === "headline_search";
+    if (searching) this._shapeSearchWas = true;
+    if (!running && this._shapeSearchWas) {
+      this._shapeSearchWas = false;
+      await this.loadCatalogs();
+    }
+    this.updateWorkloadNote();
     $("#stop-btn").disabled = !running;
     $("#start-btn").disabled = running;
     if (running) {

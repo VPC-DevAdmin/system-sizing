@@ -210,6 +210,9 @@ async def run_headline_search(
     new_run: bool = False,
     run_dir: Path | None = None,
     catalog_dir: Path | None = None,
+    # Mutable holder the service exposes via /api/status — the UI's
+    # completion bar reads {cell, budget, shape, best, done} from it.
+    progress: dict | None = None,
 ) -> Path:
     """Run the shape search end-to-end. Returns the summary JSON path."""
     from .open_loop import run_cohort_open_loop
@@ -239,6 +242,11 @@ async def run_headline_search(
         while (shape := climb.propose()) is not None:
             inp, out = shape
             n = len(climb.scores) + 1
+            if progress is not None:
+                progress.update({
+                    "cell": n, "budget": sim.headline_cell_budget,
+                    "shape": [inp, out], "done": False,
+                })
             log.info("headline cell %d/%d: shape %d→%d",
                      n, sim.headline_cell_budget, inp, out)
             cell_overlay = _write_persona_overlay(
@@ -289,6 +297,12 @@ async def run_headline_search(
             cells.append(result)
             climb.record(shape, result.objective)
             prev = result
+            if progress is not None:
+                b = climb.best()
+                progress["best"] = {
+                    "shape": list(b) if b else None,
+                    "objective": round(climb.scores.get(b, 0)) if b else 0,
+                }
             log.info(
                 "headline cell %d→%d: C=%.0f in-flight, T=%.0f out tok/s "
                 "→ score %.0f", inp, out,
@@ -334,6 +348,9 @@ async def run_headline_search(
         }
         out_path = Path(run_dir) / "headline_search.json"
         out_path.write_text(json.dumps(summary, indent=2))
+        if progress is not None:
+            progress["done"] = True
+            progress["winner"] = summary["winner"]
         BUS.publish("run", {
             "event": "finished", "mode": "headline_search",
             "cohort_id": "headline_search",

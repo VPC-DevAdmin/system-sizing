@@ -65,6 +65,9 @@ class ActiveRun:
     # pack · KV fp8" / "optimized profile x") — the banner's answer to
     # "what exactly is running?", surviving page reloads.
     engine_summary: Optional[str] = None
+    # Mutable progress holder for multi-cell runs (the headline shape
+    # search updates it in place: {cell, budget, shape, best, done}).
+    progress: Optional[dict] = None
 
     def describe(self) -> dict:
         return {
@@ -75,6 +78,7 @@ class ActiveRun:
             "error": self.error,
             "result": self.result,
             "engine_summary": self.engine_summary,
+            "progress": self.progress,
         }
 
 
@@ -733,8 +737,9 @@ def create_app(
             coro_factory = _cohort_coro(cfg, cohort_from_persona(wid), req)
         elif kind == "headline_search":
             from .headline_search import run_headline_search
+            shape_progress: dict = {}
             coro_factory = lambda: run_headline_search(  # noqa: E731
-                cfg, new_run=req.new_run,
+                cfg, new_run=req.new_run, progress=shape_progress,
             )
         elif kind == "sweep":
             from .personas import resolve_workload_group
@@ -781,6 +786,7 @@ def create_app(
             config_path=str(config_path),
             started_at=time.time(),
             engine_summary=summary,
+            progress=(shape_progress if kind == "headline_search" else None),
         )
         app.state.active = active
         return {"accepted": True, "workload": req.workload,

@@ -193,16 +193,26 @@ class EngineConfig:
 @dataclass
 class SimulationConfig:
     initial_pool_size: int = 4
-    max_pool_size: int = 1024
+    # SAFETY RAIL, not a finding: high enough that no plausible host
+    # hits it. The methodology's real upper boundary is client
+    # saturation (event-loop lag — see loop_lag guard in runner), and
+    # a run that DOES end at this rail is reported as a LOWER BOUND
+    # with "limit not found", never as capacity. (The old 1024 was a
+    # CPU-era knee guess that silently capped an 8-GPU box.)
+    max_pool_size: int = 65536
     target_samples_per_step: int = 500
     measurement_timeout_s: int = 300
     # ── Soft-start ramp ──
     # Spawning N users in a tight loop produces a synchronised burst
     # that takes minutes to dissolve into independent cycles (or never
-    # does, on tight engines). Pace new spawns instead — one virtual
-    # user per ``ramp_spawn_interval_s`` seconds — so users land in the
-    # request/think cycle staggered.
+    # does, on tight engines). Pace new spawns — but pace by TIME, not
+    # by a fixed per-user rate: at most one user per
+    # ``ramp_spawn_interval_s``, accelerated so any ramp completes
+    # within ``ramp_max_duration_s`` (a fixed 1 user/s ramp made a
+    # 4096-user doubling cost 68 minutes of dead time — the silent
+    # reason big-box knees were unreachable).
     ramp_spawn_interval_s: float = 1.0
+    ramp_max_duration_s: float = 120.0
 
     # ── Initial phase offset ──
     # Each new virtual user sleeps for a random fraction of one

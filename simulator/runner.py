@@ -36,6 +36,11 @@ from .virtual_user import SharedState, _now_ms
 
 log = logging.getLogger(__name__)
 
+# Event-loop lag (ms, max within one measurement window) above which
+# the measuring CLIENT is judged saturated: escalation stops and the
+# run reports coverage=client_limited instead of blaming the engine.
+CLIENT_SATURATION_LAG_MS = 1000.0
+
 
 def _run_db_path(run_dir: Path) -> Path:
     """The canonical DB path for a run dir.
@@ -237,6 +242,8 @@ async def run_cohort(
         on_user_spawned=lambda s: user_spawn_buffer.append(s),
         capture_token_timestamps=cfg.simulation.enable_token_timestamps,
         ramp_spawn_interval_s=cfg.simulation.ramp_spawn_interval_s,
+        ramp_max_duration_s=getattr(
+            cfg.simulation, "ramp_max_duration_s", 120.0),
         initial_phase_offset_enabled=cfg.simulation.initial_phase_offset_enabled,
         # Only pass reasoning_effort when the engine is declared as a
         # reasoning model — keeps non-reasoning request bodies clean.
@@ -312,6 +319,7 @@ async def run_cohort(
     run_started = time.monotonic()
     max_total_s = cfg.simulation.max_total_duration_minutes * 60
     step_index = starting_step_index
+    client_max_lag_ms = 0.0
 
     try:
         next_size = (
@@ -366,6 +374,25 @@ async def run_cohort(
                     sample_size=result.sample_size,
                 ))
             step_index += 1
+
+            # Client-saturation guard — the honest upper boundary of
+            # this methodology. When the measuring client's own event
+            # loop lags badly, every latency it reports is inflated:
+            # escalating further would blame the system under test
+            # for the client's exhaustion. Stop stepping UP and say
+            # so (export reports coverage=client_limited).
+            window_lag_ms = snap.pop_max_loop_lag_ms()
+            client_max_lag_ms = max(client_max_lag_ms, window_lag_ms)
+            if window_lag_ms > CLIENT_SATURATION_LAG_MS:
+                log.warning(
+                    "client saturation: event-loop lag %.0fms during "
+                    "this window (threshold %dms) — stopping escalation "
+                    "at pool=%d; results above this point would measure "
+                    "the CLIENT, not the engine",
+                    window_lag_ms, CLIENT_SATURATION_LAG_MS,
+                    result.target_pool_size,
+                )
+                break
 
             next_size = (
                 stepper.next_pool_size() if stepper is not None
@@ -435,6 +462,15 @@ async def run_cohort(
                 })
             except Exception as e:  # noqa: BLE001
                 log.debug("collector-status persist failed: %s", e)
+        # Client-saturation record: the export downgrades a capped
+        # curve to coverage=client_limited when the client itself was
+        # the boundary.
+        try:
+            db.update_cohort_run(cohort_run_id, {
+                "client_max_lag_ms": round(client_max_lag_ms, 1),
+            })
+        except Exception as e:  # noqa: BLE001
+            log.debug("client-lag persist failed: %s", e)
         await pool.stop()
         _flush_user_spawns(db, cohort_run_id, user_spawn_buffer)
         _flush_users(db, cohort_run_id, user_termination_buffer)

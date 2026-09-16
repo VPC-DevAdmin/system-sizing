@@ -22,7 +22,7 @@ from typing import Any, Iterable
 # The version is stamped into SQLite's ``PRAGMA user_version``; DBs from
 # before versioning existed read as 0 and get every migration (each one
 # is idempotent, so a partially-lifted legacy DB is fine too).
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cohort_run (
@@ -47,7 +47,10 @@ CREATE TABLE IF NOT EXISTS cohort_run (
     -- "no_data", "disabled", "perf_not_found", ...). Echoed into the
     -- export's ``collectors`` block so downstream consumers know what
     -- evidence backs the bottleneck attribution.
-    collectors_json TEXT
+    collectors_json TEXT,
+    -- v6: run-level max event-loop lag of the measuring client — the
+    -- export downgrades a capped curve to client_limited past 1s.
+    client_max_lag_ms REAL
 );
 
 -- One row per ramp step. Measurement-window aggregates (PMU, IMC
@@ -216,7 +219,10 @@ CREATE TABLE IF NOT EXISTS simulation_snapshots (
     sessions_cold INTEGER,
     -- v5: token-weighted hot set — Σ history tokens over warm
     -- sessions, comparable against the engine's KV pool.
-    warm_kv_tokens INTEGER
+    warm_kv_tokens INTEGER,
+    -- v6: how late the 1 Hz snapshot loop woke — the client-
+    -- saturation signal (see runner.CLIENT_SATURATION_LAG_MS).
+    loop_lag_ms REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_run_time ON simulation_snapshots(cohort_run_id, snapshot_at_ms);
@@ -435,6 +441,19 @@ def _migration_5_warm_kv_tokens(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_6_client_saturation(conn: sqlite3.Connection) -> None:
+    """Client-saturation guard: per-second event-loop lag on
+    snapshots, and the run-level maximum on cohort_run — the honest
+    upper boundary of the closed-loop methodology (when the measuring
+    client lags, escalation stops instead of blaming the engine)."""
+    _ensure_columns(
+        conn, "simulation_snapshots", [("loop_lag_ms", "REAL")],
+    )
+    _ensure_columns(
+        conn, "cohort_run", [("client_max_lag_ms", "REAL")],
+    )
+
+
 def _migrate_legacy_aggregate(conn: sqlite3.Connection) -> None:
     """Copy legacy ``measurement_aggregate`` rows onto
     ``cohort_measurements`` and drop the table.
@@ -474,6 +493,7 @@ MIGRATIONS: list[tuple[int, str, Any]] = [
     (4, "deep telemetry (token rates, host/gpu detail, session phases)",
      _migration_4_deep_telemetry),
     (5, "token-weighted warm KV hot set", _migration_5_warm_kv_tokens),
+    (6, "client-saturation lag columns", _migration_6_client_saturation),
 ]
 assert [v for v, _, _ in MIGRATIONS] == list(range(1, SCHEMA_VERSION + 1)), (
     "MIGRATIONS must be contiguous 1..SCHEMA_VERSION"

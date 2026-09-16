@@ -73,7 +73,7 @@ from .prefix_cache import (
 # the document's structure needs a version bump there and here, plus a
 # green run of the schema-validation tests. Patch = additive optional
 # fields; minor = additive required fields; major = anything breaking.
-EXPORT_SCHEMA_VERSION = "1.0.0"
+EXPORT_SCHEMA_VERSION = "1.1.0"
 
 EXPORT_SCHEMA_PATH = Path(__file__).parent / "export_schema" / "buyer_page_data.schema.json"
 
@@ -881,6 +881,31 @@ def _summarise_cohort(
         ttft_rate_field="ttft_target_miss_rate",
         tpot_rate_field="tpot_target_miss_rate",
     )
+
+    # A capped curve whose ceiling was the CLIENT (event-loop lag past
+    # the saturation threshold) is client_limited — a different fact
+    # than "the rail was too low".
+    client_lag = run.get("client_max_lag_ms")
+    if coverage == "capped" and client_lag and float(client_lag) >= 1000.0:
+        coverage = "client_limited"
+    capacity_is_lower_bound = coverage in ("capped", "client_limited")
+
+    # Attribution honesty: a bottleneck can only be named at a knee.
+    # With no failure knee observed, attributing anything blames some
+    # incidental signal for a limit that was never reached (a run once
+    # reported "frequency_droop" for a box at 1.5% GPU utilization).
+    max_tested = max((m["target_pool_size"] for m in measurements),
+                     default=None)
+    if fail_pool is None:
+        bottleneck = "none_observed"
+        evidence = {"note": ("no SLA knee within the tested range — "
+                             "capacity figures are lower bounds"),
+                    "max_pool_tested": max_tested}
+    if all(m.get("target_status") == "pass" for m in measurements):
+        target_bottleneck = "none_observed"
+        target_evidence = {"note": "no target-miss knee within the "
+                                   "tested range",
+                           "max_pool_tested": max_tested}
     return {
         "id": run["cohort_id"],
         "cohort_run_id": run["cohort_run_id"],
@@ -914,16 +939,24 @@ def _summarise_cohort(
         # Self-documenting band labels so the buyer page can render
         # the three-zone narrative without hardcoding the language
         # in the frontend.
+        "capacity_is_lower_bound": capacity_is_lower_bound,
         "capacity_landing_zones": {
             "fast": (
-                f"≤{capacity_pool} concurrent users — no SLA violations"
+                (f"≥{capacity_pool} concurrent users with zero SLA "
+                 f"violations — the TRUE limit was NOT found "
+                 f"({'the measuring client saturated first' if coverage == 'client_limited' else 'the pool ceiling was reached'})"
+                 if capacity_is_lower_bound else
+                 f"≤{capacity_pool} concurrent users — no SLA violations")
                 if capacity_pool is not None
                 else "no clean-pass operating point — workload is "
                      "always at least marginal"
             ),
             "acceptable": (
-                f"≤{soft_capacity_pool} concurrent users — some users "
-                f"see slower-than-target responses but no failures"
+                (f"≥{soft_capacity_pool} concurrent users — limit not "
+                 f"found within the tested range"
+                 if capacity_is_lower_bound else
+                 f"≤{soft_capacity_pool} concurrent users — some users "
+                 f"see slower-than-target responses but no failures")
                 if soft_capacity_pool is not None
                 else "no acceptable operating point — workload fails "
                      "at the smallest probed concurrency"

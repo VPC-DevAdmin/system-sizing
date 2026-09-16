@@ -54,6 +54,7 @@ class PoolManager:
         on_user_spawned=None,
         capture_token_timestamps: bool = False,
         ramp_spawn_interval_s: float = 1.0,
+        ramp_max_duration_s: float = 120.0,
         initial_phase_offset_enabled: bool = True,
         # Reasoning-model support: when set, passed via ``extra_body``
         # on every chat/completions request so the engine emits a
@@ -84,6 +85,7 @@ class PoolManager:
         self._on_user_spawned = on_user_spawned
         self._capture_token_timestamps = capture_token_timestamps
         self._ramp_spawn_interval_s = ramp_spawn_interval_s
+        self._ramp_max_duration_s = ramp_max_duration_s
         self._initial_phase_offset_enabled = initial_phase_offset_enabled
         self._reasoning_effort = reasoning_effort
 
@@ -130,6 +132,15 @@ class PoolManager:
         the moment ramping completes.
         """
         self._target_size = n
+        # Pace by TIME, not by a fixed per-user rate: the configured
+        # per-user interval, accelerated so the whole ramp finishes
+        # within ramp_max_duration_s. A 20ms floor keeps spawns off
+        # the same event-loop tick (each user also carries a random
+        # initial phase offset, so bursts still dissolve).
+        to_add = max(1, n - len(self._users))
+        interval = min(self._ramp_spawn_interval_s,
+                       max(0.02, self._ramp_max_duration_s / to_add)) \
+            if self._ramp_spawn_interval_s > 0 else 0.0
         spawned_this_ramp = 0
         while not self._stopped and len(self._users) < n:
             self._spawn_one(replaced_user_id=None)
@@ -138,8 +149,8 @@ class PoolManager:
                 break
             # Don't sleep on the very first spawn of a totally-empty pool —
             # that's just dead time. Pace subsequent spawns.
-            if self._ramp_spawn_interval_s > 0:
-                await asyncio.sleep(self._ramp_spawn_interval_s)
+            if interval > 0:
+                await asyncio.sleep(interval)
         # If shrinking, cancel surplus (rare in adaptive ramping)
         if len(self._users) > n:
             surplus = len(self._users) - n

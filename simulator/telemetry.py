@@ -89,6 +89,14 @@ class SnapshotRecorder:
         self.interval_s = interval_s
         self._task: asyncio.Task | None = None
         self._stopped = False
+        # Client-saturation signal: how late this 1 Hz loop actually
+        # wakes vs when it asked to. When the measuring client's event
+        # loop is drowning (tens of thousands of virtual-user tasks),
+        # every latency number it reports is inflated — the honest
+        # upper boundary of the methodology, surfaced instead of
+        # silently biting. The runner reads window maxima via
+        # ``pop_max_loop_lag_ms`` to stop escalating past it.
+        self._max_loop_lag_ms: float = 0.0
 
     def start(self) -> None:
         if self._task is None:
@@ -122,9 +130,21 @@ class SnapshotRecorder:
         except Exception:
             pass
 
+    def pop_max_loop_lag_ms(self) -> float:
+        """Max event-loop lag observed since the last pop — the
+        runner samples this per measurement window."""
+        v = self._max_loop_lag_ms
+        self._max_loop_lag_ms = 0.0
+        return v
+
     async def _loop(self) -> None:
+        import time as _time
+        expected = _time.monotonic()
         try:
             while not self._stopped:
+                now = _time.monotonic()
+                lag_ms = max(0.0, (now - expected) * 1000.0)
+                self._max_loop_lag_ms = max(self._max_loop_lag_ms, lag_ms)
                 pool_size = self.pool.target_size
                 in_flight = self.state.in_flight
                 warm = getattr(self.state, "warm_thinking", 0)
@@ -154,9 +174,11 @@ class SnapshotRecorder:
                     "errors": self.state.errors,
                     "step_samples": self.state.step_samples,
                     "step_target_samples": self.state.step_target_samples,
+                    "loop_lag_ms": round(lag_ms, 1),
                 }
                 self.db.insert_snapshot(row)
                 BUS.publish("snapshot", row)
+                expected = _time.monotonic() + self.interval_s
                 await asyncio.sleep(self.interval_s)
         except asyncio.CancelledError:
             pass

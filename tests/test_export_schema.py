@@ -211,3 +211,88 @@ def test_cpu_runs_unaffected_by_gpu_heuristics(tmp_path) -> None:
     knee = _gpu_measurement(64, "fail", pmu_stall_mem_ratio=0.7)
     label, _ = _bottleneck([knee])
     assert label == "memory_bandwidth"
+
+
+def _build_capped_run_db(tmp_path: Path, client_lag_ms=None) -> Path:
+    """A run where EVERY step passes cleanly — the curve never crossed
+    a knee (the whole-box benchmark's shape)."""
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="vllm_cuda_multi", model_id="Qwen/Test",
+        cohort_id="chat_heavy",
+        cohort_definition={"name": "Chat heavy", "description": "t",
+                           "category": "mix",
+                           "persona_weights": {"chat": 1.0}},
+        config={"engine": {"type": "vllm_cuda_multi",
+                           "model_id": "Qwen/Test"}},
+    )
+    for i, pool in enumerate([256, 512, 1024]):
+        db.insert_measurement({
+            "cohort_run_id": "crid", "step_index": i,
+            "target_pool_size": pool,
+            "measured_avg_pool_size": float(pool),
+            "measured_avg_in_flight": pool * 0.05,
+            "measurement_started_at": "2026-01-01T00:00:00Z",
+            "measurement_duration_s": 60, "sample_size": 500,
+            "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+            "combined_violation_rate": 0.0,
+            "ttft_target_miss_rate": 0.0, "tpot_target_miss_rate": 0.0,
+            "combined_target_miss_rate": 0.0,
+            "violation_rate_ci_lower": 0.0,
+            "violation_rate_ci_upper": 0.01,
+            "ttft_p50_ms": 90.0, "ttft_p95_ms": 600.0,
+            "tpot_p50_ms": 15.0, "tpot_p95_ms": 26.0,
+            "capacity_status": "pass", "target_status": "pass",
+            "effective_freq_ghz_mean": 2.0,
+        })
+    if client_lag_ms is not None:
+        db.update_cohort_run("crid", {"client_max_lag_ms": client_lag_ms})
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+    return run_dir
+
+
+def test_capped_run_reports_lower_bound_not_findings(tmp_path) -> None:
+    """A curve that never crossed a knee must NOT read as a result:
+    capacity is a lower bound, coverage says capped, and no
+    bottleneck is fabricated (a real run once blamed frequency_droop
+    for a box at 1.5% GPU utilization)."""
+    run_dir = _build_capped_run_db(tmp_path)
+    doc, _ = export_dir(run_dir)
+    _validate(doc)
+    c = doc["cohorts"][0]
+    assert c["measurement_coverage"] == "capped"
+    assert c["capacity_is_lower_bound"] is True
+    assert c["fail_pool_size"] is None
+    assert c["bottleneck"] == "none_observed"
+    assert c["bottleneck_evidence"]["max_pool_tested"] == 1024
+    assert c["target_bottleneck"] == "none_observed"
+    assert c["capacity_landing_zones"]["fast"].startswith("≥1024")
+    assert "NOT found" in c["capacity_landing_zones"]["fast"]
+
+
+def test_client_limited_coverage(tmp_path) -> None:
+    """When the measuring client saturated (event-loop lag past the
+    threshold), a capped curve is client_limited — a different fact
+    than 'the rail was too low'."""
+    run_dir = _build_capped_run_db(tmp_path, client_lag_ms=2400.0)
+    doc, _ = export_dir(run_dir)
+    _validate(doc)
+    c = doc["cohorts"][0]
+    assert c["measurement_coverage"] == "client_limited"
+    assert c["capacity_is_lower_bound"] is True
+    assert "client saturated" in c["capacity_landing_zones"]["fast"]
+
+
+def test_ramp_interval_scales_with_pool() -> None:
+    """Time-bounded ramp: adding 4096 users must not take 68 minutes.
+    The per-spawn interval accelerates so any ramp fits in
+    ramp_max_duration_s, floored at 20ms."""
+    interval = lambda cfg_int, max_s, to_add: min(   # noqa: E731
+        cfg_int, max(0.02, max_s / to_add))
+    assert interval(1.0, 120.0, 10) == 1.0          # small adds unchanged
+    assert interval(1.0, 120.0, 4096) == pytest.approx(120.0 / 4096)
+    assert interval(1.0, 120.0, 100000) == 0.02     # floor holds

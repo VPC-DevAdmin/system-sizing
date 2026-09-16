@@ -102,7 +102,7 @@
           "enum": ["graceful", "moderate", "sharp", "unbounded", "unmeasured"]
         },
         "measurement_coverage": {
-          "enum": ["full_curve", "downward_search", "single_point", "capped"]
+          "enum": ["full_curve", "downward_search", "single_point", "capped", "client_limited", "exceeds_hardware"]
         },
         "capacity_landing_zones": {
           "type": "object",
@@ -118,6 +118,7 @@
           "items": { "$ref": "#/$defs/curveEntry" }
         },
         "bottleneck": { "type": "string" },
+        "capacity_is_lower_bound": { "type": "boolean" },
         "bottleneck_evidence": { "type": "object" },
         "target_bottleneck": { "type": "string" },
         "target_bottleneck_evidence": { "type": "object" },

@@ -109,8 +109,14 @@ class StartRunRequest(BaseModel):
     # Shape search only: the pinned prompt length. None = config
     # default (128, the vendor convention).
     input_tokens: Optional[int] = None
-    # Joint engine+shape search: which grid to walk.
+    # Joint engine+shape search: which grid to walk. The explicit
+    # lists override the preset — a model's KV cost per token decides
+    # which shapes are even reachable (Llama-70B is 16x Qwen3.6's, so
+    # its grid belongs at short outputs), and that is not something a
+    # fixed preset can know.
     preset: Optional[str] = None
+    search_max_num_seqs: Optional[list[int]] = None
+    search_output_tokens: Optional[list[int]] = None
 
 
 class ExportRequest(BaseModel):
@@ -943,6 +949,8 @@ def create_app(
             coro_factory = lambda: run_headline_optimize(  # noqa: E731
                 cfg, cohort_from_persona(wid),
                 preset=req.preset or "standard",
+                max_num_seqs=req.search_max_num_seqs,
+                output_tokens=req.search_output_tokens,
                 input_tokens=req.input_tokens or 128,
                 build_config=_build, runs_base=runs_base,
                 progress=sweep_progress,

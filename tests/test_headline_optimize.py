@@ -118,3 +118,30 @@ def test_optimize_survives_a_failing_candidate(tmp_path, monkeypatch):
     # The search still produced a winner and reported progress.
     assert doc["winner"] is not None
     assert progress["done"] is True
+
+
+def test_explicit_grid_overrides_the_preset():
+    """A model's KV cost decides which shapes are reachable at all.
+    Llama-3.3-70B costs 16x Qwen3.6's per token, so its grid belongs
+    at short outputs — a fixed preset cannot know that."""
+    llama = grid("standard", max_num_seqs=[512, 1024, 2048],
+                 output_tokens=[128, 256, 512])
+    assert len(llama) == 9
+    assert max(o for _, o in llama) == 512
+    # The preset's own (longer) shapes are not smuggled in.
+    assert 2048 not in {o for _, o in llama}
+
+
+def test_request_model_accepts_an_explicit_grid():
+    from simulator.service import StartRunRequest
+
+    req = StartRunRequest(
+        workload={"kind": "headline_optimize", "id": "headline_generation"},
+        search_max_num_seqs=[512, 1024],
+        search_output_tokens=[128, 256],
+    )
+    assert req.search_max_num_seqs == [512, 1024]
+    assert req.search_output_tokens == [128, 256]
+    # Absent by default, so the preset still governs.
+    plain = StartRunRequest(workload={"kind": "cohort", "id": "x"})
+    assert plain.search_max_num_seqs is None

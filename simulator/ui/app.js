@@ -657,6 +657,7 @@ const Control = {
    * coupled — optimizing them separately walks in circles — so this
    * walks the product and then sweeps the winner at full resolution. */
   async startHeadlineOptimize() {
+    if (this._starting) return;          // double-click guard
     const body = this.buildRunBody({
       kind: "headline_optimize", id: "headline_generation" });
     if (!body) return;
@@ -669,6 +670,8 @@ const Control = {
     body.preset = $("#hl-preset").value;
     body.input_tokens = +$("#hl-input-tokens")?.value || 128;
     const pairs = { quick: 4, standard: 9, thorough: 16 }[body.preset] || 9;
+    this._starting = true;
+    $("#hl-optimize").disabled = true;
     try {
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
       this.msg(`searching ${pairs} engine/shape combinations, then `
@@ -677,6 +680,9 @@ const Control = {
       this.pollStatus();
     } catch (e) {
       this.msg(e.message, "error");
+    } finally {
+      this._starting = false;
+      $("#hl-optimize").disabled = false;
     }
   },
 

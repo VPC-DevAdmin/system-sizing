@@ -485,6 +485,8 @@ def create_app(
     app.state.optimizer: Optional[dict] = None       # {proc, profile, started_at, log}
     app.state.optimizer_catalog: Optional[dict] = None
     app.state.model_downloads: dict = {}             # model -> {proc, log, started_at}
+    # Serializes start_run's check-then-create (see below).
+    app.state.start_lock = asyncio.Lock()
 
     # A previous release saved the shape-search winner as its own
     # "headline_best" persona; the winner now lands IN the Headline:
@@ -854,6 +856,17 @@ def create_app(
 
     @app.post("/api/runs", status_code=202)
     async def start_run(req: StartRunRequest) -> dict:
+        # Serialize the whole check-then-create sequence. There is an
+        # await between "is a run already active?" and setting
+        # app.state.active, so two near-simultaneous POSTs both
+        # cleared the guard and both spawned runs. They then destroyed
+        # each other: every engine launch sweeps stale vllm-*
+        # containers, so concurrent runs removed one another's
+        # replicas and every candidate failed while the GPUs sat idle.
+        async with app.state.start_lock:
+            return await _start_run_locked(req)
+
+    async def _start_run_locked(req: StartRunRequest) -> dict:
         active = app.state.active
         if active is not None and not active.task.done():
             raise HTTPException(

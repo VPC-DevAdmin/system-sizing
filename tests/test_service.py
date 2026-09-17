@@ -696,3 +696,52 @@ def test_trust_remote_code_is_opt_in_and_recorded(tmp_path) -> None:
          "trust_remote_code": True}, runs)
     assert "--trust-remote-code" in (
         _yaml.safe_load(cpu_on.read_text())["engine"]["vllm_extra_flags"])
+
+
+def test_concurrent_start_requests_only_start_one_run(
+        tmp_path, monkeypatch) -> None:
+    """Two near-simultaneous starts must not both spawn a run.
+
+    start_run awaits between checking app.state.active and setting
+    it, so without a lock both callers cleared the guard — and the
+    resulting concurrent runs destroyed each other, because every
+    engine launch sweeps stale vllm-* containers. The custom-engine
+    path is the one with the await, so the test must use it.
+    """
+    import threading
+    import time as _time
+    from pathlib import Path as _Path
+
+    import simulator.service as svc
+    from simulator.service import create_app
+
+    config_path = _write_mock_config(tmp_path)
+
+    # Stand in for the real generator (which needs a GPU host) and
+    # keep its await: this is the window the race lives in.
+    def slow_build(custom, runs_base):
+        _time.sleep(0.25)
+        return _Path(config_path)
+
+    monkeypatch.setattr(svc, "_build_custom_config", slow_build)
+
+    body = {"custom": {"model_id": "org/Model"},
+            "workload": {"kind": "persona", "id": "quick_lookup"}}
+    codes: list[int] = []
+    lock = threading.Lock()
+
+    with TestClient(create_app(tmp_path / "runs")) as client:
+        def fire():
+            r = client.post("/api/runs", json=body)
+            with lock:
+                codes.append(r.status_code)
+
+        threads = [threading.Thread(target=fire) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        client.post("/api/runs/stop")
+
+    assert codes.count(202) == 1, codes
+    assert codes.count(409) == 3, codes

@@ -439,7 +439,31 @@ const Control = {
       }
     }
     $("#workload-detail").textContent = text;
+    this.updateHeadlineOpts();
     this.updateWorkloadNote();
+  },
+
+  isHeadlineWorkload() {
+    const w = $("#workload-select").value || "";
+    return w.startsWith("persona:headline_");
+  },
+
+  /* Headline workloads swap the whole measurement instrument, so the
+   * form grows a small block of controls that only make sense there —
+   * and capacity workloads never see it. */
+  updateHeadlineOpts() {
+    const box = $("#headline-opts");
+    if (!box) return;
+    const on = this.isHeadlineWorkload();
+    box.hidden = !on;
+    if (!on) return;
+    const pid = $("#workload-select").value.slice(8);
+    const p = this.catalogs.personas.find(x => x.id === pid);
+    const s = p?.summary;
+    $("#hl-shape").textContent = s
+      ? `${Math.round(s.input_tokens.median)} tok in → `
+        + `${Math.round(s.output_tokens.median)} out, EOS ignored`
+      : "—";
   },
 
   msg(text, cls = "") {
@@ -509,12 +533,21 @@ const Control = {
     if (!body) return;
     const engineDesc = body.engineDesc;
     delete body.engineDesc;
+    const headline = this.isHeadlineWorkload();
+    if (headline) {
+      const cap = $("#hl-max-conc").value;
+      if (cap) body.max_concurrency = +cap;
+    }
     try {
       this.msg("starting…");
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
       this.msg(
-        `run started with ${engineDesc} — engine launch can take `
-        + `several minutes; the Phase readout below tracks it`, "ok");
+        headline
+          ? `saturation benchmark started with ${engineDesc} — holding `
+            + `streams in flight and stepping concurrency up; no SLA is `
+            + `enforced`
+          : `run started with ${engineDesc} — engine launch can take `
+            + `several minutes; the Phase readout below tracks it`, "ok");
       this.pollStatus();
     } catch (e) {
       this.msg(e.message, "error");
@@ -651,8 +684,20 @@ const Control = {
           || (id ?? "").replaceAll("_", " ") || kind;
       };
       const isShape = w.kind === "headline_search";
+      const isSat = w.kind === "persona" && (w.id || "").startsWith("headline_");
       const wtxt = w.kind === "sweep" ? `sweep(${w.type})`
-        : isShape ? "Shape search" : nameOf(w.kind, w.id);
+        : isShape ? "Shape search"
+        : isSat ? `${nameOf(w.kind, w.id)} · saturation benchmark`
+        : nameOf(w.kind, w.id);
+      // Rung-by-rung progress, so the minutes between rungs never
+      // read as a hang.
+      const p = active.progress || {};
+      const satProgress = (isSat && running && p.rungs)
+        ? ` · <b>rung ${p.rung} of ${p.rungs}</b> (${p.concurrency}
+            streams)${p.peak?.out_tok_s
+              ? ` · best so far ${Math.round(
+                  p.peak.out_tok_s).toLocaleString()} tok/s` : ""}`
+        : "";
       const since = fmt.clock(active.started_at * 1000);
       const finished = !running && !active.error && active.result;
       box.innerHTML =
@@ -660,7 +705,7 @@ const Control = {
         (active.engine_summary
           ? ` · engine: <b>${active.engine_summary}</b>`
           : ` · config <b>${active.config}</b>`) +
-        ` · started ${since}` +
+        ` · started ${since}` + satProgress +
         (active.error ? ` · <span class="status-fail">${active.error}</span>` : "") +
         (finished
           ? isShape
@@ -1074,6 +1119,14 @@ const Results = {
   },
 
   headline(e) {
+    // A saturation sweep has no arrival rate and no pool — its
+    // headline is peak output throughput, carried on the entry.
+    if (e.mode === "headline_sweep") {
+      return e.peak_out_tok_s != null
+        ? { n: `${Math.round(e.peak_out_tok_s).toLocaleString()} tok/s`,
+            d: `peak output · ${Math.round(e.peak_streams || 0)} streams` }
+        : { n: "—", d: "saturation sweep" };
+    }
     if (e.rate_max_per_min != null) {
       const rate = e.rate_sla_per_min ?? e.rate_max_per_min;
       const sess = e.sessions_at_max != null
@@ -1105,7 +1158,8 @@ const Results = {
       const cls = STATUS_CLASS[status]
         ?? (status === "running" ? "status-marginal" : "status-error");
       const mode = (e.mode === "open_loop") ? "open-loop"
-        : e.mode ? "pool ramp" : "pool ramp";
+        : e.mode === "headline_sweep" ? "saturation"
+        : "pool ramp";
       const h = this.headline(e);
       const model = (e.model_id || "").split("/").pop();
       const row = document.createElement("div");
@@ -1176,6 +1230,9 @@ const Results = {
 
   async openEntry(entry) {
     this.msg("loading…");
+    // A headline sweep measured a different thing and gets a
+    // different report — never force it through the capacity view.
+    if (entry.mode === "headline_sweep") return this.openHeadline(entry);
     let doc;
     try {
       doc = await this.loadExport(entry.run);
@@ -1193,10 +1250,158 @@ const Results = {
     this.render(c);
   },
 
+  /* ── Headline sweep report ──────────────────────────────────────
+   * The saturation curve and what it costs. No SLA verdicts, no
+   * arrival rate, no "concurrent users" — none of that means
+   * anything for a firehose benchmark. */
+  async openHeadline(entry) {
+    let doc;
+    try {
+      doc = await api(`/api/runs/${entry.run}/headline`);
+    } catch (e) {
+      this.msg(e.message, "error");
+      return;
+    }
+    this.openId = entry.cohort_run_id;
+    this.msg("");
+    this.renderList();
+    $("#result-summary").hidden = true;
+    $("#report").hidden = true;
+    $("#step-detail-panel").hidden = true;
+    $("#headline-report").hidden = false;
+    this.renderHeadlineSweep(doc);
+  },
+
+  renderHeadlineSweep(doc) {
+    const rungs = (doc.rungs || []).filter(r => r.out_tok_s);
+    const peak = doc.peak;
+    const labels = rungs.map(r => String(r.concurrency));
+    const num = (v, d = 0) => v == null ? "—"
+      : Number(v).toLocaleString(undefined, { maximumFractionDigits: d });
+
+    $("#hl-title").textContent =
+      `${doc.cohort_name || doc.cohort_id} — `
+      + `${(doc.model || "").split("/").pop()} · saturation benchmark`;
+
+    const effAt = r => (r.gpu_power_w && r.out_tok_s)
+      ? r.out_tok_s / (r.gpu_power_w / 1000) : null;
+    const stat = (n, label, hint) => `<div class="stat"><span
+      class="k">${label}</span><span class="v">${n}</span>
+      <span class="hint">${hint}</span></div>`;
+    $("#hl-stats").innerHTML =
+      stat(num(peak?.out_tok_s), "Peak output tokens/sec",
+           "generation only — the headline number")
+      + stat(num(peak?.in_flight), "Concurrent streams",
+             "running in the engine's batch at that peak")
+      + stat(num(peak?.total_tok_s), "Total tokens/sec",
+             "prefill + decode through the box")
+      + stat(num(effAt(peak || {})), "Tokens/sec per kW",
+             "generation throughput per kilowatt of GPU draw")
+      + stat(peak ? `${num(peak.ttft_p95_ms)} ms` : "—", "TTFT p95",
+             "what the headline costs — not a gate")
+      + stat(peak ? `${num(peak.tpot_p95_ms, 1)} ms` : "—", "TPOT p95",
+             "per-token pacing at the peak");
+
+    const stopped = doc.stop_reason || "the ladder was exhausted";
+    const notSteady = rungs.filter(r => r.steady_state === false).length;
+    const sh = doc.shape;
+    const shapeTxt = sh
+      ? `${num(sh.input_tokens)} tokens in → ${num(sh.output_tokens)} out`
+        + (sh.ignore_eos ? ", EOS ignored" : "")
+      : "the workload's shape";
+    $("#hl-verdict").innerHTML =
+      `<b>${num(peak?.out_tok_s)} output tokens/sec</b> sustained at
+       <b>${num(peak?.in_flight)}</b> concurrent streams, at
+       <b>${shapeTxt}</b>. The sweep stopped because ${stopped}.
+       ${notSteady ? ` <span class="status-fail">${notSteady} rung(s)
+         hit the measurement cap before settling — treat those as
+         provisional.</span>` : ""}
+       <div class="msg" style="margin-top:8px">${doc.note || ""}</div>`;
+
+    this.xy("hl-chart-tput", labels, [
+      { label: "output tok/s", data: rungs.map(r => r.out_tok_s) },
+      { label: "total tok/s", data: rungs.map(r => r.total_tok_s) },
+    ], { ytitle: "tokens/sec" });
+    this.xy("hl-chart-lat", labels, [
+      { label: "TTFT p95 (ms)", data: rungs.map(r => r.ttft_p95_ms) },
+      { label: "TPOT p95 (ms)", data: rungs.map(r => r.tpot_p95_ms),
+        yAxisID: "y2" },
+    ], { ytitle: "TTFT ms", y2title: "TPOT ms" });
+    this.xy("hl-chart-batch", labels, [
+      { label: "offered", data: rungs.map(r => r.concurrency) },
+      { label: "running in engine", data: rungs.map(r => r.in_flight) },
+    ], { ytitle: "streams" });
+    this.xy("hl-chart-split", labels, [
+      { label: "decode tok/s", data: rungs.map(r => r.out_tok_s) },
+      { label: "prefill tok/s", data: rungs.map(r => r.prompt_tok_s) },
+    ], { ytitle: "tokens/sec" });
+    this.xy("hl-chart-kv", labels, [
+      { label: "KV cache %", data: rungs.map(r => r.kv_cache_pct) },
+    ], { ytitle: "percent" });
+    this.xy("hl-chart-power", labels, [
+      { label: "GPU watts", data: rungs.map(r => r.gpu_power_w) },
+    ], { ytitle: "watts" });
+    this.xy("hl-chart-eff", labels, [
+      { label: "tok/s per kW", data: rungs.map(effAt) },
+    ], { ytitle: "tokens/sec/kW" });
+    this.xy("hl-chart-queue", labels, [
+      { label: "queued", data: rungs.map(r => r.queue_depth) },
+    ], { ytitle: "requests waiting" });
+
+    const bestEff = rungs.reduce((a, b) =>
+      (effAt(b) ?? 0) > (effAt(a) ?? 0) ? b : a, rungs[0] || {});
+    $("#hl-take-curve").textContent = peak
+      ? `peaks at ${num(peak.out_tok_s)} tok/s on ${num(peak.in_flight)} streams`
+      : "no rung produced tokens";
+    $("#hl-narr-curve").innerHTML =
+      `<p>Throughput climbs with concurrency until the engine runs out of
+       batch or KV room, then flattens. The peak here is
+       <b>${num(peak?.out_tok_s)} output tokens/sec</b> with
+       <b>${num(peak?.in_flight)}</b> streams actually running.</p>
+       <p>The <b>running batch vs offered</b> chart is the honest one: while
+       the two lines track each other the engine is serving everything
+       offered. Where they separate, the extra streams are queued, not
+       served — that is the engine's own ceiling, and past it latency
+       grows without throughput following.</p>
+       <p>Prefill and decode are split out because a generation headline
+       should be overwhelmingly decode. A large prefill share means the
+       shape is spending your GPUs on reading rather than writing.</p>`;
+    $("#hl-take-cost").textContent = bestEff?.concurrency
+      ? `most efficient at ${bestEff.concurrency} streams`
+      : "";
+    $("#hl-narr-cost").innerHTML =
+      `<p>Efficiency usually peaks <i>before</i> throughput does:
+       ${bestEff?.concurrency ? `here the best tokens/sec per kW is at
+       <b>${num(bestEff.concurrency)}</b> streams, while peak throughput
+       needs <b>${num(peak?.concurrency)}</b>.` : ""}
+       The gap between those two points is what the last few percent of
+       headline throughput costs in power.</p>
+       <p>KV occupancy shows what caps concurrency. If it reaches the
+       high nineties before throughput plateaus, KV capacity is the
+       binding constraint and fp8 KV or a shorter shape buys more
+       streams. If it stays low while the batch stops growing,
+       <code>max_num_seqs</code> is the constraint instead.</p>`;
+
+    const cells = rungs.map(r => `<tr>
+      <td>${num(r.concurrency)}</td><td>${num(r.in_flight)}</td>
+      <td>${num(r.out_tok_s)}</td><td>${num(r.prompt_tok_s)}</td>
+      <td>${num(r.ttft_p95_ms)}</td><td>${num(r.tpot_p95_ms, 1)}</td>
+      <td>${num(r.kv_cache_pct, 1)}</td><td>${num(r.gpu_power_w)}</td>
+      <td>${r.steady_state ? "yes" : "capped"}</td>
+      <td>${r.measure_s}s</td></tr>`).join("");
+    $("#hl-table").innerHTML = `<table><thead><tr>
+      <th>Offered</th><th>Running</th><th>Out tok/s</th>
+      <th>Prefill tok/s</th><th>TTFT p95</th><th>TPOT p95</th>
+      <th>KV %</th><th>GPU W</th><th>Settled</th><th>Measured</th>
+      </tr></thead><tbody>${cells}</tbody></table>`;
+    $("#hl-take-table").textContent = `${rungs.length} rungs measured`;
+  },
+
   render(c) {
     c = c ?? this.cohort;
     if (!c) return;
     this.cohort = c;
+    $("#headline-report").hidden = true;
     $("#result-summary").hidden = false;
     $("#report").hidden = false;
     $("#step-detail-panel").hidden = true;

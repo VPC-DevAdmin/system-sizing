@@ -188,6 +188,35 @@
           workloads</button></span>
       </label>
     </div>
+    <!-- Headline-only controls. Hidden entirely for capacity
+         workloads so the ordinary form is untouched. -->
+    <div id="headline-opts" class="callout headline-opts" hidden>
+      <div class="ho-head"><b>Saturation benchmark</b>
+        <span class="info-dot" tabindex="0" aria-label="how this differs">i
+          <span class="info-pop msg">Headline workloads don't use the
+            arrival-rate capacity search. This holds a fixed number of
+            streams in flight, waits for the running batch and token
+            rate to stop moving, measures from the engine's own
+            counters, then steps concurrency up — the convention
+            vendor benchmarks use. It stops when throughput plateaus
+            or the engine can no longer hold what it's offered. No SLA
+            is enforced; latency is reported as the price of the
+            number, not as a gate.</span></span>
+      </div>
+      <div class="row wrap">
+        <label>Max concurrent streams
+          <select id="hl-max-conc">
+            <option value="">full ladder (to 8192)</option>
+            <option value="512">512</option>
+            <option value="1024">1024</option>
+            <option value="2048">2048</option>
+            <option value="4096">4096</option>
+          </select></label>
+        <label>Shape
+          <span id="hl-shape" class="hint" style="margin-top:6px"></span>
+        </label>
+      </div>
+    </div>
     <details id="bench-advanced" style="margin-bottom:14px">
       <summary class="msg" style="cursor:pointer">Advanced — engine
         settings</summary>
@@ -332,6 +361,58 @@
     <div id="headline-verdict" class="callout"
       style="font-size:.95rem;line-height:1.75"></div>
   </section>
+
+  <!-- Headline sweeps get their own presentation: a saturation curve,
+       not a capacity curve. Shown instead of #report. -->
+  <div id="headline-report" hidden>
+    <section class="panel">
+      <h2 id="hl-title"></h2>
+      <div id="hl-stats" class="statusbar" style="background:none;
+        border:none;box-shadow:none;padding:0;backdrop-filter:none;
+        margin-bottom:14px"></div>
+      <div id="hl-verdict" class="callout"
+        style="font-size:.95rem;line-height:1.75"></div>
+    </section>
+    <details class="panel report-sec" open>
+      <summary><span class="sec-title">The saturation curve</span>
+        <span class="sec-take" id="hl-take-curve"></span></summary>
+      <div class="sec-grid">
+        <div class="quad">
+          <div class="q"><h3>Output tokens/sec vs concurrency</h3>
+            <canvas id="hl-chart-tput"></canvas></div>
+          <div class="q"><h3>Latency vs concurrency</h3>
+            <canvas id="hl-chart-lat"></canvas></div>
+          <div class="q"><h3>Running batch vs offered streams</h3>
+            <canvas id="hl-chart-batch"></canvas></div>
+          <div class="q"><h3>Prefill vs decode tokens/sec</h3>
+            <canvas id="hl-chart-split"></canvas></div>
+        </div>
+        <div class="sec-narrative" id="hl-narr-curve"></div>
+      </div>
+    </details>
+    <details class="panel report-sec" open>
+      <summary><span class="sec-title">What the number costs</span>
+        <span class="sec-take" id="hl-take-cost"></span></summary>
+      <div class="sec-grid">
+        <div class="quad">
+          <div class="q"><h3>KV cache occupancy</h3>
+            <canvas id="hl-chart-kv"></canvas></div>
+          <div class="q"><h3>GPU power</h3>
+            <canvas id="hl-chart-power"></canvas></div>
+          <div class="q"><h3>Efficiency — tokens/sec per kW</h3>
+            <canvas id="hl-chart-eff"></canvas></div>
+          <div class="q"><h3>Queue depth</h3>
+            <canvas id="hl-chart-queue"></canvas></div>
+        </div>
+        <div class="sec-narrative" id="hl-narr-cost"></div>
+      </div>
+    </details>
+    <details class="panel report-sec">
+      <summary><span class="sec-title">Every rung</span>
+        <span class="sec-take" id="hl-take-table"></span></summary>
+      <div id="hl-table"></div>
+    </details>
+  </div>
 
   <div id="report" hidden>
     <details class="panel report-sec" id="sec-ux" open>

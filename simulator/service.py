@@ -103,6 +103,9 @@ class StartRunRequest(BaseModel):
     # comparison runs and for the pool_sizes / adaptive knobs, which
     # only apply there). Sweeps always run closed-loop.
     mode: str = "open"
+    # Headline sweeps only: cap the concurrency ladder (the UI's
+    # "max concurrent streams" control). None = the full ladder.
+    max_concurrency: Optional[int] = None
 
 
 class ExportRequest(BaseModel):
@@ -353,6 +356,18 @@ def _list_runs(base: Path) -> list[dict]:
                         (crid,),
                     ).fetchone()
                     c["capacity_pool"] = p["cap"] if p else None
+                    # A saturation sweep's headline is peak output
+                    # throughput, which lives in its own summary file
+                    # rather than the SLA-shaped measurement columns.
+                    if c.get("mode") == "headline_sweep":
+                        try:
+                            sw = json.loads(
+                                (d / "headline_sweep.json").read_text())
+                            pk = sw.get("peak") or {}
+                            c["peak_out_tok_s"] = pk.get("out_tok_s")
+                            c["peak_streams"] = pk.get("in_flight")
+                        except (OSError, json.JSONDecodeError):
+                            pass
                     cohorts.append(c)
                 entry["cohorts"] = cohorts
                 conn.close()
@@ -802,6 +817,19 @@ def create_app(
     async def runs() -> list[dict]:
         return _list_runs(runs_base)
 
+    @app.get("/api/runs/{run}/headline")
+    async def headline_sweep_doc(run: str) -> dict:
+        """The saturation-sweep summary for a headline run. Separate
+        from the capacity export because it answers a different
+        question and shares none of its shape."""
+        path = runs_base / run / "headline_sweep.json"
+        if not path.exists():
+            raise HTTPException(404, f"{run} has no headline sweep summary")
+        try:
+            return json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            raise HTTPException(500, f"unreadable sweep summary: {e}") from e
+
     @app.get("/api/doctor")
     async def doctor() -> dict:
         from .doctor import run_doctor
@@ -831,12 +859,32 @@ def create_app(
             config_path = _resolve_config_path(req)
 
         from .config import load_config
+        from .headline_shapes import is_headline_persona
         from .personas import COHORTS, PERSONAS, cohort_from_persona
         cfg = load_config(config_path)
         cfg.output.db_directory = str(runs_base)
 
         kind = req.workload.get("kind")
-        if kind == "cohort":
+        # A headline workload asks a different question than capacity,
+        # so it gets a different instrument: a saturation sweep over
+        # concurrency rather than an arrival-rate stability search.
+        # Selecting one in the UI swaps the mechanism automatically —
+        # the user picks a workload, not a methodology.
+        sweep_progress: dict = {}
+        is_sweep = False
+        if kind == "persona" and is_headline_persona(req.workload.get("id")) \
+                and req.mode != "closed":
+            wid = req.workload.get("id")
+            if wid not in PERSONAS:
+                raise HTTPException(404, f"unknown persona '{wid}'")
+            from .headline_sweep import run_headline_sweep
+            is_sweep = True
+            coro_factory = lambda: run_headline_sweep(  # noqa: E731
+                cfg, cohort_from_persona(wid), new_run=req.new_run,
+                max_concurrency=req.max_concurrency,
+                progress=sweep_progress,
+            )
+        elif kind == "cohort":
             wid = req.workload.get("id")
             if wid not in COHORTS:
                 raise HTTPException(404, f"unknown cohort '{wid}'")
@@ -897,7 +945,8 @@ def create_app(
             config_path=str(config_path),
             started_at=time.time(),
             engine_summary=summary,
-            progress=(shape_progress if kind == "headline_search" else None),
+            progress=(shape_progress if kind == "headline_search"
+                      else sweep_progress if is_sweep else None),
         )
         app.state.active = active
         return {"accepted": True, "workload": req.workload,

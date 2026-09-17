@@ -24,6 +24,15 @@ import yaml
 
 GENERATION_PERSONA_ID = "headline_generation"
 
+# Headline workloads are saturation benchmarks, not capacity models —
+# picking one swaps the whole measurement instrument (see
+# simulator/headline_sweep.py), so the id prefix is load-bearing.
+HEADLINE_PREFIX = "headline_"
+
+
+def is_headline_persona(persona_id) -> bool:
+    return bool(persona_id) and str(persona_id).startswith(HEADLINE_PREFIX)
+
 # Weight-format / quantization tokens that do not change which shape
 # is optimal — siblings differing only in these share a family.
 _QUANT_TOKENS = {

@@ -219,3 +219,44 @@ def test_open_loop_end_to_end_mock(tmp_path, monkeypatch):
     assert ol["rate_max_per_min"] == 480.0
     assert cohort_doc["capacity_is_lower_bound"]
     assert "arrival_rate_per_min" in cohort_doc["curve"][0]
+
+
+def test_fuse_spares_a_slow_engine_that_is_still_generating():
+    """A 2048-token turn takes ~290s at load, longer than a 120s
+    window — a healthy engine can show zero completions while every
+    request streams. Generated tokens, not completions, separate
+    'slow' from 'broken'."""
+    from simulator.open_loop import _engine_broken
+
+    # The real regression: 91 client timeouts, no completions yet,
+    # but the engine generated millions of tokens in the window.
+    assert _engine_broken(91, 0, 2_000_000) is False
+    assert _engine_broken(500, 10, 5_000_000) is False
+    # Genuinely broken: up, failing everything, generating nothing.
+    assert _engine_broken(91, 0, 0) is True
+    assert _engine_broken(200, 10, 0) is True
+    # Counter unavailable: fall back to the original test rather than
+    # silently weakening the fuse.
+    assert _engine_broken(91, 0, None) is True
+    assert _engine_broken(10, 0, None) is False       # under threshold
+
+
+def test_request_timeout_scales_with_pinned_output_length():
+    """Client patience follows the workload's own SLA, so the engine
+    (not the stopwatch) decides the outcome."""
+    from simulator.config import SimulationConfig
+    from simulator.open_loop import (
+        REQUEST_TIMEOUT_CEILING_S,
+        _request_timeout_for,
+    )
+    from simulator.personas import cohort_from_persona
+
+    sim = SimulationConfig()
+    # Ordinary conversational personas are unaffected.
+    assert _request_timeout_for(
+        cohort_from_persona("conversational"), sim) == sim.request_timeout_s
+    # A pinned long-output headline workload gets real headroom.
+    headline = _request_timeout_for(
+        cohort_from_persona("headline_generation"), sim)
+    assert headline > sim.request_timeout_s
+    assert headline <= REQUEST_TIMEOUT_CEILING_S

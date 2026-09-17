@@ -1527,9 +1527,20 @@ def build_prompt(target_tokens: int) -> str:
 
 # Pre-generate prompts once so every config tests the SAME inputs.
 def make_prompts(cells: list[TestCell]) -> dict[str, list[str]]:
+    """One deterministic prompt set, shared by every config.
+
+    The distinguishing marker goes at the FRONT. vLLM ships with
+    prefix caching on, and a marker at the end leaves every prompt
+    sharing its whole prefix — the first request populates the cache
+    and the rest hit it, so prefill becomes nearly free and the
+    prefill-chunk dimension measures nothing. A leading marker (cell
+    name + index) makes every request a genuine cache miss while
+    keeping the set identical across configs, which is what fairness
+    actually requires.
+    """
     return {
         cell.name: [
-            build_prompt(cell.input_tokens) + f" [variant {i}]"
+            f"[{i:06d}-{cell.name}] " + build_prompt(cell.input_tokens)
             for i in range(cell.concurrency)
         ]
         for cell in cells
@@ -2489,6 +2500,17 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool,
         print(f"\n=== iteration {sstate.iterations[-1]['index']} "
               f"({kind}): {len(batch)} candidate(s) ===")
         for params in batch:
+            # A value the engine has already refused twice (an
+            # unsupported kv-cache dtype, say) will refuse again —
+            # skip it here rather than spending another 4-minute
+            # launch proving it. next_batch filters future proposals;
+            # this catches the rest of the CURRENT batch.
+            blocked = search.blocked_values(sstate)
+            if search.is_blocked(params, blocked):
+                print(f"    -> skipping {search.canonical_key(params, space)}"
+                      f": uses a value that has only ever failed to launch "
+                      f"({blocked})")
+                continue
             view = search.candidate_summary(params, space)
             cfg = _candidate_engine_config(view, eval_index)
             _set_model_globals(view["model"], view["served_name"])

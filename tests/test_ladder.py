@@ -158,3 +158,70 @@ def test_extend_ladder_reaches_candidate_capacity() -> None:
     for mns, dp in ((512, 8), (256, 4), (128, 8)):
         lad = extend_ladder(base, mns, dp)
         assert lad == sorted(set(lad))
+
+
+def _ev(status, score, **params):
+    from simulator.search import Evaluation
+    return Evaluation(params=params, iteration=0, status=status,
+                      score=score, config_name="c", cells=[])
+
+
+def test_blocked_values_stops_burning_budget_on_a_rejected_flag() -> None:
+    """nvfp4 KV burned 7 of 27 evaluations before the search gave up
+    on it. Two failures with no success anywhere is enough to stop
+    proposing that value."""
+    from simulator.search import SearchState, blocked_values, is_blocked
+
+    st = SearchState(space_hash="h")
+    st.evaluated = {
+        "a": _ev("ok", 8000.0, kv_cache_dtype="auto", dp=8),
+        "b": _ev("launch_failed", None, kv_cache_dtype="nvfp4", dp=8),
+        "c": _ev("launch_failed", None, kv_cache_dtype="nvfp4", dp=4),
+    }
+    blocked = blocked_values(st)
+    assert blocked == {"kv_cache_dtype": {"nvfp4"}}
+    assert is_blocked({"kv_cache_dtype": "nvfp4", "dp": 2}, blocked)
+    assert not is_blocked({"kv_cache_dtype": "auto", "dp": 8}, blocked)
+    # dp=8 failed once but also succeeded — never blocked.
+    assert "dp" not in blocked
+
+
+def test_blocked_values_needs_two_failures_and_a_success_somewhere() -> None:
+    from simulator.search import SearchState, blocked_values
+
+    st = SearchState(space_hash="h")
+    # A single failure is not yet evidence.
+    st.evaluated = {
+        "a": _ev("ok", 1.0, kv_cache_dtype="auto"),
+        "b": _ev("launch_failed", None, kv_cache_dtype="nvfp4"),
+    }
+    assert blocked_values(st) == {}
+    # Nothing has succeeded at all: report that, don't block the world.
+    st.evaluated = {
+        "b": _ev("launch_failed", None, kv_cache_dtype="nvfp4"),
+        "c": _ev("launch_failed", None, kv_cache_dtype="nvfp4"),
+    }
+    assert blocked_values(st) == {}
+
+
+def test_optimizer_prompts_defeat_prefix_caching() -> None:
+    """Identical prompts + vLLM's prefix caching made prefill nearly
+    free, so the prefill-chunk dimension measured nothing. Every
+    prompt must now differ from its FIRST characters."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from engine_optimizer import TestCell, make_prompts
+
+    cells = [TestCell("ladder_c0008", input_tokens=128,
+                      output_tokens=64, concurrency=8),
+             TestCell("ladder_c0032", input_tokens=128,
+                      output_tokens=64, concurrency=32)]
+    prompts = make_prompts(cells)
+    a = prompts["ladder_c0008"]
+    assert len(set(a)) == len(a)                  # all unique
+    # Divergent in the FIRST token — a shared leading block would
+    # still be a prefix-cache hit.
+    assert len({p[:8] for p in a}) == len(a)
+    # Different rungs don't re-serve each other's cached prompts.
+    assert not set(a) & set(prompts["ladder_c0032"])

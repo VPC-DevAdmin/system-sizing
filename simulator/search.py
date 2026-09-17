@@ -691,6 +691,42 @@ def record_evaluation(
     )
 
 
+def blocked_values(state: SearchState, *,
+                   min_failures: int = 2) -> dict[str, set[str]]:
+    """(dimension, value) pairs that have ONLY ever failed to launch.
+
+    An engine flag the model rejects — an unsupported kv-cache dtype
+    for its attention backend, say — fails identically every time.
+    Without this the search keeps spending budget rediscovering it:
+    nvfp4 KV burned 7 of 27 evaluations on one Qwen3.6 search. A value
+    is blocked only once it has failed ``min_failures`` times and
+    never succeeded, and only when something else HAS succeeded, so a
+    wholly broken setup still reports that rather than an empty
+    neighborhood.
+    """
+    if not any(e.status == "ok" for e in state.evaluated.values()):
+        return {}
+    fails: dict[tuple[str, str], int] = {}
+    ok_pairs: set[tuple[str, str]] = set()
+    for e in state.evaluated.values():
+        for d, v in e.params.items():
+            pair = (d, str(v))
+            if e.status == "ok":
+                ok_pairs.add(pair)
+            else:
+                fails[pair] = fails.get(pair, 0) + 1
+    out: dict[str, set[str]] = {}
+    for (d, v), n in fails.items():
+        if n >= min_failures and (d, v) not in ok_pairs:
+            out.setdefault(d, set()).add(v)
+    return out
+
+
+def is_blocked(params: dict, blocked: dict[str, set[str]]) -> bool:
+    """Does this candidate use a known-broken dimension value?"""
+    return any(str(params.get(d)) in vals for d, vals in blocked.items())
+
+
 def next_batch(
     state: SearchState, space: SearchSpace, rng: random.Random,
 ) -> tuple[str, list[dict]]:
@@ -706,11 +742,14 @@ def next_batch(
         return ("done:space_changed — start a new run (the state file "
                 "was produced by a different space)", [])
 
-    # Resume: pending candidates of the current iteration first.
+    # Resume: pending candidates of the current iteration first,
+    # minus any that use a value already proven un-launchable.
     if state.iterations:
         last = state.iterations[-1]
+        blocked = blocked_values(state)
         pending = [p for p in last["params"]
-                   if canonical_key(p, space) not in state.evaluated]
+                   if canonical_key(p, space) not in state.evaluated
+                   and not is_blocked(p, blocked)]
         if pending:
             return last["kind"], pending
 
@@ -754,10 +793,13 @@ def next_batch(
     if not tops:
         state.done_reason = "no_successful_candidates"
         return "done:no_successful_candidates", []
-    batch = _restart_order(propose_neighbors(
-        space, tops, set(state.evaluated),
-        min(space.search.neighbors_per_iteration, budget_left),
-    ), space)
+    blocked = blocked_values(state)
+    batch = _restart_order([
+        p for p in propose_neighbors(
+            space, tops, set(state.evaluated),
+            min(space.search.neighbors_per_iteration, budget_left),
+        ) if not is_blocked(p, blocked)
+    ], space)
     if not batch:
         state.done_reason = "neighborhood_exhausted"
         return "done:neighborhood_exhausted", []

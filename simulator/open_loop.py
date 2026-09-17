@@ -73,16 +73,65 @@ class EngineBrokenError(RuntimeError):
     the engine's own error instead of an endless error counter."""
 
 
-def _engine_broken(errors: int, completions: int) -> bool:
+def _engine_broken(errors: int, completions: int,
+                   generated_tokens: int | None = None) -> bool:
     """Runaway-error fuse. A broken engine fails every request almost
     instantly, so nothing would ever stop the run on its own — the
-    queue stays empty (stable!) while errors pile up forever. Trip
-    when a window has failures and NOTHING completing, or when
-    failures dwarf completions. Genuine overload never looks like
-    this: at a real knee, thousands of turns still complete alongside
-    the timeouts."""
+    queue stays empty (stable!) while errors pile up forever.
+
+    Completions alone cannot tell breakage from slowness. A window is
+    120s; a turn with 2048 pinned output tokens takes ~290s at load,
+    so a perfectly healthy engine can show ZERO completions for a
+    whole window while every request is still streaming — and any
+    client-timeout failures alongside them used to trip this fuse and
+    abort a run that had already served 50k turns.
+
+    Generated tokens settle it: an engine that is up but cannot serve
+    produces none. If tokens are flowing, the engine is working, and
+    overload is the stability statistics' job to judge, not ours.
+    When the counter is unavailable we fall back to the old test
+    rather than weakening the fuse.
+    """
+    if generated_tokens is not None and generated_tokens > 0:
+        return False
     return (errors >= 25 and completions == 0) or \
            (errors >= 100 and errors > 4 * completions)
+
+
+REQUEST_TIMEOUT_CEILING_S = 1800
+
+
+def _request_timeout_for(cohort, sim) -> int:
+    """Client patience sized to the WORKLOAD, not a flat 300s.
+
+    A turn's honest worst case is its own SLA: time-to-first-token
+    failure, then one output token per TPOT-failure interval. A
+    workload with 2048 pinned output tokens needs ~290s at load, so a
+    flat 300s timeout kills requests the engine was still serving —
+    and those client-side kills then read as engine failures. We take
+    the longest SLA bound across the cohort's personas (capped, and
+    never below the configured value) so the ENGINE's behaviour
+    decides the outcome; the stability statistics, not the stopwatch,
+    are what call a collapse.
+    """
+    from .distributions import summarize
+    from .personas import PERSONAS
+    configured = int(sim.request_timeout_s)
+    worst = 0.0
+    for pid in cohort.persona_weights:
+        p = PERSONAS.get(pid)
+        if p is None:
+            continue
+        out_tokens = summarize(p.output_tokens).get("p90") or 0
+        worst = max(worst, float(p.ttft_failure_seconds)
+                    + float(out_tokens) * float(p.tpot_failure_ms) / 1000.0)
+    scaled = min(REQUEST_TIMEOUT_CEILING_S, int(worst))
+    if scaled > configured:
+        log.info("request timeout raised %ds → %ds for this workload "
+                 "(long pinned outputs need more than the default)",
+                 configured, scaled)
+        return scaled
+    return configured
 
 
 async def smoke_test_engine(engine, timeout_s: float = 180.0) -> None:
@@ -453,7 +502,7 @@ class OpenLoopRunner:
                 "api_key": engine.api_key,
                 "api_model_name": engine.api_model_name,
                 "model_id": cfg.engine.model_id,
-                "request_timeout_s": sim.request_timeout_s,
+                "request_timeout_s": _request_timeout_for(cohort, sim),
                 "reasoning_effort": (
                     cfg.engine.reasoning_effort if cfg.engine.reasoning
                     else None
@@ -563,6 +612,7 @@ class OpenLoopRunner:
         fuse_agg = self.pool.aggregate()
         fuse_err0 = fuse_agg.get("errors", 0) if fuse_agg else 0
         fuse_comp0 = fuse_agg.get("completed", 0) if fuse_agg else 0
+        fuse_tok0 = self._last_engine_metrics.get("generation_tokens_total")
         last_error: list[str] = []
 
         def _check_fuse(fresh_turns: list[dict]) -> None:
@@ -575,7 +625,11 @@ class OpenLoopRunner:
                 return
             err_d = agg_now.get("errors", 0) - fuse_err0
             comp_d = agg_now.get("completed", 0) - fuse_comp0
-            if _engine_broken(err_d, comp_d):
+            tok_now = self._last_engine_metrics.get("generation_tokens_total")
+            tok_d = (int(tok_now) - int(fuse_tok0)
+                     if tok_now is not None and fuse_tok0 is not None
+                     else None)
+            if _engine_broken(err_d, comp_d, tok_d):
                 raise EngineBrokenError(
                     f"aborting run: {err_d} failed requests against "
                     f"{comp_d} completions at {rate_per_s * 60:.0f}/min — "

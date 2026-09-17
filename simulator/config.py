@@ -316,6 +316,10 @@ class SimulationConfig:
     headline_measure_s: int = 15     # one measurement chunk
     headline_measure_max_s: int = 300  # per-cell cap when chasing steady state
     headline_cell_budget: int = 12
+    # Prompt length for the shape search — PINNED, not searched.
+    # 128 is the vendor-benchmark convention, which keeps the result
+    # comparable with published tables.
+    headline_input_tokens: int = 128
     # Headline SWEEP (the concurrency ladder, not the shape search).
     headline_sweep_ladder: list[int] = field(
         default_factory=lambda: [64, 128, 256, 512, 1024, 2048, 4096, 8192])

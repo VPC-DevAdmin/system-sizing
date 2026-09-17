@@ -139,14 +139,23 @@ def objective(in_flight: float | None, out_tok_s: float | None) -> float:
     return (in_flight * out_tok_s) ** 0.5
 
 
-def _neighbors(cell: tuple[int, int]) -> list[tuple[int, int]]:
-    i_idx = LATTICE_IN.index(cell[0])
-    o_idx = LATTICE_OUT.index(cell[1])
+def _neighbors(cell: tuple[int, int],
+               lattice_in: list[int] | None = None,
+               lattice_out: list[int] | None = None,
+               ) -> list[tuple[int, int]]:
+    """One-step neighbours on the lattice. With a single-valued
+    ``lattice_in`` (input pinned) this degenerates to a 1-D walk along
+    output length, which is the only axis worth searching for a
+    generation headline — see run_headline_search."""
+    lin = lattice_in if lattice_in is not None else LATTICE_IN
+    lout = lattice_out if lattice_out is not None else LATTICE_OUT
+    i_idx = lin.index(cell[0])
+    o_idx = lout.index(cell[1])
     out: list[tuple[int, int]] = []
     for di, do in ((-1, 0), (1, 0), (0, -1), (0, 1)):
         ni, no = i_idx + di, o_idx + do
-        if 0 <= ni < len(LATTICE_IN) and 0 <= no < len(LATTICE_OUT):
-            out.append((LATTICE_IN[ni], LATTICE_OUT[no]))
+        if 0 <= ni < len(lin) and 0 <= no < len(lout):
+            out.append((lin[ni], lout[no]))
     return out
 
 
@@ -160,8 +169,13 @@ class ShapeClimb:
     """
 
     def __init__(self, start: tuple[int, int] = (128, 512),
-                 budget: int = 12):
-        assert start[0] in LATTICE_IN and start[1] in LATTICE_OUT
+                 budget: int = 12,
+                 lattice_in: list[int] | None = None,
+                 lattice_out: list[int] | None = None):
+        self.lattice_in = lattice_in if lattice_in is not None else LATTICE_IN
+        self.lattice_out = (lattice_out if lattice_out is not None
+                            else LATTICE_OUT)
+        assert start[0] in self.lattice_in and start[1] in self.lattice_out
         self.start = start
         self.budget = budget
         self.scores: dict[tuple[int, int], float] = {}
@@ -183,7 +197,9 @@ class ShapeClimb:
             best = self.best()
             if best is None:
                 return None
-            fresh = [n for n in _neighbors(best) if n not in self.scores]
+            fresh = [n for n in _neighbors(
+                best, self.lattice_in, self.lattice_out)
+                if n not in self.scores]
             if not fresh:
                 return None  # local optimum: neighborhood exhausted
             self._queue.extend(fresh)
@@ -237,6 +253,16 @@ async def run_headline_search(
     # Mutable holder the service exposes via /api/status — the UI's
     # completion bar reads {cell, budget, shape, best, done} from it.
     progress: dict | None = None,
+    # Prompt length, PINNED rather than searched. Input tokens cannot
+    # improve this objective — they add prefill work and KV pressure
+    # while contributing nothing to output tokens/sec or to
+    # concurrency — so searching that axis only ever walks to the
+    # smallest prompt on the lattice and produces a number nobody can
+    # quote (the winning cell did 7.6 prefill tokens/sec). Pinning it
+    # at the vendor convention keeps the result comparable with
+    # published tables and spends the whole budget on the axis that
+    # genuinely trades off.
+    input_tokens: int | None = None,
 ) -> Path:
     """Run the shape search end-to-end. Returns the summary JSON path."""
     from .open_loop import WorkerPool
@@ -265,7 +291,13 @@ async def run_headline_search(
     log.info("headline shape search: launching engine once for all cells")
     await asyncio.to_thread(engine.launch, log_dir=run_dir)
 
-    climb = ShapeClimb(budget=sim.headline_cell_budget)
+    pinned_in = int(input_tokens or sim.headline_input_tokens)
+    start_out = 512 if 512 in LATTICE_OUT else LATTICE_OUT[0]
+    climb = ShapeClimb(start=(pinned_in, start_out),
+                       budget=sim.headline_cell_budget,
+                       lattice_in=[pinned_in])
+    log.info("shape search: prompt pinned at %d tokens, searching "
+             "output length only", pinned_in)
     cells: list[CellResult] = []
     cell_overlay: Path | None = None
     outstanding = INITIAL_OUTSTANDING
@@ -554,6 +586,7 @@ async def run_headline_search(
             "applied_to": (
                 {"persona": "headline_generation", "family": family}
                 if winner and winner.objective > 0 else None),
+            "input_tokens_pinned": pinned_in,
             "outstanding": outstanding,
             "cells": [asdict(c) for c in cells],
             "duration_s": round(time.monotonic() - started),

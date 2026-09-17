@@ -106,6 +106,9 @@ class StartRunRequest(BaseModel):
     # Headline sweeps only: cap the concurrency ladder (the UI's
     # "max concurrent streams" control). None = the full ladder.
     max_concurrency: Optional[int] = None
+    # Shape search only: the pinned prompt length. None = config
+    # default (128, the vendor convention).
+    input_tokens: Optional[int] = None
 
 
 class ExportRequest(BaseModel):
@@ -899,6 +902,7 @@ def create_app(
             shape_progress: dict = {}
             coro_factory = lambda: run_headline_search(  # noqa: E731
                 cfg, new_run=req.new_run, progress=shape_progress,
+                input_tokens=req.input_tokens,
             )
         elif kind == "sweep":
             from .personas import resolve_workload_group

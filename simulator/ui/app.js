@@ -624,14 +624,18 @@ const Control = {
 
   async startShapeSearch() {
     const body = this.buildRunBody({ kind: "headline_search" });
+    // Prompt length is pinned, not searched — input tokens can only
+    // cost this objective, so searching them walks to the smallest
+    // prompt on the lattice and yields a number nobody can quote.
+    const pinned = +$("#hl-input-tokens")?.value || 0;
+    if (body && pinned) body.input_tokens = pinned;
     if (!body) return;
     delete body.engineDesc;
     try {
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
-      this.msg("shape search started — shapes swap on the fly at "
-        + "saturation; short shapes score in ~40s, long-output shapes "
-        + "measure until steady state (up to ~5 min); the winner "
-        + "becomes Headline: Generation's shape", "ok");
+      this.msg(`shape search started — prompt pinned at `
+        + `${pinned || 128} tokens, searching output length only; `
+        + `the winner becomes Headline: Generation's shape`, "ok");
       this._shapeSearchWas = true;
       this.pollStatus();
     } catch (e) {

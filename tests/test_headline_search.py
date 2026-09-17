@@ -264,3 +264,37 @@ def test_idle_engine_is_never_mistaken_for_steady_state():
     no_gauge = Chunk(running=None, queue=None, out_rate=21000.0,
                      prompt_rate=None)
     assert chunks_converged(no_gauge, no_gauge) is True
+
+
+def test_worker_fleet_is_sized_from_config_not_a_magic_number():
+    """The shape search under-provisioned the load generator 2.7x
+    against the capacity runner's own standard, so measured
+    'concurrency' plateaued at a per-worker ceiling — the client's
+    limit, not the engine's."""
+    import inspect
+
+    import simulator.headline_search as hs
+
+    src = inspect.getsource(hs.run_headline_search)
+    assert "open_loop_inflight_per_worker" in src
+    # The old hardcoded streams-per-worker constant must be gone.
+    assert not hasattr(hs, "STREAMS_PER_WORKER")
+
+
+def test_cell_records_client_limitation():
+    """A cell whose worker loop fell behind is measuring the harness;
+    the result has to carry that."""
+    from simulator.headline_search import CLIENT_LAG_LIMIT_MS, CellResult
+
+    ok = CellResult(input_tokens=256, output_tokens=2048,
+                    out_tok_s=26000.0, prompt_tok_s=16000.0,
+                    in_flight=546.0, queue_depth=0.0, objective=3785.0,
+                    client_limited=False, client_lag_ms=40.0)
+    assert ok.client_limited is False
+    bad = CellResult(input_tokens=256, output_tokens=2048,
+                     out_tok_s=26000.0, prompt_tok_s=16000.0,
+                     in_flight=546.0, queue_depth=0.0, objective=3785.0,
+                     client_limited=CLIENT_LAG_LIMIT_MS + 1
+                     > CLIENT_LAG_LIMIT_MS,
+                     client_lag_ms=CLIENT_LAG_LIMIT_MS + 1)
+    assert bad.client_limited is True

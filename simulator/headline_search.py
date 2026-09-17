@@ -70,7 +70,10 @@ CELL_PERSONA_ID = "headline_cell"
 # Saturation-pressure controller bounds.
 INITIAL_OUTSTANDING = 512
 MAX_OUTSTANDING = 8192
-STREAMS_PER_WORKER = 512
+# Event-loop lag above this means the WORKER, not the engine, is the
+# thing limiting how many streams stay resident — the cell is then
+# measuring our own client and must say so.
+CLIENT_LAG_LIMIT_MS = 250.0
 
 
 @dataclass
@@ -84,6 +87,8 @@ class CellResult:
     objective: float
     steady_state: bool = True        # converged before the time cap?
     measure_s: int = 0               # wall time spent measuring
+    client_limited: bool = False     # the LOAD GENERATOR was the ceiling
+    client_lag_ms: float = 0.0
 
 
 @dataclass
@@ -299,9 +304,15 @@ async def run_headline_search(
 
     async def _apply_pressure(n: int) -> None:
         import math
+        # Size the worker fleet the way the capacity runner does. A
+        # single asyncio loop cannot hold hundreds of streaming
+        # responses without falling behind: at 512 streams per worker
+        # the measured "concurrency" plateaued in exact multiples of a
+        # per-worker ceiling, which is the client's limit, not the
+        # engine's.
         await pool.scale_to(
             min(sim.open_loop_max_workers,
-                max(1, math.ceil(n / STREAMS_PER_WORKER))))
+                max(1, math.ceil(n / sim.open_loop_inflight_per_worker))))
         await pool.set_outstanding(n)
 
     async def _measure_chunk(phase: str, seconds: int) -> Chunk:
@@ -376,8 +387,11 @@ async def run_headline_search(
             chunks: list[Chunk] = []
             t_start = time.monotonic()
             steady = False
+            max_lag = 0.0
             while True:
                 n = len(chunks) + 1
+                max_lag = max(max_lag,
+                              float(pool.aggregate().get("loop_lag_ms") or 0.0))
                 chunks.append(await _measure_chunk(
                     f"{phase} — measuring (chunk {n})",
                     sim.headline_measure_s))
@@ -392,6 +406,8 @@ async def run_headline_search(
                         inp, out, sim.headline_measure_max_s)
                     break
             measure_s = round(time.monotonic() - t_start)
+            max_lag = max(max_lag,
+                          float(pool.aggregate().get("loop_lag_ms") or 0.0))
             last = chunks[-1]
             # Under-pressure check: the engine has headroom (empty
             # queue, batch ≈ everything we offered) — double the
@@ -435,6 +451,8 @@ async def run_headline_search(
                 objective=objective(last.running, last.out_rate),
                 steady_state=steady,
                 measure_s=measure_s,
+                client_limited=max_lag > CLIENT_LAG_LIMIT_MS,
+                client_lag_ms=round(max_lag, 1),
             )
         raise AssertionError("unreachable")
 

@@ -74,6 +74,9 @@ MAX_OUTSTANDING = 8192
 # thing limiting how many streams stay resident — the cell is then
 # measuring our own client and must say so.
 CLIENT_LAG_LIMIT_MS = 250.0
+# How many times one cell may double its offered pressure while
+# hunting for the point where the engine stops keeping up.
+MAX_PRESSURE_STEPS = 4
 
 
 @dataclass
@@ -344,7 +347,8 @@ async def run_headline_search(
 
     async def _measure_cell(inp: int, out: int, phase: str) -> CellResult:
         nonlocal outstanding
-        for attempt in (0, 1):
+        pressure_steps = 0
+        for attempt in range(MAX_PRESSURE_STEPS + 2):
             if attempt == 0:
                 # Instant shape swap: abort every in-flight session —
                 # the engine cancels aborted requests, and each
@@ -409,21 +413,30 @@ async def run_headline_search(
             max_lag = max(max_lag,
                           float(pool.aggregate().get("loop_lag_ms") or 0.0))
             last = chunks[-1]
-            # Under-pressure check: the engine has headroom (empty
-            # queue, batch ≈ everything we offered) — double the
-            # outstanding load and re-measure once so small shapes
-            # aren't unfairly starved.
+            # Under-pressure check. If the engine is running nearly
+            # everything we offered, we have measured OUR pressure,
+            # not its capacity — the cell's concurrency is then a
+            # constant across shapes and stops discriminating. Keep
+            # doubling until the engine visibly stops keeping up.
+            # The queue tolerance is RELATIVE: a couple of waiting
+            # requests against a thousand running is noise, and an
+            # absolute "< 1" test left the engine at a quarter of its
+            # batch capacity.
+            queue_ok = (last.queue is None
+                        or last.queue < max(4.0, 0.02 * outstanding))
             underfed = (
-                attempt == 0
-                and (last.queue is None or last.queue < 1.0)
+                pressure_steps < MAX_PRESSURE_STEPS
+                and queue_ok
                 and last.running is not None
                 and last.running >= 0.9 * outstanding
                 and outstanding < MAX_OUTSTANDING
             )
             if underfed:
+                pressure_steps += 1
                 outstanding = min(MAX_OUTSTANDING, outstanding * 2)
-                log.info("engine underfed at %d outstanding — raising "
-                         "to %d and re-measuring", last.running, outstanding)
+                log.info("engine held %.0f of %d offered — raising "
+                         "pressure to %d and re-measuring",
+                         last.running, outstanding // 2, outstanding)
                 await _apply_pressure(outstanding)
                 continue
             # Nothing generated at all: the population never came

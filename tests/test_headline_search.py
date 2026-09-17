@@ -298,3 +298,28 @@ def test_cell_records_client_limitation():
                      > CLIENT_LAG_LIMIT_MS,
                      client_lag_ms=CLIENT_LAG_LIMIT_MS + 1)
     assert bad.client_limited is True
+
+
+def test_pressure_keeps_climbing_until_the_engine_stops_keeping_up():
+    """If the engine runs nearly everything offered, the cell measured
+    OUR pressure, not its capacity — and concurrency then reads the
+    same for every shape, so it stops discriminating. A couple of
+    queued requests against a thousand running is noise, not a sign
+    the engine is full."""
+    from simulator.headline_search import MAX_PRESSURE_STEPS
+
+    def underfed(running, outstanding, queue, steps=0):
+        queue_ok = queue is None or queue < max(4.0, 0.02 * outstanding)
+        return (steps < MAX_PRESSURE_STEPS and queue_ok
+                and running is not None and running >= 0.9 * outstanding)
+
+    # The real case: 1022 running of 1024 offered, queue of 2. The old
+    # absolute "queue < 1" test refused to raise pressure and left the
+    # engine at a quarter of its batch capacity.
+    assert underfed(1022.0, 1024, 2.0) is True
+    # A genuinely backed-up engine is not underfed.
+    assert underfed(1022.0, 1024, 90.0) is False
+    # Nor is one that already failed to hold the offer.
+    assert underfed(600.0, 1024, 0.0) is False
+    # Escalation is bounded.
+    assert underfed(1022.0, 1024, 2.0, steps=MAX_PRESSURE_STEPS) is False

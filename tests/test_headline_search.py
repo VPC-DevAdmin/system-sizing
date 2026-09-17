@@ -240,3 +240,27 @@ def test_restart_respawns_with_fresh_population(monkeypatch):
     held, respawned = asyncio.run(main())
     assert held == 6            # population fully restored
     assert respawned >= 6       # every cancelled session was replaced
+
+
+def test_idle_engine_is_never_mistaken_for_steady_state():
+    """The bug that corrupted the Qwen3.6 search: a cell whose
+    session population had not rebuilt after the shape swap read zero
+    running and zero tokens, and two such chunks 'agreed' — scoring a
+    good shape as a legitimate zero and pruning it from the climb."""
+    from simulator.headline_search import Chunk, chunks_converged
+
+    idle = Chunk(running=0.0, queue=0.0, out_rate=None, prompt_rate=None)
+    assert chunks_converged(idle, idle) is False
+    # Still idle even if the queue has entries but nothing is running.
+    queued = Chunk(running=0.0, queue=12.0, out_rate=None, prompt_rate=None)
+    assert chunks_converged(queued, queued) is False
+    # A real, settled measurement still converges.
+    busy = Chunk(running=800.0, queue=0.0, out_rate=21000.0,
+                 prompt_rate=900.0)
+    busy2 = Chunk(running=805.0, queue=0.0, out_rate=20900.0,
+                  prompt_rate=905.0)
+    assert chunks_converged(busy, busy2) is True
+    # Generating but with the batch gauge missing: still a measurement.
+    no_gauge = Chunk(running=None, queue=None, out_rate=21000.0,
+                     prompt_rate=None)
+    assert chunks_converged(no_gauge, no_gauge) is True

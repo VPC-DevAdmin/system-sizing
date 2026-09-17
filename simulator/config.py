@@ -312,6 +312,7 @@ class SimulationConfig:
     # in minutes, and the winner is saved as a persona for a
     # full-resolution capacity run afterwards.
     headline_clear_s: int = 10       # batch-refill wait after a shape swap
+    headline_refill_max_s: int = 90  # cap on waiting for that refill
     headline_measure_s: int = 15     # one measurement chunk
     headline_measure_max_s: int = 300  # per-cell cap when chasing steady state
     headline_cell_budget: int = 12

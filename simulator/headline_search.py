@@ -102,7 +102,15 @@ def chunks_converged(prev: Chunk, cur: Chunk, *,
     sliding (KV occupancy converged) and output rate is steady. This
     is the guard against the young-KV bias: a long-output shape looks
     great in its first half-minute because sequences haven't grown
-    their KV yet; we keep measuring until the surface stops moving."""
+    their KV yet; we keep measuring until the surface stops moving.
+
+    An IDLE engine is not a settled one. Zero running batch and no
+    generated tokens means the session population has not rebuilt
+    after the shape swap — two such chunks used to "agree" and score
+    the cell a legitimate zero, which then pruned a perfectly good
+    region out of the climb. Waiting is right; scoring is not."""
+    if not cur.out_rate and not cur.running:
+        return False
     if prev.running and cur.running:
         if abs(cur.running - prev.running) > \
                 running_tol * max(prev.running, 1.0):
@@ -332,13 +340,33 @@ async def run_headline_search(
                 # session respawns at once with the NEW shape. No
                 # cross-cell contamination from long-output stragglers.
                 await pool.restart_sessions()
-            clear_end = time.monotonic() + sim.headline_clear_s
-            while time.monotonic() < clear_end:
+            # Wait for the batch to actually REBUILD, rather than a
+            # fixed few seconds. Aborting hundreds of sessions and
+            # respawning them takes as long as it takes (each respawn
+            # builds a prompt and opens a request); measuring before
+            # the engine is full reads an idle box and scores the
+            # shape zero. Poll until the running batch stops climbing.
+            refill_end = time.monotonic() + sim.headline_refill_max_s
+            prev_running = -1.0
+            settled_for = 0
+            while time.monotonic() < refill_end:
                 m = await _metrics()
                 pool.drain_turn_queue()
+                running = float(m.get("num_running") or 0)
                 _snapshot(f"{phase} — refilling batch", m,
                           pool.aggregate().get("sessions_active", 0))
+                if running > 0 and running <= prev_running * 1.05:
+                    settled_for += 1
+                    if settled_for >= 3:
+                        break
+                else:
+                    settled_for = 0
+                prev_running = max(prev_running, running)
                 await asyncio.sleep(1.0)
+            else:
+                log.warning("batch did not refill within %ds after the "
+                            "swap to %d→%d", sim.headline_refill_max_s,
+                            inp, out)
             # Measure in chunks until the engine's own counters stop
             # trending — the running batch keeps sliding down while
             # sequences grow into their KV, and scoring before it
@@ -382,6 +410,18 @@ async def run_headline_search(
                          "to %d and re-measuring", last.running, outstanding)
                 await _apply_pressure(outstanding)
                 continue
+            # Nothing generated at all: the population never came
+            # back. That is a FAILED measurement, not a shape that
+            # deserves a zero — a zero here prunes the region from
+            # the climb. Re-pressurize and try once more.
+            if not last.out_rate and attempt == 0:
+                log.warning("shape %d→%d measured an idle engine — "
+                            "re-applying pressure and retrying", inp, out)
+                await _apply_pressure(outstanding)
+                continue
+            if not last.out_rate:
+                log.error("shape %d→%d produced no tokens on either "
+                          "attempt; recording it as unmeasured", inp, out)
             return CellResult(
                 input_tokens=inp, output_tokens=out,
                 out_tok_s=(round(last.out_rate, 1)

@@ -176,3 +176,67 @@ def test_outstanding_mode_holds_and_respawns(monkeypatch):
     assert held == 8 and held2 == 8
     assert done >= 16          # respawned repeatedly
     assert len(spawned) >= 24
+
+
+def test_chunks_converged_guards_young_kv_bias():
+    """A long-output cell's running batch keeps sliding while KV
+    fills — consecutive chunks must AGREE before a cell may score."""
+    from simulator.headline_search import Chunk, chunks_converged
+
+    def ch(running, rate):
+        return Chunk(running=running, queue=0.0,
+                     out_rate=rate, prompt_rate=None)
+
+    # Batch still sagging 4096 → 3600 → not converged.
+    assert not chunks_converged(ch(4096, 30000), ch(3600, 30000))
+    # Rate still moving > 5% → not converged.
+    assert not chunks_converged(ch(800, 30000), ch(800, 26000))
+    # Both settled within tolerance → converged.
+    assert chunks_converged(ch(812, 21000), ch(805, 20800))
+    # Metrics missing entirely → never "converged" by default.
+    assert not chunks_converged(ch(None, None), ch(None, None))
+    # One signal present and steady is enough.
+    assert chunks_converged(ch(None, 21000), ch(None, 21000))
+
+
+def test_restart_respawns_with_fresh_population(monkeypatch):
+    """The instant shape swap: cancelling every session in saturation
+    mode leaves the outstanding target intact — the population comes
+    back immediately (with freshly-resolved personas)."""
+    import asyncio
+
+    import simulator.arrivals as arrivals_mod
+    from simulator.arrivals import SessionArrivalLauncher
+    from simulator.virtual_user import SharedState
+
+    async def fake_run_virtual_user(**kw):
+        # Long-running unless cancelled — models a 4096-token
+        # straggler. Honors cancel_event like the real virtual user.
+        try:
+            await asyncio.wait_for(kw["cancel_event"].wait(), timeout=30)
+        except asyncio.TimeoutError:
+            pass
+
+    monkeypatch.setattr(arrivals_mod, "run_virtual_user",
+                        fake_run_virtual_user)
+
+    async def main():
+        launcher = SessionArrivalLauncher(
+            persona_weights={"quick_lookup": 1.0},
+            clients=[object()], model_id="m", corpus=None,
+            state=SharedState(), request_timeout_s=5,
+        )
+        launcher.start()
+        launcher.set_outstanding(6)
+        await asyncio.sleep(0.05)
+        before = launcher.stats.arrivals_total
+        launcher.cancel_active_sessions()   # the "restart" worker cmd
+        await asyncio.sleep(0.1)
+        held = launcher.stats.sessions_active
+        respawned = launcher.stats.arrivals_total - before
+        await launcher.stop()
+        return held, respawned
+
+    held, respawned = asyncio.run(main())
+    assert held == 6            # population fully restored
+    assert respawned >= 6       # every cancelled session was replaced

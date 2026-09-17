@@ -259,6 +259,13 @@ class WorkerPool:
         for w in self._workers:
             await self._send(w, {"cmd": "reload_personas"})
 
+    async def restart_sessions(self) -> None:
+        """Abort every in-flight session; in saturation mode each
+        respawns immediately with the current (fresh-loaded) persona.
+        The instant shape swap: no waiting for old-shape requests."""
+        for w in self._workers:
+            await self._send(w, {"cmd": "restart"})
+
     def drain_turn_queue(self) -> list[dict]:
         out: list[dict] = []
         while True:

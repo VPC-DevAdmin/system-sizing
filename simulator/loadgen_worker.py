@@ -122,6 +122,13 @@ async def _amain(config: dict) -> None:
                 launcher.trim_active(int(msg.get("target") or 0))
             elif cmd == "outstanding":
                 launcher.set_outstanding(int(msg.get("n") or 0))
+            elif cmd == "restart":
+                # Saturation-mode shape swap: abort every in-flight
+                # session (the engine cancels aborted requests) —
+                # each one's finally-refill respawns it immediately,
+                # and the respawn picks the persona up fresh, i.e.
+                # with the NEW shape. Outstanding count is untouched.
+                launcher.cancel_active_sessions()
             elif cmd == "reload_personas":
                 # Shape search rewrites the cell persona overlay and
                 # changes shape ON THE FLY — the launcher looks the

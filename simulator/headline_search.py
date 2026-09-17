@@ -12,13 +12,23 @@ The search is FAST because ranking shapes needs saturation, not a
 capacity search. One engine launch; the generator holds a fixed
 number of outstanding zero-think requests (classic max-throughput
 closed loop — self-throttling is exactly right here, it keeps the
-engine perfectly fed); shapes change ON THE FLY (the cell persona
-overlay is rewritten and workers reload their registry — spawns pick
-up the new shape immediately); a few seconds clear the pipe of
-old-shape requests; then throughput and running-batch size are read
-from the ENGINE'S OWN counters (token totals + num_running), so
-client-side lag cannot distort the measurement. ~35-45 seconds per
-cell → a 12-cell hill-climb finishes in minutes.
+engine perfectly fed); shapes change ON THE FLY: the cell persona
+overlay is rewritten, workers reload their registry, and every
+in-flight session is ABORTED — the engine cancels aborted requests
+and each session respawns instantly with the new shape, so no
+old-shape straggler contaminates the next cell. Throughput and
+running-batch size are read from the ENGINE'S OWN counters (token
+totals + num_running), so client-side lag cannot distort the
+measurement.
+
+Measurement runs in chunks until consecutive chunks agree (steady
+state). This guards the YOUNG-KV BIAS: a long-output shape looks
+great in its first half-minute because no sequence has grown its KV
+yet — the running batch only sags once the pool fills. Short-output
+cells converge in ~2 chunks (~40s); long-output cells measure until
+the surface stops moving, capped at headline_measure_max_s. Cells
+that hit the cap are scored from their last chunk and flagged
+steady_state=false in the summary.
 
 The winning shape becomes the DEFAULT of the "Headline: Generation"
 workload (its persona overlay is rewritten in place) and is recorded
@@ -72,6 +82,36 @@ class CellResult:
     in_flight: float | None          # engine num_running, mean
     queue_depth: float | None        # engine waiting, mean
     objective: float
+    steady_state: bool = True        # converged before the time cap?
+    measure_s: int = 0               # wall time spent measuring
+
+
+@dataclass
+class Chunk:
+    """One measurement chunk read from the engine's own counters."""
+    running: float | None            # num_running mean
+    queue: float | None              # waiting mean
+    out_rate: float | None           # generation tok/s
+    prompt_rate: float | None        # prompt tok/s
+
+
+def chunks_converged(prev: Chunk, cur: Chunk, *,
+                     running_tol: float = 0.03,
+                     rate_tol: float = 0.05) -> bool:
+    """Two consecutive chunks agree — the running batch has stopped
+    sliding (KV occupancy converged) and output rate is steady. This
+    is the guard against the young-KV bias: a long-output shape looks
+    great in its first half-minute because sequences haven't grown
+    their KV yet; we keep measuring until the surface stops moving."""
+    if prev.running and cur.running:
+        if abs(cur.running - prev.running) > \
+                running_tol * max(prev.running, 1.0):
+            return False
+    if prev.out_rate and cur.out_rate:
+        if abs(cur.out_rate - prev.out_rate) > \
+                rate_tol * max(prev.out_rate, 1.0):
+            return False
+    return cur.running is not None or cur.out_rate is not None
 
 
 def objective(in_flight: float | None, out_tok_s: float | None) -> float:
@@ -250,65 +290,105 @@ async def run_headline_search(
                 max(1, math.ceil(n / STREAMS_PER_WORKER))))
         await pool.set_outstanding(n)
 
+    async def _measure_chunk(phase: str, seconds: int) -> Chunk:
+        m0 = await _metrics()
+        t0 = time.monotonic()
+        running: list[float] = []
+        waiting: list[float] = []
+        for _ in range(seconds):
+            await asyncio.sleep(1.0)
+            m = await _metrics()
+            pool.drain_turn_queue()
+            if m.get("num_running") is not None:
+                running.append(float(m["num_running"]))
+            if m.get("queue_depth") is not None:
+                waiting.append(float(m["queue_depth"]))
+            _snapshot(phase, m, pool.aggregate().get("sessions_active", 0))
+        m1 = await _metrics()
+        dt = max(1e-3, time.monotonic() - t0)
+        gen = ((m1.get("generation_tokens_total") or 0)
+               - (m0.get("generation_tokens_total") or 0))
+        prm = ((m1.get("prompt_tokens_total") or 0)
+               - (m0.get("prompt_tokens_total") or 0))
+        return Chunk(
+            running=statistics.fmean(running) if running else None,
+            queue=statistics.fmean(waiting) if waiting else None,
+            out_rate=gen / dt if gen else None,
+            prompt_rate=prm / dt if prm else None,
+        )
+
     async def _measure_cell(inp: int, out: int, phase: str) -> CellResult:
         nonlocal outstanding
         for attempt in (0, 1):
-            # Clear the pipe: old-shape requests finish and the batch
-            # refills with the new shape.
+            if attempt == 0:
+                # Instant shape swap: abort every in-flight session —
+                # the engine cancels aborted requests, and each
+                # session respawns at once with the NEW shape. No
+                # cross-cell contamination from long-output stragglers.
+                await pool.restart_sessions()
             clear_end = time.monotonic() + sim.headline_clear_s
             while time.monotonic() < clear_end:
                 m = await _metrics()
                 pool.drain_turn_queue()
-                _snapshot(f"{phase} — clearing pipe", m,
+                _snapshot(f"{phase} — refilling batch", m,
                           pool.aggregate().get("sessions_active", 0))
                 await asyncio.sleep(1.0)
-            # Measure on the ENGINE's counters.
-            m0 = await _metrics()
-            t0 = time.monotonic()
-            running: list[float] = []
-            waiting: list[float] = []
-            for _ in range(sim.headline_measure_s):
-                await asyncio.sleep(1.0)
-                m = await _metrics()
-                pool.drain_turn_queue()
-                if m.get("num_running") is not None:
-                    running.append(float(m["num_running"]))
-                if m.get("queue_depth") is not None:
-                    waiting.append(float(m["queue_depth"]))
-                _snapshot(f"{phase} — measuring", m,
-                          pool.aggregate().get("sessions_active", 0))
-            m1 = await _metrics()
-            dt = max(1e-3, time.monotonic() - t0)
-            gen = ((m1.get("generation_tokens_total") or 0)
-                   - (m0.get("generation_tokens_total") or 0))
-            prm = ((m1.get("prompt_tokens_total") or 0)
-                   - (m0.get("prompt_tokens_total") or 0))
-            c_mean = statistics.fmean(running) if running else None
-            q_mean = statistics.fmean(waiting) if waiting else None
+            # Measure in chunks until the engine's own counters stop
+            # trending — the running batch keeps sliding down while
+            # sequences grow into their KV, and scoring before it
+            # settles inflates long-output shapes (the young-KV bias).
+            # Short-output cells converge in two chunks; long-output
+            # cells take as long as they take, capped.
+            chunks: list[Chunk] = []
+            t_start = time.monotonic()
+            steady = False
+            while True:
+                n = len(chunks) + 1
+                chunks.append(await _measure_chunk(
+                    f"{phase} — measuring (chunk {n})",
+                    sim.headline_measure_s))
+                if len(chunks) >= 2 and chunks_converged(
+                        chunks[-2], chunks[-1]):
+                    steady = True
+                    break
+                if time.monotonic() - t_start >= sim.headline_measure_max_s:
+                    log.warning(
+                        "shape %d→%d hit the %ds measurement cap before "
+                        "steady state — scoring the last chunk",
+                        inp, out, sim.headline_measure_max_s)
+                    break
+            measure_s = round(time.monotonic() - t_start)
+            last = chunks[-1]
             # Under-pressure check: the engine has headroom (empty
             # queue, batch ≈ everything we offered) — double the
             # outstanding load and re-measure once so small shapes
             # aren't unfairly starved.
             underfed = (
                 attempt == 0
-                and (q_mean is None or q_mean < 1.0)
-                and c_mean is not None
-                and c_mean >= 0.9 * outstanding
+                and (last.queue is None or last.queue < 1.0)
+                and last.running is not None
+                and last.running >= 0.9 * outstanding
                 and outstanding < MAX_OUTSTANDING
             )
             if underfed:
                 outstanding = min(MAX_OUTSTANDING, outstanding * 2)
                 log.info("engine underfed at %d outstanding — raising "
-                         "to %d and re-measuring", c_mean, outstanding)
+                         "to %d and re-measuring", last.running, outstanding)
                 await _apply_pressure(outstanding)
                 continue
             return CellResult(
                 input_tokens=inp, output_tokens=out,
-                out_tok_s=round(gen / dt, 1) if gen else None,
-                prompt_tok_s=round(prm / dt, 1) if prm else None,
-                in_flight=round(c_mean, 1) if c_mean is not None else None,
-                queue_depth=round(q_mean, 1) if q_mean is not None else None,
-                objective=objective(c_mean, gen / dt if gen else None),
+                out_tok_s=(round(last.out_rate, 1)
+                           if last.out_rate is not None else None),
+                prompt_tok_s=(round(last.prompt_rate, 1)
+                              if last.prompt_rate is not None else None),
+                in_flight=(round(last.running, 1)
+                           if last.running is not None else None),
+                queue_depth=(round(last.queue, 1)
+                             if last.queue is not None else None),
+                objective=objective(last.running, last.out_rate),
+                steady_state=steady,
+                measure_s=measure_s,
             )
         raise AssertionError("unreachable")
 

@@ -588,8 +588,9 @@ const Control = {
     delete body.engineDesc;
     try {
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
-      this.msg("shape search started — shapes change on the fly at "
-        + "saturation, ~40s per cell, done in minutes; the winner "
+      this.msg("shape search started — shapes swap on the fly at "
+        + "saturation; short shapes score in ~40s, long-output shapes "
+        + "measure until steady state (up to ~5 min); the winner "
         + "becomes Headline: Generation's shape", "ok");
       this._shapeSearchWas = true;
       this.pollStatus();

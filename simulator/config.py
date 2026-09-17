@@ -311,8 +311,9 @@ class SimulationConfig:
     # engine's own counters. ~35-45s per cell — the whole search runs
     # in minutes, and the winner is saved as a persona for a
     # full-resolution capacity run afterwards.
-    headline_clear_s: int = 10
-    headline_measure_s: int = 25
+    headline_clear_s: int = 10       # batch-refill wait after a shape swap
+    headline_measure_s: int = 15     # one measurement chunk
+    headline_measure_max_s: int = 300  # per-cell cap when chasing steady state
     headline_cell_budget: int = 12
 
 

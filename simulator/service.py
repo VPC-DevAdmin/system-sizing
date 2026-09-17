@@ -2073,7 +2073,25 @@ def create_app(
     ui_dir = Path(__file__).parent / "ui"
     if ui_dir.exists():
         from fastapi.staticfiles import StaticFiles
-        app.mount("/", StaticFiles(directory=ui_dir, html=True), name="ui")
+
+        class _RevalidatingUI(StaticFiles):
+            """Serve the UI with must-revalidate.
+
+            Without this the browser may serve app.js/index.html from
+            its own cache for a heuristic period and never ask, so a
+            deploy silently shows the OLD interface — which looks
+            exactly like the deploy having failed. ETags still do the
+            real work: revalidation returns 304 and no body, so the
+            cost is one conditional request per file per load.
+            """
+
+            def file_response(self, *args, **kwargs):
+                resp = super().file_response(*args, **kwargs)
+                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+                return resp
+
+        app.mount("/", _RevalidatingUI(directory=ui_dir, html=True),
+                  name="ui")
 
     return app
 

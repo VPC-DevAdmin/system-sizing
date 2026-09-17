@@ -644,3 +644,20 @@ def test_optimizer_log_heartbeat(tmp_path, monkeypatch) -> None:
     empty = tmp_path / "empty.log"
     empty.write_text("")
     assert _log_heartbeat(empty) is None
+
+
+def test_ui_assets_must_revalidate(tmp_path) -> None:
+    """A deployed UI change must never be hidden behind the browser's
+    own cache — that failure mode is indistinguishable from a failed
+    deploy."""
+    from simulator.service import create_app
+
+    with TestClient(create_app(tmp_path / "runs")) as client:
+        r = client.get("/app.js")
+        assert r.status_code == 200
+        assert "no-cache" in r.headers.get("cache-control", "")
+        # ETags still do the real work: a revalidation costs no body.
+        etag = r.headers.get("etag")
+        assert etag
+        again = client.get("/app.js", headers={"If-None-Match": etag})
+        assert again.status_code == 304

@@ -109,6 +109,8 @@ class StartRunRequest(BaseModel):
     # Shape search only: the pinned prompt length. None = config
     # default (128, the vendor convention).
     input_tokens: Optional[int] = None
+    # Joint engine+shape search: which grid to walk.
+    preset: Optional[str] = None
 
 
 class ExportRequest(BaseModel):
@@ -906,6 +908,32 @@ def create_app(
             if wid not in PERSONAS:
                 raise HTTPException(404, f"unknown persona '{wid}'")
             coro_factory = _cohort_coro(cfg, cohort_from_persona(wid), req)
+        elif kind == "headline_optimize":
+            # Engine shape and request shape are coupled, so they are
+            # searched together; see simulator/headline_optimize.py.
+            from .headline_optimize import run_headline_optimize
+            wid = req.workload.get("id") or "headline_generation"
+            if wid not in PERSONAS:
+                raise HTTPException(404, f"unknown persona '{wid}'")
+            if req.custom is None:
+                raise HTTPException(
+                    422, "the joint search needs a custom engine (pick a "
+                         "model and engine settings) — it varies "
+                         "max_num_seqs against that baseline")
+            base_custom = dict(req.custom)
+
+            def _build(overrides: dict) -> Path:
+                return _build_custom_config(
+                    {**base_custom, **overrides}, runs_base)
+
+            is_sweep = True          # reuse the sweep progress holder
+            coro_factory = lambda: run_headline_optimize(  # noqa: E731
+                cfg, cohort_from_persona(wid),
+                preset=req.preset or "standard",
+                input_tokens=req.input_tokens or 128,
+                build_config=_build, runs_base=runs_base,
+                progress=sweep_progress,
+            )
         elif kind == "headline_search":
             from .headline_search import run_headline_search
             shape_progress: dict = {}
@@ -930,7 +958,7 @@ def create_app(
         else:
             raise HTTPException(
                 422, "workload.kind must be cohort | persona | "
-                     "headline_search | sweep",
+                     "headline_search | headline_optimize | sweep",
             )
 
         if req.custom is not None:

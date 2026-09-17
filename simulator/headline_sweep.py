@@ -170,6 +170,10 @@ async def run_headline_sweep(
     run_dir: Path | None = None,
     max_concurrency: int | None = None,
     progress: dict | None = None,
+    # Override the concurrency ladder. A coarse ladder is enough to
+    # RANK candidates in a joint engine/shape search; the winner then
+    # earns a full-resolution sweep.
+    ladder_override: list[int] | None = None,
 ) -> Path:
     """Sweep concurrency at saturation. Returns the summary JSON path."""
     sim = cfg.simulation
@@ -178,7 +182,8 @@ async def run_headline_sweep(
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    ladder = [c for c in (sim.headline_sweep_ladder or DEFAULT_LADDER)
+    ladder = [c for c in (ladder_override or sim.headline_sweep_ladder
+                          or DEFAULT_LADDER)
               if c <= (max_concurrency or 10**9)]
     if not ladder:
         ladder = [min(DEFAULT_LADDER)]

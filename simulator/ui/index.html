@@ -223,6 +223,17 @@
           <span id="hl-shape" class="hint" style="margin-top:6px"></span>
         </label>
       </div>
+      <div class="row wrap" style="margin-top:10px;align-items:flex-end">
+        <label>Search breadth
+          <select id="hl-preset">
+            <option value="quick">Quick — 4 combinations</option>
+            <option value="standard" selected>Standard — 9 combinations</option>
+            <option value="thorough">Thorough — 16 combinations</option>
+          </select></label>
+        <button type="button" class="note-link" id="hl-optimize">&#128269;
+          Find the best configuration</button>
+        <span id="hl-optimize-note" class="hint"></span>
+      </div>
     </div>
     <details id="bench-advanced" style="margin-bottom:14px">
       <summary class="msg" style="cursor:pointer">Advanced — engine

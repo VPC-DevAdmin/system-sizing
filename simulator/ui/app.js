@@ -634,6 +634,8 @@ const Control = {
          Optimize the shape</button>`;
     $("#load-best-shape")?.addEventListener("click", () =>
       this.applyHeadlineShape());
+    $("#hl-optimize")?.addEventListener("click", () =>
+      this.startHeadlineOptimize());
     $("#optimize-shape")?.addEventListener("click", () =>
       this.startShapeSearch());
   },
@@ -646,6 +648,33 @@ const Control = {
       });
       await this.loadCatalogs();   // refreshed medians → green check
       this.msg("optimal shape loaded into Headline: Generation", "ok");
+    } catch (e) {
+      this.msg(e.message, "error");
+    }
+  },
+
+  /* Joint engine + shape search. Engine shape and request shape are
+   * coupled — optimizing them separately walks in circles — so this
+   * walks the product and then sweeps the winner at full resolution. */
+  async startHeadlineOptimize() {
+    const body = this.buildRunBody({
+      kind: "headline_optimize", id: "headline_generation" });
+    if (!body) return;
+    delete body.engineDesc;
+    if (!body.custom) {
+      this.msg("the joint search varies engine settings, so it needs a "
+        + "custom engine — open Advanced and set your baseline", "error");
+      return;
+    }
+    body.preset = $("#hl-preset").value;
+    body.input_tokens = +$("#hl-input-tokens")?.value || 128;
+    const pairs = { quick: 4, standard: 9, thorough: 16 }[body.preset] || 9;
+    try {
+      await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
+      this.msg(`searching ${pairs} engine/shape combinations, then `
+        + `sweeping the winner at full resolution — expect roughly `
+        + `${Math.round(pairs * 10 + 14)} minutes`, "ok");
+      this.pollStatus();
     } catch (e) {
       this.msg(e.message, "error");
     }
@@ -727,11 +756,22 @@ const Control = {
       const isSat = w.kind === "persona" && (w.id || "").startsWith("headline_");
       const wtxt = w.kind === "sweep" ? `sweep(${w.type})`
         : isShape ? "Shape search"
+        : w.kind === "headline_optimize" ? "Engine + shape search"
         : isSat ? `${nameOf(w.kind, w.id)} · saturation benchmark`
         : nameOf(w.kind, w.id);
       // Rung-by-rung progress, so the minutes between rungs never
       // read as a hang.
       const p = active.progress || {};
+      const isOpt = w.kind === "headline_optimize";
+      const optProgress = !(isOpt && running) ? ""
+        : ` · <b>combination ${p.pair ?? 1} of ${p.pairs ?? "?"}</b>`
+          + (p.current?.max_num_seqs
+            ? ` (mns ${p.current.max_num_seqs}, ${p.current.output_tokens}
+               out)` : "")
+          + (p.phase ? ` · ${p.phase}` : "")
+          + (p.best?.out_tok_s
+            ? ` · best ${Math.round(
+                p.best.out_tok_s).toLocaleString()} tok/s` : "");
       const satProgress = !(isSat && running) ? ""
         : !p.rung
           ? ` · <span class="msg">launching the engine (a few
@@ -747,7 +787,7 @@ const Control = {
         (active.engine_summary
           ? ` · engine: <b>${active.engine_summary}</b>`
           : ` · config <b>${active.config}</b>`) +
-        ` · started ${since}` + satProgress +
+        ` · started ${since}` + satProgress + optProgress +
         (active.error ? ` · <span class="status-fail">${active.error}</span>` : "") +
         (finished
           ? isShape

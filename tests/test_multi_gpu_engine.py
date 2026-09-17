@@ -140,12 +140,13 @@ def test_startup_failure_reports_the_engines_own_error(tmp_path) -> None:
     assert cause.startswith("ImportError:")
     assert "bytes_to_unicode" in cause
 
-    # The LAST exception wins — it is the innermost reported cause.
+    # Later is NOT better when the later line is vLLM's generic
+    # wrapper: the specific cause raised earlier is what we want.
     log.write_text(
-        "[r0] ValueError: earlier and less specific\n"
+        "[r0] ValueError: the actual specific cause\n"
         "[r0] RuntimeError: Engine core initialization failed\n"
     )
-    assert e._startup_cause().startswith("RuntimeError:")
+    assert e._startup_cause().startswith("ValueError:")
 
     # Degrades without throwing.
     log.write_text("[r0] INFO nothing resembling an exception\n")
@@ -154,3 +155,41 @@ def test_startup_failure_reports_the_engines_own_error(tmp_path) -> None:
     assert "no engine log" in e._startup_cause()
     e._log_path = tmp_path / "missing.log"
     assert "unreadable" in e._startup_cause()
+
+
+def test_startup_cause_skips_vllms_generic_wrapper(tmp_path) -> None:
+    """vLLM's outermost error says only "see root cause above" — the
+    real cause is raised earlier, in the engine-core worker."""
+    from simulator.engines.vllm_cuda_multi import VllmCudaMultiEngine
+
+    e = VllmCudaMultiEngine.__new__(VllmCudaMultiEngine)
+    log = tmp_path / "engine.log"
+    e._log_path = log
+
+    # The real Kimi-Linear failure: a Triton kernel that does not fit
+    # SM120 shared memory, wrapped in a useless RuntimeError.
+    log.write_text(
+        "[r1] ERROR triton.runtime.errors.OutOfResources: out of resource: "
+        "shared memory, Required: 102400, Hardware limit: 101376.\n"
+        "[r7] (APIServer pid=1) RuntimeError: Engine core initialization "
+        "failed. See root cause above. Failed core proc(s): {}\n"
+    )
+    cause = e._startup_cause()
+    assert "OutOfResources" in cause and "101376" in cause
+    assert "root cause above" not in cause
+
+    # An exception whose name is not *Error/*Exception still counts
+    # when it lives in an errors module.
+    log.write_text("[r0] mylib.errors.Boom: it broke\n")
+    assert e._startup_cause().startswith("mylib.errors.Boom:")
+
+    # When the wrapper is genuinely all there is, report it rather
+    # than nothing.
+    log.write_text(
+        "[r0] RuntimeError: Engine core initialization failed. "
+        "See root cause above.\n")
+    assert "Engine core initialization failed" in e._startup_cause()
+
+    # A log line that merely contains a colon is not an exception.
+    log.write_text("[r0] INFO 09-17 20:31:16 model: loaded fine\n")
+    assert "INFO" in e._startup_cause()

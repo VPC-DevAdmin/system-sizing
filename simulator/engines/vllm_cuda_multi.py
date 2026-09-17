@@ -236,14 +236,37 @@ class VllmCudaMultiEngine(Engine):
                 lines = f.read().decode("utf-8", "replace").splitlines()
         except OSError:
             return "engine log unreadable"
-        # Python names its exceptions "SomeError: message"; take the
-        # last one, which is the innermost cause the engine reported.
+        # Python names its exceptions "SomeError: message". The LAST
+        # one is usually the API server's generic wrapper ("Engine
+        # core initialization failed. See root cause above"), which
+        # says nothing — the real cause is raised earlier, in the
+        # engine-core worker. Prefer the last NON-generic line.
         import re
-        pat = re.compile(r"\b([A-Za-z_]+(?:Error|Exception))\b:\s*(.+)")
+        # A dotted-or-bare name followed by a message. Accepting only
+        # names ending in Error/Exception would miss real causes like
+        # "triton.runtime.errors.OutOfResources", so a name inside an
+        # errors/exceptions module counts too.
+        pat = re.compile(
+            r"\b((?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*)"
+            r"\s*:\s+(\S.*)")
+        looks_like_exc = re.compile(
+            r"(Error|Exception)$|\.(errors?|exceptions?)\.", re.I)
+        generic = re.compile(
+            r"see root cause above|engine core initialization failed|"
+            r"engine process failed to start|see stack trace",
+            re.I)
+        fallback = None
         for ln in reversed(lines):
             m = pat.search(ln)
-            if m:
-                return f"{m.group(1)}: {m.group(2).strip()[:300]}"
+            if not m or not looks_like_exc.search(m.group(1)):
+                continue
+            msg = f"{m.group(1)}: {m.group(2).strip()[:300]}"
+            if generic.search(m.group(2)):
+                fallback = fallback or msg
+                continue
+            return msg
+        if fallback:
+            return fallback
         for ln in reversed(lines):
             if ln.strip():
                 return ln.strip()[:300]

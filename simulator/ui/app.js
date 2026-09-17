@@ -570,6 +570,13 @@ const Control = {
       && active.workload?.kind === "headline_search";
     if (searching) {
       const p = active.progress || {};
+      if (!p.cell) {
+        // Engine launch: minutes of silence before the first cell.
+        note.innerHTML = `<span class="msg">launching the engine —
+          model load and CUDA-graph capture take a few minutes before
+          the first shape is measured</span>`;
+        return;
+      }
       const pct = p.budget ? Math.round(100 * ((p.cell || 1) - 1) / p.budget) : 0;
       const shape = p.shape ? `${p.shape[0]}→${p.shape[1]}` : "…";
       const best = p.best?.shape
@@ -692,12 +699,14 @@ const Control = {
       // Rung-by-rung progress, so the minutes between rungs never
       // read as a hang.
       const p = active.progress || {};
-      const satProgress = (isSat && running && p.rungs)
-        ? ` · <b>rung ${p.rung} of ${p.rungs}</b> (${p.concurrency}
-            streams)${p.peak?.out_tok_s
-              ? ` · best so far ${Math.round(
-                  p.peak.out_tok_s).toLocaleString()} tok/s` : ""}`
-        : "";
+      const satProgress = !(isSat && running) ? ""
+        : !p.rung
+          ? ` · <span class="msg">launching the engine (a few
+              minutes)</span>`
+          : ` · <b>rung ${p.rung} of ${p.rungs}</b> (${p.concurrency}
+              streams)${p.peak?.out_tok_s
+                ? ` · best so far ${Math.round(
+                    p.peak.out_tok_s).toLocaleString()} tok/s` : ""}`;
       const since = fmt.clock(active.started_at * 1000);
       const finished = !running && !active.error && active.result;
       box.innerHTML =

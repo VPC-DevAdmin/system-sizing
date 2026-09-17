@@ -235,6 +235,12 @@ async def run_headline_search(
 
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
+    # Say what we're doing before the engine launch, which is minutes
+    # of silence — an empty progress dict renders as "cell 1 of ?"
+    # and reads exactly like a hang.
+    if progress is not None:
+        progress.update({"phase": "launching engine",
+                         "budget": sim.headline_cell_budget, "done": False})
     BUS.publish("run", {
         "event": "started", "mode": "headline_search",
         "cohort_id": "headline_search", "engine": cfg.engine.type,
@@ -408,7 +414,7 @@ async def run_headline_search(
             if progress is not None:
                 progress.update({
                     "cell": n, "budget": sim.headline_cell_budget,
-                    "shape": [inp, out], "done": False,
+                    "shape": [inp, out], "done": False, "phase": "measuring",
                 })
             log.info("headline cell %d/%d: shape %d→%d (outstanding=%d)",
                      n, sim.headline_cell_budget, inp, out, outstanding)

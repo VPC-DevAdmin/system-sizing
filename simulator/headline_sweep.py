@@ -198,6 +198,9 @@ async def run_headline_sweep(
 
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
+    if progress is not None:
+        progress.update({"phase": "launching engine",
+                         "rungs": len(ladder), "done": False})
     BUS.publish("run", {
         "event": "started", "mode": "headline_sweep",
         "cohort_id": cohort.id, "engine": cfg.engine.type,
@@ -290,7 +293,8 @@ async def run_headline_sweep(
             acc_offered[0] = n
             if progress is not None:
                 progress.update({"rung": idx + 1, "rungs": len(ladder),
-                                 "concurrency": n, "done": False})
+                                 "concurrency": n, "done": False,
+                                 "phase": "measuring"})
             log.info("headline rung %d/%d: %d concurrent streams",
                      idx + 1, len(ladder), n)
             # Enough worker processes to drive this many streams.

@@ -135,9 +135,10 @@ const Control = {
     // KV dropdown once ran "auto" when the user meant fp8).
     for (const id of ["eng-replicas", "eng-tp", "eng-placement",
                       "eng-gmu", "eng-mns", "eng-mbt", "eng-kv",
-                      "eng-ep"]) {
+                      "eng-ep", "eng-trc"]) {
       $("#" + id).addEventListener("input", () => {
         this._engineDirty = true;
+        if (id === "eng-trc") this.updateTrcWarning();
       });
     }
     $("#start-btn").addEventListener("click", () => this.start());
@@ -237,6 +238,11 @@ const Control = {
       (d.kv_cache_dtype && d.kv_cache_dtype !== "auto")
         ? d.kv_cache_dtype : "";
     $("#eng-ep").value = d.expert_parallel ? "on" : "off";
+    // Never inherited from a profile: running a repo's own Python is
+    // a decision the operator makes per run, not a setting that
+    // rides along with an engine shape.
+    $("#eng-trc").value = "off";
+    this.updateTrcWarning();
     this.engineDefaults = this.readEngineForm();
     this._engineDirty = false;
   },
@@ -251,6 +257,7 @@ const Control = {
       max_num_batched_tokens: $("#eng-mbt").value.trim(),
       kv_cache_dtype: $("#eng-kv").value,
       expert_parallel: $("#eng-ep").value === "on",
+      trust_remote_code: $("#eng-trc").value === "on",
     };
   },
 
@@ -263,7 +270,25 @@ const Control = {
       + (form.max_num_batched_tokens
           ? ` · mbt ${form.max_num_batched_tokens}` : "")
       + ` · KV ${form.kv_cache_dtype || "auto"}`
-      + (form.expert_parallel ? " · EP on" : "");
+      + (form.expert_parallel ? " · EP on" : "")
+      + (form.trust_remote_code ? " · trust-remote-code" : "");
+  },
+
+  /* Spell out what the flag does at the moment it is switched on —
+   * "trust remote code" understates it. */
+  updateTrcWarning() {
+    const box = $("#eng-trc-warn");
+    if (!box) return;
+    const on = $("#eng-trc")?.value === "on";
+    box.hidden = !on;
+    if (on) {
+      box.innerHTML = `<span class="status-fail">The model repository's
+        own Python will be executed inside the engine container.</span>
+        Only enable this for a repo you have reason to trust — some
+        architectures (Kimi-Linear, for one) ship their own config and
+        model classes and cannot load without it. The run's engine
+        summary records that it was enabled.`;
+    }
   },
 
   /* Model or device changed: find a fitting optimization, prefill
@@ -494,7 +519,10 @@ const Control = {
       return null;
     }
     if (this.deviceMode === "cpu") {
-      body.custom = { model_id: model, device: "cpu" };
+      body.custom = {
+        model_id: model, device: "cpu",
+        trust_remote_code: $("#eng-trc")?.value === "on",
+      };
       body.engineDesc = "CPU engine, stock settings";
       return body;
     }
@@ -518,6 +546,7 @@ const Control = {
         max_num_batched_tokens: +form.max_num_batched_tokens || null,
         kv_cache_dtype: form.kv_cache_dtype || null,
         expert_parallel: form.expert_parallel,
+        trust_remote_code: form.trust_remote_code,
       };
       body.engineDesc = `a custom variant (${this.engineSummary(form)})`;
     }

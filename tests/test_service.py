@@ -661,3 +661,38 @@ def test_ui_assets_must_revalidate(tmp_path) -> None:
         assert etag
         again = client.get("/app.js", headers={"If-None-Match": etag})
         assert again.status_code == 304
+
+
+def test_trust_remote_code_is_opt_in_and_recorded(tmp_path) -> None:
+    """Some architectures (Kimi-Linear) ship their own model classes and
+    cannot load without it — but it executes repo Python in the engine
+    container, so it must never be a silent default."""
+    import yaml as _yaml
+
+    from simulator.service import _build_custom_config
+
+    runs = tmp_path / "runs"
+    base = {"model_id": "org/Model", "replicas": 1, "tp": 1,
+            "placement": "pack", "gpu_memory_utilization": 0.9}
+
+    def _flags(custom):
+        try:
+            path = _build_custom_config(custom, runs)
+        except Exception:                      # no GPUs in CI
+            pytest.skip("custom GPU config needs a GPU host")
+        doc = _yaml.safe_load(path.read_text())
+        return doc["engine"].get("vllm_extra_flags") or []
+
+    assert "--trust-remote-code" not in _flags(base)
+    assert "--trust-remote-code" in _flags({**base, "trust_remote_code": True})
+    # The CPU path honours it too, and stays off by default.
+    cpu = _build_custom_config(
+        {"model_id": "org/Model", "device": "cpu"}, runs)
+    assert "--trust-remote-code" not in (
+        _yaml.safe_load(cpu.read_text())["engine"].get(
+            "vllm_extra_flags") or [])
+    cpu_on = _build_custom_config(
+        {"model_id": "org/Model", "device": "cpu",
+         "trust_remote_code": True}, runs)
+    assert "--trust-remote-code" in (
+        _yaml.safe_load(cpu_on.read_text())["engine"]["vllm_extra_flags"])

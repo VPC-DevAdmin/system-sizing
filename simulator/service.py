@@ -196,6 +196,8 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
             "type": "vllm",
             "model_id": model_id,
             "max_model_len": int(custom.get("max_model_len") or 8192),
+            "vllm_extra_flags": (["--trust-remote-code"]
+                                 if custom.get("trust_remote_code") else []),
             "port": 9100,
             "host": "127.0.0.1",
             "startup_timeout_s": 1800,
@@ -232,6 +234,13 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
         flags += ["--kv-cache-dtype", str(custom["kv_cache_dtype"])]
     if custom.get("expert_parallel"):
         flags += ["--enable-expert-parallel"]
+    if custom.get("trust_remote_code"):
+        # Executes model-repo Python inside the engine container, so
+        # it is opt-in per run and recorded in the run's engine
+        # summary — never a silent default. Architectures like
+        # Kimi-Linear ship their own config/model classes and cannot
+        # load without it.
+        flags += ["--trust-remote-code"]
     gmu = custom.get("gpu_memory_utilization")
     try:
         gmu = min(0.98, max(0.5, float(gmu))) if gmu is not None else 0.92
@@ -938,6 +947,8 @@ def create_app(
                    if c.get("max_num_batched_tokens") else "")
                 + f" · KV {c.get('kv_cache_dtype') or 'auto'}"
                 + (" · EP on" if c.get("expert_parallel") else "")
+                + (" · trust-remote-code"
+                   if c.get("trust_remote_code") else "")
             )
         elif req.profile:
             summary = f"profile {req.profile}"

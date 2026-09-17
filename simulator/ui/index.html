@@ -258,7 +258,14 @@
             <option value="off">off</option>
             <option value="on">on</option>
           </select></label>
+        <label>Trust remote code
+          <span class="hint">(runs the model repo's own Python)</span>
+          <select id="eng-trc">
+            <option value="off">off</option>
+            <option value="on">on</option>
+          </select></label>
       </div>
+      <div id="eng-trc-warn" class="hint" style="margin-top:8px" hidden></div>
     </details>
     <div class="row wrap">
       <button id="start-btn" class="primary">Start run</button>

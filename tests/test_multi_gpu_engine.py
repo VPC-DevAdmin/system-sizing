@@ -119,3 +119,38 @@ def test_promoted_multi_profile_round_trips(tmp_path) -> None:
     eng = make_engine(cfg.engine.type, cfg.engine)
     assert isinstance(eng, VllmCudaMultiEngine)
     assert len(eng.replica_urls) == 8
+
+
+def test_startup_failure_reports_the_engines_own_error(tmp_path) -> None:
+    """"see the log" makes every launch failure look alike. The engine's
+    last exception line distinguishes an unsupported flag from a
+    missing import from an OOM without a round trip."""
+    from simulator.engines.vllm_cuda_multi import VllmCudaMultiEngine
+
+    e = VllmCudaMultiEngine.__new__(VllmCudaMultiEngine)
+    log = tmp_path / "engine.log"
+    log.write_text(
+        "[r0] INFO 09-17 launching\n"
+        '[r0]   File "tokenization_kimi.py", line 19, in <module>\n'
+        "[r0] ImportError: cannot import name 'bytes_to_unicode' from "
+        "'transformers.models.gpt2.tokenization_gpt2'\n"
+    )
+    e._log_path = log
+    cause = e._startup_cause()
+    assert cause.startswith("ImportError:")
+    assert "bytes_to_unicode" in cause
+
+    # The LAST exception wins — it is the innermost reported cause.
+    log.write_text(
+        "[r0] ValueError: earlier and less specific\n"
+        "[r0] RuntimeError: Engine core initialization failed\n"
+    )
+    assert e._startup_cause().startswith("RuntimeError:")
+
+    # Degrades without throwing.
+    log.write_text("[r0] INFO nothing resembling an exception\n")
+    assert "nothing resembling" in e._startup_cause()
+    e._log_path = None
+    assert "no engine log" in e._startup_cause()
+    e._log_path = tmp_path / "missing.log"
+    assert "unreadable" in e._startup_cause()

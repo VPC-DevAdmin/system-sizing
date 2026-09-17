@@ -220,6 +220,35 @@ class VllmCudaMultiEngine(Engine):
         inner += list(cfg.vllm_extra_flags or [])
         return cmd + inner
 
+    def _startup_cause(self, tail_bytes: int = 200_000) -> str:
+        """The engine's OWN last error line, lifted out of the log.
+
+        "see the log" makes every launch failure look alike and costs
+        a round trip to diagnose; the exception line distinguishes an
+        unsupported flag from a missing import from an OOM at a
+        glance."""
+        if self._log_path is None:
+            return "no engine log was captured"
+        try:
+            with open(self._log_path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - tail_bytes))
+                lines = f.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            return "engine log unreadable"
+        # Python names its exceptions "SomeError: message"; take the
+        # last one, which is the innermost cause the engine reported.
+        import re
+        pat = re.compile(r"\b([A-Za-z_]+(?:Error|Exception))\b:\s*(.+)")
+        for ln in reversed(lines):
+            m = pat.search(ln)
+            if m:
+                return f"{m.group(1)}: {m.group(2).strip()[:300]}"
+        for ln in reversed(lines):
+            if ln.strip():
+                return ln.strip()[:300]
+        return "the engine log is empty"
+
     def _wait_for_replica_ready(self, index: int, port: int,
                                 container_id: str) -> None:
         start = time.time()
@@ -233,8 +262,9 @@ class VllmCudaMultiEngine(Engine):
                 )
                 if r.stdout.strip() != "true":
                     raise RuntimeError(
-                        f"replica {index} container exited during startup; "
-                        f"see {self._log_path}"
+                        f"replica {index} container exited during startup: "
+                        f"{self._startup_cause()} (full log: "
+                        f"{self._log_path})"
                     )
             except subprocess.TimeoutExpired:
                 pass

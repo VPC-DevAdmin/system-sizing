@@ -642,7 +642,16 @@ const Control = {
     if (active) {
       box.hidden = false;
       const w = active.workload;
-      const wtxt = w.kind === "sweep" ? `sweep(${w.type})` : `${w.kind} ${w.id}`;
+      // Display names, never raw ids or a kind with no id.
+      const nameOf = (kind, id) => {
+        const list = kind === "cohort"
+          ? this.catalogs?.cohorts : this.catalogs?.personas;
+        return list?.find(x => x.id === id)?.name
+          || (id ?? "").replaceAll("_", " ") || kind;
+      };
+      const isShape = w.kind === "headline_search";
+      const wtxt = w.kind === "sweep" ? `sweep(${w.type})`
+        : isShape ? "Shape search" : nameOf(w.kind, w.id);
       const since = fmt.clock(active.started_at * 1000);
       const finished = !running && !active.error && active.result;
       box.innerHTML =
@@ -653,9 +662,14 @@ const Control = {
         ` · started ${since}` +
         (active.error ? ` · <span class="status-fail">${active.error}</span>` : "") +
         (finished
-          ? ` · <span class="status-pass">finished</span>
-             <button id="goto-results" class="small"
-               style="margin-left:8px">View results →</button>`
+          ? isShape
+            // A shape search leaves no run entry — its result IS the
+            // workload's new shape, shown under the picker above.
+            ? ` · <span class="status-pass">finished — winning shape
+                 saved to Headline: Generation</span>`
+            : ` · <span class="status-pass">finished</span>
+               <button id="goto-results" class="small"
+                 style="margin-left:8px">View results →</button>`
           : "");
       box.querySelector("#goto-results")?.addEventListener("click", () => {
         document.querySelector('#tabs button[data-view="results"]').click();

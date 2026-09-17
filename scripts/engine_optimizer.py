@@ -2446,16 +2446,24 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool,
     # ITS OWN best SLA-passing rung, not at an arbitrary fixed
     # concurrency that under-saturates wide configs.
     m = space.measurement
-    ladder_cells = [
-        TestCell(
-            f"ladder_c{c:04d}", input_tokens=m.input_tokens,
-            output_tokens=m.output_tokens, concurrency=c,
-            # Wall time grows with rung width; the tier policy still
-            # kills stalled requests individually.
-            hard_timeout_s=max(600.0, m.output_tokens * 0.5 + c * 2.0),
-        )
-        for c in m.ladder
-    ]
+
+    def _ladder_cells(view: dict) -> list[TestCell]:
+        # Ladder extended to THIS candidate's sequence capacity — see
+        # search.extend_ladder. SLA early-exit keeps narrow configs
+        # from paying for the tall rungs.
+        rungs = search.extend_ladder(
+            m.ladder, (view.get("params") or {}).get("max_num_seqs"),
+            len(view.get("replica_devices") or []) or 1)
+        return [
+            TestCell(
+                f"ladder_c{c:04d}", input_tokens=m.input_tokens,
+                output_tokens=m.output_tokens, concurrency=c,
+                # Wall time grows with rung width; the tier policy
+                # still kills stalled requests individually.
+                hard_timeout_s=max(600.0, m.output_tokens * 0.5 + c * 2.0),
+            )
+            for c in rungs
+        ]
 
     def climb_stop(cr: CellResult) -> bool:
         if space.objective.kind != "sla_throughput":
@@ -2465,13 +2473,12 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool,
         broken = attempts > 0 and cr.samples < attempts / 2
         return broken or not search.rung_sla_ok(cell, space.objective)
 
-    prompts = make_prompts(ladder_cells)
     state_ui = OptimizerState(total_configs=space.search.budget,
                               print_to_stdout=True)
     print(f"Guided search: space={space.name} objective="
           f"{space.objective.kind} budget={space.search.budget} "
-          f"ladder={m.ladder} ({m.input_tokens}in/{m.output_tokens}out) "
-          f"-> {out_path}")
+          f"ladder={m.ladder}+capacity extension "
+          f"({m.input_tokens}in/{m.output_tokens}out) -> {out_path}")
 
     eval_index = len(sstate.evaluated)
     while True:
@@ -2486,10 +2493,11 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool,
             cfg = _candidate_engine_config(view, eval_index)
             _set_model_globals(view["model"], view["served_name"])
             state_ui.begin_config(eval_index, cfg.name)
+            cand_cells = _ladder_cells(view)
             result = await run_config(
-                cfg, state_ui, prompts,
+                cfg, state_ui, make_prompts(cand_cells),
                 save=lambda: None,     # search persists its own state
-                cells=ladder_cells, early_stop=climb_stop,
+                cells=cand_cells, early_stop=climb_stop,
             )
             cells = [dataclasses.asdict(c) for c in result.cells]
             score = (search.score_ladder(cells, space.objective)

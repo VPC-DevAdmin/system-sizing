@@ -559,6 +559,24 @@ def rung_sla_ok(cell: dict, objective: Objective) -> bool:
                 (tpot is not None and tpot > objective.tpot_p95_cap_ms))
 
 
+def extend_ladder(base: list[int], mns, replicas) -> list[int]:
+    """The base ladder extended (×4 rungs) to a candidate's box-wide
+    sequence capacity (max_num_seqs × replicas). Without this every
+    candidate stops at the base top rung, so batch-width and
+    KV-precision dimensions are never probed in the regime where they
+    differ. A non-numeric mns ("default") keeps the base ladder."""
+    ladder = list(base)
+    try:
+        cap = int(mns) * max(1, int(replicas))
+    except (TypeError, ValueError):
+        return ladder
+    while ladder[-1] * 4 <= cap:
+        ladder.append(ladder[-1] * 4)
+    if ladder[-1] < cap:
+        ladder.append(cap)
+    return ladder
+
+
 def score_ladder(cells: list[dict], objective: Objective) -> Optional[float]:
     """Reduce a candidate's ladder rungs to one scalar: the BEST rung,
     not the sum — every rung is the same workload at a different

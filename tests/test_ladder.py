@@ -136,3 +136,25 @@ def test_arena_space_declares_measurement(tmp_path, monkeypatch) -> None:
     s = summarize_space_doc(doc)
     assert s["ladder"] == [8, 32, 128, 512]
     assert s["measurement_tokens"] == [512, 256]
+
+
+def test_extend_ladder_reaches_candidate_capacity() -> None:
+    """The measurement ladder must climb to each candidate's own
+    box-wide sequence capacity, or batch-width/KV dims are never
+    probed where they differ."""
+    from simulator.search import extend_ladder
+    base = [8, 32, 128, 512]
+    # mns 512 × dp8 = 4096: two more ×4 rungs land exactly on it.
+    assert extend_ladder(base, 512, 8) == [8, 32, 128, 512, 2048, 4096]
+    # mns 128 × dp8 = 1024: a final partial rung tops out at capacity.
+    assert extend_ladder(base, 128, 8) == [8, 32, 128, 512, 1024]
+    # Capacity at/below the base top: unchanged.
+    assert extend_ladder(base, 64, 8) == base
+    assert extend_ladder(base, 64, 2) == base
+    # "default" / missing mns: unchanged, never an exception.
+    assert extend_ladder(base, "default", 8) == base
+    assert extend_ladder(base, None, 8) == base
+    # Ladders stay strictly ascending (search-space invariant).
+    for mns, dp in ((512, 8), (256, 4), (128, 8)):
+        lad = extend_ladder(base, mns, dp)
+        assert lad == sorted(set(lad))

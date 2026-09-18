@@ -220,7 +220,19 @@ def full_arena(catalog: Optional[list[dict]] = None) -> dict:
             "feasible_tps": tps,
             "feasible": bool(tps) and bool(hw["count"]),
         })
-    dims = {"tp": tp_all, "dp": dp_all, **{k: list(v) for k, v in BATCH_DIMS.items()}}
+    dims = {"tp": tp_all, "dp": dp_all,
+            **{k: list(v) for k, v in BATCH_DIMS.items()}}
+    # Feasibility is derived, not declared -- same rule as TP. An
+    # engine whose image is not staged is not a choice the operator
+    # has, and offering it would spend the first candidate
+    # discovering a tens-of-GB download it cannot do mid-search.
+    # A host with one staged runtime gets no engine dimension at all,
+    # so the arena's combinatorics are unchanged until a second one
+    # is actually pulled.
+    from .engine_runtimes import available_engines
+    engines = available_engines()
+    if len(engines) > 1:
+        dims["engine"] = engines
     return {
         "hardware": hw,
         "models": models,

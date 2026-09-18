@@ -132,6 +132,13 @@ class EngineConfig:
     name: str
     description: str
     replicas: list[ReplicaSpec]
+    # Which server to launch. TensorRT-LLM needs a different image, a
+    # different command form and an options YAML for the knobs it has
+    # no flag for -- see docker_launch.
+    engine: str = "vllm_cuda_multi"
+    model: str = ""
+    kv_cache_dtype: Optional[str] = None
+    gpu_memory_utilization: Optional[float] = None
     replica_args: list[str] = field(default_factory=list)
     replica_env: dict = field(default_factory=dict)
     shm_size: str = "4g"
@@ -1280,6 +1287,57 @@ def cleanup_containers(state: "OptimizerState") -> None:
     time.sleep(2)
 
 
+TRTLLM_OPTIONS_DIR = Path("runs/engine_optimizer")
+
+
+def _trtllm_tail(cfg: EngineConfig, replica: ReplicaSpec) -> list[str]:
+    """Image + CMD for a TensorRT-LLM replica.
+
+    Delegates to simulator.engines.trtllm so the two non-obvious rules
+    -- never override the image entrypoint, and KV dtype only travels
+    in the options YAML -- are stated once and cannot drift between
+    the benchmark path and the arena.
+    """
+    try:
+        from simulator.engines.trtllm import (
+            DEFAULT_IMAGE, OPTIONS_IN_CONTAINER, serve_argv)
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from simulator.engines.trtllm import (
+            DEFAULT_IMAGE, OPTIONS_IN_CONTAINER, serve_argv)
+    import yaml as _yaml
+
+    opts: dict = {"return_perf_metrics": True}
+    kv: dict = {}
+    if cfg.kv_cache_dtype:
+        kv["dtype"] = cfg.kv_cache_dtype
+    if cfg.gpu_memory_utilization is not None:
+        kv["free_gpu_memory_fraction"] = float(cfg.gpu_memory_utilization)
+    if kv:
+        opts["kv_cache_config"] = kv
+    TRTLLM_OPTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    opts_path = (TRTLLM_OPTIONS_DIR / f"trtllm_{cfg.name}.yaml").resolve()
+    opts_path.write_text(_yaml.safe_dump(opts, sort_keys=False))
+
+    image = os.environ.get("OPTIMIZER_TRTLLM_IMAGE", DEFAULT_IMAGE)
+    tail = ["-v", f"{opts_path}:{OPTIONS_IN_CONTAINER}:ro", image]
+    argv = serve_argv(
+        cfg.model or MODEL_PATH,
+        port=replica.port,
+        tp=max(1, len(replica.gpus.split(",")) if replica.gpus else 1),
+        max_seq_len=8192,
+        trust_remote_code=True,
+        options_path=OPTIONS_IN_CONTAINER,
+    )
+    # The searched tuning flags (--max_batch_size etc.) come from
+    # candidate_summary already in trtllm spelling; drop the --tp_size
+    # it leads with, which the replica's device list settles.
+    extra = list(cfg.replica_args)
+    if extra[:1] == ["--tp_size"]:
+        extra = extra[2:]
+    return tail + argv + extra
+
+
 def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
     """Build and run the docker command for one replica. Returns the
     container ID."""
@@ -1333,17 +1391,20 @@ def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
     env = {**cfg.replica_env, **replica.env}
     for k, v in env.items():
         args.extend(["-e", f"{k}={v}"])
-    args.append(IMAGE)
-    args.extend([
-        "--model", MODEL_PATH,
-        "--dtype", "bfloat16",
-        "--max-model-len", "8192",
-        "--trust-remote-code",
-        "--host", "0.0.0.0",
-        "--port", str(replica.port),
-        "--served-model-name", SERVED_NAME,
-    ])
-    args.extend(cfg.replica_args)
+    if cfg.engine == "trtllm":
+        args.extend(_trtllm_tail(cfg, replica))
+    else:
+        args.append(IMAGE)
+        args.extend([
+            "--model", MODEL_PATH,
+            "--dtype", "bfloat16",
+            "--max-model-len", "8192",
+            "--trust-remote-code",
+            "--host", "0.0.0.0",
+            "--port", str(replica.port),
+            "--served-model-name", SERVED_NAME,
+        ])
+        args.extend(cfg.replica_args)
     res = subprocess.run(args, capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(
@@ -2364,6 +2425,10 @@ def _candidate_engine_config(view: dict, index: int) -> EngineConfig:
         name=name,
         description=", ".join(f"{k}={v}" for k, v in params.items()),
         replicas=replicas,
+        engine=str(view.get("engine") or "vllm_cuda_multi"),
+        model=str(view.get("model") or ""),
+        kv_cache_dtype=view.get("kv_cache_dtype"),
+        gpu_memory_utilization=view.get("gpu_memory_utilization"),
         replica_args=list(view["engine_args"]),
         shm_size="32g" if view["tp"] > 1 else "16g",
         launch_timeout_s=2700,

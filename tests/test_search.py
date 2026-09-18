@@ -54,7 +54,7 @@ def test_load_space_rejects_bad(tmp_path) -> None:
         load_space(bad)
     bad.write_text("engine: sglang\ndevice_groups: [[0]]\n"
                    "model_variants: {a: {model: m}}\ndimensions: {tp: [1]}\n")
-    with pytest.raises(SearchSpaceError, match="vllm_cuda only"):
+    with pytest.raises(SearchSpaceError, match="not supported"):
         load_space(bad)
 
 

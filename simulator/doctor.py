@@ -129,6 +129,61 @@ def _check_docker(report: DoctorReport) -> bool:
     return True
 
 
+def _check_engine_runtimes(report: DoctorReport, docker_ok: bool) -> None:
+    """Which engine images are staged, and whether there is room for
+    the rest.
+
+    An engine with no image is not a choice the operator has: the
+    arena hides it and the benchmark form will not offer it. Saying
+    so here — with the size and the disk that would absorb it — is
+    the difference between a deliberate pull and a wedged root volume
+    discovered mid-search.
+    """
+    if not docker_ok:
+        report.add("engine runtimes", SKIP, "needs a reachable docker daemon")
+        return
+    from .engine_runtimes import image_store_root, runtime_status
+    rows = runtime_status()
+    staged = [r for r in rows if r["staged"]]
+    missing = [r for r in rows if not r["staged"]]
+    store = image_store_root()
+    where = ""
+    if store.get("path"):
+        where = f"; images land in {store['path']}"
+        if store.get("free_gb") is not None:
+            where += f" ({store['free_gb']:.0f} GB free)"
+        if store.get("note"):
+            where += f" — {store['note']}"
+
+    if not staged:
+        report.add(
+            "engine runtimes", FAIL,
+            "no engine image staged — pull at least one in Prepare "
+            "(step 4) before optimizing or benchmarking"
+            + where)
+        return
+    names = ", ".join(r["label"] for r in staged)
+    if not missing:
+        report.add("engine runtimes", OK,
+                   f"staged: {names}{where}")
+        return
+    want = ", ".join(f"{r['label']} (~{r['approx_gb']} GB)"
+                     for r in missing)
+    short = [r for r in missing
+             if store.get("free_gb") is not None
+             and store["free_gb"] < r["approx_gb"] * 1.2]
+    if short:
+        report.add(
+            "engine runtimes", WARN,
+            f"staged: {names}. Not staged: {want} — and there is not "
+            f"room for it{where}. Free space or move the image store "
+            f"before pulling.")
+    else:
+        report.add(
+            "engine runtimes", OK,
+            f"staged: {names}. Available to add: {want}{where}")
+
+
 def _check_gpu(report: DoctorReport, docker_ok: bool) -> bool:
     rc, out = _run([
         "nvidia-smi",
@@ -414,6 +469,7 @@ def run_doctor(config_dir: Path = Path("config")) -> DoctorReport:
     _check_numa(report)
     docker_ok = _check_docker(report)
     gpu = _check_gpu(report, docker_ok)
+    _check_engine_runtimes(report, docker_ok)
     _check_disk(report, docker_ok)
     _check_perf(report)
     _check_rapl(report)

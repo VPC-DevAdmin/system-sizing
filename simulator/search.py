@@ -48,6 +48,10 @@ import yaml
 # values in the listed order; ``categorical`` dims refine by swapping.
 KNOWN_DIMENSIONS: dict[str, str] = {
     "model_variant": "categorical",
+    # Which server. Only engines whose image is staged are ever
+    # offered (see engine_runtimes), so this dimension is absent on a
+    # host that has one runtime -- it costs nothing until it is real.
+    "engine": "categorical",
     "tp": "ordinal",
     "dp": "ordinal",
     "gpu_memory_utilization": "ordinal",
@@ -64,6 +68,13 @@ KNOWN_DIMENSIONS: dict[str, str] = {
 
 # Sentinel meaning "don't pass the flag; let the engine pick".
 DEFAULT = "default"
+
+# Servers the driver can launch. The space-level ``engine`` field sets
+# the DEFAULT for a space; the ``engine`` DIMENSION, when present,
+# chooses per candidate. (``vllm_cuda`` is the historical spelling of
+# the vLLM launcher and is kept so existing space files still load.)
+SUPPORTED_ENGINES = frozenset(
+    {"vllm_cuda", "vllm_cuda_multi", "trtllm"})
 
 
 class SearchSpaceError(ValueError):
@@ -167,10 +178,10 @@ def load_space(path: str | Path) -> SearchSpace:
         raise SearchSpaceError(f"{path}: top level must be a mapping")
 
     engine = raw.get("engine", "vllm_cuda")
-    if engine != "vllm_cuda":
+    if engine not in SUPPORTED_ENGINES:
         raise SearchSpaceError(
             f"{path}: engine '{engine}' not supported by the search "
-            f"driver yet — vllm_cuda only for now"
+            f"driver — one of {', '.join(sorted(SUPPORTED_ENGINES))}"
         )
 
     groups = raw.get("device_groups")
@@ -293,10 +304,16 @@ def _dim_value(params: dict, dim: str, space: SearchSpace):
         return params[dim]
     if dim in space.dimensions:
         return space.dimensions[dim][0]
+    if dim == "engine":
+        # No engine dimension: the space's own engine field decides,
+        # so a single-runtime host behaves exactly as it always did.
+        return ("trtllm" if space.engine == "trtllm"
+                else "vllm_cuda_multi")
     return {"tp": 1, "dp": 1, "gpu_memory_utilization": 0.90,
             "max_num_seqs": DEFAULT, "max_num_batched_tokens": DEFAULT,
             "placement": "pack", "kv_cache_dtype": "auto",
-            "expert_parallel": "off"}.get(dim)
+            "expert_parallel": "off",
+            "engine": "vllm_cuda_multi"}.get(dim)
 
 
 def normalize(params: dict, space: SearchSpace) -> dict:
@@ -876,27 +893,48 @@ def candidate_summary(params: dict, space: SearchSpace) -> dict[str, Any]:
     n = normalize(params, space)
     variant = space.model_variants[str(_dim_value(n, "model_variant", space))]
     tp = int(_dim_value(n, "tp", space))
-    args: list[str] = ["--gpu-memory-utilization",
-                       str(_dim_value(n, "gpu_memory_utilization", space))]
-    if tp > 1:
-        args += ["--tensor-parallel-size", str(tp)]
+    engine = str(_dim_value(n, "engine", space))
     mns = _dim_value(n, "max_num_seqs", space)
-    if mns not in (None, DEFAULT):
-        args += ["--max-num-seqs", str(mns)]
     mbt = _dim_value(n, "max_num_batched_tokens", space)
-    if mbt not in (None, DEFAULT):
-        args += ["--max-num-batched-tokens", str(mbt)]
     kv = _dim_value(n, "kv_cache_dtype", space)
-    if kv not in (None, "auto"):
-        args += ["--kv-cache-dtype", str(kv)]
-    if _dim_value(n, "expert_parallel", space) == "on":
-        args += ["--enable-expert-parallel"]
+    gmu = _dim_value(n, "gpu_memory_utilization", space)
+    ep = _dim_value(n, "expert_parallel", space) == "on"
+
+    if engine == "trtllm":
+        # trtllm-serve spells every one of these differently, and KV
+        # dtype has no flag at all -- it rides in the options YAML the
+        # driver writes. See engines/trtllm.py.
+        from .engines.trtllm import serve_argv
+        args = serve_argv(
+            variant["model"], port=0, tp=tp,
+            max_batch_size=(None if mns in (None, DEFAULT) else int(mns)),
+            max_num_tokens=(None if mbt in (None, DEFAULT) else int(mbt)),
+            expert_parallel=ep,
+        )
+        # The driver owns model/host/port/entrypoint; keep only the
+        # tuning flags it appends.
+        args = args[args.index("--tp_size"):]
+    else:
+        args = ["--gpu-memory-utilization", str(gmu)]
+        if tp > 1:
+            args += ["--tensor-parallel-size", str(tp)]
+        if mns not in (None, DEFAULT):
+            args += ["--max-num-seqs", str(mns)]
+        if mbt not in (None, DEFAULT):
+            args += ["--max-num-batched-tokens", str(mbt)]
+        if kv not in (None, "auto"):
+            args += ["--kv-cache-dtype", str(kv)]
+        if ep:
+            args += ["--enable-expert-parallel"]
     args += list(variant.get("extra_args") or [])
     return {
         "params": n,
+        "engine": engine,
         "model": variant["model"],
         "served_name": variant.get("served_name") or "search-model",
         "replica_devices": build_replica_devices(n, space),
         "engine_args": args,
+        "kv_cache_dtype": (None if kv in (None, "auto") else str(kv)),
+        "gpu_memory_utilization": gmu,
         "tp": tp,
     }

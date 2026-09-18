@@ -199,3 +199,137 @@ def test_hit_rate_survives_multi_replica_rollup():
     agg = aggregate_replica_metrics([{"prefix_cache_hit_rate": 0.2},
                                      {"prefix_cache_hit_rate": 0.4}])
     assert agg["prefix_cache_hit_rate"] == pytest.approx(0.3)
+
+
+# ── The arena searches engines too ────────────────────────────────────
+
+def test_candidate_summary_emits_the_right_dialect():
+    """The arena's dimensions are engine-neutral; the args it produces
+    must not be. A vLLM flag handed to trtllm-serve is a launch
+    failure, and vice versa."""
+    from simulator.search import (
+        Objective, SearchParams, SearchSpace, candidate_summary)
+
+    space = SearchSpace(
+        name="t",
+        engine="vllm_cuda",
+        model_variants={"m": {"model": "org/M"}},
+        dimensions={"engine": ["vllm_cuda_multi", "trtllm"],
+                    "model_variant": ["m"], "tp": [1], "dp": [1],
+                    "max_num_seqs": [2048], "kv_cache_dtype": ["fp8"]},
+        device_groups=[[0]],
+        objective=Objective(),
+        search=SearchParams(),
+    )
+    vllm = candidate_summary(
+        {"engine": "vllm_cuda_multi", "model_variant": "m", "tp": 1,
+         "dp": 1, "max_num_seqs": 2048, "kv_cache_dtype": "fp8"}, space)
+    trt = candidate_summary(
+        {"engine": "trtllm", "model_variant": "m", "tp": 1, "dp": 1,
+         "max_num_seqs": 2048, "kv_cache_dtype": "fp8"}, space)
+
+    assert "--max-num-seqs" in vllm["engine_args"]
+    assert "--kv-cache-dtype" in vllm["engine_args"]
+    # trtllm-serve spells it differently, and has NO kv dtype flag —
+    # it rides in the options YAML instead.
+    assert "--max_batch_size" in trt["engine_args"]
+    assert "--max-num-seqs" not in trt["engine_args"]
+    assert "--kv-cache-dtype" not in trt["engine_args"]
+    assert trt["kv_cache_dtype"] == "fp8"
+    assert trt["engine"] == "trtllm"
+
+
+def test_arena_offers_only_staged_engines(monkeypatch):
+    """An engine whose image is not on the box is not a choice. A host
+    with one runtime gets no engine dimension at all, so combinatorics
+    are unchanged until a second one is actually pulled."""
+    import simulator.engine_runtimes as er
+    from simulator.arena import full_arena
+
+    monkeypatch.setattr(er, "local_images",
+                        lambda: {"vllm/vllm-openai:latest"})
+    assert "engine" not in full_arena(catalog=[])["dimensions"]
+
+    monkeypatch.setattr(er, "local_images", lambda: {
+        "vllm/vllm-openai:latest",
+        "nvcr.io/nvidia/tensorrt-llm/release:1.2.1"})
+    dims = full_arena(catalog=[])["dimensions"]
+    assert dims["engine"] == ["vllm_cuda_multi", "trtllm"]
+
+
+# ── Prepare: staging a runtime is what unlocks it ─────────────────────
+
+def test_engines_endpoint_reports_staging(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import simulator.engine_runtimes as er
+    from simulator.service import create_app
+
+    monkeypatch.setattr(er, "local_images",
+                        lambda: {"vllm/vllm-openai:latest"})
+    c = TestClient(create_app())
+    d = c.get("/api/engines").json()
+    assert d["available"] == ["vllm_cuda_multi"]
+    by = {r["engine"]: r for r in d["runtimes"]}
+    assert by["trtllm"]["staged"] is False
+    # The size is part of the offer: these images are tens of GB.
+    assert by["trtllm"]["approx_gb"] > 50
+
+
+def test_pull_refuses_when_the_disk_cannot_take_it(monkeypatch):
+    """A 59 GB pull onto a volume without room wedges the host. Refuse
+    with the actual numbers instead of discovering it at 98%."""
+    from fastapi.testclient import TestClient
+
+    import simulator.engine_runtimes as er
+    from simulator.service import create_app
+
+    monkeypatch.setattr(er, "local_images", lambda: set())
+    monkeypatch.setattr(er, "image_store_root", lambda: {
+        "path": "/var/lib/containerd", "free_gb": 5.0,
+        "note": "images are stored by containerd, not under "
+                "Docker's data-root"})
+    c = TestClient(create_app())
+    r = c.post("/api/engines/pull", json={"engine": "trtllm"})
+    assert r.status_code == 507
+    detail = r.json()["detail"]
+    assert "59 GB" in detail and "5 GB" in detail
+    # Names the directory that actually fills up, not data-root.
+    assert "/var/lib/containerd" in detail
+
+
+def test_benchmark_config_builds_for_either_engine(monkeypatch):
+    from simulator.service import _build_custom_config
+
+    import simulator.arena as arena
+    monkeypatch.setattr(arena, "hardware", lambda: {
+        "count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+        "vram_per_gpu_gb": 96.0})
+
+    def _cfg_for(engine, tmp):
+        import yaml
+        p = _build_custom_config({
+            "model_id": "nvidia/Qwen3.6-35B-A3B-NVFP4", "engine": engine,
+            "replicas": 8, "tp": 1, "max_num_seqs": 2048,
+            "kv_cache_dtype": "fp8", "gpu_memory_utilization": 0.95,
+        }, tmp)
+        return yaml.safe_load(p.read_text())["engine"]
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        from pathlib import Path
+        tmp = Path(td)
+        v = _cfg_for("vllm_cuda_multi", tmp)
+        t = _cfg_for("trtllm", tmp)
+
+    assert v["type"] == "vllm_cuda_multi"
+    assert "--max-num-seqs" in v["vllm_extra_flags"]
+    assert t["type"] == "trtllm"
+    # TensorRT-LLM takes no vLLM flags; the shape rides on the config.
+    assert "vllm_extra_flags" not in t
+    assert t["max_num_seqs"] == 2048
+    assert t["kv_cache_dtype"] == "fp8"
+    # Both record the SAME canonical shape, which is what makes an
+    # engine comparison a comparison.
+    for k in ("max_num_seqs", "kv_cache_dtype", "gpu_memory_utilization"):
+        assert v[k] == t[k]

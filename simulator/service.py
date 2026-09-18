@@ -157,6 +157,10 @@ class ModelAddRequest(BaseModel):
     specialty: Optional[str] = None
 
 
+class EnginePullRequest(BaseModel):
+    engine: str                         # key in engine_runtimes.RUNTIMES
+
+
 class StorageRequest(BaseModel):
     hf_cache: str      # absolute directory for model weights
 
@@ -484,6 +488,7 @@ def create_app(
     app.state.optimizer: Optional[dict] = None       # {proc, profile, started_at, log}
     app.state.optimizer_catalog: Optional[dict] = None
     app.state.model_downloads: dict = {}             # model -> {proc, log, started_at}
+    app.state.engine_pulls: dict = {}                # engine -> {proc, log, started_at}
     # Serializes start_run's check-then-create (see below).
     app.state.start_lock = asyncio.Lock()
 
@@ -1372,6 +1377,93 @@ def create_app(
             "proc": proc, "log": str(log_path), "started_at": time.time(),
         }
         return {"accepted": True, "model": req.model, "log": str(log_path)}
+
+    # ── engine runtimes (Prepare: stage the servers) ─────────────
+    # An engine is only offered downstream once its image is on the
+    # box (see engine_runtimes). These two endpoints are what make
+    # that gate openable from the UI.
+
+    def _pull_progress(log_path: str) -> str:
+        """Last meaningful line of a docker pull log — the layer
+        progress, so a 59 GB pull is visibly alive."""
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 8192))
+                lines = f.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            return ""
+        for ln in reversed(lines):
+            ln = ln.strip()
+            if ln and not ln.startswith("\r"):
+                return ln[:200]
+        return ""
+
+    @app.get("/api/engines")
+    async def engines_status() -> dict:
+        from .engine_runtimes import image_store_root, runtime_status
+        rows = await asyncio.to_thread(runtime_status)
+        store = await asyncio.to_thread(image_store_root)
+        for r in rows:
+            pull = app.state.engine_pulls.get(r["engine"])
+            if not pull:
+                continue
+            rc = pull["proc"].poll()
+            r["pull"] = {
+                "running": rc is None,
+                "returncode": rc,
+                "started_at": pull["started_at"],
+                "log": pull["log"],
+                "progress": await asyncio.to_thread(
+                    _pull_progress, pull["log"]),
+            }
+        return {"runtimes": rows, "image_store": store,
+                "available": [r["engine"] for r in rows if r["staged"]]}
+
+    @app.post("/api/engines/pull", status_code=202)
+    async def engines_pull(req: EnginePullRequest) -> dict:
+        from .engine_runtimes import RUNTIMES, image_store_root
+        meta = RUNTIMES.get(req.engine)
+        if meta is None:
+            raise HTTPException(
+                404, f"unknown engine '{req.engine}' — one of "
+                     f"{', '.join(RUNTIMES)}")
+        existing = app.state.engine_pulls.get(req.engine)
+        if existing and existing["proc"].poll() is None:
+            raise HTTPException(409, "a pull is already running for this "
+                                     "engine")
+        # Refuse rather than wedge the disk: these images are tens of
+        # GB and the store is frequently not on the roomiest volume.
+        store = await asyncio.to_thread(image_store_root)
+        free = store.get("free_gb")
+        if free is not None and free < meta["approx_gb"] * 1.1:
+            raise HTTPException(
+                507, f"{meta['label']} needs about {meta['approx_gb']} GB "
+                     f"but only {free:.0f} GB is free on "
+                     f"{store.get('path')}"
+                     + (f" ({store['note']})" if store.get("note") else "")
+                     + " — free space or move the image store first")
+        log_dir = runs_base / "engine_pulls"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / (
+            req.engine + f"_{time.strftime('%Y%m%dT%H%M%S')}.log")
+        log_file = open(log_path, "w")
+        try:
+            proc = subprocess.Popen(
+                ["docker", "pull", meta["image"]],
+                stdout=log_file, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        except FileNotFoundError as e:
+            log_file.close()
+            raise HTTPException(
+                500, f"docker not found ({e}) — the service host must be "
+                     f"the one that launches engines") from e
+        app.state.engine_pulls[req.engine] = {
+            "proc": proc, "log": str(log_path), "started_at": time.time(),
+        }
+        return {"accepted": True, "engine": req.engine,
+                "image": meta["image"], "log": str(log_path)}
 
     # ── engine optimizer (find the best launch shape first) ──────
     # Runs scripts/engine_optimizer.py as a supervised subprocess —

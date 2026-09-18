@@ -133,6 +133,13 @@ def accumulate(stats: list, acc: _Acc) -> _Acc:
         used, mx = kv.get("usedNumBlocks"), kv.get("maxNumBlocks")
         if used is not None and mx:
             g["kv_cache_used_pct"] = 100.0 * float(used) / float(mx)
+        # The size of the pool the engine actually built. This is what
+        # makes the memory translation verifiable instead of merely
+        # plausible: two engines given "the same" share should end up
+        # holding a comparable number of KV tokens, and if they do not,
+        # the comparison is measuring allocation, not performance.
+        if mx and kv.get("tokensPerBlock"):
+            g["kv_cache_tokens"] = float(mx) * float(kv["tokensPerBlock"])
         if kv.get("cacheHitRate") is not None:
             g["prefix_cache_hit_rate"] = float(kv["cacheHitRate"])
         if kv.get("reusedBlocks") is not None:
@@ -166,14 +173,18 @@ def llm_api_options(cfg) -> dict:
     if dtype and str(dtype) != "auto":
         kv["dtype"] = str(dtype)
     if getattr(cfg, "gpu_memory_utilization", None) is not None:
-        # NOTE: NOT the same quantity as vLLM's --gpu-memory-utilization.
-        # vLLM's is a fraction of TOTAL VRAM covering weights + KV;
-        # TensorRT-LLM's is the fraction of what remains FREE AFTER
-        # weights are loaded, for KV alone. Same operator intent ("how
-        # hard to push the KV pool"), different denominator — so the
-        # two engines' numbers are not interchangeable and a run
-        # records which engine produced it.
-        kv["free_gpu_memory_fraction"] = float(cfg.gpu_memory_utilization)
+        # The operator's number means "share of total VRAM", which is
+        # NOT what this flag takes -- see engines/vram.py. Translate,
+        # never pass through: the same digits describe materially
+        # different allocations in the two engines.
+        from .vram import to_engine_fraction
+        value, why = to_engine_fraction(
+            "trtllm", float(cfg.gpu_memory_utilization),
+            total_vram_gb=getattr(cfg, "vram_per_gpu_gb", None),
+            weights_gb=getattr(cfg, "model_weights_gb", None))
+        log.info("trtllm KV fraction: %s", why)
+        if value is not None:
+            kv["free_gpu_memory_fraction"] = round(value, 4)
     opts: dict = {}
     if kv:
         opts["kv_cache_config"] = kv

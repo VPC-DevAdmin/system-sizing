@@ -39,9 +39,6 @@ ENGINE_CAVEATS = {
         "vLLM just takes fp8, and it has no nvfp4 path at all. capsim "
         "translates what it can and refuses the rest rather than "
         "measuring a different precision than you asked for.",
-        "GPU memory fraction is a share of TOTAL VRAM here, the same "
-        "quantity vLLM names — so a vLLM number carries over, but a "
-        "TensorRT-LLM one does not.",
     ],
     "ktransformers": [
         "This is a heterogeneous engine: attention runs on the GPU "
@@ -67,6 +64,11 @@ ENGINE_CAVEATS = {
         "than read off a cumulative counter, because TensorRT-LLM "
         "exposes no token counter. capsim detects any gap in that "
         "stream and reports the total as a lower bound if one occurs.",
+        "GPU memory fraction is translated for you: this engine's own "
+        "flag sizes the KV pool against free memory AFTER weights "
+        "load, so capsim converts your share-of-total-VRAM into the "
+        "value that yields the same pool. Each run reports the KV "
+        "tokens actually allocated, so you can check it landed.",
     ],
 }
 

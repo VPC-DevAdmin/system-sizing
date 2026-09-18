@@ -270,7 +270,9 @@
             <option value="pack">pack — fill one domain first</option>
             <option value="spread">spread — balance across domains</option>
           </select></label>
-        <label>GPU memory fraction <span class="hint">(weights + KV pool)</span>
+        <label>GPU memory fraction
+          <span class="hint">(share of each GPU's total VRAM, for
+            weights + KV)</span>
           <input id="eng-gmu" type="number" step="0.01" min="0.5"
             max="0.98"></label>
         <label>Max sequences / replica

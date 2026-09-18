@@ -94,7 +94,6 @@ def test_kv_dtype_travels_in_the_options_yaml():
     opts = llm_api_options(_cfg(kv_cache_dtype="fp8",
                                 gpu_memory_utilization=0.95))
     assert opts["kv_cache_config"]["dtype"] == "fp8"
-    assert opts["kv_cache_config"]["free_gpu_memory_fraction"] == 0.95
     assert opts["return_perf_metrics"] is True
     # "auto" means "say nothing" — not a literal dtype.
     assert "dtype" not in llm_api_options(

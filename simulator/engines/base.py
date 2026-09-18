@@ -198,6 +198,13 @@ class Engine:
     )
 
     @staticmethod
+    def _label(line: str, key: str) -> Optional[str]:
+        """One label value out of a Prometheus exposition line."""
+        import re
+        m = re.search(rf'{re.escape(key)}="([^"]*)"', line)
+        return m.group(1) if m else None
+
+    @staticmethod
     def _parse_prometheus(text: str) -> dict[str, float]:
         """Extract a small set of metric values from Prometheus exposition.
 
@@ -237,10 +244,29 @@ class Engine:
             # SGLang retracts requests under KV pressure; same signal
             # as vLLM preemptions -- latency cliffs follow.
             "sglang:num_retracted_reqs": "preemptions_total",
+            # KV pool capacity, in tokens. Not a performance number --
+            # it is how the one-memory-knob translation gets CHECKED.
+            # Two engines given "the same" share of VRAM should hold a
+            # comparable number of KV tokens; if they do not, a
+            # throughput comparison between them is measuring
+            # allocation rather than engine quality.
+            "sglang:max_total_num_tokens": "kv_cache_tokens",
         }
         out: dict[str, float] = {}
         for line in text.splitlines():
             if not line or line.startswith("#"):
+                continue
+            # vLLM publishes its KV pool size as LABELS on an Info
+            # metric whose value is a constant 1.0, so the usual
+            # name->value path cannot see it.
+            if line.startswith("vllm:cache_config_info"):
+                blocks = Engine._label(line, "num_gpu_blocks")
+                size = Engine._label(line, "block_size")
+                if blocks and size:
+                    try:
+                        out["kv_cache_tokens"] = float(blocks) * float(size)
+                    except ValueError:
+                        pass
                 continue
             # name{labels} value  OR  name value
             try:

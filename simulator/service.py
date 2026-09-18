@@ -247,6 +247,19 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
             422, f"unknown engine {engine_type!r} — expected one of "
                  f"{', '.join(GPU_ENGINES)}")
     knobs = canonical(custom)
+    # Inputs to the one-memory-knob translation: the operator sets a
+    # share of TOTAL VRAM and each engine gets whatever its own flag
+    # needs to mean the same allocation (engines/vram.py).
+    from .engines.vram import weights_per_gpu_gb
+    from .model_catalog import load_model_catalog
+    weights = None
+    try:
+        for e in load_model_catalog():
+            if e.get("id") == model_id:
+                weights = weights_per_gpu_gb(e.get("approx_size_gb"), tp)
+                break
+    except Exception:  # noqa: BLE001
+        weights = None
     from .engines.knobs import unsupported
     why = unsupported(engine_type, knobs)
     if why:
@@ -259,6 +272,8 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
         "port": 9100,
         "host": "127.0.0.1",
         "startup_timeout_s": 1800,
+        "vram_per_gpu_gb": hw.get("vram_per_gpu_gb"),
+        "model_weights_gb": weights,
         **to_engine_config(engine_type, knobs),
     }
     if engine_type == "trtllm":

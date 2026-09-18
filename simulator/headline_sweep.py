@@ -304,8 +304,21 @@ async def run_headline_sweep(
 
     acc_offered = [ladder[0]]   # current offered count, for snapshots
 
+    kv_capacity: float | None = None
     try:
         await smoke_test_engine(engine)
+        # The KV pool the engine actually built. Recorded because the
+        # memory knob is TRANSLATED per engine (see engines/vram.py):
+        # two engines given the same share of VRAM should end up with
+        # comparable room, and if they did not, a throughput
+        # comparison between them is measuring allocation instead.
+        try:
+            kv_capacity = (await _metrics()).get("kv_cache_tokens")
+            if kv_capacity:
+                log.info("KV pool: %.0f tokens across the box "
+                         "(engine %s)", kv_capacity, cfg.engine.type)
+        except Exception:  # noqa: BLE001
+            kv_capacity = None
         for idx, n in enumerate(ladder):
             acc_offered[0] = n
             if progress is not None:
@@ -439,6 +452,10 @@ async def run_headline_sweep(
             "cohort_name": cohort.name,
             "model": cfg.engine.model_id,
             "engine": cfg.engine.type,
+            # Whole-box KV capacity in tokens: what makes a
+            # cross-engine result comparable rather than merely
+            # adjacent. None when the engine does not report it.
+            "kv_cache_tokens": kv_capacity,
             "ladder": ladder,
             "shape": _cohort_shape(cohort),
             "rungs": [asdict(r) for r in rungs],

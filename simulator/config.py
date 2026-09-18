@@ -140,6 +140,13 @@ class EngineConfig:
     # engine-specific flags) is what lets a run say WHAT shape was
     # measured independently of WHICH engine measured it, and what
     # makes the engine itself a searchable dimension.
+    # Inputs to the one-memory-knob translation (engines/vram.py):
+    # per-GPU VRAM and the weight footprint of this model. Filled in
+    # when the config is generated; None means "could not translate,
+    # use the engine's own default" rather than a guessed number.
+    vram_per_gpu_gb: float | None = None
+    model_weights_gb: float | None = None
+
     max_num_seqs: int | None = None
     max_num_batched_tokens: int | None = None
     kv_cache_dtype: str | None = None       # "auto" | "fp8" | "nvfp4"

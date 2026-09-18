@@ -471,6 +471,14 @@
         mean that collector isn't available on this host.</div></section>
     <section class="panel"><h2>Token rates &middot; prefill vs decode</h2>
       <canvas id="chart-tokens"></canvas>
+      <div class="chart-note">During a saturation sweep these are
+        smoothed. The workload holds a fixed number of streams of
+        identical length, so streams that start together finish
+        together and the engine's token counters advance in convoys
+        about one request-duration apart &mdash; raw per-sample rates
+        spike to several times their own mean at the same instants in
+        both series, which looks like instability and is only the
+        sampling. The area under the curve is the real number.</div>
       <div class="chart-note">From the engine's own counters. Prefill (prompt ingest) is
         compute-bound; decode (generation) is memory-bandwidth-bound — spiky prefill with
         sagging decode is the query-storm signature.</div></section>

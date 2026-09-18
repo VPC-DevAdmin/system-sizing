@@ -1125,8 +1125,16 @@ const Live = {
       t.gpu_sm_util_pct,
     ]);
     if (t.prefill_tok_s != null || t.decode_tok_s != null) {
-      this.push(this.charts.tokens, fmt.clock(ts),
-        [t.prefill_tok_s, t.decode_tok_s]);
+      // Smoothed in headline mode. A closed-loop sweep holds N streams
+      // of IDENTICAL fixed length, so streams launched together finish
+      // together and the engine's counters advance in convoys roughly
+      // one request-duration apart. Differencing that per sample makes
+      // both series spike to ~5.6x their own mean at the same instants
+      // -- which reads as instability and is only the sampling.
+      const pair = Headline.active
+        ? Headline.smoothTokens(t.prefill_tok_s, t.decode_tok_s)
+        : [t.prefill_tok_s, t.decode_tok_s];
+      this.push(this.charts.tokens, fmt.clock(ts), pair);
     }
     let host = null, gpus = null;
     try { host = t.host_json ? JSON.parse(t.host_json) : null; } catch { /* skip */ }
@@ -4372,6 +4380,21 @@ const Headline = {
       l.data.datasets[1].data = rungs.map(r => r.tpot_p95_ms ?? null);
       l.update("none");
     }
+  },
+
+  /* Rolling median of both token rates. Median rather than mean so a
+   * single convoy cannot drag the line, and the same window as the
+   * hero so the two agree. */
+  _tok: { pre: [], dec: [] },
+
+  smoothTokens(pre, dec) {
+    const mid = (arr, v) => {
+      if (v != null) { arr.push(v); if (arr.length > HL_RATE_WINDOW) arr.shift(); }
+      if (!arr.length) return null;
+      const s = [...arr].sort((a, b) => a - b);
+      return s[Math.floor(s.length / 2)];
+    };
+    return [mid(this._tok.pre, pre), mid(this._tok.dec, dec)];
   },
 
   sysChart(key, canvas, datasets, yOpts) {

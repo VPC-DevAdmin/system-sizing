@@ -235,6 +235,19 @@ def llm_api_options(cfg) -> dict:
     # Stock trtllm-serve is not its fast path, and the gap is not
     # subtle. Every value below is a DEFAULT: an explicit setting in
     # trtllm_llm_api_options still wins, so a run can opt out.
+    # WATCH THE INTERACTION WITH max_seq_len. CUDA graph warmup runs at
+    # max_seq_len for every captured batch size, and TensorRT-LLM sizes
+    # the KV pool from what is left AFTERWARDS. Measured here: graphs
+    # for 22 batch sizes up to 1024 at max_seq_len 16384 left a KV pool
+    # of 49,120 tokens where the same box gave 303,584 with graphs off
+    # -- throughput more than halved, because the engine could then
+    # admit only ~128 requests per replica.
+    #
+    # So max_seq_len must reflect the workload, not an arbitrary
+    # ceiling: a 128->256 benchmark needs 384, and every token of
+    # headroom above that is charged twice, once to the graphs and
+    # once to the pool. Each sweep records kv_cache_tokens, which is
+    # where this shows up if it happens again.
     mns = getattr(cfg, "max_num_seqs", None)
     if mns:
         # CUDA graphs are OFF out of the box -- cuda_graph_config

@@ -235,32 +235,26 @@ def llm_api_options(cfg) -> dict:
     # Stock trtllm-serve is not its fast path, and the gap is not
     # subtle. Every value below is a DEFAULT: an explicit setting in
     # trtllm_llm_api_options still wins, so a run can opt out.
-    # WATCH THE INTERACTION WITH max_seq_len. CUDA graph warmup runs at
-    # max_seq_len for every captured batch size, and TensorRT-LLM sizes
-    # the KV pool from what is left AFTERWARDS. Measured here: graphs
-    # for 22 batch sizes up to 1024 at max_seq_len 16384 left a KV pool
-    # of 49,120 tokens where the same box gave 303,584 with graphs off
-    # -- throughput more than halved, because the engine could then
-    # admit only ~128 requests per replica.
+    # CUDA graphs are deliberately NOT enabled by default, despite
+    # being off in the shipped config and despite decode replay being
+    # where a large-batch workload spends its time. Measured on this
+    # box, twice: capturing graphs for batch sizes up to max_batch_size
+    # consumes memory that TensorRT-LLM sizes the KV pool from
+    # AFTERWARDS, and the trade is catastrophic rather than marginal.
     #
-    # So max_seq_len must reflect the workload, not an arbitrary
-    # ceiling: a 128->256 benchmark needs 384, and every token of
-    # headroom above that is charged twice, once to the graphs and
-    # once to the pool. Each sweep records kv_cache_tokens, which is
-    # where this shows up if it happens again.
-    mns = getattr(cfg, "max_num_seqs", None)
-    if mns:
-        # CUDA graphs are OFF out of the box -- cuda_graph_config
-        # ships with max_batch_size 0 -- so decode replays eagerly,
-        # which is where a large-batch decode workload spends nearly
-        # all of its time. Padding matters as much as enabling them:
-        # without it a graph is only reused when the batch size
-        # matches exactly, and at saturation the batch moves
-        # constantly.
-        opts.setdefault("cuda_graph_config", {
-            "enable_padding": True,
-            "max_batch_size": int(mns),
-        })
+    #   graphs off        KV pool 303,584 tokens   37,494 tok/s
+    #   graphs, seq 16384 KV pool  49,120 tokens   18,397 tok/s
+    #   graphs, seq  2048 KV pool  34,784 tokens
+    #
+    # At 164 KB of KV per token for this model, the pool is ~50 GB
+    # without graphs and ~5 GB with them: the engine can then admit
+    # only about 128 requests per replica, and a saturation benchmark
+    # is entirely about how many it can admit. Shrinking max_seq_len
+    # did not rescue it.
+    #
+    # Set cuda_graph_config explicitly in trtllm_llm_api_options to
+    # opt in -- it is likely the right trade on a smaller model, where
+    # the weights leave enough room for both.
     # Without chunked prefill a prefill batch occupies the iteration
     # and decode waits behind it. At 128-token prompts and thousands
     # of streams that is a steady tax on the number being measured.

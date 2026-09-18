@@ -235,30 +235,28 @@ def llm_api_options(cfg) -> dict:
     # Stock trtllm-serve is not its fast path, and the gap is not
     # subtle. Every value below is a DEFAULT: an explicit setting in
     # trtllm_llm_api_options still wins, so a run can opt out.
-    # CUDA graphs are deliberately NOT enabled by default, despite
-    # being off in the shipped config and despite decode replay being
-    # where a large-batch workload spends its time. Measured on this
-    # box, twice: capturing graphs for batch sizes up to max_batch_size
-    # consumes memory that TensorRT-LLM sizes the KV pool from
-    # AFTERWARDS, and the trade is catastrophic rather than marginal.
+    # TWO KNOBS THAT LOOK LIKE TUNING AND ARE NOT, both measured here:
     #
-    #   graphs off        KV pool 303,584 tokens   37,494 tok/s
-    #   graphs, seq 16384 KV pool  49,120 tokens   18,397 tok/s
-    #   graphs, seq  2048 KV pool  34,784 tokens
+    # enable_chunked_prefill breaks KV sizing outright. TensorRT-LLM
+    # sizes the pool in two phases -- an estimation dry run, then the
+    # real allocation -- and with chunked prefill on, the real pool
+    # never grows past the dry run:
     #
-    # At 164 KB of KV per token for this model, the pool is ~50 GB
-    # without graphs and ~5 GB with them: the engine can then admit
-    # only about 128 requests per replica, and a saturation benchmark
-    # is entirely about how many it can admit. Shrinking max_seq_len
-    # did not rescue it.
+    #   default          dry run 32,768 -> real 304,160 tokens (46.4 GiB)
+    #   chunked prefill  dry run 32,768 -> real  32,768 tokens ( 5.0 GiB)
     #
-    # Set cuda_graph_config explicitly in trtllm_llm_api_options to
-    # opt in -- it is likely the right trade on a smaller model, where
-    # the weights leave enough room for both.
-    # Without chunked prefill a prefill batch occupies the iteration
-    # and decode waits behind it. At 128-token prompts and thousands
-    # of streams that is a steady tax on the number being measured.
-    opts.setdefault("enable_chunked_prefill", True)
+    # A ninefold smaller pool means the engine admits roughly 128
+    # requests per replica instead of a thousand, and a saturation
+    # benchmark is entirely about how many it can admit: 18,397 tok/s
+    # against 37,494 with it off.
+    #
+    # cuda_graph_config is left alone because TensorRT-LLM already
+    # captures graphs by default (34 batch sizes here). Setting it
+    # explicitly only changes WHICH sizes are captured, and the
+    # collapse above was first misattributed to it -- the two changes
+    # had been made together, and only chunked prefill mattered.
+    #
+    # Both remain available through trtllm_llm_api_options.
     # Detokenisation runs on the serving loop by default (0 workers).
     # At a thousand streams per replica that is enough to bound
     # throughput on CPU while the GPU waits.

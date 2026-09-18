@@ -279,11 +279,18 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
         "model_quant": model_quant,
         **to_engine_config(engine_type, knobs),
     }
-    if engine_type == "trtllm":
-        # One code path for every replica count: the TensorRT engine
-        # is a DockerReplicaEngine, so even a single replica is
+    if engine_type != "vllm_cuda_multi":
+        # Every non-vLLM engine is a DockerReplicaEngine, so one code
+        # path covers any replica count -- even a single replica is
         # described by replica_devices.
-        engine["type"] = "trtllm"
+        #
+        # This MUST NOT be a list of known engines with a fall-through
+        # to vLLM. It was, and adding SGLang and KTransformers to the
+        # picker silently routed both to vllm_cuda_multi: the runs
+        # launched, measured and reported as though the requested
+        # engine had been used. Anything not explicitly vLLM keeps its
+        # own type, so a new engine cannot be quietly absorbed again.
+        engine["type"] = engine_type
         engine["replica_devices"] = devices
     elif replicas > 1:
         engine["type"] = "vllm_cuda_multi"
@@ -575,10 +582,14 @@ def create_app(
                     label = f"{short} — whole box, {len(reps)} replicas"
                     detail = (f"tp{tp} per replica"
                               if tp > 1 else "one GPU per replica")
-                elif engine_type == "trtllm":
+                elif engine_type in ("trtllm", "sglang_cuda",
+                                     "ktransformers"):
+                    from .engines.knobs import ENGINE_LABELS
                     reps = eng.get("replica_devices") or []
                     tp = max((len(g) for g in reps), default=1)
-                    label = f"{short} — TensorRT-LLM, {len(reps)} replicas"
+                    label = (f"{short} — "
+                             f"{ENGINE_LABELS.get(engine_type, engine_type)}"
+                             f", {len(reps)} replicas")
                     detail = (f"tp{tp} per replica"
                               if tp > 1 else "one GPU per replica")
                 elif engine_type == "vllm_cuda":
@@ -595,8 +606,8 @@ def create_app(
                     label = f"Remote endpoint{' — ' + short if short else ''}"
             except Exception:  # noqa: BLE001
                 pass
-            gpu_engine = engine_type in ("vllm_cuda", "vllm_cuda_multi",
-                                         "trtllm")
+            from .engines.knobs import GPU_ENGINES
+            gpu_engine = engine_type in GPU_ENGINES or engine_type == "vllm_cuda"
             # The searched engine dimensions, extracted so the
             # benchmark form can prefill its Advanced settings with
             # exactly what the optimization landed on.
@@ -612,7 +623,8 @@ def create_app(
                     # Which server the profile was measured on, so the
                     # benchmark form prefills the engine too and does
                     # not silently re-measure on a different one.
-                    "engine": ("trtllm" if engine_type == "trtllm"
+                    "engine": (engine_type
+                               if engine_type in GPU_ENGINES
                                else "vllm_cuda_multi"),
                     "replicas": len(reps) if reps else 1,
                     "tp": (max((len(g) for g in reps), default=1) if reps

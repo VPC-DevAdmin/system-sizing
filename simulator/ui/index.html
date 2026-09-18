@@ -17,9 +17,10 @@
   <nav id="tabs">
     <button data-view="prepare" class="active">Prepare</button>
     <button data-view="optimizer">Optimize</button>
-    <button data-view="control">Benchmark</button>
+    <button data-view="roofline">Roofline</button>
+    <button data-view="control">Workload</button>
     <button data-view="results">Results</button>
-    <button data-view="personas">Workloads</button>
+    <button data-view="personas">Edit&nbsp;workloads</button>
   </nav>
   <div id="status-pill" class="pill idle">idle</div>
 </header>
@@ -178,7 +179,116 @@
   </section>
 </main>
 
-<!-- ── 3 · Benchmark (setup + live telemetry, one place) ───────── -->
+<!-- ── Roofline ─────────────────────────────────────────────────
+     The opposite question from the Workload tab. That one asks how
+     many users a given deployment holds; this asks what the largest
+     sustained token rate this hardware can produce is, over every
+     model, engine and shape worth trying. It runs for hours, so the
+     page is built to be correct for someone who was not watching. -->
+<main id="view-roofline" class="view">
+  <section class="panel">
+    <h2>Roofline autopilot</h2>
+    <p class="msg">Stages the models, searches every engine against
+      every shape for each of them, confirms each model's winner at
+      full resolution, and reports the matrix. Hours, not minutes
+      &mdash; every step is written to disk as it completes, so you can
+      close this page and the numbers will be here when you come back.
+      Interrupted runs resume where they stopped rather than repeating
+      engine launches.</p>
+
+    <div class="row wrap">
+      <label>Models
+        <select id="rf-model-mode">
+          <option value="auto">Pick the most promising automatically</option>
+          <option value="cached">Only models already downloaded</option>
+          <option value="manual">Choose below</option>
+        </select></label>
+      <label>How many
+        <input id="rf-model-limit" type="number" min="1" max="8" value="3"
+          style="width:64px"></label>
+      <label>Prompt length
+        <select id="rf-input-tokens">
+          <option value="128">128 tokens (vendor convention)</option>
+          <option value="256">256 tokens</option>
+          <option value="512">512 tokens</option>
+        </select></label>
+      <label class="check"><input type="checkbox" id="rf-confirm" checked>
+        Confirm each winner <span class="hint">(full ladder)</span></label>
+      <button id="rf-start" class="primary">Start roofline</button>
+      <button id="rf-stop" class="danger" disabled>Stop</button>
+      <span id="rf-msg" class="msg"></span>
+    </div>
+
+    <div id="rf-engines" class="chips" style="margin-top:12px"></div>
+    <div id="rf-shapes" class="row wrap" style="margin-top:10px"></div>
+    <div id="rf-cost" class="callout" style="margin-top:12px"></div>
+    <div id="rf-candidates" style="margin-top:12px"></div>
+  </section>
+
+  <section class="panel" id="rf-progress-panel" hidden>
+    <h2>Progress</h2>
+    <div id="rf-progress" class="msg"></div>
+    <div id="rf-staging" class="hl-board" style="margin-top:10px"></div>
+  </section>
+
+  <section class="panel" id="rf-best-panel" hidden>
+    <h2>Best measured</h2>
+    <div class="hl-hero" style="padding:0">
+      <div class="hl-main">
+        <div class="hl-label" id="rf-best-label">output tokens / sec</div>
+        <div class="hl-now" id="rf-best">&mdash;</div>
+        <div class="hl-sub" id="rf-best-detail"></div>
+      </div>
+      <div class="hl-side">
+        <div class="hl-kv"><span>streams held</span><b id="rf-best-streams">&mdash;</b></div>
+        <div class="hl-kv"><span>efficiency</span><b id="rf-best-eff">&mdash;</b>
+          <i class="msg">tokens per watt</i></div>
+        <div class="hl-kv"><span>KV cache</span><b id="rf-best-kv">&mdash;</b></div>
+        <div class="hl-kv"><span>measured</span><b id="rf-best-count">&mdash;</b>
+          <i class="msg">cells that settled</i></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="rf-matrix-panel" hidden>
+    <h2>Model &times; engine</h2>
+    <div id="rf-heatmap"></div>
+    <div class="chart-note">Best sustained output rate for each pairing,
+      shaded against the fastest cell. Empty means not measured yet;
+      hatched means it was attempted and failed. The row and column
+      winners matter more than the single best cell &mdash; they are
+      what tell you which engine to reach for on the next model.</div>
+  </section>
+
+  <div class="quad" id="rf-charts" hidden>
+    <section class="panel"><h2>By model</h2>
+      <canvas id="chart-rf-models"></canvas>
+      <div class="chart-note">Each model at its best engine and shape.
+        A model wins here by being cheap per token, not by being
+        small: KV traffic at large batch dwarfs the weight reads.</div></section>
+    <section class="panel"><h2>By engine</h2>
+      <canvas id="chart-rf-engines"></canvas>
+      <div class="chart-note">Each engine at its best model and shape.
+        Held constant within a pairing: same model, same shape, same
+        ladder, same stopping rule.</div></section>
+  </div>
+
+  <section class="panel" id="rf-results-panel" hidden>
+    <h2>Every cell</h2>
+    <table id="rf-results">
+      <thead><tr><th>Model</th><th>Engine</th><th>mns</th><th>Shape</th>
+        <th>Output tok/s</th><th>Streams</th><th>TTFT p95</th>
+        <th>TPOT p95</th><th>KV %</th><th>GPU W</th><th>tok/W</th>
+        <th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="chart-note">Confirmed rows were re-measured at full
+      resolution and are the ones to publish; the rest are search rungs,
+      coarse by design and used only to rank.</div>
+  </section>
+</main>
+
+<!-- ── Workload benchmark (setup + live telemetry, one place) ──── -->
 <main id="view-control" class="view">
   <section class="panel">
     <h2>Start a capacity benchmark</h2>

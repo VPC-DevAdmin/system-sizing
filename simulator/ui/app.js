@@ -4099,15 +4099,26 @@ const Engines = {
 
 const HL_SYS_WINDOW = 240;        // ~4 min of system-graph history
 
-// Engines advance their token counters in BURSTS -- SGLang jumps by
-// thousands on one sample and hundreds on the next -- so a rate
-// differenced over a single second swings by an order of magnitude
-// while the engine is in perfect steady state. Measured on this box:
-// one-second samples ranged 3.4k-108k while the true sustained rate
-// over 30s was 52.8k. The sweep already averages over 15-second
-// chunks, so only the live display was misleading; this smooths it to
-// match. Median, not mean, so one burst cannot drag the figure.
+// Engines advance their token counters in BURSTS. A closed-loop sweep
+// holds a fixed number of streams of identical length, so streams that
+// start together finish together and the counters discharge in convoys
+// about one request-duration apart -- measured here, a median 15.3s
+// apart against a 1.9s sample interval, with 14% of samples reading
+// near zero because nothing had completed yet.
+//
+// So the window must cover a convoy, and the average across it MUST BE
+// THE MEAN. A median looks tempting -- it stops one burst dragging the
+// line -- but the bursts ARE the tokens, and discarding them discards
+// real work: on this data a rolling median reads 39.9% BELOW the true
+// rate while a rolling mean lands within 1.1%. Quietly under-reporting
+// throughput by two fifths is far worse than a jagged line.
 const HL_RATE_WINDOW = 12;
+
+/* Mean of a short window, ignoring gaps. */
+function windowMean(arr) {
+  const v = arr.filter(x => x != null);
+  return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+}
 
 const Headline = {
   active: false,
@@ -4382,19 +4393,17 @@ const Headline = {
     }
   },
 
-  /* Rolling median of both token rates. Median rather than mean so a
-   * single convoy cannot drag the line, and the same window as the
-   * hero so the two agree. */
+  /* Rolling MEAN of both token rates -- see HL_RATE_WINDOW for why a
+   * median is the wrong average here. Same window as the hero, so the
+   * chart and the big number always agree. */
   _tok: { pre: [], dec: [] },
 
   smoothTokens(pre, dec) {
-    const mid = (arr, v) => {
+    const avg = (arr, v) => {
       if (v != null) { arr.push(v); if (arr.length > HL_RATE_WINDOW) arr.shift(); }
-      if (!arr.length) return null;
-      const s = [...arr].sort((a, b) => a - b);
-      return s[Math.floor(s.length / 2)];
+      return windowMean(arr);
     };
-    return [mid(this._tok.pre, pre), mid(this._tok.dec, dec)];
+    return [avg(this._tok.pre, pre), avg(this._tok.dec, dec)];
   },
 
   sysChart(key, canvas, datasets, yOpts) {
@@ -4510,12 +4519,11 @@ const Headline = {
     if (t.decode_tok_s != null) {
       this._rate.push(t.decode_tok_s);
       if (this._rate.length > HL_RATE_WINDOW) this._rate.shift();
-      const sorted = [...this._rate].sort((a, b) => a - b);
-      const smoothed = sorted[Math.floor(sorted.length / 2)];
+      const smoothed = windowMean(this._rate);
       this._tel.decode = smoothed;
       $("#hl-now").textContent = Math.round(smoothed).toLocaleString();
       $("#hl-now-note").textContent = this._rate.length >= 3
-        ? `median of the last ${this._rate.length} samples — engines `
+        ? `mean of the last ${this._rate.length} samples — engines `
           + `advance their token counters in bursts, so a one-second `
           + `rate is not a measurement`
         : "";

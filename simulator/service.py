@@ -157,6 +157,20 @@ class ModelAddRequest(BaseModel):
     specialty: Optional[str] = None
 
 
+class RooflineRequest(BaseModel):
+    """Autopilot: stage models, search engines x shapes, confirm, report."""
+    # Explicit model list, or None to let the ranker choose.
+    models: Optional[list[str]] = None
+    model_limit: int = 3
+    cached_only: bool = False
+    engines: Optional[list[str]] = None      # None = every staged engine
+    max_num_seqs: Optional[list[int]] = None
+    output_tokens: Optional[list[int]] = None
+    input_tokens: int = 128
+    resume: bool = True
+    confirm_winners: bool = True
+
+
 class EnginePullRequest(BaseModel):
     engine: str                         # key in engine_runtimes.RUNTIMES
 
@@ -973,6 +987,57 @@ def create_app(
             if wid not in PERSONAS:
                 raise HTTPException(404, f"unknown persona '{wid}'")
             coro_factory = _cohort_coro(cfg, cohort_from_persona(wid), req)
+        elif kind == "roofline":
+            # Autopilot: stage models, search models x engines x shapes,
+            # confirm each model's winner. Hours long by design, and
+            # every step is persisted -- see simulator/roofline.py.
+            from .engine_runtimes import available_engines
+            from .roofline import run_roofline
+
+            spec = dict(req.workload.get("spec") or {})
+            engines = spec.get("engines") or available_engines()
+            if not engines:
+                raise HTTPException(
+                    422, "no engine runtime is staged — pull one in "
+                         "Prepare before starting a roofline")
+            models = spec.get("models")
+            if not models:
+                from .arena import hardware as _hw
+                from .model_catalog import load_model_catalog
+                from .roofline import pick_models
+                hw = await asyncio.to_thread(_hw)
+                cat = await asyncio.to_thread(load_model_catalog)
+                picked = await asyncio.to_thread(
+                    pick_models, cat,
+                    vram_per_gpu_gb=hw.get("vram_per_gpu_gb"),
+                    limit=int(spec.get("model_limit") or 3),
+                    cached_only=bool(spec.get("cached_only")))
+                models = [c.id for c in picked]
+            if not models:
+                raise HTTPException(422, "no model fits this host")
+
+            base_custom = dict(req.custom or {})
+            base_custom.setdefault("device", "gpu")
+            base_custom.setdefault("replicas", 8)
+            base_custom.setdefault("tp", 1)
+            base_custom.setdefault("gpu_memory_utilization", 0.95)
+            base_custom.setdefault("kv_cache_dtype", "fp8")
+            base_custom.setdefault("max_model_len", 2048)
+
+            def _build_rf(overrides: dict) -> Path:
+                return _build_custom_config(
+                    {**base_custom, **overrides}, runs_base)
+
+            shapes = {"max_num_seqs": spec.get("max_num_seqs"),
+                      "output_tokens": spec.get("output_tokens")}
+            coro_factory = lambda: run_roofline(  # noqa: E731
+                models=models, engines=engines,
+                shapes={k: v for k, v in shapes.items() if v},
+                input_tokens=int(spec.get("input_tokens") or 128),
+                build_config=_build_rf, runs_base=runs_base,
+                resume=bool(spec.get("resume", True)),
+                confirm_winners=bool(spec.get("confirm_winners", True)),
+            )
         elif kind == "headline_optimize":
             # Engine shape and request shape are coupled, so they are
             # searched together; see simulator/headline_optimize.py.
@@ -1026,7 +1091,8 @@ def create_app(
         else:
             raise HTTPException(
                 422, "workload.kind must be cohort | persona | "
-                     "headline_search | headline_optimize | sweep",
+                     "headline_search | headline_optimize | "
+                     "roofline | sweep",
             )
 
         if req.custom is not None:
@@ -1425,6 +1491,48 @@ def create_app(
             "proc": proc, "log": str(log_path), "started_at": time.time(),
         }
         return {"accepted": True, "model": req.model, "log": str(log_path)}
+
+    # ── roofline autopilot ───────────────────────────────────────
+    # A roofline run takes hours and the operator will not be watching.
+    # Everything it knows lives in runs/roofline.json, written after
+    # every step, so reconnecting is a GET rather than a replay of
+    # events nobody was listening for.
+
+    _roofline_state = runs_base / "roofline.json"
+
+    @app.get("/api/roofline")
+    async def roofline_state() -> dict:
+        from .roofline import load_state
+        st = await asyncio.to_thread(load_state, _roofline_state)
+        if st is None:
+            return {"kind": "roofline", "status": "none", "done": True,
+                    "results": [], "summary": {"best": None,
+                                               "best_per_model": {},
+                                               "best_per_engine": {}}}
+        doc = st.to_dict()
+        # Whether THIS service is still driving it. A state file left
+        # at "searching" by a killed process must not read as running.
+        active = app.state.active_run
+        doc["live"] = bool(active and active.get("running")
+                           and (active.get("workload") or {}).get("kind")
+                           == "roofline")
+        return doc
+
+    @app.get("/api/roofline/candidates")
+    async def roofline_candidates(limit: int = 12) -> dict:
+        """The ranked model shortlist, with the reasoning shown."""
+        from dataclasses import asdict as _asdict
+
+        from .arena import hardware
+        from .model_catalog import load_model_catalog
+        from .roofline import score_models
+
+        hw = await asyncio.to_thread(hardware)
+        cat = await asyncio.to_thread(load_model_catalog)
+        ranked = await asyncio.to_thread(
+            score_models, cat, vram_per_gpu_gb=hw.get("vram_per_gpu_gb"))
+        return {"hardware": hw,
+                "candidates": [_asdict(c) for c in ranked[:max(1, limit)]]}
 
     # ── engine runtimes (Prepare: stage the servers) ─────────────
     # An engine is only offered downstream once its image is on the

@@ -232,46 +232,35 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
         raise HTTPException(
             422, f"{replicas} replicas × tp{tp} does not fit "
                  f"{hw['count']} GPUs in domains {hw['device_groups']}")
-    flags: list[str] = []
-    if custom.get("max_num_seqs"):
-        flags += ["--max-num-seqs", str(int(custom["max_num_seqs"]))]
-    if custom.get("max_num_batched_tokens"):
-        flags += ["--max-num-batched-tokens",
-                  str(int(custom["max_num_batched_tokens"]))]
-    if custom.get("kv_cache_dtype") in ("fp8", "nvfp4"):
-        flags += ["--kv-cache-dtype", str(custom["kv_cache_dtype"])]
-    if custom.get("expert_parallel"):
-        flags += ["--enable-expert-parallel"]
-    if custom.get("trust_remote_code"):
-        # Executes model-repo Python inside the engine container, so
-        # it is opt-in per run and recorded in the run's engine
-        # summary — never a silent default. Architectures like
-        # Kimi-Linear ship their own config/model classes and cannot
-        # load without it.
-        flags += ["--trust-remote-code"]
-    gmu = custom.get("gpu_memory_utilization")
-    try:
-        gmu = min(0.98, max(0.5, float(gmu))) if gmu is not None else 0.92
-    except (TypeError, ValueError):
-        gmu = 0.92
+    from .engines.knobs import GPU_ENGINES, canonical, to_engine_config
+    engine_type = str(custom.get("engine") or "vllm_cuda_multi")
+    if engine_type not in GPU_ENGINES:
+        raise HTTPException(
+            422, f"unknown engine {engine_type!r} — expected one of "
+                 f"{', '.join(GPU_ENGINES)}")
+    knobs = canonical(custom)
     engine: dict = {
         "model_id": model_id,
-        "gpu_image": "vllm/vllm-openai:latest",
-        "max_model_len": int(custom.get("max_model_len") or 16384),
         "tensor_parallel_size": tp,
-        "gpu_memory_utilization": gmu,
         "port": 9100,
         "host": "127.0.0.1",
         "startup_timeout_s": 1800,
+        **to_engine_config(engine_type, knobs),
     }
-    if replicas > 1:
+    if engine_type == "trtllm":
+        # One code path for every replica count: the TensorRT engine
+        # is a DockerReplicaEngine, so even a single replica is
+        # described by replica_devices.
+        engine["type"] = "trtllm"
+        engine["replica_devices"] = devices
+    elif replicas > 1:
         engine["type"] = "vllm_cuda_multi"
+        engine["gpu_image"] = "vllm/vllm-openai:latest"
         engine["replica_devices"] = devices
     else:
         engine["type"] = "vllm_cuda"
+        engine["gpu_image"] = "vllm/vllm-openai:latest"
         engine["gpu_device_ids"] = devices[0]
-    if flags:
-        engine["vllm_extra_flags"] = flags
     doc = {
         "engine": engine,
         "telemetry": {"enable_pmu": True, "enable_memory_bandwidth": True,

@@ -132,6 +132,31 @@ class EngineConfig:
     # tp2×4: [[0,1],[2,3],[4,5],[6,7]]). Replica i serves on port+i.
     replica_devices: list | None = None
 
+    # ── Canonical launch knobs (engine-neutral) ───────────────────────
+    # The optimizer and the benchmark form speak in these terms, and
+    # each engine translates them into its own dialect — vLLM into
+    # command-line flags, TensorRT-LLM into flags plus an
+    # extra_llm_api_options YAML. Recording them here (not only as
+    # engine-specific flags) is what lets a run say WHAT shape was
+    # measured independently of WHICH engine measured it, and what
+    # makes the engine itself a searchable dimension.
+    max_num_seqs: int | None = None
+    max_num_batched_tokens: int | None = None
+    kv_cache_dtype: str | None = None       # "auto" | "fp8" | "nvfp4"
+    expert_parallel: bool = False
+    trust_remote_code: bool = False
+
+    # ── trtllm: TensorRT-LLM via trtllm-serve ─────────────────────────
+    # Launched through the image's OWN entrypoint — see engines/trtllm.py
+    # for why overriding it breaks the TensorRT import.
+    trtllm_image: str = "nvcr.io/nvidia/tensorrt-llm/release:1.2.1"
+    trtllm_backend: str = "pytorch"         # pytorch | tensorrt | _autodeploy
+    trtllm_extra_flags: list[str] = field(default_factory=list)
+    # Merged into the generated --extra_llm_api_options document; the
+    # only route to knobs trtllm-serve has no flag for (KV dtype above
+    # all).
+    trtllm_llm_api_options: dict = field(default_factory=dict)
+
     # ── remote: endpoint-only target (roadmap 1.1) ────────────────────
     # Benchmarks an OpenAI-compatible endpoint the simulator doesn't
     # launch or own. Host-local telemetry is skipped (it would measure
@@ -164,7 +189,7 @@ class EngineConfig:
 
     @property
     def base_url(self) -> str:
-        if self.type in ("vllm", "sglang", "vllm_cuda", "mock"):
+        if self.type in ("vllm", "sglang", "vllm_cuda", "mock", "trtllm"):
             return f"http://{self.host}:{self.port}/v1"
         if self.type == "vllm_dual_socket":
             return f"http://{self.host}:{self.litellm_port}/v1"

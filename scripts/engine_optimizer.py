@@ -1338,6 +1338,52 @@ def _trtllm_tail(cfg: EngineConfig, replica: ReplicaSpec) -> list[str]:
     return tail + argv + extra
 
 
+def _replica_tp(replica: ReplicaSpec) -> int:
+    return max(1, len(replica.gpus.split(",")) if replica.gpus else 1)
+
+
+def _sglang_tail(cfg: EngineConfig, replica: ReplicaSpec) -> list[str]:
+    """Image + CMD for an SGLang GPU replica.
+
+    Delegates to simulator.engines.sglang_cuda so the KV-dtype
+    translation (SGLang names the float8 representation outright) is
+    stated once and cannot drift from the benchmark path.
+    """
+    try:
+        from simulator.engines.sglang_cuda import DEFAULT_IMAGE, launch_argv
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from simulator.engines.sglang_cuda import DEFAULT_IMAGE, launch_argv
+    image = os.environ.get("OPTIMIZER_SGLANG_IMAGE", DEFAULT_IMAGE)
+    argv = launch_argv(
+        cfg.model or MODEL_PATH,
+        port=replica.port,
+        tp=_replica_tp(replica),
+        context_length=8192,
+        mem_fraction_static=cfg.gpu_memory_utilization,
+        kv_cache_dtype=cfg.kv_cache_dtype,
+        trust_remote_code=True,
+    )
+    extra = list(cfg.replica_args)
+    if extra[:1] == ["--tp"]:
+        extra = extra[2:]
+    return [image] + argv + extra
+
+
+def _ktransformers_tail(cfg: EngineConfig,
+                        replica: ReplicaSpec) -> list[str]:
+    """Image + CMD for a KTransformers replica."""
+    try:
+        from simulator.engines.ktransformers import DEFAULT_IMAGE, serve_argv
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from simulator.engines.ktransformers import DEFAULT_IMAGE, serve_argv
+    image = os.environ.get("OPTIMIZER_KTRANSFORMERS_IMAGE", DEFAULT_IMAGE)
+    argv = serve_argv(cfg.model or MODEL_PATH, port=replica.port,
+                      cache_lens=8192)
+    return [image] + argv + list(cfg.replica_args)
+
+
 def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
     """Build and run the docker command for one replica. Returns the
     container ID."""
@@ -1393,6 +1439,10 @@ def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
         args.extend(["-e", f"{k}={v}"])
     if cfg.engine == "trtllm":
         args.extend(_trtllm_tail(cfg, replica))
+    elif cfg.engine == "sglang_cuda":
+        args.extend(_sglang_tail(cfg, replica))
+    elif cfg.engine == "ktransformers":
+        args.extend(_ktransformers_tail(cfg, replica))
     else:
         args.append(IMAGE)
         args.extend([

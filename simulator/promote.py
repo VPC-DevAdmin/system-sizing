@@ -89,12 +89,13 @@ def _write_profile(
     replica_devices: Optional[list[list[int]]] = None,
     engine_type: str = "vllm_cuda_multi",
 ) -> tuple[str, Path]:
-    trtllm = engine_type == "trtllm"
+    # A winner must promote to a profile for the engine that WON it.
+    # Writing a vLLM profile for any other engine would silently
+    # re-measure the winning shape on the engine that did not win it.
+    NON_VLLM = ("trtllm", "sglang_cuda", "ktransformers")
+    trtllm = engine_type in NON_VLLM
     engine: dict[str, Any] = {
-        # A TensorRT-LLM winner must promote to a TensorRT-LLM
-        # profile. Writing a vLLM profile would silently re-measure
-        # the winning shape on the engine that did not win it.
-        "type": ("trtllm" if trtllm
+        "type": (engine_type if engine_type in NON_VLLM
                  else "vllm_cuda_multi" if replica_devices
                  else "vllm_cuda"),
         "model_id": model_id,
@@ -119,8 +120,11 @@ def _write_profile(
     elif gpu_device_ids:
         engine["gpu_device_ids"] = gpu_device_ids
     if extra_flags:
-        engine["trtllm_extra_flags" if trtllm
-               else "vllm_extra_flags"] = [str(f) for f in extra_flags]
+        key = {"trtllm": "trtllm_extra_flags",
+               "sglang_cuda": "sglang_extra_flags",
+               "ktransformers": "ktransformers_extra_flags",
+               }.get(engine_type, "vllm_extra_flags")
+        engine[key] = [str(f) for f in extra_flags]
     # No docker_volumes on purpose: the vllm_cuda launcher mounts the
     # RESOLVED hf cache (UI storage choice) when a profile doesn't pin one.
     doc = {
@@ -182,14 +186,16 @@ def promote_search_winner(
     warnings = []
     multi = len(replicas) > 1
     if multi:
-        promoted_as = ("trtllm" if engine_type == "trtllm"
+        promoted_as = (engine_type
+                       if engine_type in ("trtllm", "sglang_cuda",
+                                          "ktransformers")
                        else "vllm_cuda_multi")
         warnings.append(
             f"dp={len(replicas)} winner — promoted as {promoted_as}: "
             f"the benchmark drives ALL {len(replicas)} replicas with "
             f"sticky per-user routing (whole-box capacity, measured)."
         )
-    if engine_type == "trtllm":
+    if engine_type in ("trtllm", "sglang_cuda", "ktransformers"):
         kv = summary.get("kv_cache_dtype")
         if kv:
             fields["kv_cache_dtype"] = kv

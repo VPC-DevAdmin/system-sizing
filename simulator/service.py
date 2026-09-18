@@ -247,6 +247,12 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
             422, f"unknown engine {engine_type!r} — expected one of "
                  f"{', '.join(GPU_ENGINES)}")
     knobs = canonical(custom)
+    from .engines.knobs import unsupported
+    why = unsupported(engine_type, knobs)
+    if why:
+        # Refuse rather than approximate: measuring "close enough" here
+        # answers a different question than the one asked.
+        raise HTTPException(422, f"{engine_type} cannot run this shape — {why}")
     engine: dict = {
         "model_id": model_id,
         "tensor_parallel_size": tp,

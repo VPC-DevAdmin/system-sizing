@@ -900,6 +900,10 @@ def candidate_summary(params: dict, space: SearchSpace) -> dict[str, Any]:
     gmu = _dim_value(n, "gpu_memory_utilization", space)
     ep = _dim_value(n, "expert_parallel", space) == "on"
 
+    _mns = None if mns in (None, DEFAULT) else int(mns)
+    _mbt = None if mbt in (None, DEFAULT) else int(mbt)
+    _kv = None if kv in (None, "auto") else str(kv)
+
     if engine == "trtllm":
         # trtllm-serve spells every one of these differently, and KV
         # dtype has no flag at all -- it rides in the options YAML the
@@ -907,23 +911,35 @@ def candidate_summary(params: dict, space: SearchSpace) -> dict[str, Any]:
         from .engines.trtllm import serve_argv
         args = serve_argv(
             variant["model"], port=0, tp=tp,
-            max_batch_size=(None if mns in (None, DEFAULT) else int(mns)),
-            max_num_tokens=(None if mbt in (None, DEFAULT) else int(mbt)),
-            expert_parallel=ep,
+            max_batch_size=_mns, max_num_tokens=_mbt, expert_parallel=ep,
         )
         # The driver owns model/host/port/entrypoint; keep only the
         # tuning flags it appends.
         args = args[args.index("--tp_size"):]
+    elif engine == "sglang_cuda":
+        from .engines.sglang_cuda import launch_argv
+        args = launch_argv(
+            variant["model"], port=0, tp=tp,
+            max_running_requests=_mns, max_prefill_tokens=_mbt,
+            mem_fraction_static=float(gmu) if gmu is not None else None,
+            kv_cache_dtype=_kv, expert_parallel=ep,
+        )
+        args = args[args.index("--tp"):]
+    elif engine == "ktransformers":
+        from .engines.ktransformers import serve_argv as kt_argv
+        args = kt_argv(variant["model"], port=0,
+                       max_batch_size=_mns)
+        args = args[args.index("--max_batch_size"):] if _mns else []
     else:
         args = ["--gpu-memory-utilization", str(gmu)]
         if tp > 1:
             args += ["--tensor-parallel-size", str(tp)]
-        if mns not in (None, DEFAULT):
-            args += ["--max-num-seqs", str(mns)]
-        if mbt not in (None, DEFAULT):
-            args += ["--max-num-batched-tokens", str(mbt)]
-        if kv not in (None, "auto"):
-            args += ["--kv-cache-dtype", str(kv)]
+        if _mns:
+            args += ["--max-num-seqs", str(_mns)]
+        if _mbt:
+            args += ["--max-num-batched-tokens", str(_mbt)]
+        if _kv:
+            args += ["--kv-cache-dtype", _kv]
         if ep:
             args += ["--enable-expert-parallel"]
     args += list(variant.get("extra_args") or [])

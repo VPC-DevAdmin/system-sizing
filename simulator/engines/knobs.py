@@ -22,15 +22,42 @@ from __future__ import annotations
 
 # Engines the benchmark and optimizer may choose between, in the order
 # the UI offers them.
-GPU_ENGINES = ("vllm_cuda_multi", "trtllm")
+GPU_ENGINES = ("vllm_cuda_multi", "trtllm", "sglang_cuda", "ktransformers")
 
 ENGINE_LABELS = {
     "vllm_cuda_multi": "vLLM",
     "vllm_cuda": "vLLM (single engine)",
     "trtllm": "TensorRT-LLM",
+    "sglang_cuda": "SGLang",
+    "ktransformers": "KTransformers",
 }
 
 ENGINE_CAVEATS = {
+    "sglang_cuda": [
+        "KV cache precision is named differently: SGLang wants the "
+        "float8 representation spelled out (fp8_e5m2 / fp8_e4m3) where "
+        "vLLM just takes fp8, and it has no nvfp4 path at all. capsim "
+        "translates what it can and refuses the rest rather than "
+        "measuring a different precision than you asked for.",
+        "GPU memory fraction is a share of TOTAL VRAM here, the same "
+        "quantity vLLM names — so a vLLM number carries over, but a "
+        "TensorRT-LLM one does not.",
+    ],
+    "ktransformers": [
+        "This is a heterogeneous engine: attention runs on the GPU "
+        "while MoE experts run on the CPU, which is what lets it serve "
+        "models far larger than VRAM. Its throughput is bounded by CPU "
+        "and memory bandwidth, so it is not competing on the same axis "
+        "as the GPU-resident engines.",
+        "GPU-side knobs (KV cache precision, expert parallelism) have "
+        "no meaning here and are refused rather than silently ignored. "
+        "Batched tokens maps to its prefill chunk size.",
+        "Concurrency is modest by design -- its own docs demonstrate a "
+        "max batch of 4, where the GPU engines hold thousands of "
+        "streams. A tokens/sec ranking against them measures the wrong "
+        "thing; what this engine answers is whether a model too large "
+        "for VRAM can be served at all.",
+    ],
     "trtllm": [
         "GPU memory fraction means something different here: vLLM's is "
         "a share of TOTAL VRAM covering weights and KV together, "
@@ -42,6 +69,29 @@ ENGINE_CAVEATS = {
         "stream and reports the total as a lower bound if one occurs.",
     ],
 }
+
+
+# Knobs an engine has no way to express. Measuring "close enough"
+# here would silently answer a different question than the one asked,
+# which is worse than refusing -- the search records the candidate as
+# unreachable and moves on.
+def unsupported(engine_type: str, knobs: dict) -> str | None:
+    """Why ``engine_type`` cannot run this shape as specified."""
+    kv = knobs.get("kv_cache_dtype")
+    if engine_type == "sglang_cuda":
+        from .sglang_cuda import kv_dtype_for_sglang
+        _value, reason = kv_dtype_for_sglang(kv)
+        if reason:
+            return reason
+    if engine_type == "ktransformers":
+        if kv and kv != "auto":
+            return ("KTransformers does not expose a KV cache precision "
+                    "knob — its KV lives in host memory under its own "
+                    "scheme")
+        if knobs.get("expert_parallel"):
+            return ("expert parallelism is not applicable: KTransformers "
+                    "already places every expert on the CPU")
+    return None
 
 
 def canonical(custom: dict) -> dict:
@@ -109,9 +159,9 @@ def to_engine_config(engine_type: str, knobs: dict) -> dict:
         "expert_parallel": bool(k.get("expert_parallel")),
         "trust_remote_code": bool(k.get("trust_remote_code")),
     }
-    if engine_type == "trtllm":
-        # trtllm-serve reads these off the config object directly
-        # (see engines/trtllm.build_replica_command), so no flag
+    if engine_type in ("trtllm", "sglang_cuda", "ktransformers"):
+        # These engines read the canonical fields off the config
+        # object directly (see each build_replica_command), so no flag
         # translation is needed beyond what is already above.
         return out
     flags = _vllm_flags(k)

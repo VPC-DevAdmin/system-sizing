@@ -222,11 +222,21 @@ class Engine:
             # means requests are being restarted — latency cliffs
             # follow. Distinct signal from queue depth.
             "vllm:num_preemptions_total": "preemptions_total",
-            # SGLang naming is in flux; best-effort matches.
+            # SGLang. Names verified against the observability
+            # collector in lmsysorg/sglang, not guessed: the queue
+            # gauge is num_queue_reqs (there is no num_waiting_reqs),
+            # and without the two token counters below the headline
+            # sweep -- which measures throughput as a delta of
+            # generation_tokens_total -- reads a flat zero.
             "sglang:num_running_reqs": "num_running",
-            "sglang:num_waiting_reqs": "queue_depth",
+            "sglang:num_queue_reqs": "queue_depth",
             "sglang:cache_hit_rate": "prefix_cache_hit_rate",
             "sglang:token_usage": "kv_cache_used_pct",
+            "sglang:prompt_tokens_total": "prompt_tokens_total",
+            "sglang:generation_tokens_total": "generation_tokens_total",
+            # SGLang retracts requests under KV pressure; same signal
+            # as vLLM preemptions -- latency cliffs follow.
+            "sglang:num_retracted_reqs": "preemptions_total",
         }
         out: dict[str, float] = {}
         for line in text.splitlines():

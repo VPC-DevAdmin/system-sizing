@@ -146,6 +146,17 @@ class EngineConfig:
     expert_parallel: bool = False
     trust_remote_code: bool = False
 
+    # ── sglang_cuda: SGLang on GPUs (the CPU path is ``sglang``) ──────
+    sglang_image: str = "lmsysorg/sglang:latest"
+
+    # ── ktransformers: heterogeneous CPU-expert / GPU-attention ───────
+    ktransformers_image: str = "approachingai/ktransformers:latest"
+    ktransformers_extra_flags: list[str] = field(default_factory=list)
+    # Optional GGUF/weights directory mounted for the CPU expert path.
+    ktransformers_gguf_path: str | None = None
+    # CPU threads the expert path may use. None -> the engine decides.
+    ktransformers_cpu_threads: int | None = None
+
     # ── trtllm: TensorRT-LLM via trtllm-serve ─────────────────────────
     # Launched through the image's OWN entrypoint — see engines/trtllm.py
     # for why overriding it breaks the TensorRT import.
@@ -189,7 +200,8 @@ class EngineConfig:
 
     @property
     def base_url(self) -> str:
-        if self.type in ("vllm", "sglang", "vllm_cuda", "mock", "trtllm"):
+        if self.type in ("vllm", "sglang", "vllm_cuda", "mock", "trtllm",
+                         "sglang_cuda", "ktransformers"):
             return f"http://{self.host}:{self.port}/v1"
         if self.type == "vllm_dual_socket":
             return f"http://{self.host}:{self.litellm_port}/v1"

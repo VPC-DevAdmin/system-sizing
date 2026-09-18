@@ -36,6 +36,22 @@ RUNTIMES: dict[str, dict] = {
         "blurb": "The default. Broad model coverage and the engine "
                  "every existing capsim result was measured on.",
     },
+    "sglang_cuda": {
+        "label": "SGLang",
+        "image": "lmsysorg/sglang:latest",
+        "approx_gb": 22,
+        "blurb": "RadixAttention prefix caching and an aggressive "
+                 "scheduler. Often the strongest on workloads with "
+                 "shared prefixes, which is most chat traffic.",
+    },
+    "ktransformers": {
+        "label": "KTransformers",
+        "image": "approachingai/ktransformers:latest",
+        "approx_gb": 18,
+        "blurb": "Heterogeneous: MoE experts on the CPU, attention on "
+                 "the GPU. Serves models far larger than VRAM — the "
+                 "reason this box has 2 TB of RAM and AMX.",
+    },
     "trtllm": {
         "label": "TensorRT-LLM",
         "image": "nvcr.io/nvidia/tensorrt-llm/release:1.2.1",

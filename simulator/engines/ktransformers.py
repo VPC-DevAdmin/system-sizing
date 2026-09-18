@@ -1,0 +1,117 @@
+"""KTransformers — MoE experts on the CPU, attention on the GPU.
+
+This engine is here because of what the box is, not because it is
+another GPU server. An XE7740 has two Xeon 6787P sockets with AMX and
+2 TB of RAM sitting next to the GPUs, and KTransformers is the engine
+built to use exactly that: it keeps attention and the dense path on
+the GPU and runs MoE expert matmuls on the CPU, so a model whose
+weights dwarf 8x96 GB of VRAM can still be served.
+
+That makes it a different KIND of measurement, and the reports should
+not pretend otherwise. The GPU-resident engines compete on tokens per
+second at a given concurrency; KTransformers competes on serving a
+model the others cannot load at all. Its throughput is bounded by CPU
+and memory bandwidth, so a straight tokens/sec ranking against vLLM
+flatters vLLM and answers a question nobody asked.
+
+Knobs that have no meaning here (KV precision, batched-token budget,
+expert parallelism) are refused by ``knobs.unsupported`` rather than
+accepted and ignored -- a silently dropped setting is how a search
+concludes the wrong thing.
+
+Concurrency needs the ``balance_serve`` backend; the older single-
+stream backends serve one request at a time, which would read as a
+catastrophic engine rather than the wrong launch flag.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional
+
+from .docker_replica import DockerReplicaEngine, gpus_arg_for
+
+log = logging.getLogger(__name__)
+
+DEFAULT_IMAGE = "approachingai/ktransformers:latest"
+
+# Batching backend. The default backend answers one request at a
+# time; without this the concurrency sweep measures a queue, not an
+# engine.
+DEFAULT_BACKEND = "balance_serve"
+
+
+def serve_argv(model: str, *, port: int,
+               gguf_path: str | None = None,
+               max_batch_size: int | None = None,
+               max_new_tokens: int | None = None,
+               cache_lens: int | None = None,
+               cpu_threads: int | None = None,
+               backend: str = DEFAULT_BACKEND,
+               extra: list[str] | None = None) -> list[str]:
+    """The container CMD: ``python -m ktransformers.server.main ...``.
+
+    KTransformers uses snake_case flags throughout, unlike every other
+    engine capsim drives.
+    """
+    argv = [
+        "python", "-m", "ktransformers.server.main",
+        "--model_path", model,
+        "--host", "0.0.0.0",
+        "--port", str(int(port)),
+        "--backend_type", backend,
+    ]
+    if gguf_path:
+        argv += ["--gguf_path", gguf_path]
+    if max_batch_size:
+        argv += ["--max_batch_size", str(int(max_batch_size))]
+    if max_new_tokens:
+        argv += ["--max_new_tokens", str(int(max_new_tokens))]
+    if cache_lens:
+        argv += ["--cache_lens", str(int(cache_lens))]
+    if cpu_threads:
+        argv += ["--cpu_infer", str(int(cpu_threads))]
+    argv += list(extra or [])
+    return argv
+
+
+class KTransformersEngine(DockerReplicaEngine):
+    """KTransformers replicas, sticky-routed by the pool.
+
+    Almost always ONE replica: the expert path wants every core and
+    the whole memory bandwidth of the box, so two replicas contend
+    with each other rather than doubling throughput.
+    """
+
+    ENGINE_NAME = "ktransformers"
+
+    def build_replica_command(self, index: int, devices: list[int],
+                              container_name: str) -> list[str]:
+        cfg = self.cfg
+        cmd = [
+            "docker", "run", "-d", "--rm",
+            "--name", container_name,
+            "--gpus", gpus_arg_for(devices),
+            "--ipc=host",
+            "--network", "host",
+        ]
+        cmd += self._mount_args()
+        gguf = getattr(cfg, "ktransformers_gguf_path", None)
+        if gguf and Path(gguf).exists():
+            cmd += ["-v", f"{gguf}:/gguf:ro"]
+        cmd += list(cfg.docker_extra_args or [])
+        cmd.append(getattr(cfg, "ktransformers_image", None) or DEFAULT_IMAGE)
+
+        return cmd + serve_argv(
+            cfg.model_local_path or cfg.model_id,
+            port=self._port(index),
+            gguf_path="/gguf" if (gguf and Path(gguf).exists()) else None,
+            max_batch_size=getattr(cfg, "max_num_seqs", None),
+            cache_lens=cfg.max_model_len,
+            cpu_threads=getattr(cfg, "ktransformers_cpu_threads", None),
+            extra=list(getattr(cfg, "ktransformers_extra_flags", None) or []),
+        )
+
+    def _ready_url(self, port: int) -> str:
+        return f"http://{self.cfg.host}:{port}/v1/models"

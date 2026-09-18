@@ -72,33 +72,59 @@ class _Acc:
     gauges: dict = field(default_factory=dict)
 
 
+def _active_batching(stat: dict) -> tuple[str, dict]:
+    """Whichever batching block the running backend is actually filling.
+
+    Both blocks are ALWAYS present. The pytorch backend fills
+    inflightBatchingStats and leaves staticBatchingStats as a block of
+    zeros -- so "use static if it exists" reads a real zero and reports
+    no work at all. Verified on 1.2.1: a 150-token completion produced
+    150 iterations, every one carrying numGenTokens 0 in the static
+    block alongside numGenRequests 1 in the inflight block.
+
+    Activity decides, not presence.
+    """
+    ibs = stat.get("inflightBatchingStats") or {}
+    if any(ibs.get(k) for k in ("numScheduledRequests", "numGenRequests",
+                                "numContextRequests", "numCtxTokens")):
+        return "inflight", ibs
+    sbs = stat.get("staticBatchingStats") or {}
+    if any(sbs.get(k) for k in ("numScheduledRequests", "numGenTokens",
+                                "numContextRequests", "numCtxTokens")):
+        return "static", sbs
+    return "none", {}
+
+
 def iteration_gen_tokens(stat: dict) -> float:
     """Decode tokens produced in ONE iteration.
 
-    The pytorch backend reports inflight-batching stats, where each
-    generating request emits ``avgNumDecodedTokensPerIter`` tokens
-    (1.0 normally, >1 under speculative decoding). The tensorrt
-    backend reports static-batching stats, which count gen tokens
-    directly.
+    Under inflight batching each generating request emits one token per
+    iteration. ``avgNumDecodedTokensPerIter`` would scale that for
+    speculative decoding, but the pytorch backend leaves it at 0.0 --
+    it is unpopulated, not a real multiplier -- so it is only trusted
+    when positive.
     """
-    sbs = stat.get("staticBatchingStats") or {}
-    if sbs.get("numGenTokens") is not None:
-        return float(sbs["numGenTokens"])
-    ibs = stat.get("inflightBatchingStats") or {}
-    if ibs:
-        n = float(ibs.get("numGenRequests") or 0)
-        per = ibs.get("avgNumDecodedTokensPerIter")
-        return n * (float(per) if per else 1.0)
+    # NOTE: the context iteration also emits each request's first
+    # token, and it is deliberately not counted -- with chunked
+    # prefill a request spans several context iterations and only the
+    # last produces a token, so counting them would OVERSTATE. The
+    # cost is at most one token per request (0.4% of a 256-token
+    # completion), and it errs low, which is the right direction for a
+    # number that gets published.
+    kind, blk = _active_batching(stat)
+    if kind == "static":
+        return float(blk.get("numGenTokens") or 0)
+    if kind == "inflight":
+        n = float(blk.get("numGenRequests") or 0)
+        per = blk.get("avgNumDecodedTokensPerIter") or 0
+        return n * (float(per) if float(per) > 0 else 1.0)
     return 0.0
 
 
 def iteration_prompt_tokens(stat: dict) -> float:
     """Prefill tokens processed in ONE iteration."""
-    for key in ("inflightBatchingStats", "staticBatchingStats"):
-        blk = stat.get(key) or {}
-        if blk.get("numCtxTokens") is not None:
-            return float(blk["numCtxTokens"])
-    return 0.0
+    _kind, blk = _active_batching(stat)
+    return float(blk.get("numCtxTokens") or 0)
 
 
 def accumulate(stats: list, acc: _Acc) -> _Acc:

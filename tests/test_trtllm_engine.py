@@ -3,6 +3,8 @@ accounting the headline number depends on."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from simulator.config import EngineConfig
@@ -121,11 +123,24 @@ def test_gen_tokens_from_inflight_batching():
     assert iteration_prompt_tokens(_stat(1, ctx_tokens=4096)) == 4096
 
 
-def test_gen_tokens_prefers_static_batching_when_present():
-    """The tensorrt backend counts gen tokens directly."""
-    s = _stat(1, gen_reqs=64)
-    s["staticBatchingStats"] = {"numGenTokens": 999, "numCtxTokens": 7}
+def test_static_batching_is_used_when_it_is_the_active_backend():
+    """The tensorrt backend counts gen tokens directly. It is chosen by
+    ACTIVITY, not presence -- both blocks always exist, and preferring
+    a merely-present static block reads the pytorch backend's zeros as
+    a genuine absence of work."""
+    s = _stat(1, gen_reqs=0)
+    s["inflightBatchingStats"] = {"numGenRequests": 0, "numCtxTokens": 0,
+                                  "numScheduledRequests": 0}
+    s["staticBatchingStats"] = {"numGenTokens": 999, "numCtxTokens": 7,
+                                "numScheduledRequests": 8}
     assert iteration_gen_tokens(s) == 999
+    assert iteration_prompt_tokens(s) == 7
+
+    # ...but an idle static block must never override live inflight work.
+    s2 = _stat(1, gen_reqs=64)
+    s2["staticBatchingStats"] = {"numGenTokens": 0, "numCtxTokens": 0,
+                                 "numScheduledRequests": 0}
+    assert iteration_gen_tokens(s2) == 64
 
 
 def test_accumulate_builds_a_monotonic_counter():
@@ -396,3 +411,66 @@ def test_iteration_stats_must_be_enabled_explicitly():
     # The queue the poller drains; an overflow would truncate the
     # token totals, which cannot be detected from the numbers alone.
     assert opts["iter_stats_max_iterations"] >= 1000
+
+
+# ── payloads captured verbatim from TensorRT-LLM 1.2.1 on the box ────
+
+_CTX_ITER = {
+    "iter": 1, "numActiveRequests": 1,
+    "inflightBatchingStats": {
+        "avgNumDecodedTokensPerIter": 0.0, "microBatchId": 0,
+        "numContextRequests": 1, "numCtxTokens": 39, "numGenRequests": 0,
+        "numPausedRequests": 0, "numScheduledRequests": 1},
+    "staticBatchingStats": {
+        "emptyGenSlots": 0, "numContextRequests": 0, "numCtxTokens": 0,
+        "numGenTokens": 0, "numScheduledRequests": 0},
+}
+_GEN_ITER = {
+    "iter": 2, "numActiveRequests": 1,
+    "inflightBatchingStats": {
+        "avgNumDecodedTokensPerIter": 0.0, "microBatchId": 0,
+        "numContextRequests": 0, "numCtxTokens": 0, "numGenRequests": 1,
+        "numPausedRequests": 0, "numScheduledRequests": 1},
+    "staticBatchingStats": {
+        "emptyGenSlots": 0, "numContextRequests": 0, "numCtxTokens": 0,
+        "numGenTokens": 0, "numScheduledRequests": 0},
+}
+
+
+def test_static_batching_zeros_do_not_mask_real_work():
+    """BOTH blocks are always present. The pytorch backend fills
+    inflightBatchingStats and leaves staticBatchingStats a block of
+    zeros, so "use static if it exists" reads a real zero and reports
+    no work at all -- a healthy server with a throughput of nothing."""
+    assert iteration_gen_tokens(_GEN_ITER) == 1.0
+    assert iteration_prompt_tokens(_CTX_ITER) == 39.0
+    # The context iteration does no decode work of its own.
+    assert iteration_gen_tokens(_CTX_ITER) == 0.0
+
+
+def test_unpopulated_decode_multiplier_is_not_trusted():
+    """avgNumDecodedTokensPerIter is 0.0 on this backend -- absent, not
+    a real multiplier. Taking it literally zeroes the throughput."""
+    assert iteration_gen_tokens(_GEN_ITER) == 1.0
+    spec = json.loads(json.dumps(_GEN_ITER))
+    spec["inflightBatchingStats"]["avgNumDecodedTokensPerIter"] = 3.0
+    spec["inflightBatchingStats"]["numGenRequests"] = 4
+    assert iteration_gen_tokens(spec) == 12.0     # honoured when real
+
+
+def test_a_real_completion_accumulates_its_tokens():
+    """The captured shape of a 150-token completion: one context
+    iteration then 149 decode iterations."""
+    acc = _Acc()
+    stats = [_CTX_ITER]
+    for i in range(2, 151):
+        s = json.loads(json.dumps(_GEN_ITER))
+        s["iter"] = i
+        stats.append(s)
+    accumulate(stats, acc)
+    snap = snapshot(acc)
+    assert snap["prompt_tokens_total"] == 39.0
+    # 149, not 150: the first token rides on the context iteration and
+    # is deliberately not counted (see iteration_gen_tokens).
+    assert snap["generation_tokens_total"] == 149.0
+    assert acc.dropped_iters == 0

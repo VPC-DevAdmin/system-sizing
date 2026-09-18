@@ -216,6 +216,13 @@ async def run_headline_sweep(
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
     if progress is not None:
+        progress.update({
+            "model": cfg.engine.model_id,
+            "engine": cfg.engine.type,
+            "shape": _cohort_shape(cohort),
+            "ladder": ladder,
+        })
+    if progress is not None:
         progress.update({"phase": "launching engine",
                          "rungs": len(ladder), "done": False})
     BUS.publish("run", {
@@ -429,6 +436,8 @@ async def run_headline_sweep(
                      n, rung.in_flight or 0, rung.out_tok_s or 0,
                      rung.ttft_p95_ms or 0)
             if progress is not None:
+                progress["rungs_done"] = [asdict(r) for r in rungs]
+                progress["kv_cache_tokens"] = kv_capacity
                 pk = peak_rung(rungs)
                 progress["peak"] = asdict(pk) if pk else None
 

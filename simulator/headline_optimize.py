@@ -208,7 +208,8 @@ async def run_headline_optimize(
             progress.update(kw)
 
     _emit(pairs=len(pairs), pair=0, phase="searching", done=False,
-          estimate_min=estimate_minutes(pairs))
+          estimate_min=estimate_minutes(pairs),
+          engines=engines_in(pairs), model=cfg.engine.model_id)
 
     for i, (eng, mns, out_tok) in enumerate(pairs, 1):
         cand = Candidate(engine=eng, max_num_seqs=mns,
@@ -255,7 +256,13 @@ async def run_headline_optimize(
                         eng, mns, input_tokens, out_tok, e)
         results.append(cand)
         best = rank(results)
-        _emit(best=asdict(best[0]) if best else None)
+        # The head-to-head, live. A single "best" hides the loser the
+        # moment one engine sweeps the top, which is the comparison the
+        # operator started the search to see.
+        _emit(best=asdict(best[0]) if best else None,
+              best_per_engine={k: asdict(v) for k, v
+                               in best_per_engine(results).items()},
+              done_candidates=[asdict(c) for c in results])
         log.info("  -> %s", "error: " + cand.error if cand.error
                  else f"{cand.out_tok_s:.0f} out tok/s at "
                       f"{cand.in_flight:.0f} streams")

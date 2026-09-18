@@ -310,6 +310,75 @@
     <div id="active-run-box" class="callout" hidden></div>
   </section>
 
+  <!-- ── Headline-only live view ──────────────────────────────────
+       Saturation runs answer a different question from capacity runs,
+       so they get a different instrument. Swapped in whenever a
+       headline workload is active; the capacity panels that have no
+       meaning here (arrival rate, session states, SLA steps) are
+       hidden rather than left showing dashes. -->
+  <div id="headline-live" hidden>
+    <section class="panel hl-hero">
+      <div class="hl-main">
+        <div class="hl-label">output tokens / sec</div>
+        <div class="hl-now" id="hl-now">&mdash;</div>
+        <div class="hl-sub">peak this sweep <b id="hl-peak">&mdash;</b>
+          <span id="hl-peak-at" class="msg"></span></div>
+      </div>
+      <div class="hl-side">
+        <div class="hl-kv"><span>held / offered</span>
+          <b id="hl-held">&mdash;</b>
+          <i id="hl-held-note" class="msg"></i></div>
+        <div class="hl-kv"><span>queued at engine</span>
+          <b id="hl-queue">&mdash;</b>
+          <i class="msg">streams waiting, not running</i></div>
+        <div class="hl-kv"><span>KV cache</span>
+          <b id="hl-kv">&mdash;</b>
+          <i id="hl-kvpool" class="msg"></i></div>
+        <div class="hl-kv"><span>GPU power</span>
+          <b id="hl-power">&mdash;</b>
+          <i id="hl-eff" class="msg"></i></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>What is under test</h2>
+      <div id="hl-under" class="hl-under msg">waiting&hellip;</div>
+      <div id="hl-board" class="hl-board"></div>
+    </section>
+
+    <div class="quad">
+      <section class="panel"><h2>Throughput vs concurrency</h2>
+        <canvas id="chart-hl-curve"></canvas>
+        <div class="chart-note">The saturation curve: sustained output
+          rate at each offered stream count. It climbs while the engine
+          can still batch more work and flattens when something binds —
+          KV capacity, memory bandwidth, or the engine's own batch
+          ceiling. The peak is the headline number.</div></section>
+      <section class="panel"><h2>Offered vs actually held</h2>
+        <canvas id="chart-hl-held"></canvas>
+        <div class="chart-note">Streams offered against streams the
+          engine really ran. While the two track, added concurrency is
+          being served; once held flattens below offered, the extra
+          streams are only queueing and latency grows for nothing.
+          That gap is the engine's ceiling, and it is why a headline
+          number needs a stream count beside it.</div></section>
+    </div>
+
+    <section class="panel">
+      <h2>Concurrency ladder</h2>
+      <table id="hl-ladder">
+        <thead><tr><th>Offered</th><th>Held</th><th>Output tok/s</th>
+          <th>Total tok/s</th><th>Queue</th><th>TTFT p95</th>
+          <th>TPOT p95</th><th>KV %</th><th>GPU W</th><th>tok/W</th>
+          <th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="chart-note">Every rung measured at steady state from
+        the engine's own counters. Latency is reported as the price of
+        the number, not as a gate &mdash; no SLA is enforced here.</div>
+    </section>
+  </div>
+
   <section class="panel statusbar">
     <div class="stat"><span class="k">Phase</span><span id="live-phase" class="v">&mdash;</span>
       <span class="c">warmup &rarr; measure &rarr; verdict</span></div>
@@ -355,7 +424,7 @@
       <div class="chart-note">From the engine's own counters. Prefill (prompt ingest) is
         compute-bound; decode (generation) is memory-bandwidth-bound — spiky prefill with
         sagging decode is the query-storm signature.</div></section>
-    <section class="panel"><h2>Session states</h2>
+    <section class="panel" id="panel-sessions"><h2>Session states</h2>
       <canvas id="chart-sessions"></canvas>
       <div class="chart-note">Where every session in the pool is right now: in prefill,
         streaming (decode), <b>warm</b> think (mid-conversation — their KV is the prefix
@@ -372,7 +441,7 @@
       per-core detail and NVMe/NIC counters land in the run DB every second.</div>
   </section>
 
-  <section class="panel">
+  <section class="panel" id="panel-steps">
     <h2>Completed steps</h2>
     <table id="steps-table">
       <thead><tr><th>Step</th><th>Load</th><th>Samples</th>

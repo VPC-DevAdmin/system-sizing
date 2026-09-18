@@ -821,6 +821,9 @@ const Control = {
       await this.loadCatalogs();
     }
     this.updateWorkloadNote();
+    // Saturation runs get their own instrument; see the Headline
+    // module for why the capacity panels do not fit them.
+    Headline.fromStatus(active);
     $("#stop-btn").disabled = !running;
     $("#start-btn").disabled = running;
     if (running) {
@@ -1083,6 +1086,7 @@ const Live = {
         t >= 1e6 ? `${(t / 1e6).toFixed(1)}M` :
         t >= 1e3 ? `${(t / 1e3).toFixed(1)}k` : `${t}`;
     }
+    Headline.onSnapshot(s);
     this.push(this.charts.pool, fmt.clock(ts),
       [s.pool_size, s.in_flight, s.queue_depth ?? null]);
     if (s.prefill_in_flight != null) {
@@ -1107,6 +1111,7 @@ const Live = {
   },
 
   onTelemetry(ts, t) {
+    Headline.onTelemetry(t);
     this.push(this.charts.host, fmt.clock(ts), [
       t.kv_cache_used_pct, t.cpu_util_bound_avg ?? t.cpu_util_avg,
       t.gpu_sm_util_pct,
@@ -4065,6 +4070,235 @@ const Engines = {
     this.refresh();
   },
 };
+
+
+/* ── Headline (saturation) live view ───────────────────────────────
+ * A capacity run and a saturation run answer different questions, so
+ * they need different instruments. The capacity statusbar has no
+ * arrival rate, no completed sessions and no warm-KV figure to show
+ * during a headline sweep -- it renders dashes where the operator is
+ * looking for a number. This swaps in the things a saturation run
+ * actually produces: the sustained output rate, the ladder that earns
+ * it, and what the box is spending to get there. */
+
+const Headline = {
+  active: false,
+  charts: {},
+  _tel: {},
+
+  setActive(on) {
+    if (on === this.active) return;
+    this.active = on;
+    $("#headline-live").hidden = !on;
+    $("#view-control").classList.toggle("headline-mode", on);
+  },
+
+  /* Driven by Control.pollStatus — the search's own progress dict. */
+  fromStatus(active) {
+    const w = active?.workload || {};
+    const isHeadline = w.kind === "headline_optimize"
+      || (w.kind === "persona" && (w.id || "").startsWith("headline_"));
+    this.setActive(Boolean(isHeadline && active?.running));
+    if (!this.active) return;
+    const p = active.progress || {};
+
+    // What is being measured, right now. A search runs many engines
+    // and shapes; without this the numbers below are unattributable.
+    const bits = [];
+    if (p.pairs) {
+      bits.push(`<b>candidate ${p.pair || 1} of ${p.pairs}</b>`);
+      const c = p.current || {};
+      if (c.engine) bits.push(`engine <b>${Engines.label(c.engine)}</b>`);
+      if (c.max_num_seqs) bits.push(`mns <b>${c.max_num_seqs}</b>`);
+      if (c.output_tokens) {
+        bits.push(`shape <b>${p.input_tokens || 128}&rarr;`
+          + `${c.output_tokens}</b>`);
+      }
+    } else {
+      if (p.engine) bits.push(`engine <b>${Engines.label(p.engine)}</b>`);
+      if (p.shape) bits.push(`shape <b>${p.shape}</b>`);
+    }
+    if (p.model) bits.push(`model <b>${p.model.split("/").pop()}</b>`);
+    if (p.rung) {
+      bits.push(`rung <b>${p.rung} of ${p.rungs}</b>`
+        + (p.concurrency ? ` at <b>${p.concurrency.toLocaleString()}</b>
+             streams` : ""));
+    }
+    if (p.phase) bits.push(p.phase);
+    $("#hl-under").innerHTML = bits.join(" &nbsp;·&nbsp; ")
+      || "waiting for the engine…";
+
+    this.renderBoard(p.best_per_engine, p.engines);
+    this.renderLadder(p.rungs_done || [], p.peak);
+    if (p.peak?.out_tok_s) {
+      $("#hl-peak").textContent = Math.round(p.peak.out_tok_s)
+        .toLocaleString();
+      $("#hl-peak-at").textContent = p.peak.in_flight
+        ? `at ${Math.round(p.peak.in_flight).toLocaleString()} streams`
+        : "";
+    }
+    if (p.kv_cache_tokens) {
+      $("#hl-kvpool").textContent =
+        `pool ${fmtCompact(p.kv_cache_tokens)} tokens`;
+    }
+  },
+
+  /* Head-to-head. A single "best" hides the loser the moment one
+   * engine sweeps the top, which is the comparison the search exists
+   * to produce. */
+  renderBoard(best, engines) {
+    const el = $("#hl-board");
+    const names = engines || (best ? Object.keys(best) : []);
+    if (!names || names.length < 2) { el.innerHTML = ""; return; }
+    const top = Math.max(...names.map(e => best?.[e]?.out_tok_s || 0));
+    el.innerHTML = names.map(e => {
+      const b = best?.[e];
+      const lead = b && b.out_tok_s === top && top > 0;
+      return `<div class="e ${lead ? "lead" : ""}">
+        <div class="n">${Engines.label(e)}</div>
+        <div class="t">${b?.out_tok_s
+          ? Math.round(b.out_tok_s).toLocaleString() : "—"}</div>
+        <div class="s">${b?.out_tok_s
+          ? `mns ${b.max_num_seqs} · ${b.input_tokens}→${b.output_tokens}`
+             + (b.in_flight
+                ? ` · ${Math.round(b.in_flight).toLocaleString()} streams`
+                : "")
+          : "not measured yet"}</div></div>`;
+    }).join("");
+  },
+
+  renderLadder(rungs, peak) {
+    const body = $("#hl-ladder tbody");
+    if (!rungs.length) {
+      body.innerHTML = `<tr><td colspan="11" class="msg">no rung has
+        settled yet — the first one takes a few minutes</td></tr>`;
+      return;
+    }
+    const peakC = peak?.concurrency;
+    body.innerHTML = rungs.map(r => {
+      const held = r.in_flight != null
+        ? Math.round(r.in_flight).toLocaleString() : "—";
+      const eff = (r.out_tok_s && r.gpu_power_w)
+        ? (r.out_tok_s / r.gpu_power_w).toFixed(1) : "—";
+      // Two honesty flags, in the row they belong to rather than a
+      // footnote: a rung the engine could not hold, and one that had
+      // not settled when it was measured.
+      const flags = [
+        r.held === false ? `<span class="status-marginal"
+          title="the engine ran well under what it was offered — the
+          extra streams only queued">ceiling</span>` : "",
+        r.steady_state === false ? `<span class="status-fail"
+          title="measured before the running batch and token rate
+          stopped moving — not a sustained number">unsettled</span>` : "",
+      ].filter(Boolean).join(" ");
+      return `<tr class="${r.concurrency === peakC ? "peak" : ""}">
+        <td>${r.concurrency.toLocaleString()}</td>
+        <td>${held}</td>
+        <td><b>${r.out_tok_s ? Math.round(r.out_tok_s).toLocaleString()
+          : "—"}</b></td>
+        <td>${r.total_tok_s ? Math.round(r.total_tok_s).toLocaleString()
+          : "—"}</td>
+        <td>${r.queue_depth != null
+          ? Math.round(r.queue_depth).toLocaleString() : "—"}</td>
+        <td>${r.ttft_p95_ms != null ? Math.round(r.ttft_p95_ms) + " ms"
+          : "—"}</td>
+        <td>${r.tpot_p95_ms != null ? r.tpot_p95_ms.toFixed(1) + " ms"
+          : "—"}</td>
+        <td>${r.kv_cache_pct != null ? r.kv_cache_pct.toFixed(0) + "%"
+          : "—"}</td>
+        <td>${r.gpu_power_w != null ? Math.round(r.gpu_power_w) : "—"}</td>
+        <td>${eff}</td>
+        <td>${flags}</td></tr>`;
+    }).join("");
+    this.drawCurves(rungs);
+  },
+
+  drawCurves(rungs) {
+    const labels = rungs.map(r => r.concurrency.toLocaleString());
+    if (!this.charts.curve) {
+      this.charts.curve = new Chart($("#chart-hl-curve"), {
+        type: "line",
+        data: { labels: [], datasets: [
+          { label: "output tok/s", data: [], borderColor: C.gold,
+            backgroundColor: fill(C.gold), tension: .3, fill: true },
+        ] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: { y: { beginAtZero: true },
+                    x: { title: { display: true,
+                                  text: "streams offered" } } },
+          plugins: { legend: { position: "bottom" } },
+        },
+      });
+      this.charts.held = new Chart($("#chart-hl-held"), {
+        type: "line",
+        data: { labels: [], datasets: [
+          { label: "offered", data: [], borderColor: C.muted || C.blue,
+            borderDash: [5, 4], tension: 0 },
+          { label: "held by the engine", data: [], borderColor: C.teal,
+            backgroundColor: fill(C.teal), tension: .3, fill: true },
+        ] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: { y: { beginAtZero: true },
+                    x: { title: { display: true,
+                                  text: "streams offered" } } },
+          plugins: { legend: { position: "bottom" } },
+        },
+      });
+    }
+    const c = this.charts.curve;
+    c.data.labels = labels;
+    c.data.datasets[0].data = rungs.map(r => r.out_tok_s ?? null);
+    c.update("none");
+    const h = this.charts.held;
+    h.data.labels = labels;
+    h.data.datasets[0].data = rungs.map(r => r.concurrency);
+    h.data.datasets[1].data = rungs.map(r => r.in_flight ?? null);
+    h.update("none");
+  },
+
+  /* Live numbers between rungs, so the hero is never stale. */
+  onSnapshot(s) {
+    if (!this.active) return;
+    const offered = s.pool_size, held = s.in_flight;
+    $("#hl-held").textContent = held != null
+      ? `${Math.round(held).toLocaleString()} / ${(offered ?? 0).toLocaleString()}`
+      : "—";
+    $("#hl-held-note").textContent =
+      (held != null && offered) ? `${Math.round(100 * held / offered)}% of
+        what was offered` : "";
+    $("#hl-queue").textContent = s.queue_depth != null
+      ? Math.round(s.queue_depth).toLocaleString() : "—";
+  },
+
+  onTelemetry(t) {
+    if (!this.active) return;
+    if (t.decode_tok_s != null) {
+      this._tel.decode = t.decode_tok_s;
+      $("#hl-now").textContent = Math.round(t.decode_tok_s).toLocaleString();
+    }
+    if (t.kv_cache_used_pct != null) {
+      $("#hl-kv").textContent = `${t.kv_cache_used_pct.toFixed(0)}%`;
+    }
+    if (t.gpu_power_w != null) {
+      this._tel.power = t.gpu_power_w;
+      $("#hl-power").textContent = `${Math.round(t.gpu_power_w)} W`;
+    }
+    // Tokens per watt is the number that survives a hardware refresh,
+    // and it is the one a power-capped rack is actually bounded by.
+    if (this._tel.decode && this._tel.power) {
+      $("#hl-eff").textContent =
+        `${(this._tel.decode / this._tel.power).toFixed(1)} tokens/watt`;
+    }
+  },
+};
+
+function fmtCompact(n) {
+  return n >= 1e9 ? `${(n / 1e9).toFixed(1)}B`
+    : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M`
+    : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : `${Math.round(n)}`;
+}
 
 /* ── boot ─────────────────────────────────────────────────────── */
 

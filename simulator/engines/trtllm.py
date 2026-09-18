@@ -188,9 +188,22 @@ def llm_api_options(cfg) -> dict:
     opts: dict = {}
     if kv:
         opts["kv_cache_config"] = kv
-    # Mounts /prometheus/metrics and enables per-request perf records.
-    # The JSON iteration stats this engine reads are always on, but the
-    # histograms are a useful cross-check on client-side latency.
+    # WITHOUT THIS THE SWEEP MEASURES NOTHING. Iteration-stats
+    # collection is OFF by default, and with it off /metrics answers
+    # 200 with an empty list -- so every throughput figure comes back
+    # zero while the server looks perfectly healthy. Verified on
+    # 1.2.1: the endpoint returned "[]" for a completed generation
+    # until this was set.
+    opts["enable_iter_perf_stats"] = True
+    # Depth of the queue /metrics drains. The poller empties it twice a
+    # second and a saturated decode step is a few tens of iterations a
+    # second, so this is generous; an overflow would silently truncate
+    # the token totals, which is the one failure this engine cannot
+    # detect from the numbers alone.
+    opts.setdefault("iter_stats_max_iterations", 1000)
+    # Also mounts /prometheus/metrics with per-request latency
+    # histograms -- not used for throughput, but a useful cross-check
+    # against the client-side percentiles.
     opts["return_perf_metrics"] = True
     extra = getattr(cfg, "trtllm_llm_api_options", None) or {}
     for k, v in extra.items():

@@ -384,3 +384,15 @@ def test_containerd_root_is_read_from_its_own_config(tmp_path):
     missing = str(tmp_path / "nope.toml")
     assert _containerd_root(missing, default=str(tmp_path)) == str(tmp_path)
     assert _containerd_root(missing, default=str(tmp_path / "absent")) is None
+
+
+def test_iteration_stats_must_be_enabled_explicitly():
+    """Collection is OFF by default. With it off, /metrics answers 200
+    with an empty list, so every throughput figure comes back zero
+    while the server looks perfectly healthy — a silent nothing, not
+    an error. Verified against 1.2.1."""
+    opts = llm_api_options(_cfg())
+    assert opts["enable_iter_perf_stats"] is True
+    # The queue the poller drains; an overflow would truncate the
+    # token totals, which cannot be detected from the numbers alone.
+    assert opts["iter_stats_max_iterations"] >= 1000

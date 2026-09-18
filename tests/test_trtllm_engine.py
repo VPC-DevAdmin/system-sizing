@@ -363,3 +363,25 @@ def test_a_tensorrt_winner_promotes_to_a_tensorrt_profile(tmp_path):
     assert "vllm_extra_flags" not in eng
     assert "gpu_image" not in eng
     assert eng["trtllm_extra_flags"] == ["--max_batch_size", "2048"]
+
+
+def test_containerd_root_is_read_from_its_own_config(tmp_path):
+    """docker info does not expose it, and under the containerd
+    snapshotter it -- not data-root -- is the directory that fills up.
+    Reporting free space from the wrong one is a confident wrong
+    answer, which is how a 59 GB pull wedges a root volume."""
+    from simulator.engine_runtimes import _containerd_root
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('version = 3\nroot = "/data/containerd"\n'
+                   'state = "/run/containerd"\n')
+    assert _containerd_root(str(cfg)) == "/data/containerd"
+
+    # Commented-out settings are not settings.
+    cfg.write_text('# root = "/wrong"\nversion = 3\n')
+    assert _containerd_root(str(cfg), default=str(tmp_path)) == str(tmp_path)
+
+    # No config at all -> containerd's built-in default, when present.
+    missing = str(tmp_path / "nope.toml")
+    assert _containerd_root(missing, default=str(tmp_path)) == str(tmp_path)
+    assert _containerd_root(missing, default=str(tmp_path / "absent")) is None

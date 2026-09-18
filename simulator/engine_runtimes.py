@@ -46,8 +46,8 @@ RUNTIMES: dict[str, dict] = {
     },
     "ktransformers": {
         "label": "KTransformers",
-        "image": "approachingai/ktransformers:latest",
-        "approx_gb": 18,
+        "image": "approachingai/ktransformers:v0.3.2-AVX512",
+        "approx_gb": 25,
         "blurb": "Heterogeneous: MoE experts on the CPU, attention on "
                  "the GPU. Serves models far larger than VRAM — the "
                  "reason this box has 2 TB of RAM and AMX.",
@@ -103,7 +103,10 @@ def image_store_root() -> dict:
         return out
     if "containerd" in driver:
         # The containerd snapshotter ignores data-root for image
-        # content. Its own root is the one that fills up.
+        # content. Its own root is the one that fills up, and it is
+        # frequently on a different filesystem -- reporting free space
+        # from data-root would be a confident wrong answer.
+        out["path"] = _containerd_root() or out["path"]
         out["note"] = ("images are stored by containerd, not under "
                        "Docker's data-root")
     if out["path"]:
@@ -113,6 +116,31 @@ def image_store_root() -> dict:
         except OSError:
             pass
     return out
+
+
+def _containerd_root(config_path: str = "/etc/containerd/config.toml",
+                     default: str = "/var/lib/containerd") -> str | None:
+    """containerd's image-store root.
+
+    ``docker info`` does not expose it, so read containerd's config:
+    a bare ``root = "..."`` at top level, else containerd's built-in
+    default. Returns None when neither exists on this host (a Mac, a
+    rootless setup) so the caller keeps whatever Docker reported.
+    """
+    from pathlib import Path
+    try:
+        for line in Path(config_path).read_text().splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() == "root":
+                root = value.strip().strip('"').strip("'")
+                if root:
+                    return root
+    except OSError:
+        pass
+    return default if Path(default).exists() else None
 
 
 def runtime_status(images: set[str] | None = None) -> list[dict]:

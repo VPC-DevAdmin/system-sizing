@@ -41,7 +41,11 @@ log = logging.getLogger(__name__)
 
 # Container-name prefixes capsim owns exclusively. Anything matching
 # is fair game for the pre-launch sweep.
-CAPSIM_CONTAINER_PREFIXES = ("vllm-", "trtllm-")
+# One per engine: a leftover container of ANY engine holds port 9100
+# and answers health checks for the wrong server, so every prefix must
+# be swept before every launch.
+CAPSIM_CONTAINER_PREFIXES = ("vllm-", "trtllm-", "sglang-",
+                             "ktransformers-")
 
 
 def gpus_arg_for(device_ids: list[int]) -> str:

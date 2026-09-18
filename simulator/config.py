@@ -150,12 +150,16 @@ class EngineConfig:
     sglang_image: str = "lmsysorg/sglang:latest"
 
     # ── ktransformers: heterogeneous CPU-expert / GPU-attention ───────
-    ktransformers_image: str = "approachingai/ktransformers:latest"
+    ktransformers_image: str = "approachingai/ktransformers:v0.3.2-AVX512"
     ktransformers_extra_flags: list[str] = field(default_factory=list)
     # Optional GGUF/weights directory mounted for the CPU expert path.
     ktransformers_gguf_path: str | None = None
     # CPU threads the expert path may use. None -> the engine decides.
     ktransformers_cpu_threads: int | None = None
+    # Per-architecture injection rules. KTransformers needs one to know
+    # which tensors go to the CPU and which stay on the GPU; capsim
+    # cannot infer it from the model id.
+    ktransformers_optimize_config: str | None = None
 
     # ── trtllm: TensorRT-LLM via trtllm-serve ─────────────────────────
     # Launched through the image's OWN entrypoint — see engines/trtllm.py

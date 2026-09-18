@@ -231,6 +231,32 @@ def llm_api_options(cfg) -> dict:
     # histograms -- not used for throughput, but a useful cross-check
     # against the client-side percentiles.
     opts["return_perf_metrics"] = True
+    # ── Performance defaults ──────────────────────────────────────
+    # Stock trtllm-serve is not its fast path, and the gap is not
+    # subtle. Every value below is a DEFAULT: an explicit setting in
+    # trtllm_llm_api_options still wins, so a run can opt out.
+    mns = getattr(cfg, "max_num_seqs", None)
+    if mns:
+        # CUDA graphs are OFF out of the box -- cuda_graph_config
+        # ships with max_batch_size 0 -- so decode replays eagerly,
+        # which is where a large-batch decode workload spends nearly
+        # all of its time. Padding matters as much as enabling them:
+        # without it a graph is only reused when the batch size
+        # matches exactly, and at saturation the batch moves
+        # constantly.
+        opts.setdefault("cuda_graph_config", {
+            "enable_padding": True,
+            "max_batch_size": int(mns),
+        })
+    # Without chunked prefill a prefill batch occupies the iteration
+    # and decode waits behind it. At 128-token prompts and thousands
+    # of streams that is a steady tax on the number being measured.
+    opts.setdefault("enable_chunked_prefill", True)
+    # Detokenisation runs on the serving loop by default (0 workers).
+    # At a thousand streams per replica that is enough to bound
+    # throughput on CPU while the GPU waits.
+    opts.setdefault("num_postprocess_workers", 4)
+
     extra = getattr(cfg, "trtllm_llm_api_options", None) or {}
     for k, v in extra.items():
         if k == "kv_cache_config" and isinstance(v, dict):

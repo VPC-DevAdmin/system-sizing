@@ -235,32 +235,22 @@ def llm_api_options(cfg) -> dict:
     # Stock trtllm-serve is not its fast path, and the gap is not
     # subtle. Every value below is a DEFAULT: an explicit setting in
     # trtllm_llm_api_options still wins, so a run can opt out.
-    # TWO KNOBS THAT LOOK LIKE TUNING AND ARE NOT, both measured here:
-    #
-    # enable_chunked_prefill breaks KV sizing outright. TensorRT-LLM
-    # sizes the pool in two phases -- an estimation dry run, then the
-    # real allocation -- and with chunked prefill on, the real pool
-    # never grows past the dry run:
-    #
-    #   default          dry run 32,768 -> real 304,160 tokens (46.4 GiB)
-    #   chunked prefill  dry run 32,768 -> real  32,768 tokens ( 5.0 GiB)
-    #
-    # A ninefold smaller pool means the engine admits roughly 128
-    # requests per replica instead of a thousand, and a saturation
-    # benchmark is entirely about how many it can admit: 18,397 tok/s
-    # against 37,494 with it off.
-    #
-    # cuda_graph_config is left alone because TensorRT-LLM already
-    # captures graphs by default (34 batch sizes here). Setting it
-    # explicitly only changes WHICH sizes are captured, and the
-    # collapse above was first misattributed to it -- the two changes
-    # had been made together, and only chunked prefill mattered.
-    #
-    # Both remain available through trtllm_llm_api_options.
-    # Detokenisation runs on the serving loop by default (0 workers).
-    # At a thousand streams per replica that is enough to bound
-    # throughput on CPU while the GPU waits.
-    opts.setdefault("num_postprocess_workers", 4)
+    # Tuning levers, all defaulting to the engine's own behaviour.
+    # Every one of these was measured on this box and every one made
+    # things worse when switched on -- see simulator/engine_notes.py
+    # for the numbers. They stay reachable because a smaller model,
+    # whose weights leave room for both the graphs and the pool, may
+    # well trade differently; they are simply not the default.
+    if getattr(cfg, "trtllm_chunked_prefill", False):
+        opts.setdefault("enable_chunked_prefill", True)
+    workers = getattr(cfg, "trtllm_postprocess_workers", 0) or 0
+    if workers:
+        opts.setdefault("num_postprocess_workers", int(workers))
+    if getattr(cfg, "trtllm_cuda_graphs", None) == "wide":
+        mns = getattr(cfg, "max_num_seqs", None)
+        if mns:
+            opts.setdefault("cuda_graph_config", {
+                "enable_padding": True, "max_batch_size": int(mns)})
 
     extra = getattr(cfg, "trtllm_llm_api_options", None) or {}
     for k, v in extra.items():

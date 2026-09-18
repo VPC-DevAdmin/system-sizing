@@ -182,6 +182,11 @@ class EngineConfig:
     # only route to knobs trtllm-serve has no flag for (KV dtype above
     # all).
     trtllm_llm_api_options: dict = field(default_factory=dict)
+    # Searchable levers. All default to the engine's own behaviour —
+    # each was measured slower when enabled (engine_notes.py).
+    trtllm_chunked_prefill: bool = False
+    trtllm_postprocess_workers: int = 0
+    trtllm_cuda_graphs: str = "default"      # "default" | "wide"
 
     # ── remote: endpoint-only target (roadmap 1.1) ────────────────────
     # Benchmarks an OpenAI-compatible endpoint the simulator doesn't

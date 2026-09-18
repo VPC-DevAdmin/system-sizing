@@ -64,6 +64,11 @@ KNOWN_DIMENSIONS: dict[str, str] = {
     # variant is MoE and tp>1 (normalize() forces "off" otherwise, so
     # infeasible combinations dedupe instead of wasting evaluations).
     "expert_parallel": "categorical",         # off | on
+    # Engine-specific levers (see engine_notes.py). Present only when
+    # the owning engine is staged, so they cost nothing otherwise.
+    "trtllm_chunked_prefill": "categorical",
+    "trtllm_cuda_graphs": "categorical",
+    "trtllm_postprocess_workers": "categorical",
 }
 
 # Sentinel meaning "don't pass the flag; let the engine pick".
@@ -313,6 +318,9 @@ def _dim_value(params: dict, dim: str, space: SearchSpace):
             "max_num_seqs": DEFAULT, "max_num_batched_tokens": DEFAULT,
             "placement": "pack", "kv_cache_dtype": "auto",
             "expert_parallel": "off",
+            "trtllm_chunked_prefill": "off",
+            "trtllm_cuda_graphs": "default",
+            "trtllm_postprocess_workers": "0",
             "engine": "vllm_cuda_multi"}.get(dim)
 
 
@@ -952,5 +960,10 @@ def candidate_summary(params: dict, space: SearchSpace) -> dict[str, Any]:
         "engine_args": args,
         "kv_cache_dtype": (None if kv in (None, "auto") else str(kv)),
         "gpu_memory_utilization": gmu,
+        "trtllm_chunked_prefill":
+            _dim_value(n, "trtllm_chunked_prefill", space) == "on",
+        "trtllm_cuda_graphs": str(_dim_value(n, "trtllm_cuda_graphs", space)),
+        "trtllm_postprocess_workers":
+            int(_dim_value(n, "trtllm_postprocess_workers", space) or 0),
         "tp": tp,
     }

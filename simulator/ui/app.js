@@ -2308,6 +2308,30 @@ const Optimizer = {
         text: `pack keeps TP peers inside one PCIe/NUMA domain (fast
           peer transfers); spread deals replicas across domains
           (balanced host bandwidth).` },
+      { key: "engine", kind: "dim", title: "Engine",
+        options: (dims.engine ?? []).map(v => [String(v),
+          Engines.label(String(v))]),
+        text: `Which server is under test. Held constant across a
+          comparison: same model, same shape, same ladder, same
+          stopping rule &mdash; only the server changes.
+          ${Object.entries(this.arena?.engine_notes ?? {})
+            .map(([e, t]) => `<b>${Engines.label(e)}</b>: ${t}`)
+            .join("<br><br>")}` },
+      // Engine-specific levers, each carrying what it MEASURED here.
+      // A knob offered without its evidence invites the same afternoon
+      // to be spent discovering its cost a second time.
+      ...(this.arena?.levers ?? [])
+        .filter(l => l.searchable && (dims[l.key] ?? []).length > 1)
+        .map(l => ({
+          key: l.key, kind: "dim", title: l.title,
+          options: (dims[l.key] ?? []).map(v => [String(v),
+            String(v) === l.default ? `${v} (default)` : String(v)]),
+          text: `${l.text}${l.measured
+            ? `<br><br><b>Measured here${
+                l.verdict === "harm" ? " &mdash; slower"
+                : l.verdict === "required" ? " &mdash; required" : ""
+              }:</b> ${l.measured}` : ""}`,
+        })),
     ].filter(c => c.options.length > 1);
   },
 

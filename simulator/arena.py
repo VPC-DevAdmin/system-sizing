@@ -233,11 +233,21 @@ def full_arena(catalog: Optional[list[dict]] = None) -> dict:
     engines = available_engines()
     if len(engines) > 1:
         dims["engine"] = engines
+    # Engine-specific levers become dimensions only when that engine is
+    # staged. Each carries what it MEASURED here (engine_notes.py), so
+    # the arena can offer a knob without inviting the same afternoon to
+    # be spent discovering its cost twice.
+    from .engine_notes import searchable_dimensions
+    dims.update(searchable_dimensions(engines))
+    from .engine_notes import ENGINE_NOTES, as_dicts
     return {
         "hardware": hw,
         "models": models,
         "dimensions": dims,
         "fixed": {"gpu_memory_utilization": FIXED_GMU},
+        # Narrative + evidence for the optimize cards.
+        "engine_notes": {e: ENGINE_NOTES.get(e, "") for e in engines},
+        "levers": [d for d in as_dicts() if d["engine"] in engines],
     }
 
 

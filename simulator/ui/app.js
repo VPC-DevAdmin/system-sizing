@@ -4708,7 +4708,17 @@ const Roofline = {
         this.renderPlan();
       }));
 
+    const live = !!this.doc?.live;
     const hrs = mins >= 90 ? ` (about ${(mins / 60).toFixed(1)} hours)` : "";
+    if (live) {
+      const planned = (this.doc.plan?.cells ?? []).length;
+      const done = this.doc.summary?.attempted ?? 0;
+      $("#rf-cost").innerHTML = `<b>Running now:</b> ${planned} cells,
+        ${done} measured. <span class="msg">The controls above describe
+        the NEXT run — changing them does not affect the one in
+        flight.</span>`;
+      return;
+    }
     $("#rf-cost").innerHTML = nCells
       ? `<b>${nCells}</b> cells &mdash; ${models.length} model${
           models.length === 1 ? "" : "s"} &times; ${engines.length} engine${
@@ -4784,6 +4794,24 @@ const Roofline = {
     const d = this.doc;
     if (!d || d.status === "none") return;
     const running = !!d.live;
+    // While a run is live the plan panel must describe THAT run, not
+    // the form's defaults. Showing "48 cells" above a progress bar
+    // counting to 18 is the kind of small contradiction that makes an
+    // operator distrust the whole page.
+    if (d.plan?.cells && this._syncedFor !== d.started_at) {
+      this._syncedFor = d.started_at;
+      this.engines = new Set(d.plan.engines || []);
+      this.chosen = new Set(d.plan.models || []);
+      if (d.plan.shapes?.max_num_seqs?.length) {
+        this.shapes = {
+          max_num_seqs: d.plan.shapes.max_num_seqs,
+          output_tokens: d.plan.shapes.output_tokens,
+        };
+      }
+      $("#rf-model-mode").value = "manual";
+      $("#rf-input-tokens").value = String(d.input_tokens || 128);
+      this.renderPlan();
+    }
     $("#rf-stop").disabled = !running;
     $("#rf-start").disabled = running;
 

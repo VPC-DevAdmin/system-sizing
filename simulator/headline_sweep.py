@@ -269,7 +269,25 @@ async def run_headline_sweep(
         except Exception:  # noqa: BLE001
             return {}
 
-    def _snapshot(phase: str, m: dict, offered: int) -> None:
+    # Rolling latency window. A saturation sweep never publishes
+    # per-turn events -- at eight thousand concurrent streams that is
+    # tens of thousands of messages a second, which would cost more
+    # than the measurement -- so the live latency charts had nothing
+    # to draw. The percentiles ride on the once-a-second snapshot
+    # instead, over a bounded tail so the cost stays flat no matter
+    # how long a rung runs.
+    LATENCY_WINDOW = 4000
+
+    def _snapshot(phase: str, m: dict, offered: int,
+                  acc: "_Acc | None" = None) -> None:
+        lat: dict = {}
+        if acc is not None:
+            for name, series in (("ttft", acc.ttft), ("tpot", acc.tpot)):
+                if not series:
+                    continue
+                tail = sorted(series[-LATENCY_WINDOW:])
+                lat[f"{name}_p50_ms"] = round(_percentile(tail, 0.50), 2)
+                lat[f"{name}_p95_ms"] = round(_percentile(tail, 0.95), 2)
         BUS.publish("snapshot", {
             "snapshot_at_ms": int(time.time() * 1000),
             "phase": phase,
@@ -280,6 +298,7 @@ async def run_headline_sweep(
             "requests_completed": 0, "errors": 0,
             "arrival_rate_per_min": None,
             "active_sessions": offered,
+            **lat,
         })
 
     async def _chunk(phase: str, seconds: int, acc: _Acc) -> Chunk:
@@ -295,7 +314,7 @@ async def run_headline_sweep(
                 running.append(float(m["num_running"]))
             if m.get("queue_depth") is not None:
                 waiting.append(float(m["queue_depth"]))
-            _snapshot(phase, m, acc_offered[0])
+            _snapshot(phase, m, acc_offered[0], acc)
         m1 = await _metrics()
         dt = max(1e-3, time.monotonic() - t0)
         gen = ((m1.get("generation_tokens_total") or 0)

@@ -1087,6 +1087,14 @@ const Live = {
         t >= 1e3 ? `${(t / 1e3).toFixed(1)}k` : `${t}`;
     }
     Headline.onSnapshot(s);
+    // A saturation sweep publishes no per-turn events (tens of
+    // thousands a second at full concurrency), so its latency rides
+    // on the snapshot instead. Feed the same charts from it.
+    if (s.ttft_p50_ms != null || s.tpot_p50_ms != null) {
+      const lbl = fmt.clock(ts);
+      this.push(this.charts.ttft, lbl, [s.ttft_p50_ms, s.ttft_p95_ms]);
+      this.push(this.charts.tpot, lbl, [s.tpot_p50_ms, s.tpot_p95_ms]);
+    }
     this.push(this.charts.pool, fmt.clock(ts),
       [s.pool_size, s.in_flight, s.queue_depth ?? null]);
     if (s.prefill_in_flight != null) {
@@ -1160,9 +1168,9 @@ const Live = {
     el.innerHTML = parts.join(" &nbsp;·&nbsp; ");
   },
 
-  renderGpuGrid(gpus) {
-    const el = $("#gpu-grid");
-    if (!gpus || !gpus.length) return;
+  renderGpuGrid(gpus, sel = "#gpu-grid") {
+    const el = $(sel);
+    if (!el || !gpus || !gpus.length) return;
     el.innerHTML = gpus.map(g => {
       const vramPct = g.vram_total_gb
         ? 100 * g.vram_used_gb / g.vram_total_gb : 0;
@@ -4081,10 +4089,19 @@ const Engines = {
  * actually produces: the sustained output rate, the ladder that earns
  * it, and what the box is spending to get there. */
 
+const HL_SYS_WINDOW = 240;        // ~4 min of system-graph history
+
 const Headline = {
   active: false,
   charts: {},
   _tel: {},
+  // Live samples per offered concurrency. The ladder only gains a row
+  // when a rung SETTLES, which is minutes apart; without this the two
+  // saturation charts sit empty for most of a run. Settled rungs
+  // overwrite these the moment they arrive.
+  _live: new Map(),
+  _sys: { labels: [], power: [], syspower: [], eff: [], sm: [], mem: [],
+          vram: [], hostmem: [], rss: [], cpu: [], ghz: [] },
 
   setActive(on) {
     if (on === this.active) return;
@@ -4209,6 +4226,7 @@ const Headline = {
   },
 
   renderLadder(rungs, peak) {
+    this._rungs = rungs;
     const body = $("#hl-ladder tbody");
     if (!rungs.length) {
       body.innerHTML = `<tr><td colspan="11" class="msg">no rung has
@@ -4251,10 +4269,28 @@ const Headline = {
         <td>${eff}</td>
         <td>${flags}</td></tr>`;
     }).join("");
-    this.drawCurves(rungs);
   },
 
-  drawCurves(rungs) {
+  /* Settled rungs are authoritative; live samples fill the gaps so the
+   * curve is never blank while a rung is still being measured. */
+  series() {
+    const byC = new Map();
+    for (const [c, v] of this._live) {
+      byC.set(c, { concurrency: c, in_flight: v.held,
+                   out_tok_s: v.tok, settled: false });
+    }
+    for (const r of this._rungs || []) {
+      byC.set(r.concurrency, { concurrency: r.concurrency,
+        in_flight: r.in_flight, out_tok_s: r.out_tok_s,
+        ttft_p95_ms: r.ttft_p95_ms, tpot_p95_ms: r.tpot_p95_ms,
+        settled: true });
+    }
+    return [...byC.values()].sort((a, b) => a.concurrency - b.concurrency);
+  },
+
+  drawCurves() {
+    const rungs = this.series();
+    if (!rungs.length) return;
     const labels = rungs.map(r => r.concurrency.toLocaleString());
     if (!this.charts.curve) {
       this.charts.curve = new Chart($("#chart-hl-curve"), {
@@ -4268,6 +4304,27 @@ const Headline = {
           scales: { y: { beginAtZero: true },
                     x: { title: { display: true,
                                   text: "streams offered" } } },
+          plugins: { legend: { position: "bottom" } },
+        },
+      });
+      this.charts.lat = new Chart($("#chart-hl-lat"), {
+        type: "line",
+        data: { labels: [], datasets: [
+          { label: "TTFT p95 (ms)", data: [], borderColor: C.purple,
+            tension: .3, yAxisID: "y" },
+          { label: "TPOT p95 (ms)", data: [], borderColor: C.accent,
+            tension: .3, yAxisID: "y1" },
+        ] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: {
+            y: { beginAtZero: true, position: "left",
+                 title: { display: true, text: "TTFT ms" } },
+            y1: { beginAtZero: true, position: "right",
+                  grid: { drawOnChartArea: false },
+                  title: { display: true, text: "TPOT ms" } },
+            x: { title: { display: true, text: "streams offered" } },
+          },
           plugins: { legend: { position: "bottom" } },
         },
       });
@@ -4297,6 +4354,96 @@ const Headline = {
     h.data.datasets[0].data = rungs.map(r => r.concurrency);
     h.data.datasets[1].data = rungs.map(r => r.in_flight ?? null);
     h.update("none");
+    const l = this.charts.lat;
+    if (l) {
+      l.data.labels = labels;
+      l.data.datasets[0].data = rungs.map(r => r.ttft_p95_ms ?? null);
+      l.data.datasets[1].data = rungs.map(r => r.tpot_p95_ms ?? null);
+      l.update("none");
+    }
+  },
+
+  sysChart(key, canvas, datasets, yOpts) {
+    if (!this.charts[key]) {
+      this.charts[key] = new Chart($(canvas), {
+        type: "line", data: { labels: [], datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          animation: false,
+          scales: { x: { ticks: { maxTicksLimit: 8, maxRotation: 0 } },
+                    ...(yOpts || { y: { beginAtZero: true } }) },
+          plugins: { legend: { position: "bottom" } },
+        },
+      });
+    }
+    return this.charts[key];
+  },
+
+  /* The host summary was one dense line of text -- readable as a
+   * status check, useless for seeing a trend. During a saturation
+   * sweep the question is always "what moved when concurrency went
+   * up", which is a shape over time, not a snapshot. */
+  drawSystem() {
+    const S = this._sys;
+    const power = this.sysChart("power", "#chart-hl-power", [
+      { label: "GPU W", data: [], borderColor: C.gold,
+        backgroundColor: fill(C.gold), fill: true, tension: .3,
+        pointRadius: 0, yAxisID: "y" },
+      { label: "chassis W", data: [], borderColor: C.muted,
+        borderDash: [5, 4], tension: .3, pointRadius: 0, yAxisID: "y" },
+      { label: "tokens/watt", data: [], borderColor: C.teal,
+        tension: .3, pointRadius: 0, yAxisID: "y1" },
+    ], { y: { beginAtZero: true, position: "left",
+              title: { display: true, text: "watts" } },
+         y1: { beginAtZero: true, position: "right",
+               grid: { drawOnChartArea: false },
+               title: { display: true, text: "tok/W" } } });
+    power.data.labels = S.labels;
+    power.data.datasets[0].data = S.power;
+    power.data.datasets[1].data = S.syspower;
+    power.data.datasets[2].data = S.eff;
+    power.update("none");
+
+    const gpu = this.sysChart("gpu", "#chart-hl-gpu", [
+      { label: "SM util %", data: [], borderColor: C.blue,
+        tension: .3, pointRadius: 0 },
+      { label: "memory-controller busy %", data: [], borderColor: C.accent,
+        backgroundColor: fill(C.accent), fill: true, tension: .3,
+        pointRadius: 0 },
+    ], { y: { beginAtZero: true, max: 100 } });
+    gpu.data.labels = S.labels;
+    gpu.data.datasets[0].data = S.sm;
+    gpu.data.datasets[1].data = S.mem;
+    gpu.update("none");
+
+    const mem = this.sysChart("mem", "#chart-hl-mem", [
+      { label: "VRAM GB", data: [], borderColor: C.purple,
+        backgroundColor: fill(C.purple), fill: true, tension: .3,
+        pointRadius: 0 },
+      { label: "host RAM GB", data: [], borderColor: C.teal,
+        tension: .3, pointRadius: 0 },
+      { label: "engine RSS GB", data: [], borderColor: C.muted,
+        borderDash: [5, 4], tension: .3, pointRadius: 0 },
+    ]);
+    mem.data.labels = S.labels;
+    mem.data.datasets[0].data = S.vram;
+    mem.data.datasets[1].data = S.hostmem;
+    mem.data.datasets[2].data = S.rss;
+    mem.update("none");
+
+    const cpu = this.sysChart("cpu", "#chart-hl-cpu", [
+      { label: "CPU util %", data: [], borderColor: C.blue,
+        backgroundColor: fill(C.blue), fill: true, tension: .3,
+        pointRadius: 0, yAxisID: "y" },
+      { label: "core GHz", data: [], borderColor: C.gold,
+        tension: .3, pointRadius: 0, yAxisID: "y1" },
+    ], { y: { beginAtZero: true, max: 100, position: "left" },
+         y1: { beginAtZero: true, position: "right",
+               grid: { drawOnChartArea: false } } });
+    cpu.data.labels = S.labels;
+    cpu.data.datasets[0].data = S.cpu;
+    cpu.data.datasets[1].data = S.ghz;
+    cpu.update("none");
   },
 
   /* Live numbers between rungs, so the hero is never stale. */
@@ -4311,6 +4458,17 @@ const Headline = {
         what was offered` : "";
     $("#hl-queue").textContent = s.queue_depth != null
       ? Math.round(s.queue_depth).toLocaleString() : "—";
+
+    // Only count a sample once the engine is actually working the
+    // rung: warmup and drain points would drag the curve down and
+    // invent a dip that never happened.
+    if (offered && held != null && /measur/i.test(s.phase || "")) {
+      const cur = this._live.get(offered) || {};
+      this._live.set(offered, {
+        held, tok: this._tel.decode ?? cur.tok ?? null,
+      });
+      this.drawCurves();
+    }
   },
 
   onTelemetry(t) {
@@ -4332,6 +4490,37 @@ const Headline = {
       $("#hl-eff").textContent =
         `${(this._tel.decode / this._tel.power).toFixed(1)} tokens/watt`;
     }
+
+    let host = null, gpus = null;
+    try { host = t.host_json ? JSON.parse(t.host_json) : null; } catch { /* skip */ }
+    try { gpus = t.gpu_devices_json ? JSON.parse(t.gpu_devices_json) : null;
+    } catch { /* skip */ }
+
+    const S = this._sys;
+    const push = (arr, v) => {
+      arr.push(v == null ? null : v);
+      if (arr.length > HL_SYS_WINDOW) arr.shift();
+    };
+    S.labels.push(fmt.clock(t.sampled_at_ms ?? Date.now()));
+    if (S.labels.length > HL_SYS_WINDOW) S.labels.shift();
+    push(S.power, t.gpu_power_w);
+    push(S.syspower, host?.system_power_w);
+    push(S.eff, (this._tel.decode && this._tel.power)
+      ? +(this._tel.decode / this._tel.power).toFixed(2) : null);
+    push(S.sm, t.gpu_sm_util_pct);
+    // Memory-controller busy is the bandwidth-pressure signal, and at
+    // large batch it is the one that saturates first.
+    const memBusy = gpus?.length
+      ? gpus.reduce((a, g) => a + (g.mem_util_pct ?? 0), 0) / gpus.length
+      : null;
+    push(S.mem, memBusy);
+    push(S.vram, t.gpu_vram_used_gb);
+    push(S.hostmem, t.memory_used_gb);
+    push(S.rss, t.engine_rss_gb);
+    push(S.cpu, t.cpu_util_bound_avg ?? t.cpu_util_avg);
+    push(S.ghz, t.freq_mhz_mean ? +(t.freq_mhz_mean / 1000).toFixed(2) : null);
+    this.drawSystem();
+    if (gpus?.length) Live.renderGpuGrid(gpus, "#hl-gpu-grid");
   },
 };
 

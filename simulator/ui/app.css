@@ -733,7 +733,14 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Chart.js sizes to its container, so the canvas needs a height of
    its own or it collapses to the 150px browser default. */
-#chart-hl-curve, #chart-hl-held { height: 260px; }
+#chart-hl-curve, #chart-hl-held, #chart-hl-lat, #chart-hl-power,
+#chart-hl-gpu, #chart-hl-mem, #chart-hl-cpu { height: 240px; }
+
+/* In headline mode the rolling per-turn charts have no turn stream to
+   draw from, and the capacity host summary is replaced by graphs. */
+#view-control.headline-mode #panel-ttft,
+#view-control.headline-mode #panel-tpot,
+#view-control.headline-mode #panel-sysdetail { display: none; }
 
 #hl-ladder td, #hl-ladder th { font-variant-numeric: tabular-nums; }
 #hl-ladder tr.peak td { background: var(--accent-soft, rgba(255,255,255,.04)); }

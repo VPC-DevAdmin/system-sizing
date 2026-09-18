@@ -171,3 +171,26 @@ def test_candidates_endpoint_ranks_and_explains():
     d = c.get("/api/roofline/candidates?limit=3").json()
     assert len(d["candidates"]) <= 3
     assert all(x["why"] for x in d["candidates"])
+
+
+def test_measured_kv_outranks_a_guess(monkeypatch):
+    """A staged model whose KV cost was read from its config is a known
+    quantity. An unstaged one is a guess from parameter count that
+    flatters small models -- and acting on it costs a multi-gigabyte
+    download before anyone finds out it was wrong."""
+    import simulator.roofline as rf
+
+    cat = [
+        {"id": "org/tiny-unstaged", "quant": "nvfp4", "params_b": 8.0,
+         "moe": True, "approx_size_gb": 5, "min_vram_gb": 8},
+        {"id": "org/staged", "quant": "nvfp4", "params_b": 35.0,
+         "moe": True, "approx_size_gb": 21, "min_vram_gb": 24},
+    ]
+    monkeypatch.setattr(rf, "kv_bytes_per_token",
+                        lambda mid, cache=None: 40960 if "staged" in mid
+                        and "unstaged" not in mid else None)
+    ranked = rf.score_models(cat, vram_per_gpu_gb=95.6)
+    assert ranked[0].id == "org/staged"
+    assert ranked[0].measured_kv is True
+    assert "own config" in ranked[0].why
+    assert ranked[1].measured_kv is False

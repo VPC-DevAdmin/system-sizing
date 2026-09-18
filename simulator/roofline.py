@@ -103,6 +103,7 @@ class Candidate:
     cached: bool = False
     fits: bool = True
     score: float = 0.0
+    measured_kv: bool = False
     why: str = ""
 
 
@@ -145,7 +146,9 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
         # Primary: KV bytes per token, when we can read it.
         if c.kv_bytes:
             c.score = 1_000_000.0 / c.kv_bytes
-            bits.append(f"{c.kv_bytes // 1024} KiB of KV per token")
+            c.measured_kv = True
+            bits.append(f"{c.kv_bytes // 1024} KiB of KV per token, "
+                        f"read from the model's own config")
         elif c.params_b:
             # Unstaged: fall back to parameter count, and say so. A
             # dense model's KV scales with its layer count, which
@@ -170,7 +173,13 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             bits = ["does not fit this box"]
         c.why = "; ".join(bits)
         out.append(c)
-    return sorted(out, key=lambda x: -x.score)
+    # Measured beats estimated, always. A staged model whose KV cost
+    # was read from its config is a known quantity; an unstaged one is
+    # a guess from parameter count that systematically flatters small
+    # models -- and acting on it costs a multi-gigabyte download before
+    # anyone finds out. An operator who wants an unstaged model can
+    # still name it directly.
+    return sorted(out, key=lambda x: (not x.measured_kv, -x.score))
 
 
 def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,

@@ -38,10 +38,18 @@ def test_peak_is_the_highest_sustained_output_rate():
 
 
 def test_sweep_stops_when_the_engine_stops_holding_the_offer():
+    # A ceiling is growth STOPPING: 256 offered, but the running
+    # count barely moved past the 128 the previous rung already held.
     rungs = [_r(64, 9000.0), _r(128, 18000.0),
-             _r(256, 19000.0, in_flight=150.0)]
+             _r(256, 19000.0, in_flight=130.0)]
     reason = should_stop(rungs, 3.0)
     assert reason and "batch ceiling" in reason
+
+    # Whereas a rung that grew 128 -> 150 has not hit any ceiling,
+    # even though it fell short of the 256 offered.
+    growing = [_r(64, 9000.0), _r(128, 18000.0),
+               _r(256, 19000.0, in_flight=150.0)]
+    assert should_stop(growing, 3.0) is None
 
 
 def test_sweep_stops_when_throughput_plateaus():
@@ -148,3 +156,25 @@ def test_ordinary_workload_still_uses_the_capacity_search(tmp_path,
             time.sleep(0.05)
     assert "sweep" not in called
     assert "conversational" in called.get("open_loop", "")
+
+
+def test_ceiling_needs_settling_and_stalled_growth():
+    """A sweep once aborted at rung two — "the engine held 77 of 128
+    offered streams, its own batch ceiling" — on an engine already
+    measured holding 6,430. A ceiling means growth STOPPED, not that
+    one unsettled rung came up short."""
+    def r(c, inflight, out, steady=True):
+        return Rung(concurrency=c, in_flight=inflight, queue_depth=0.0,
+                    out_tok_s=out, prompt_tok_s=0.0, total_tok_s=out,
+                    steady_state=steady)
+
+    # The exact regression: second rung, never settled, 77 of 128.
+    assert should_stop([r(64, 64.0, 8226),
+                        r(128, 76.8, 8307, steady=False)], 3.0) is None
+    # Settled but running count still climbing — not a ceiling.
+    assert should_stop([r(64, 64.0, 8226), r(128, 100.0, 9000)], 3.0) is None
+    # Genuine ceiling: settled, no growth past the previous best, and
+    # well short of what was offered.
+    reason = should_stop([r(4096, 4095.0, 54000),
+                          r(8192, 4095.0, 52000)], 3.0)
+    assert reason and "batch ceiling" in reason

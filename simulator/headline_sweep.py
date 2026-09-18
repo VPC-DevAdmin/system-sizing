@@ -110,12 +110,24 @@ def should_stop(rungs: list[Rung], min_gain_pct: float) -> str | None:
     if not rungs:
         return None
     last = rungs[-1]
-    # Derived here rather than trusting the stored flag, so the stop
-    # decision cannot drift from the measurement it is based on.
-    if not engine_held(last.concurrency, last.in_flight):
+    # A batch ceiling means the engine STOPPED GROWING, not merely
+    # that one rung came up short. Two extra conditions, both learned
+    # the hard way: a rung that never settled says nothing (the
+    # shortfall may just be fill time), and a rung whose running
+    # count still beat every earlier rung plainly has not hit a
+    # ceiling. Without these, a sweep aborted at 77-of-128 offered
+    # and called it the ceiling of an engine already measured holding
+    # 6,430 streams.
+    prev_best_running = max(
+        (r.in_flight or 0.0) for r in rungs[:-1]) if len(rungs) > 1 else 0.0
+    still_growing = (last.in_flight or 0.0) > prev_best_running * 1.05
+    if (last.steady_state
+            and not still_growing
+            and not engine_held(last.concurrency, last.in_flight)):
         return (f"the engine held {last.in_flight:.0f} of "
-                f"{last.concurrency} offered streams — its own batch "
-                f"ceiling, so wider offers only add queueing")
+                f"{last.concurrency} offered streams and stopped growing "
+                f"— its own batch ceiling, so wider offers only add "
+                f"queueing")
     if len(rungs) >= 3:
         best_before = max((r.out_tok_s or 0.0) for r in rungs[:-2])
         recent = max((r.out_tok_s or 0.0) for r in rungs[-2:])

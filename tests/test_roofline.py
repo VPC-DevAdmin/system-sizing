@@ -194,3 +194,18 @@ def test_measured_kv_outranks_a_guess(monkeypatch):
     assert ranked[0].measured_kv is True
     assert "own config" in ranked[0].why
     assert ranked[1].measured_kv is False
+
+
+def test_state_endpoint_reports_liveness_from_the_run_registry():
+    """A state file left at 'searching' by a killed process must not
+    read as running, or the page waits forever on a dead run."""
+    from fastapi.testclient import TestClient
+
+    from simulator.service import create_app
+
+    app = create_app()
+    c = TestClient(app)
+    # No active run at all: the endpoint must still answer.
+    d = c.get("/api/roofline").json()
+    assert d.get("live") in (False, None)
+    assert "status" in d

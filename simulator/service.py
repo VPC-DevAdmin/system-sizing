@@ -1522,10 +1522,12 @@ def create_app(
                                                "best_per_engine": {}}}
         doc = st.to_dict()
         # Whether THIS service is still driving it. A state file left
-        # at "searching" by a killed process must not read as running.
-        active = app.state.active_run
-        doc["live"] = bool(active and active.get("running")
-                           and (active.get("workload") or {}).get("kind")
+        # at "searching" by a killed process must not read as running,
+        # or the page will sit forever waiting for a dead run.
+        active = app.state.active
+        desc = active.describe() if active else None
+        doc["live"] = bool(desc and desc.get("running")
+                           and (desc.get("workload") or {}).get("kind")
                            == "roofline")
         return doc
 

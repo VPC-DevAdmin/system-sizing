@@ -4091,6 +4091,16 @@ const Engines = {
 
 const HL_SYS_WINDOW = 240;        // ~4 min of system-graph history
 
+// Engines advance their token counters in BURSTS -- SGLang jumps by
+// thousands on one sample and hundreds on the next -- so a rate
+// differenced over a single second swings by an order of magnitude
+// while the engine is in perfect steady state. Measured on this box:
+// one-second samples ranged 3.4k-108k while the true sustained rate
+// over 30s was 52.8k. The sweep already averages over 15-second
+// chunks, so only the live display was misleading; this smooths it to
+// match. Median, not mean, so one burst cannot drag the figure.
+const HL_RATE_WINDOW = 12;
+
 const Headline = {
   active: false,
   charts: {},
@@ -4100,6 +4110,7 @@ const Headline = {
   // saturation charts sit empty for most of a run. Settled rungs
   // overwrite these the moment they arrive.
   _live: new Map(),
+  _rate: [],
   _sys: { labels: [], power: [], syspower: [], eff: [], sm: [], mem: [],
           vram: [], hostmem: [], rss: [], cpu: [], ghz: [] },
 
@@ -4474,8 +4485,17 @@ const Headline = {
   onTelemetry(t) {
     if (!this.active) return;
     if (t.decode_tok_s != null) {
-      this._tel.decode = t.decode_tok_s;
-      $("#hl-now").textContent = Math.round(t.decode_tok_s).toLocaleString();
+      this._rate.push(t.decode_tok_s);
+      if (this._rate.length > HL_RATE_WINDOW) this._rate.shift();
+      const sorted = [...this._rate].sort((a, b) => a - b);
+      const smoothed = sorted[Math.floor(sorted.length / 2)];
+      this._tel.decode = smoothed;
+      $("#hl-now").textContent = Math.round(smoothed).toLocaleString();
+      $("#hl-now-note").textContent = this._rate.length >= 3
+        ? `median of the last ${this._rate.length} samples — engines `
+          + `advance their token counters in bursts, so a one-second `
+          + `rate is not a measurement`
+        : "";
     }
     if (t.kv_cache_used_pct != null) {
       $("#hl-kv").textContent = `${t.kv_cache_used_pct.toFixed(0)}%`;

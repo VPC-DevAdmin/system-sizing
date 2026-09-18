@@ -36,6 +36,17 @@ log = logging.getLogger(__name__)
 
 DEFAULT_IMAGE = "lmsysorg/sglang:latest"
 
+# Each replica needs its OWN torch.distributed rendezvous port. Left
+# to itself SGLang picks a free one at random, and eight replicas
+# starting at the same moment on host networking race for it: two
+# choose the same number before either binds, and the loser dies with
+# EADDRINUSE mid-startup. Observed on this box at port 40593.
+#
+# The stride leaves room for the handful of consecutive ports a
+# replica may open around its base.
+NCCL_PORT_BASE = 42000
+NCCL_PORT_STRIDE = 64
+
 # vLLM's KV dtype spelling -> SGLang's. SGLang names the float8
 # representation explicitly where vLLM takes a bare "fp8", so the
 # alias has to be resolved the SAME WAY vLLM resolves it or the two
@@ -98,6 +109,7 @@ def launch_argv(model: str, *, port: int, tp: int,
                 mem_fraction_static: float | None = None,
                 kv_cache_dtype: str | None = None,
                 quantization: str | None = None,
+                nccl_port: int | None = None,
                 expert_parallel: bool = False,
                 trust_remote_code: bool = False,
                 extra: list[str] | None = None) -> list[str]:
@@ -125,6 +137,8 @@ def launch_argv(model: str, *, port: int, tp: int,
         argv += ["--kv-cache-dtype", kv]
     if quantization:
         argv += ["--quantization", quantization]
+    if nccl_port:
+        argv += ["--nccl-port", str(int(nccl_port))]
     if expert_parallel and tp > 1:
         argv += ["--enable-ep-moe", "--ep-size", str(int(tp))]
     if trust_remote_code:
@@ -174,6 +188,7 @@ class SGLangCudaEngine(DockerReplicaEngine):
             quantization=sglang_quantization(
                 getattr(cfg, "model_quant", None),
                 cfg.quantization_kind or cfg.quantization),
+            nccl_port=NCCL_PORT_BASE + index * NCCL_PORT_STRIDE,
             expert_parallel=bool(getattr(cfg, "expert_parallel", False)),
             trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),
             extra=list(cfg.sglang_extra_flags or []),

@@ -156,3 +156,27 @@ def test_modelopt_checkpoints_name_their_quantization():
     assert argv[argv.index("--quantization") + 1] == "modelopt_fp4"
     # Absent when there is nothing to say.
     assert "--quantization" not in launch_argv("m", port=1, tp=1)
+
+
+def test_each_replica_gets_its_own_rendezvous_port():
+    """Left to itself SGLang picks a free torch.distributed port at
+    random. Eight replicas starting at the same moment on host
+    networking race for it: two choose the same number before either
+    binds and the loser dies with EADDRINUSE mid-startup, which is
+    what happened on this box at port 40593."""
+    from simulator.engines.sglang_cuda import (
+        NCCL_PORT_BASE, NCCL_PORT_STRIDE)
+
+    eng = SGLangCudaEngine(_cfg(
+        replica_devices=[[i] for i in range(8)]))
+    ports = []
+    for i in range(8):
+        cmd = eng.build_replica_command(i, [i], f"sglang-r{i}-x")
+        ports.append(int(cmd[cmd.index("--nccl-port") + 1]))
+    assert len(set(ports)) == 8                    # all distinct
+    assert ports[0] == NCCL_PORT_BASE
+    # Spaced, because a replica may open a few consecutive ports.
+    assert min(b - a for a, b in zip(ports, ports[1:])) == NCCL_PORT_STRIDE
+    # And distinct from the HTTP ports the replicas serve on.
+    http = {eng._port(i) for i in range(8)}
+    assert not (set(ports) & http)

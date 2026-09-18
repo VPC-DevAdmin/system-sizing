@@ -4098,7 +4098,10 @@ const Headline = {
     const w = active?.workload || {};
     const isHeadline = w.kind === "headline_optimize"
       || (w.kind === "persona" && (w.id || "").startsWith("headline_"));
-    this.setActive(Boolean(isHeadline && active?.running));
+    // Stays up after the sweep ends. Reverting to the capacity view on
+    // completion would drop the operator back to the blank statusbar
+    // at the exact moment the result is worth reading.
+    this.setActive(Boolean(isHeadline && active));
     if (!this.active) return;
     const p = active.progress || {};
 
@@ -4116,7 +4119,13 @@ const Headline = {
       }
     } else {
       if (p.engine) bits.push(`engine <b>${Engines.label(p.engine)}</b>`);
-      if (p.shape) bits.push(`shape <b>${p.shape}</b>`);
+      // The sweep reports its shape as a structured cohort record, not
+      // a string; rendering it raw prints "[object Object]".
+      const sh = p.shape;
+      if (sh?.input_tokens != null) {
+        bits.push(`shape <b>${Math.round(sh.input_tokens)}&rarr;`
+          + `${Math.round(sh.output_tokens)}</b>`);
+      }
     }
     if (p.model) bits.push(`model <b>${p.model.split("/").pop()}</b>`);
     if (p.rung) {
@@ -4130,16 +4139,48 @@ const Headline = {
 
     this.renderBoard(p.best_per_engine, p.engines);
     this.renderLadder(p.rungs_done || [], p.peak);
-    if (p.peak?.out_tok_s) {
-      $("#hl-peak").textContent = Math.round(p.peak.out_tok_s)
-        .toLocaleString();
-      $("#hl-peak-at").textContent = p.peak.in_flight
-        ? `at ${Math.round(p.peak.in_flight).toLocaleString()} streams`
+    const peak = p.peak;
+    if (peak?.out_tok_s) {
+      $("#hl-peak").textContent = Math.round(peak.out_tok_s).toLocaleString();
+      $("#hl-peak-at").textContent = peak.in_flight
+        ? `at ${Math.round(peak.in_flight).toLocaleString()} streams`
         : "";
     }
     if (p.kv_cache_tokens) {
       $("#hl-kvpool").textContent =
         `pool ${fmtCompact(p.kv_cache_tokens)} tokens`;
+    }
+    // A finished sweep has no live telemetry to drive the hero, and
+    // dashes at the moment the result is worth reading is the fault
+    // this view exists to fix. Fall back to the peak rung.
+    if (!active.running && peak) {
+      $("#hl-label").textContent = "peak output tokens / sec";
+      if (peak.out_tok_s) {
+        $("#hl-now").textContent = Math.round(peak.out_tok_s)
+          .toLocaleString();
+      }
+      if (peak.in_flight != null) {
+        $("#hl-held").textContent =
+          `${Math.round(peak.in_flight).toLocaleString()} / `
+          + `${(peak.concurrency ?? 0).toLocaleString()}`;
+        $("#hl-held-note").textContent = "at the peak rung";
+      }
+      if (peak.queue_depth != null) {
+        $("#hl-queue").textContent =
+          Math.round(peak.queue_depth).toLocaleString();
+      }
+      if (peak.kv_cache_pct != null) {
+        $("#hl-kv").textContent = `${peak.kv_cache_pct.toFixed(0)}%`;
+      }
+      if (peak.gpu_power_w != null) {
+        $("#hl-power").textContent = `${Math.round(peak.gpu_power_w)} W`;
+        if (peak.out_tok_s) {
+          $("#hl-eff").textContent =
+            `${(peak.out_tok_s / peak.gpu_power_w).toFixed(1)} tokens/watt`;
+        }
+      }
+    } else {
+      $("#hl-label").textContent = "output tokens / sec";
     }
   },
 

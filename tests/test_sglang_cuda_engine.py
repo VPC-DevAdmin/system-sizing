@@ -23,7 +23,8 @@ def _cfg(**kw) -> EngineConfig:
 def test_replica_argv_carries_the_shape():
     eng = SGLangCudaEngine(_cfg(max_num_seqs=2048,
                                 max_num_batched_tokens=8192,
-                                gpu_memory_utilization=0.93))
+                                gpu_memory_utilization=0.93,
+                                vram_per_gpu_gb=95.6, model_weights_gb=42.0))
     cmd = eng.build_replica_command(2, [2], "sglang-r2-x")
     j = " ".join(cmd)
     assert "--gpus device=2" in j
@@ -32,7 +33,9 @@ def test_replica_argv_carries_the_shape():
     assert "sglang.launch_server" in j
     assert "--max-running-requests 2048" in j     # NOT --max-num-seqs
     assert "--max-prefill-tokens 8192" in j
-    assert "--mem-fraction-static 0.93" in j
+    # Translated down: SGLang puts activations on top of this
+    # fraction, so passing vLLM's number through is an OOM.
+    assert "--mem-fraction-static 0.86" in j
     assert "--context-length 8192" in j
     # Without this there is no /metrics, and the sweep measures from
     # engine counters.

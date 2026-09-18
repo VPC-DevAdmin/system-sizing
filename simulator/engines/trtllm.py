@@ -299,7 +299,12 @@ class TrtLlmEngine(DockerReplicaEngine):
         d = Path(log_dir)
         d.mkdir(parents=True, exist_ok=True)
         opts = llm_api_options(self.cfg)
-        self._opts_path = d / "trtllm_llm_api_options.yaml"
+        # ABSOLUTE. Docker reads a relative -v source as a named
+        # volume, not a host path, and refuses it outright:
+        # "includes invalid characters for a local volume name".
+        # Run directories are relative throughout capsim, so this is
+        # the one place it has to be made absolute.
+        self._opts_path = (d / "trtllm_llm_api_options.yaml").resolve()
         self._opts_path.write_text(yaml.safe_dump(opts, sort_keys=False))
         log.info("trtllm extra options -> %s: %s", self._opts_path, opts)
         super().launch(log_dir)

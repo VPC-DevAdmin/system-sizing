@@ -42,8 +42,22 @@ import logging
 
 log = logging.getLogger(__name__)
 
-# Engines whose memory knob already means "share of total VRAM".
-DIRECT_FRACTION_ENGINES = ("vllm_cuda", "vllm_cuda_multi", "sglang_cuda")
+# Engines whose memory knob already means "share of total VRAM",
+# INCLUDING the activation and CUDA-graph workspace.
+DIRECT_FRACTION_ENGINES = ("vllm_cuda", "vllm_cuda_multi")
+
+# SGLang's --mem-fraction-static covers weights and the KV pool only;
+# activations and captured CUDA graphs are allocated ON TOP of it. So
+# it is not interchangeable with vLLM's fraction even though both are
+# shares of total VRAM, and passing vLLM's number through is an OOM,
+# not a slightly different allocation.
+#
+# Measured on this box: --mem-fraction-static 0.95 on Llama-3.3-70B
+# NVFP4 left 105 MiB free of 94.97 GiB and died allocating a 448 MiB
+# workspace. The reserve below is empirical, not derived -- there is
+# no catalog figure for activation working set, and it grows with
+# batch size -- so it is deliberately generous and overridable.
+SGLANG_ACTIVATION_RESERVE = 0.07
 
 # Leave the engine some room; 1.0 is an OOM in every implementation.
 MAX_FRACTION = 0.98
@@ -77,6 +91,12 @@ def to_engine_fraction(engine: str, fraction: float, *,
     if engine in DIRECT_FRACTION_ENGINES:
         return f, (f"{f:.2f} of total VRAM for weights + KV "
                    f"(this engine's own meaning)")
+    if engine == "sglang_cuda":
+        g = max(0.05, min(MAX_FRACTION, f - SGLANG_ACTIVATION_RESERVE))
+        return g, (f"{g:.2f} static, not {f:.2f}: SGLang allocates "
+                   f"activations and CUDA graphs ON TOP of this "
+                   f"fraction, so {int(SGLANG_ACTIVATION_RESERVE * 100)}% "
+                   f"is held back for them")
     if engine != "trtllm":
         return f, f"{f:.2f} of total VRAM"
 

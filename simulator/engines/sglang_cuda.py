@@ -30,6 +30,7 @@ import logging
 from typing import Optional
 
 from .docker_replica import DockerReplicaEngine, gpus_arg_for
+from .vram import to_engine_fraction
 
 log = logging.getLogger(__name__)
 
@@ -162,9 +163,13 @@ class SGLangCudaEngine(DockerReplicaEngine):
             context_length=cfg.max_model_len,
             max_running_requests=getattr(cfg, "max_num_seqs", None),
             max_prefill_tokens=getattr(cfg, "max_num_batched_tokens", None),
-            # A fraction of TOTAL GPU memory, same quantity vLLM's
-            # gpu_memory_utilization names.
-            mem_fraction_static=cfg.gpu_memory_utilization,
+            # Translated, not passed through: see vram.py for why
+            # this engine's fraction has to be smaller than vLLM's to
+            # mean the same allocation.
+            mem_fraction_static=to_engine_fraction(
+                "sglang_cuda", cfg.gpu_memory_utilization,
+                total_vram_gb=getattr(cfg, "vram_per_gpu_gb", None),
+                weights_gb=getattr(cfg, "model_weights_gb", None))[0],
             kv_cache_dtype=getattr(cfg, "kv_cache_dtype", None),
             quantization=sglang_quantization(
                 getattr(cfg, "model_quant", None),

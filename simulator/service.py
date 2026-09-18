@@ -946,8 +946,19 @@ def create_app(
                      "engines/GPUs; stop it first (POST /api/optimizer/stop)",
             )
         if req.custom is not None:
+            # A roofline varies the model per cell, so its `custom` is
+            # a TEMPLATE with no model_id. Borrow the first planned
+            # model just to satisfy this pre-flight build -- the run
+            # rebuilds a config for every cell anyway, and validating
+            # the template here still catches a bad engine or a shape
+            # that does not fit the box.
+            pre = dict(req.custom)
+            if not pre.get("model_id"):
+                planned = ((req.workload or {}).get("spec") or {}).get("models")
+                if planned:
+                    pre["model_id"] = planned[0]
             config_path = await asyncio.to_thread(
-                _build_custom_config, req.custom, runs_base)
+                _build_custom_config, pre, runs_base)
         else:
             config_path = _resolve_config_path(req)
 

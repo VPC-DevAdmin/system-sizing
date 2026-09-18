@@ -95,11 +95,27 @@ def engine_held(concurrency: int, in_flight: float | None,
 
 
 def peak_rung(rungs: list[Rung]) -> Rung | None:
-    """The headline: highest sustained output token rate."""
+    """The headline: highest SUSTAINED output token rate.
+
+    Sustained is the whole word. A rung measured before the running
+    batch and the token rate stopped moving is a transient -- the
+    engine discharging a backlog, or still filling one -- and it is
+    routinely the LARGEST number in the sweep, which is exactly why it
+    cannot be allowed to become the headline. The search already
+    discarded unsettled candidates (``Candidate.usable``); this
+    function said "sustained" in its docstring and then ranked on
+    everything, so a per-run peak could still be an artifact.
+
+    Unsettled rungs are used only when nothing settled at all, so a
+    sweep that never converged still reports something rather than
+    nothing -- and the rung it returns carries ``steady_state=False``
+    for the caller to see.
+    """
     scored = [r for r in rungs if r.out_tok_s]
     if not scored:
         return None
-    return max(scored, key=lambda r: r.out_tok_s or 0.0)
+    settled = [r for r in scored if r.steady_state]
+    return max(settled or scored, key=lambda r: r.out_tok_s or 0.0)
 
 
 def should_stop(rungs: list[Rung], min_gain_pct: float) -> str | None:

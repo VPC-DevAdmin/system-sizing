@@ -178,3 +178,47 @@ def test_ceiling_needs_settling_and_stalled_growth():
     reason = should_stop([r(4096, 4095.0, 54000),
                           r(8192, 4095.0, 52000)], 3.0)
     assert reason and "batch ceiling" in reason
+
+
+def test_peak_never_reports_an_unsettled_rung_over_a_settled_one():
+    """An unsettled rung is the engine discharging or filling a
+    backlog, and it is routinely the BIGGEST number in the sweep --
+    which is precisely why it must not become the headline.
+
+    Taken from a real confirmation sweep: the top rung read 57,647
+    tok/s with 456 queued and a 15.8-second p95 TTFT, having never
+    settled, while the best settled rung was 20,999."""
+    from simulator.headline_sweep import Rung, peak_rung
+
+    rungs = [
+        Rung(concurrency=2048, in_flight=2045.0, queue_depth=0.0,
+             out_tok_s=20999.0, prompt_tok_s=None, total_tok_s=34268.0,
+             steady_state=True),
+        Rung(concurrency=4096, in_flight=4086.0, queue_depth=0.0,
+             out_tok_s=20371.0, prompt_tok_s=None, total_tok_s=33242.0,
+             steady_state=False),
+        Rung(concurrency=8192, in_flight=7603.0, queue_depth=456.0,
+             out_tok_s=57647.0, prompt_tok_s=None, total_tok_s=94072.0,
+             steady_state=False),
+    ]
+    pk = peak_rung(rungs)
+    assert pk.out_tok_s == 20999.0
+    assert pk.steady_state is True
+
+
+def test_a_sweep_that_never_settled_still_reports_something():
+    """Reporting nothing hides the run; reporting the best transient
+    with steady_state=False attached lets the caller judge it."""
+    from simulator.headline_sweep import Rung, peak_rung
+
+    rungs = [
+        Rung(concurrency=1024, in_flight=1000.0, queue_depth=0.0,
+             out_tok_s=9000.0, prompt_tok_s=None, total_tok_s=None,
+             steady_state=False),
+        Rung(concurrency=2048, in_flight=2000.0, queue_depth=0.0,
+             out_tok_s=15000.0, prompt_tok_s=None, total_tok_s=None,
+             steady_state=False),
+    ]
+    pk = peak_rung(rungs)
+    assert pk.out_tok_s == 15000.0
+    assert pk.steady_state is False        # visible, not hidden

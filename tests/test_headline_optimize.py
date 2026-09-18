@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 
 from simulator.headline_optimize import (
+    DEFAULT_ENGINES,
     PRESETS,
     SEARCH_LADDER,
     Candidate,
+    best_per_engine,
+    engines_in,
     estimate_minutes,
     grid,
     rank,
@@ -18,11 +21,48 @@ def test_grid_is_the_product_of_engine_and_shape():
     g = grid("quick")
     assert len(g) == len(PRESETS["quick"]["max_num_seqs"]) * len(
         PRESETS["quick"]["output_tokens"])
-    # Cheapest engines first, so an interrupted search still ranks.
-    assert g == sorted(g)
+    # One engine unless asked otherwise: an unqualified search costs
+    # what it always did.
+    assert engines_in(g) == DEFAULT_ENGINES
     # Explicit lists override the preset.
-    assert grid("quick", max_num_seqs=[512], output_tokens=[1024, 2048]) == [
-        (512, 1024), (512, 2048)]
+    assert grid("quick", max_num_seqs=[512],
+                output_tokens=[1024, 2048]) == [
+        ("vllm_cuda_multi", 512, 1024), ("vllm_cuda_multi", 512, 2048)]
+
+
+def test_grid_spans_engines_engine_major():
+    """Both servers, one engine's grid completed before the other
+    starts — a partial result is then a complete answer about one
+    engine, not half an answer about two."""
+    g = grid("quick", engines=["vllm_cuda_multi", "trtllm"])
+    assert len(g) == 2 * len(grid("quick"))
+    assert engines_in(g) == ["vllm_cuda_multi", "trtllm"]
+    # Engine-major: no interleaving.
+    assert [e for e, _m, _o in g] == (["vllm_cuda_multi"] * 4
+                                      + ["trtllm"] * 4)
+    # Shape coverage is identical for each engine, or the comparison
+    # would not be a comparison.
+    per = {e: sorted((m, o) for x, m, o in g if x == e)
+           for e in engines_in(g)}
+    assert per["vllm_cuda_multi"] == per["trtllm"]
+
+
+def test_best_per_engine_surfaces_the_head_to_head():
+    """A single ranked list hides the loser entirely once one engine
+    sweeps the top; the operator asked which engine is faster."""
+    cands = [
+        Candidate("vllm_cuda_multi", 512, 2048, 128, out_tok_s=50000.0),
+        Candidate("vllm_cuda_multi", 1024, 1024, 128, out_tok_s=53000.0),
+        Candidate("trtllm", 512, 2048, 128, out_tok_s=48000.0),
+        Candidate("trtllm", 1024, 1024, 128, out_tok_s=41000.0),
+        # Unsettled: must not represent its engine.
+        Candidate("trtllm", 2048, 512, 128, out_tok_s=99999.0,
+                  steady_state=False),
+    ]
+    best = best_per_engine(cands)
+    assert set(best) == {"vllm_cuda_multi", "trtllm"}
+    assert best["vllm_cuda_multi"].out_tok_s == 53000.0
+    assert best["trtllm"].out_tok_s == 48000.0
 
 
 def test_estimate_scales_with_the_grid():
@@ -36,12 +76,15 @@ def test_estimate_scales_with_the_grid():
 def test_ranking_discards_untrustworthy_candidates():
     """The whole point of the honesty flags: a bigger number measured
     before the engine settled is an artifact, not a win."""
-    best_real = Candidate(512, 2048, 128, out_tok_s=54867.0, in_flight=4095)
-    second = Candidate(1024, 1024, 128, out_tok_s=54717.0, in_flight=6514)
-    unsettled = Candidate(2048, 512, 128, out_tok_s=99999.0,
+    eng = "vllm_cuda_multi"
+    best_real = Candidate(eng, 512, 2048, 128, out_tok_s=54867.0,
+                          in_flight=4095)
+    second = Candidate(eng, 1024, 1024, 128, out_tok_s=54717.0,
+                       in_flight=6514)
+    unsettled = Candidate(eng, 2048, 512, 128, out_tok_s=99999.0,
                           in_flight=8000, steady_state=False)
-    failed = Candidate(256, 4096, 128, error="launch failed")
-    empty = Candidate(512, 512, 128, out_tok_s=None)
+    failed = Candidate(eng, 256, 4096, 128, error="launch failed")
+    empty = Candidate(eng, 512, 512, 128, out_tok_s=None)
 
     ranked = rank([unsettled, second, best_real, failed, empty])
     assert [c.out_tok_s for c in ranked] == [54867.0, 54717.0]
@@ -127,9 +170,9 @@ def test_explicit_grid_overrides_the_preset():
     llama = grid("standard", max_num_seqs=[512, 1024, 2048],
                  output_tokens=[128, 256, 512])
     assert len(llama) == 9
-    assert max(o for _, o in llama) == 512
+    assert max(o for _e, _m, o in llama) == 512
     # The preset's own (longer) shapes are not smuggled in.
-    assert 2048 not in {o for _, o in llama}
+    assert 2048 not in {o for _e, _m, o in llama}
 
 
 def test_request_model_accepts_an_explicit_grid():

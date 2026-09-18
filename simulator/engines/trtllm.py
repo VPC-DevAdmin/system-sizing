@@ -190,6 +190,82 @@ def llm_api_options(cfg) -> dict:
     return opts
 
 
+OPTIONS_IN_CONTAINER = "/etc/capsim-trtllm.yaml"
+
+
+def docker_prefix(container_name: str, devices: list[int], *, image: str,
+                  mounts: list[str] | None = None,
+                  options_path=None,
+                  extra: list[str] | None = None,
+                  detach_rm: bool = True) -> list[str]:
+    """``docker run`` argv up to and including the image.
+
+    Shared with the arena optimizer, which owns its own launcher: the
+    entrypoint rule below is not optional, and a second hand-written
+    copy would forget it.
+    """
+    cmd = ["docker", "run", "-d"]
+    if detach_rm:
+        cmd.append("--rm")
+    cmd += [
+        "--name", container_name,
+        "--gpus", gpus_arg_for(devices),
+        # TensorRT-LLM's workers use shared memory for tensor
+        # transport; the 64MB docker default kills tp>1 init. The
+        # ulimits are what the image itself asks for on startup.
+        "--ipc=host",
+        "--ulimit", "memlock=-1",
+        "--ulimit", "stack=67108864",
+        "--network", "host",
+    ]
+    cmd += list(mounts or [])
+    if options_path is not None:
+        cmd += ["-v", f"{options_path}:{OPTIONS_IN_CONTAINER}:ro"]
+    cmd += list(extra or [])
+    cmd.append(image)
+    return cmd
+
+
+def serve_argv(model: str, *, port: int, tp: int,
+               backend: str = "pytorch",
+               max_seq_len: int | None = None,
+               max_batch_size: int | None = None,
+               max_num_tokens: int | None = None,
+               expert_parallel: bool = False,
+               trust_remote_code: bool = False,
+               options_path: str | None = None,
+               extra: list[str] | None = None) -> list[str]:
+    """The container CMD: ``trtllm-serve serve ...``.
+
+    Deliberately NOT an --entrypoint override. The image's ENV
+    LD_LIBRARY_PATH omits /usr/local/tensorrt/lib; that path is added
+    by /etc/bash.bashrc via BASH_ENV, which only the image's own
+    entrypoint runs. Bypassing it fails with
+    ``ImportError: libnvonnxparser.so.10`` before serve starts.
+    """
+    argv = [
+        "trtllm-serve", "serve", model,
+        "--host", "0.0.0.0",
+        "--port", str(int(port)),
+        "--backend", backend or "pytorch",
+        "--tp_size", str(int(tp)),
+    ]
+    if max_seq_len:
+        argv += ["--max_seq_len", str(int(max_seq_len))]
+    if max_batch_size:
+        argv += ["--max_batch_size", str(int(max_batch_size))]
+    if max_num_tokens:
+        argv += ["--max_num_tokens", str(int(max_num_tokens))]
+    if expert_parallel and tp > 1:
+        argv += ["--ep_size", str(int(tp))]
+    if trust_remote_code:
+        argv += ["--trust_remote_code"]
+    if options_path:
+        argv += ["--extra_llm_api_options", options_path]
+    argv += list(extra or [])
+    return argv
+
+
 class TrtLlmEngine(DockerReplicaEngine):
     """N GPU-pinned ``trtllm-serve`` replicas, sticky-routed."""
 
@@ -225,50 +301,26 @@ class TrtLlmEngine(DockerReplicaEngine):
     def build_replica_command(self, index: int, devices: list[int],
                               container_name: str) -> list[str]:
         cfg = self.cfg
-        image = getattr(cfg, "trtllm_image", None) or DEFAULT_IMAGE
-        cmd = [
-            "docker", "run", "-d", "--rm",
-            "--name", container_name,
-            "--gpus", gpus_arg_for(devices),
-            # TensorRT-LLM's workers use shared memory for tensor
-            # transport; the 64MB docker default kills tp>1 init.
-            "--ipc=host",
-            "--ulimit", "memlock=-1",
-            "--ulimit", "stack=67108864",
-            "--network", "host",
-        ]
-        cmd += self._mount_args()
-        if self._opts_path is not None:
-            cmd += ["-v", f"{self._opts_path}:/etc/capsim-trtllm.yaml:ro"]
-        cmd += list(cfg.docker_extra_args or [])
-        cmd.append(image)
-
-        model_arg = cfg.model_local_path or cfg.model_id
-        # NO --entrypoint: the image's own entrypoint puts
-        # /usr/local/tensorrt/lib on LD_LIBRARY_PATH. Overriding it
-        # breaks the TensorRT import before serve ever runs.
-        inner = [
-            "trtllm-serve", "serve", model_arg,
-            "--host", "0.0.0.0",
-            "--port", str(self._port(index)),
-            "--backend", getattr(cfg, "trtllm_backend", None) or "pytorch",
-            "--tp_size", str(len(devices)),
-            "--max_seq_len", str(cfg.max_model_len),
-        ]
-        mns = getattr(cfg, "max_num_seqs", None)
-        if mns:
-            inner += ["--max_batch_size", str(int(mns))]
-        mbt = getattr(cfg, "max_num_batched_tokens", None)
-        if mbt:
-            inner += ["--max_num_tokens", str(int(mbt))]
-        if getattr(cfg, "expert_parallel", False) and len(devices) > 1:
-            inner += ["--ep_size", str(len(devices))]
-        if getattr(cfg, "trust_remote_code", False):
-            inner += ["--trust_remote_code"]
-        if self._opts_path is not None:
-            inner += ["--extra_llm_api_options", "/etc/capsim-trtllm.yaml"]
-        inner += list(getattr(cfg, "trtllm_extra_flags", None) or [])
-        return cmd + inner
+        cmd = docker_prefix(
+            container_name, devices,
+            image=getattr(cfg, "trtllm_image", None) or DEFAULT_IMAGE,
+            mounts=self._mount_args(),
+            options_path=self._opts_path,
+            extra=list(cfg.docker_extra_args or []),
+        )
+        return cmd + serve_argv(
+            cfg.model_local_path or cfg.model_id,
+            port=self._port(index),
+            tp=len(devices),
+            backend=getattr(cfg, "trtllm_backend", None) or "pytorch",
+            max_seq_len=cfg.max_model_len,
+            max_batch_size=getattr(cfg, "max_num_seqs", None),
+            max_num_tokens=getattr(cfg, "max_num_batched_tokens", None),
+            expert_parallel=bool(getattr(cfg, "expert_parallel", False)),
+            trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),
+            options_path=(OPTIONS_IN_CONTAINER if self._opts_path else None),
+            extra=list(getattr(cfg, "trtllm_extra_flags", None) or []),
+        )
 
     # ── Metrics: drain in one place, serve cached ─────────────────────
 

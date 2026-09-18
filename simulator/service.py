@@ -117,6 +117,10 @@ class StartRunRequest(BaseModel):
     preset: Optional[str] = None
     search_max_num_seqs: Optional[list[int]] = None
     search_output_tokens: Optional[list[int]] = None
+    # Which servers the joint search covers. None = vLLM only, so an
+    # unqualified search costs what it always did; naming both makes
+    # the engine a measured dimension rather than an assumption.
+    search_engines: Optional[list[str]] = None
 
 
 class ExportRequest(BaseModel):
@@ -940,6 +944,7 @@ def create_app(
                 preset=req.preset or "standard",
                 max_num_seqs=req.search_max_num_seqs,
                 output_tokens=req.search_output_tokens,
+                engines=req.search_engines,
                 input_tokens=req.input_tokens or 128,
                 build_config=_build, runs_base=runs_base,
                 progress=sweep_progress,

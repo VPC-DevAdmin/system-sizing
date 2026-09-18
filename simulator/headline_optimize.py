@@ -13,6 +13,13 @@ honesty guards — over a COARSE concurrency ladder, which is enough
 to rank. The winner then earns a full-resolution sweep, and that
 run is what gets published.
 
+The SERVER is part of that product too. vLLM and TensorRT-LLM make
+different scheduling and KV-layout choices, and which one wins is a
+property of the model and the shape, not a standing fact — so it is
+measured, not assumed. Held constant across engines: the model, the
+request shape, the concurrency ladder and the stopping rule, which
+is what makes the comparison mean anything.
+
 Deliberately NOT searched: replicas and tensor parallelism. The
 engine optimizer already settled 8×tp1 for this box, and a 3B-active
 MoE has no reason to pay an all-reduce. Ranking is by sustained
@@ -38,6 +45,11 @@ log = logging.getLogger(__name__)
 # curve, so the low rungs only cost time. The winner gets the full one.
 SEARCH_LADDER = [512, 2048, 4096, 8192]
 
+# The engine axis defaults to vLLM alone so an unqualified search
+# costs what it always did; asking for both engines is an explicit
+# choice that doubles the grid.
+DEFAULT_ENGINES = ["vllm_cuda_multi"]
+
 PRESETS: dict[str, dict] = {
     "quick": {"max_num_seqs": [512, 1024], "output_tokens": [1024, 2048]},
     "standard": {"max_num_seqs": [512, 1024, 2048],
@@ -49,7 +61,8 @@ PRESETS: dict[str, dict] = {
 
 @dataclass
 class Candidate:
-    """One (engine, shape) pair and what the sweep measured for it."""
+    """One (engine, shape) point and what the sweep measured for it."""
+    engine: str
     max_num_seqs: int
     output_tokens: int
     input_tokens: int
@@ -87,17 +100,23 @@ def rank(candidates: list[Candidate]) -> list[Candidate]:
 
 def grid(preset: str = "standard",
          max_num_seqs: list[int] | None = None,
-         output_tokens: list[int] | None = None) -> list[tuple[int, int]]:
-    """(max_num_seqs, output_tokens) pairs to evaluate, ordered so the
-    cheapest engine launches come first — an interrupted search then
-    still leaves a usable ranking."""
+         output_tokens: list[int] | None = None,
+         engines: list[str] | None = None) -> list[tuple[str, int, int]]:
+    """(engine, max_num_seqs, output_tokens) points to evaluate.
+
+    Ordered engine-major, then by ascending cost: an interrupted
+    search still leaves a usable ranking, and one engine's whole
+    grid completes before the other starts, so a partial result is
+    a complete answer about one server rather than half an answer
+    about two."""
     base = PRESETS.get(preset) or PRESETS["standard"]
     mns = sorted(max_num_seqs or base["max_num_seqs"])
     outs = sorted(output_tokens or base["output_tokens"])
-    return [(m, o) for m in mns for o in outs]
+    engs = list(engines or DEFAULT_ENGINES)
+    return [(e, m, o) for e in engs for m in mns for o in outs]
 
 
-def estimate_minutes(pairs: list[tuple[int, int]], *,
+def estimate_minutes(pairs: list, *,
                      launch_min: float = 5.0,
                      rung_min: float = 1.2,
                      rungs: int = len(SEARCH_LADDER),
@@ -107,6 +126,25 @@ def estimate_minutes(pairs: list[tuple[int, int]], *,
     max_num_seqs in place."""
     return int(len(pairs) * (launch_min + rungs * rung_min)
                + final_sweep_min)
+
+
+def engines_in(pairs: list) -> list[str]:
+    """Distinct engines the grid covers, in order."""
+    out: list[str] = []
+    for p in pairs:
+        if p[0] not in out:
+            out.append(p[0])
+    return out
+
+
+def best_per_engine(candidates: list) -> dict:
+    """Each engine's best usable candidate — the head-to-head the
+    operator actually wants to see, which a single ranked list hides
+    as soon as one engine sweeps the top."""
+    out: dict = {}
+    for c in rank(candidates):
+        out.setdefault(c.engine, c)
+    return out
 
 
 @dataclass
@@ -138,6 +176,7 @@ async def run_headline_optimize(
     preset: str = "standard",
     max_num_seqs: list[int] | None = None,
     output_tokens: list[int] | None = None,
+    engines: list[str] | None = None,
     input_tokens: int = 128,
     build_config,
     runs_base: Path,
@@ -152,16 +191,17 @@ async def run_headline_optimize(
     from .headline_sweep import run_headline_sweep
     from .persona_loader import USER_CATALOG_DIR
 
-    pairs = grid(preset, max_num_seqs, output_tokens)
+    pairs = grid(preset, max_num_seqs, output_tokens, engines)
     started = time.monotonic()
     results: list[Candidate] = []
     BUS.publish("run", {
         "event": "started", "mode": "headline_optimize",
         "cohort_id": cohort.id, "model": cfg.engine.model_id,
-        "pairs": len(pairs),
+        "pairs": len(pairs), "engines": engines_in(pairs),
     })
-    log.info("headline optimize: %d (engine, shape) pairs, ~%d min",
-             len(pairs), estimate_minutes(pairs))
+    log.info("headline optimize: %d (engine, shape) points over %s, ~%d min",
+             len(pairs), ", ".join(engines_in(pairs)),
+             estimate_minutes(pairs))
 
     def _emit(**kw):
         if progress is not None:
@@ -170,18 +210,19 @@ async def run_headline_optimize(
     _emit(pairs=len(pairs), pair=0, phase="searching", done=False,
           estimate_min=estimate_minutes(pairs))
 
-    for i, (mns, out_tok) in enumerate(pairs, 1):
-        cand = Candidate(max_num_seqs=mns, output_tokens=out_tok,
-                         input_tokens=input_tokens)
+    for i, (eng, mns, out_tok) in enumerate(pairs, 1):
+        cand = Candidate(engine=eng, max_num_seqs=mns,
+                         output_tokens=out_tok, input_tokens=input_tokens)
         _emit(pair=i, phase="searching",
-              current={"max_num_seqs": mns, "output_tokens": out_tok})
-        log.info("candidate %d/%d: mns=%d shape=%d→%d",
-                 i, len(pairs), mns, input_tokens, out_tok)
+              current={"engine": eng, "max_num_seqs": mns,
+                       "output_tokens": out_tok})
+        log.info("candidate %d/%d: %s mns=%d shape=%d→%d",
+                 i, len(pairs), eng, mns, input_tokens, out_tok)
         try:
             # The shape lives in the persona; the engine lives in the
             # generated config. Both must be set before the sweep.
             apply_shape_to_generation(USER_CATALOG_DIR, input_tokens, out_tok)
-            cfg_path = build_config({"max_num_seqs": mns})
+            cfg_path = build_config({"engine": eng, "max_num_seqs": mns})
             from .config import load_config
             sub = load_config(cfg_path)
             sub.output.db_directory = str(runs_base)
@@ -210,8 +251,8 @@ async def run_headline_optimize(
             # One bad candidate (an engine shape that will not launch,
             # say) must not abandon the search.
             cand.error = f"{type(e).__name__}: {e}"
-            log.warning("candidate mns=%d shape=%d→%d failed: %s",
-                        mns, input_tokens, out_tok, e)
+            log.warning("candidate %s mns=%d shape=%d→%d failed: %s",
+                        eng, mns, input_tokens, out_tok, e)
         results.append(cand)
         best = rank(results)
         _emit(best=asdict(best[0]) if best else None)
@@ -226,14 +267,17 @@ async def run_headline_optimize(
         # The winner earns a full-resolution sweep; THAT is the run to
         # publish, and it leaves the box configured as it was measured.
         _emit(phase="confirming winner",
-              current={"max_num_seqs": winner.max_num_seqs,
+              current={"engine": winner.engine,
+                       "max_num_seqs": winner.max_num_seqs,
                        "output_tokens": winner.output_tokens})
-        log.info("winner: mns=%d shape=%d→%d — full sweep",
-                 winner.max_num_seqs, input_tokens, winner.output_tokens)
+        log.info("winner: %s mns=%d shape=%d→%d — full sweep",
+                 winner.engine, winner.max_num_seqs, input_tokens,
+                 winner.output_tokens)
         try:
             apply_shape_to_generation(
                 USER_CATALOG_DIR, input_tokens, winner.output_tokens)
-            cfg_path = build_config({"max_num_seqs": winner.max_num_seqs})
+            cfg_path = build_config({"engine": winner.engine,
+                                     "max_num_seqs": winner.max_num_seqs})
             from .config import load_config
             sub = load_config(cfg_path)
             sub.output.db_directory = str(runs_base)
@@ -248,6 +292,9 @@ async def run_headline_optimize(
         "cohort_id": cohort.id,
         "input_tokens": input_tokens,
         "preset": preset,
+        "engines": engines_in(pairs),
+        "best_per_engine": {k: asdict(v)
+                            for k, v in best_per_engine(results).items()},
         "candidates": [asdict(c) for c in results],
         "ranked": [asdict(c) for c in ranked],
         "winner": asdict(winner) if winner else None,

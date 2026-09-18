@@ -36,12 +36,15 @@ log = logging.getLogger(__name__)
 DEFAULT_IMAGE = "lmsysorg/sglang:latest"
 
 # vLLM's KV dtype spelling -> SGLang's. SGLang names the float8
-# representation explicitly; e5m2 is the conservative default choice
-# (wider exponent range, the one vLLM's plain "fp8" historically
-# meant on non-Hopper paths).
+# representation explicitly where vLLM takes a bare "fp8", so the
+# alias has to be resolved the SAME WAY vLLM resolves it or the two
+# engines run different numeric formats while reporting one
+# comparison. vLLM's own docs settle it: "CUDA 11.8+ supports fp8
+# (=fp8_e4m3)". NVIDIA's ModelOpt checkpoints agree -- they declare
+# kv_cache_quant_algo FP8, which is e4m3.
 KV_DTYPE_MAP = {
     "auto": None,
-    "fp8": "fp8_e5m2",
+    "fp8": "fp8_e4m3",
     "fp8_e5m2": "fp8_e5m2",
     "fp8_e4m3": "fp8_e4m3",
 }
@@ -65,12 +68,35 @@ def kv_dtype_for_sglang(dtype: str | None) -> tuple[Optional[str], Optional[str]
     return None, f"SGLang does not accept kv_cache_dtype {dtype!r}"
 
 
+# Precision labels that need ``--quantization`` spelled out, and the
+# value SGLang's registry knows them by. Anything absent from this map
+# (compressed-tensors, awq, gptq, plain bf16) declares itself inside
+# config.json and IS auto-detected -- naming those explicitly would
+# only create a second way to be wrong.
+MODELOPT_QUANTIZATION = {
+    "nvfp4": "modelopt_fp4",
+    "fp4": "modelopt_fp4",
+}
+
+
+def sglang_quantization(model_quant: str | None,
+                        explicit: str | None = None) -> str | None:
+    """The ``--quantization`` value for a model, or None to let SGLang
+    decide. An explicit config setting always wins."""
+    if explicit:
+        return str(explicit)
+    if not model_quant:
+        return None
+    return MODELOPT_QUANTIZATION.get(str(model_quant).lower())
+
+
 def launch_argv(model: str, *, port: int, tp: int,
                 context_length: int | None = None,
                 max_running_requests: int | None = None,
                 max_prefill_tokens: int | None = None,
                 mem_fraction_static: float | None = None,
                 kv_cache_dtype: str | None = None,
+                quantization: str | None = None,
                 expert_parallel: bool = False,
                 trust_remote_code: bool = False,
                 extra: list[str] | None = None) -> list[str]:
@@ -96,6 +122,8 @@ def launch_argv(model: str, *, port: int, tp: int,
     kv, _reason = kv_dtype_for_sglang(kv_cache_dtype)
     if kv:
         argv += ["--kv-cache-dtype", kv]
+    if quantization:
+        argv += ["--quantization", quantization]
     if expert_parallel and tp > 1:
         argv += ["--enable-ep-moe", "--ep-size", str(int(tp))]
     if trust_remote_code:
@@ -138,6 +166,9 @@ class SGLangCudaEngine(DockerReplicaEngine):
             # gpu_memory_utilization names.
             mem_fraction_static=cfg.gpu_memory_utilization,
             kv_cache_dtype=getattr(cfg, "kv_cache_dtype", None),
+            quantization=sglang_quantization(
+                getattr(cfg, "model_quant", None),
+                cfg.quantization_kind or cfg.quantization),
             expert_parallel=bool(getattr(cfg, "expert_parallel", False)),
             trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),
             extra=list(cfg.sglang_extra_flags or []),

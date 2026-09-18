@@ -253,10 +253,12 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
     from .engines.vram import weights_per_gpu_gb
     from .model_catalog import load_model_catalog
     weights = None
+    model_quant = None
     try:
         for e in load_model_catalog():
             if e.get("id") == model_id:
                 weights = weights_per_gpu_gb(e.get("approx_size_gb"), tp)
+                model_quant = e.get("quant")
                 break
     except Exception:  # noqa: BLE001
         weights = None
@@ -274,6 +276,7 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
         "startup_timeout_s": 1800,
         "vram_per_gpu_gb": hw.get("vram_per_gpu_gb"),
         "model_weights_gb": weights,
+        "model_quant": model_quant,
         **to_engine_config(engine_type, knobs),
     }
     if engine_type == "trtllm":

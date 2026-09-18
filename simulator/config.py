@@ -146,6 +146,10 @@ class EngineConfig:
     # use the engine's own default" rather than a guessed number.
     vram_per_gpu_gb: float | None = None
     model_weights_gb: float | None = None
+    # The catalog's precision label for this model (nvfp4, fp8, bf16...).
+    # Engines consult it where a checkpoint does not describe itself in
+    # the place the loader looks -- see sglang_cuda.sglang_quantization.
+    model_quant: str | None = None
 
     max_num_seqs: int | None = None
     max_num_batched_tokens: int | None = None

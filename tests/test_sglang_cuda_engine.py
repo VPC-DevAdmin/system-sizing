@@ -51,12 +51,15 @@ def test_kv_dtype_is_translated_not_passed_through():
     """vLLM takes 'fp8' and picks a representation; SGLang wants it
     spelled out. Passing vLLM's spelling straight through is a launch
     failure."""
-    assert kv_dtype_for_sglang("fp8") == ("fp8_e5m2", None)
+    # vLLM's bare "fp8" IS e4m3 ("CUDA 11.8+ supports fp8 (=fp8_e4m3)"),
+    # so resolving it any other way would run two numeric formats and
+    # call the result one comparison.
+    assert kv_dtype_for_sglang("fp8") == ("fp8_e4m3", None)
     assert kv_dtype_for_sglang("fp8_e4m3") == ("fp8_e4m3", None)
     assert kv_dtype_for_sglang("auto") == (None, None)
     assert kv_dtype_for_sglang(None) == (None, None)
     argv = launch_argv("m", port=1, tp=1, kv_cache_dtype="fp8")
-    assert argv[argv.index("--kv-cache-dtype") + 1] == "fp8_e5m2"
+    assert argv[argv.index("--kv-cache-dtype") + 1] == "fp8_e4m3"
 
 
 def test_a_precision_sglang_cannot_express_is_refused():
@@ -127,3 +130,26 @@ def test_sglang_metric_names_match_the_real_collector():
     # token_usage is a fraction; capsim's canonical form is a percent.
     assert m["kv_cache_used_pct"] == 83.0
     assert m["prefix_cache_hit_rate"] == 0.42
+
+
+def test_modelopt_checkpoints_name_their_quantization():
+    """NVIDIA's NVFP4 exports carry `quantization_config: null` in
+    config.json and declare themselves only in the hf_quant_config
+    sidecar, which the ordinary auto-detection path does not read.
+    vLLM happens to look there; betting that SGLang does too means the
+    weights load as though unquantized."""
+    from simulator.engines.sglang_cuda import sglang_quantization
+
+    assert sglang_quantization("nvfp4") == "modelopt_fp4"
+    # Formats that DO declare themselves in config.json are left alone
+    # — naming them would only add a second way to be wrong.
+    assert sglang_quantization("fp8") is None
+    assert sglang_quantization("bf16") is None
+    assert sglang_quantization(None) is None
+    # An explicit config setting always wins.
+    assert sglang_quantization("nvfp4", "modelopt_fp8") == "modelopt_fp8"
+
+    argv = launch_argv("m", port=1, tp=1, quantization="modelopt_fp4")
+    assert argv[argv.index("--quantization") + 1] == "modelopt_fp4"
+    # Absent when there is nothing to say.
+    assert "--quantization" not in launch_argv("m", port=1, tp=1)

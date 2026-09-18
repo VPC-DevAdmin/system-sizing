@@ -133,12 +133,13 @@ const Control = {
     // Any hand edit to the engine settings is STICKY: nothing may
     // silently reset the form after the user shaped it (a reverted
     // KV dropdown once ran "auto" when the user meant fp8).
-    for (const id of ["eng-replicas", "eng-tp", "eng-placement",
-                      "eng-gmu", "eng-mns", "eng-mbt", "eng-kv",
-                      "eng-ep", "eng-trc"]) {
+    for (const id of ["eng-engine", "eng-replicas", "eng-tp",
+                      "eng-placement", "eng-gmu", "eng-mns", "eng-mbt",
+                      "eng-kv", "eng-ep", "eng-trc"]) {
       $("#" + id).addEventListener("input", () => {
         this._engineDirty = true;
         if (id === "eng-trc") this.updateTrcWarning();
+        if (id === "eng-engine") this.updateEngineNote();
       });
     }
     $("#start-btn").addEventListener("click", () => this.start());
@@ -227,7 +228,78 @@ const Control = {
              expert_parallel: false };
   },
 
+  /* Offer only engines whose runtime is staged. Called by Engines
+   * after every status refresh, so pulling one mid-session makes it
+   * selectable without a reload — and an engine that vanished cannot
+   * stay silently selected. */
+  syncEngineChoices() {
+    const sel = $("#eng-engine");
+    if (!sel) return;
+    const opts = Engines.available();
+    const keep = sel.value;
+    sel.innerHTML = "";
+    for (const e of opts) {
+      const o = document.createElement("option");
+      o.value = e;
+      o.textContent = Engines.label(e);
+      sel.append(o);
+    }
+    sel.value = opts.includes(keep) ? keep : opts[0];
+    // One staged engine is not a choice; don't imply it is.
+    sel.closest("label").style.display = opts.length > 1 ? "" : "none";
+    this.updateEngineNote();
+    this.renderHeadlineEngines();
+  },
+
+  /* Say where this engine's numbers are NOT comparable with the
+   * other's, at the moment it is picked. */
+  updateEngineNote() {
+    const box = $("#eng-engine-note");
+    if (!box) return;
+    const list = Engines.caveats($("#eng-engine")?.value);
+    box.hidden = !list.length;
+    box.innerHTML = list.length
+      ? "<ul style='margin:0 0 0 16px'>"
+        + list.map(c => `<li>${c}</li>`).join("") + "</ul>"
+      : "";
+  },
+
+  /* Which engines the joint search covers. Both is a deliberate
+   * choice: it doubles the grid, so it is never the default. */
+  renderHeadlineEngines() {
+    const box = $("#hl-engines");
+    if (!box) return;
+    const opts = Engines.available();
+    if (opts.length < 2) { box.innerHTML = ""; box.hidden = true; return; }
+    box.hidden = false;
+    const chosen = this.headlineEngines ?? [$("#eng-engine")?.value
+                                            || opts[0]];
+    box.innerHTML = "";
+    for (const e of opts) {
+      const id = `hl-eng-${e}`;
+      const lab = document.createElement("label");
+      lab.className = "check";
+      lab.innerHTML = `<input type="checkbox" id="${id}"
+        ${chosen.includes(e) ? "checked" : ""}> ${Engines.label(e)}`;
+      lab.querySelector("input").addEventListener("change", () => {
+        this.headlineEngines = opts.filter(
+          x => $(`#hl-eng-${x}`)?.checked);
+        if (!this.headlineEngines.length) {
+          // Never launch a search with nothing to search.
+          this.headlineEngines = [e];
+          $(`#${id}`).checked = true;
+        }
+      });
+      box.append(lab);
+    }
+    this.headlineEngines = chosen;
+  },
+
   setEngineForm(d) {
+    if (d.engine && Engines.available().includes(d.engine)) {
+      $("#eng-engine").value = d.engine;
+    }
+    this.updateEngineNote();
     $("#eng-replicas").value = d.replicas ?? 1;
     $("#eng-tp").value = d.tp ?? 1;
     $("#eng-placement").value = d.placement ?? "pack";
@@ -249,6 +321,7 @@ const Control = {
 
   readEngineForm() {
     return {
+      engine: $("#eng-engine").value || "vllm_cuda_multi",
       replicas: +$("#eng-replicas").value || 1,
       tp: +$("#eng-tp").value || 1,
       placement: $("#eng-placement").value,
@@ -264,7 +337,9 @@ const Control = {
   /* Human summary of what an engine form means — echoed at start and
    * in the run banner so there is never doubt about what's running. */
   engineSummary(form) {
-    return `${form.replicas}×tp${form.tp} ${form.placement}`
+    const eng = Engines.available().length > 1
+      ? `${Engines.label(form.engine)} · ` : "";
+    return eng + `${form.replicas}×tp${form.tp} ${form.placement}`
       + ` · gmu ${form.gpu_memory_utilization}`
       + (form.max_num_seqs ? ` · mns ${form.max_num_seqs}` : "")
       + (form.max_num_batched_tokens
@@ -298,7 +373,7 @@ const Control = {
     const model = $("#bench-model").value;
     const entry = this.modelEntry();
     const cpuMode = this.deviceMode === "cpu";
-    const gpuEngines = ["vllm_cuda", "vllm_cuda_multi"];
+    const gpuEngines = ["vllm_cuda", "vllm_cuda_multi", "trtllm"];
     this.matchedProfile = null;
     for (const [name, p] of Object.entries(this.catalogs.profiles)) {
       if (!p?.optimized || p.model_id !== model || !p.fits_hardware) continue;
@@ -538,6 +613,7 @@ const Control = {
       body.custom = {
         model_id: model,
         device: "gpu",
+        engine: form.engine,
         replicas: form.replicas,
         tp: form.tp,
         placement: form.placement,
@@ -669,12 +745,21 @@ const Control = {
     }
     body.preset = $("#hl-preset").value;
     body.input_tokens = +$("#hl-input-tokens")?.value || 128;
-    const pairs = { quick: 4, standard: 9, thorough: 16 }[body.preset] || 9;
+    const engines = (Engines.available().length > 1
+                     && this.headlineEngines?.length)
+      ? this.headlineEngines : null;
+    if (engines) body.search_engines = engines;
+    const shapes = { quick: 4, standard: 9, thorough: 16 }[body.preset] || 9;
+    const pairs = shapes * (engines ? engines.length : 1);
     this._starting = true;
     $("#hl-optimize").disabled = true;
     try {
       await api("/api/runs", { method: "POST", body: JSON.stringify(body) });
-      this.msg(`searching ${pairs} engine/shape combinations, then `
+      this.msg(`searching ${pairs} engine/shape combinations`
+        + (engines && engines.length > 1
+           ? ` across ${engines.map(e => Engines.label(e)).join(" and ")}`
+           : "")
+        + `, then `
         + `sweeping the winner at full resolution — expect roughly `
         + `${Math.round(pairs * 10 + 14)} minutes`, "ok");
       this.pollStatus();
@@ -3866,6 +3951,121 @@ const Editor = {
   },
 };
 
+
+/* ── engine runtimes (Prepare step 4) ──────────────────────────────
+ * An engine is a choice only once its image is on the box. This is
+ * the one place that gate is opened, and Optimize and Benchmark read
+ * their options from what it reports. */
+
+const Engines = {
+  doc: null,
+  _timer: null,
+
+  init() {
+    $("#engines-refresh").addEventListener("click", () => this.refresh());
+    document.querySelector('#tabs button[data-view="prepare"]')
+      .addEventListener("click", () => this.refresh());
+    this.refresh();
+  },
+
+  msg(text, cls = "") {
+    const el = $("#engines-msg");
+    if (!el) return;
+    el.textContent = text;
+    el.className = `msg ${cls}`;
+  },
+
+  /* What Optimize and Benchmark may offer. Falls back to vLLM so a
+   * failed status fetch degrades to the historical behaviour rather
+   * than an empty picker. */
+  available() {
+    return this.doc?.available?.length ? this.doc.available
+                                       : ["vllm_cuda_multi"];
+  },
+
+  row(engine) {
+    return (this.doc?.runtimes ?? []).find(r => r.engine === engine) ?? null;
+  },
+
+  label(engine) {
+    return this.row(engine)?.label ?? engine;
+  },
+
+  caveats(engine) {
+    return this.row(engine)?.caveats ?? [];
+  },
+
+  async refresh() {
+    let doc;
+    try { doc = await api("/api/engines"); } catch { return; }
+    this.doc = doc;
+
+    const store = doc.image_store || {};
+    $("#engines-store").textContent = store.path
+      ? `${store.path}${store.free_gb != null
+          ? ` — ${store.free_gb.toFixed(0)} GB free` : ""}`
+      : "an unknown location";
+
+    const box = $("#engines-list");
+    box.innerHTML = "";
+    let pulling = false;
+    for (const r of doc.runtimes) {
+      const el = document.createElement("div");
+      el.className = "callout" + (r.staged ? "" : " muted");
+      const pull = r.pull;
+      if (pull?.running) pulling = true;
+      let action;
+      if (r.staged) {
+        action = `<span class="status-pass">staged</span>`;
+      } else if (pull?.running) {
+        action = `<span class="msg">pulling… ${pull.progress || ""}</span>`;
+      } else {
+        action = `<button class="small primary" data-pull="${r.engine}">
+          Pull ~${r.approx_gb} GB</button>`;
+      }
+      const failed = pull && !pull.running && pull.returncode
+        ? `<div class="hint status-fail">the last pull exited
+             ${pull.returncode} — see ${pull.log}</div>` : "";
+      const caveats = (r.caveats || []).length
+        ? `<ul class="hint" style="margin:6px 0 0 16px">`
+          + r.caveats.map(c => `<li>${c}</li>`).join("") + `</ul>`
+        : "";
+      el.innerHTML = `<div class="row" style="align-items:flex-start">
+          <div style="flex:1">
+            <b>${r.label}</b>
+            <div class="hint">${r.blurb}</div>
+            <div class="hint"><code>${r.image}</code></div>
+            ${caveats}${failed}
+          </div>
+          <div style="margin-left:auto">${action}</div>
+        </div>`;
+      box.append(el);
+    }
+    box.querySelectorAll("[data-pull]").forEach(b =>
+      b.addEventListener("click", () => this.pull(b.dataset.pull)));
+
+    // Keep the benchmark picker honest the moment staging changes.
+    Control.syncEngineChoices?.();
+
+    clearTimeout(this._timer);
+    if (pulling) this._timer = setTimeout(() => this.refresh(), 3000);
+  },
+
+  async pull(engine) {
+    this.msg(`starting the ${this.label(engine)} pull…`);
+    try {
+      await api("/api/engines/pull", {
+        method: "POST", body: JSON.stringify({ engine }),
+      });
+      this.msg(`pulling ${this.label(engine)} — this runs in the `
+        + `background and survives a page reload`, "ok");
+    } catch (e) {
+      this.msg(e.message, "error");
+    }
+    this.refresh();
+  },
+};
+
 /* ── boot ─────────────────────────────────────────────────────── */
 
 Control.init();
@@ -3873,5 +4073,6 @@ Live.init();
 Results.init();
 Optimizer.init();
 Storage.init();
+Engines.init();
 Models.init();
 Editor.init();

@@ -551,6 +551,12 @@ def create_app(
                     label = f"{short} — whole box, {len(reps)} replicas"
                     detail = (f"tp{tp} per replica"
                               if tp > 1 else "one GPU per replica")
+                elif engine_type == "trtllm":
+                    reps = eng.get("replica_devices") or []
+                    tp = max((len(g) for g in reps), default=1)
+                    label = f"{short} — TensorRT-LLM, {len(reps)} replicas"
+                    detail = (f"tp{tp} per replica"
+                              if tp > 1 else "one GPU per replica")
                 elif engine_type == "vllm_cuda":
                     tp = eng.get("tensor_parallel_size", 1)
                     label = f"{short} — single engine"
@@ -565,7 +571,8 @@ def create_app(
                     label = f"Remote endpoint{' — ' + short if short else ''}"
             except Exception:  # noqa: BLE001
                 pass
-            gpu_engine = engine_type in ("vllm_cuda", "vllm_cuda_multi")
+            gpu_engine = engine_type in ("vllm_cuda", "vllm_cuda_multi",
+                                         "trtllm")
             # The searched engine dimensions, extracted so the
             # benchmark form can prefill its Advanced settings with
             # exactly what the optimization landed on.
@@ -578,6 +585,11 @@ def create_app(
                             and flags.index(key) + 1 < len(flags) else None)
                 reps = eng.get("replica_devices") or []
                 params = {
+                    # Which server the profile was measured on, so the
+                    # benchmark form prefills the engine too and does
+                    # not silently re-measure on a different one.
+                    "engine": ("trtllm" if engine_type == "trtllm"
+                               else "vllm_cuda_multi"),
                     "replicas": len(reps) if reps else 1,
                     "tp": (max((len(g) for g in reps), default=1) if reps
                            else int(eng.get("tensor_parallel_size") or 1)),

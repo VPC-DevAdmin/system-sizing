@@ -87,11 +87,17 @@ def _write_profile(
     # dp>1 winners: one GPU-id list per replica → the multi-replica
     # engine benchmarks the WHOLE BOX instead of one pinned replica.
     replica_devices: Optional[list[list[int]]] = None,
+    engine_type: str = "vllm_cuda_multi",
 ) -> tuple[str, Path]:
+    trtllm = engine_type == "trtllm"
     engine: dict[str, Any] = {
-        "type": "vllm_cuda_multi" if replica_devices else "vllm_cuda",
+        # A TensorRT-LLM winner must promote to a TensorRT-LLM
+        # profile. Writing a vLLM profile would silently re-measure
+        # the winning shape on the engine that did not win it.
+        "type": ("trtllm" if trtllm
+                 else "vllm_cuda_multi" if replica_devices
+                 else "vllm_cuda"),
         "model_id": model_id,
-        "gpu_image": DEFAULT_GPU_IMAGE,
         "max_model_len": engine_fields.pop("max_model_len", 16384),
         "tensor_parallel_size": engine_fields.pop("tensor_parallel_size", 1),
         "gpu_memory_utilization": engine_fields.pop("gpu_memory_utilization", 0.90),
@@ -99,13 +105,22 @@ def _write_profile(
         "host": "127.0.0.1",
         "startup_timeout_s": 1800,
     }
+    if not trtllm:
+        engine["gpu_image"] = DEFAULT_GPU_IMAGE
     engine.update(engine_fields)          # e.g. quantization_kind
-    if replica_devices:
+    if trtllm:
+        # The TensorRT engine is a DockerReplicaEngine: one replica or
+        # eight, the shape is always replica_devices.
+        engine["replica_devices"] = [list(g) for g in (
+            replica_devices or ([gpu_device_ids] if gpu_device_ids
+                                else [[0]]))]
+    elif replica_devices:
         engine["replica_devices"] = [list(g) for g in replica_devices]
     elif gpu_device_ids:
         engine["gpu_device_ids"] = gpu_device_ids
     if extra_flags:
-        engine["vllm_extra_flags"] = [str(f) for f in extra_flags]
+        engine["trtllm_extra_flags" if trtllm
+               else "vllm_extra_flags"] = [str(f) for f in extra_flags]
     # No docker_volumes on purpose: the vllm_cuda launcher mounts the
     # RESOLVED hf cache (UI storage choice) when a profile doesn't pin one.
     doc = {
@@ -163,14 +178,24 @@ def promote_search_winner(
     fields.setdefault("tensor_parallel_size", summary["tp"])
 
     replicas = summary["replica_devices"]
+    engine_type = str(summary.get("engine") or "vllm_cuda_multi")
     warnings = []
     multi = len(replicas) > 1
     if multi:
+        promoted_as = ("trtllm" if engine_type == "trtllm"
+                       else "vllm_cuda_multi")
         warnings.append(
-            f"dp={len(replicas)} winner — promoted as vllm_cuda_multi: "
+            f"dp={len(replicas)} winner — promoted as {promoted_as}: "
             f"the benchmark drives ALL {len(replicas)} replicas with "
             f"sticky per-user routing (whole-box capacity, measured)."
         )
+    if engine_type == "trtllm":
+        kv = summary.get("kv_cache_dtype")
+        if kv:
+            fields["kv_cache_dtype"] = kv
+        if summary.get("gpu_memory_utilization") is not None:
+            fields["gpu_memory_utilization"] = summary[
+                "gpu_memory_utilization"]
     score = best.get("score")
     # Profile name from the investigation group — "Optimized Qwen3
     # 16–45B" is what the operator picks in the Benchmark tab, not
@@ -191,7 +216,9 @@ def promote_search_winner(
         extra_flags=leftover,
         gpu_device_ids=None if multi else replicas[0],
         replica_devices=replicas if multi else None,
+        engine_type=engine_type,
         provenance=[
+            f"engine: {engine_type}",
             f"source: guided search '{search_doc.get('space')}' "
             f"({search_doc.get('generated_at', '')[:19]})",
             f"winner: {best.get('key', '')}",

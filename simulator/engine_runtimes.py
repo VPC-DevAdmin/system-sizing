@@ -101,6 +101,7 @@ def image_store_root() -> dict:
 
 def runtime_status(images: set[str] | None = None) -> list[dict]:
     """One row per engine: staged or not, with what a pull would cost."""
+    from .engines.knobs import caveats
     have = local_images() if images is None else images
     rows = []
     for key, meta in RUNTIMES.items():
@@ -111,6 +112,10 @@ def runtime_status(images: set[str] | None = None) -> list[dict]:
             "approx_gb": meta["approx_gb"],
             "blurb": meta["blurb"],
             "staged": meta["image"] in have,
+            # Where this engine's numbers are NOT interchangeable with
+            # another's. Surfaced next to the choice, not buried in a
+            # doc nobody reads mid-benchmark.
+            "caveats": caveats(key),
         })
     return rows
 

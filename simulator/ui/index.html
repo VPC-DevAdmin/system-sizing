@@ -102,6 +102,20 @@
 
     <section class="panel">
       <div class="step-head"><span class="step-num">4</span>
+        <div><div class="t">Stage engine runtimes</div>
+          <div class="d">Which servers this box can launch. An engine only appears
+            in Optimize and Benchmark once its image is here &mdash; otherwise a
+            search would spend its first candidate discovering a multi-gigabyte
+            download it can't do mid-run. Images land in
+            <b id="engines-store">&mdash;</b>.</div></div>
+        <button id="engines-refresh" class="small" style="margin-left:auto">Refresh</button>
+      </div>
+      <div id="engines-list"></div>
+      <div id="engines-msg" class="msg" style="margin-top:8px"></div>
+    </section>
+
+    <section class="panel">
+      <div class="step-head"><span class="step-num">5</span>
         <div><div class="t">Find the best launch shape</div>
           <div class="d">Capacity numbers are only as good as the engine config they were
             measured on. Build the arena, search it, and save the winner as the
@@ -230,6 +244,9 @@
             <option value="standard" selected>Standard — 9 combinations</option>
             <option value="thorough">Thorough — 16 combinations</option>
           </select></label>
+        <label>Engines searched
+          <span id="hl-engines" class="chips" style="margin-top:6px"></span>
+        </label>
         <button type="button" class="note-link" id="hl-optimize">&#128269;
           Find the best configuration</button>
         <span id="hl-optimize-note" class="hint"></span>
@@ -241,6 +258,8 @@
       <span id="engine-note" class="hint" style="display:block;
         margin-top:8px"></span>
       <div id="engine-form" class="form-grid" style="margin-top:10px">
+        <label>Engine <span class="hint">(the server under test)</span>
+          <select id="eng-engine"></select></label>
         <label>Replicas <span class="hint">(data parallel — independent
           engine copies)</span>
           <input id="eng-replicas" type="number" min="1" max="16"></label>
@@ -277,6 +296,7 @@
           </select></label>
       </div>
       <div id="eng-trc-warn" class="hint" style="margin-top:8px" hidden></div>
+      <div id="eng-engine-note" class="hint" style="margin-top:8px" hidden></div>
     </details>
     <div class="row wrap">
       <button id="start-btn" class="primary">Start run</button>

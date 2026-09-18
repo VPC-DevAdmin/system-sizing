@@ -333,3 +333,33 @@ def test_benchmark_config_builds_for_either_engine(monkeypatch):
     # engine comparison a comparison.
     for k in ("max_num_seqs", "kv_cache_dtype", "gpu_memory_utilization"):
         assert v[k] == t[k]
+
+
+def test_a_tensorrt_winner_promotes_to_a_tensorrt_profile(tmp_path):
+    """Promoting a TensorRT winner as a vLLM profile would silently
+    re-measure the winning shape on the engine that did not win it."""
+    import yaml
+
+    from simulator.promote import _write_profile
+
+    name, path = _write_profile(
+        name_hint="Optimized Qwen3",
+        model_id="nvidia/Qwen3.6-35B-A3B-NVFP4",
+        engine_fields={"max_model_len": 8192, "kv_cache_dtype": "fp8",
+                       "tensor_parallel_size": 1},
+        extra_flags=["--max_batch_size", "2048"],
+        gpu_device_ids=None,
+        replica_devices=[[0], [1], [2], [3]],
+        engine_type="trtllm",
+        provenance=["engine: trtllm"],
+        warnings=[],
+        out_dir=tmp_path,
+    )
+    eng = yaml.safe_load(path.read_text())["engine"]
+    assert eng["type"] == "trtllm"
+    assert eng["replica_devices"] == [[0], [1], [2], [3]]
+    assert eng["kv_cache_dtype"] == "fp8"
+    # Never a vLLM flag list, and never the vLLM image.
+    assert "vllm_extra_flags" not in eng
+    assert "gpu_image" not in eng
+    assert eng["trtllm_extra_flags"] == ["--max_batch_size", "2048"]

@@ -219,6 +219,48 @@ def estimate_minutes(n_cells: int, *, launch_min: float = 6.0,
                + n_models * final_sweep_min)
 
 
+# A cell that fails the same way twice is not unlucky, it is
+# impossible on this host -- an engine that cannot load a model
+# architecture, or a kernel that refuses the GPU. Retrying it on every
+# resume costs an engine launch each time and never produces a number.
+GIVE_UP_AFTER = 2
+
+
+def error_signature(err: str) -> str:
+    """The stable part of a failure, for deciding 'same way twice'.
+
+    Run ids, ports and paths change between attempts; the exception
+    type and its message do not.
+    """
+    import re
+    if not err:
+        return ""
+    # The "(full log: ...)" tail names a per-attempt file and is the
+    # variable part by construction, so drop it whole rather than
+    # trying to normalise what is inside it.
+    s = re.sub(r"\(full log:[^)]*\)", "", err)
+    s = re.sub(r"run_\d+|:\d{4,5}\b|[0-9a-f]{8,}", "", s)
+    return " ".join(s.split())[:160]
+
+
+def permanently_failed(results: list[dict]) -> dict[str, str]:
+    """Cells that have failed identically at least GIVE_UP_AFTER times,
+    mapped to the reason. Reported, not hidden: a blank in the matrix
+    with a cause beside it is a finding."""
+    seen: dict[str, list[str]] = {}
+    for r in results:
+        if not r.get("error"):
+            continue
+        seen.setdefault(cell_key(r), []).append(error_signature(r["error"]))
+    out = {}
+    for key, sigs in seen.items():
+        for sig in set(sigs):
+            if sigs.count(sig) >= GIVE_UP_AFTER:
+                out[key] = sig
+                break
+    return out
+
+
 def cell_key(c: dict) -> str:
     return (f"{c['model']}|{c['engine']}|{c['max_num_seqs']}"
             f"|{c['output_tokens']}")
@@ -245,6 +287,7 @@ class State:
         d["kind"] = "roofline"
         d["done"] = self.status in ("finished", "failed", "stopped")
         d["summary"] = summarize(self.results)
+        d["written_off"] = permanently_failed(self.results)
         return d
 
 
@@ -379,9 +422,12 @@ async def run_roofline(
 
     st = load_state(path) if resume else None
     done: dict[str, dict] = {}
+    hopeless: dict[str, str] = {}
     if st and st.plan.get("cells"):
         done = {cell_key(r): r for r in st.results if not r.get("error")}
-        log.info("roofline: resuming with %d cells already measured", len(done))
+        hopeless = permanently_failed(st.results)
+        log.info("roofline: resuming with %d cells measured, %d written off",
+                 len(done), len(hopeless))
     else:
         st = State()
 
@@ -421,6 +467,12 @@ async def run_roofline(
             continue
         key = cell_key(cell)
         if key in done:
+            continue
+        if key in hopeless:
+            # Failed the same way twice already. Retrying costs an
+            # engine launch and cannot succeed; the matrix keeps the
+            # blank and the reason.
+            log.info("roofline: skipping %s — %s", key, hopeless[key][:90])
             continue
         st.current = dict(cell)
         save_state(path, st)

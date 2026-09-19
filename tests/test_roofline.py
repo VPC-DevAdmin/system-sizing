@@ -209,3 +209,56 @@ def test_state_endpoint_reports_liveness_from_the_run_registry():
     d = c.get("/api/roofline").json()
     assert d.get("live") in (False, None)
     assert "status" in d
+
+
+def test_a_cell_that_fails_the_same_way_twice_is_written_off():
+    """An engine that cannot load a model architecture, or a kernel
+    that refuses the GPU, will not succeed on the fourth attempt
+    either. Retrying costs an engine launch every pass and never
+    produces a number -- an autopilot left alone would spin on it."""
+    from simulator.roofline import GIVE_UP_AFTER, permanently_failed
+
+    base = {"model": "m", "engine": "trtllm", "max_num_seqs": 1024,
+            "output_tokens": 256}
+    rows = [
+        {**base, "error": "RuntimeError: DeepGEMM only supports Hopper "
+                          "(SM90) (full log: runs/run_12/x.log)"},
+        {**base, "error": "RuntimeError: DeepGEMM only supports Hopper "
+                          "(SM90) (full log: runs/run_99/y.log)"},
+    ]
+    assert GIVE_UP_AFTER == 2
+    out = permanently_failed(rows)
+    assert len(out) == 1
+    assert "DeepGEMM" in list(out.values())[0]
+
+
+def test_a_cell_that_failed_once_is_still_retried():
+    """A transient failure -- a port collision, a stale container --
+    must not be mistaken for an impossibility."""
+    from simulator.roofline import permanently_failed
+
+    rows = [{"model": "m", "engine": "sglang_cuda", "max_num_seqs": 1024,
+             "output_tokens": 256, "error": "EADDRINUSE"}]
+    assert permanently_failed(rows) == {}
+
+
+def test_two_different_failures_are_not_the_same_failure():
+    """Failing twice for unrelated reasons is not evidence of
+    impossibility."""
+    from simulator.roofline import permanently_failed
+
+    base = {"model": "m", "engine": "e", "max_num_seqs": 1,
+            "output_tokens": 8}
+    rows = [{**base, "error": "EADDRINUSE port 42128"},
+            {**base, "error": "ValueError: unknown architecture"}]
+    assert permanently_failed(rows) == {}
+
+
+def test_signature_ignores_run_ids_and_ports():
+    """The same failure reported with a different run directory is the
+    same failure."""
+    from simulator.roofline import error_signature
+
+    a = error_signature("boom (full log: runs/run_12/engine_abc12345.log)")
+    b = error_signature("boom (full log: runs/run_99/engine_def67890.log)")
+    assert a == b

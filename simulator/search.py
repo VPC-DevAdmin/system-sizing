@@ -69,6 +69,7 @@ KNOWN_DIMENSIONS: dict[str, str] = {
     "trtllm_chunked_prefill": "categorical",
     "trtllm_cuda_graphs": "categorical",
     "trtllm_postprocess_workers": "categorical",
+    "trtllm_moe_backend": "categorical",
 }
 
 # Sentinel meaning "don't pass the flag; let the engine pick".
@@ -321,6 +322,7 @@ def _dim_value(params: dict, dim: str, space: SearchSpace):
             "trtllm_chunked_prefill": "off",
             "trtllm_cuda_graphs": "default",
             "trtllm_postprocess_workers": "0",
+            "trtllm_moe_backend": "auto",
             "engine": "vllm_cuda_multi"}.get(dim)
 
 

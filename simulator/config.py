@@ -187,6 +187,9 @@ class EngineConfig:
     trtllm_chunked_prefill: bool = False
     trtllm_postprocess_workers: int = 0
     trtllm_cuda_graphs: str = "default"      # "default" | "wide"
+    # "auto" | CUTLASS | TRTLLM | VANILLA. MoE is unserviceable on
+    # SM120 under the engine's own selection — see engine_notes.
+    trtllm_moe_backend: str = "auto"
 
     # ── remote: endpoint-only target (roadmap 1.1) ────────────────────
     # Benchmarks an OpenAI-compatible endpoint the simulator doesn't

@@ -246,6 +246,9 @@ def llm_api_options(cfg) -> dict:
     workers = getattr(cfg, "trtllm_postprocess_workers", 0) or 0
     if workers:
         opts.setdefault("num_postprocess_workers", int(workers))
+    moe = getattr(cfg, "trtllm_moe_backend", "auto")
+    if moe and moe != "auto":
+        opts.setdefault("moe_config", {"backend": str(moe)})
     if getattr(cfg, "trtllm_cuda_graphs", None) == "wide":
         mns = getattr(cfg, "max_num_seqs", None)
         if mns:

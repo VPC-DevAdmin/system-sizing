@@ -85,6 +85,23 @@ LEVERS: list[Lever] = [
                  "worst case for this knob.",
     ),
     Lever(
+        key="trtllm_moe_backend", engine="trtllm",
+        title="TensorRT · MoE backend",
+        values=["auto", "CUTLASS", "TRTLLM", "VANILLA"], default="auto",
+        searchable=True, verdict="untested",
+        text="Which kernel family serves the mixture-of-experts GEMMs. "
+             "'auto' leaves the engine's own selection alone.",
+        measured="TensorRT-LLM 1.2.1 cannot serve MoE models on this "
+                 "hardware at all under its default selection: "
+                 "'DeepGEMM only supports Hopper (SM90) architectures, "
+                 "but current device compute capability is 120'. Both "
+                 "Qwen MoE models failed at startup while the dense "
+                 "Llama-70B ran fine on the same engine — 4 of 6 cells "
+                 "lost. The declared default is already CUTLASS, so "
+                 "something selects DeepGEMM downstream of it; naming "
+                 "a backend explicitly is the untested workaround.",
+    ),
+    Lever(
         key="sglang_quantization", engine="sglang_cuda",
         title="SGLang · ModelOpt quantization",
         values=["auto", "modelopt_fp4"], default="auto",
@@ -138,9 +155,12 @@ ENGINE_NOTES: dict[str, str] = {
         "NVIDIA's own server, and the engine vendor headline numbers "
         "are usually quoted on. Its stock configuration is already "
         "close to right for a large model: every top-level lever tried "
-        "here made it slower, twice by more than half. Closing the "
-        "remaining gap to vLLM would mean an engine build rather than "
-        "a config change.",
+        "here made it slower, twice by more than half. Two hard limits "
+        "on this box, both architectural rather than tuning: it cannot "
+        "serve MoE models at all (DeepGEMM is Hopper-only and this is "
+        "SM120), and on the dense model it landed ~12% behind vLLM. "
+        "Closing that gap would mean an engine build rather than a "
+        "config change.",
     "sglang_cuda":
         "RadixAttention prefix caching and an aggressive scheduler. "
         "Competitive at moderate concurrency — it beat vLLM at 4,096 "

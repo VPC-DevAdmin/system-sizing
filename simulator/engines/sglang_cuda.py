@@ -52,9 +52,14 @@ DEFAULT_IMAGE = "lmsysorg/sglang:latest"
 # leaves room for the handful of consecutive ports a replica opens
 # around its base, and the window stays well clear of the 9100-range
 # HTTP ports the replicas serve on.
+# The whole scheme must land inside 0-65535, which my first version
+# did not: 360 windows of 8 replicas at a 64-port stride needs 184k
+# ports and SGLang rejected it with "Port out of range". The arithmetic
+# below is asserted by a test rather than trusted.
 NCCL_PORT_BASE = 20000
 NCCL_PORT_STRIDE = 64
-NCCL_PORT_WINDOWS = 360          # distinct per-launch ranges
+NCCL_PORT_WINDOWS = 64           # 64 x 8 x 64 = 32,768 ports
+NCCL_PORT_CEILING = 60000
 
 
 def nccl_port(index: int, run_id: str = "") -> int:
@@ -65,8 +70,10 @@ def nccl_port(index: int, run_id: str = "") -> int:
         # windows rather than adjacent ones.
         window = int(hashlib.sha1(run_id.encode()).hexdigest()[:8], 16) \
             % NCCL_PORT_WINDOWS
-    return (NCCL_PORT_BASE + window * NCCL_PORT_STRIDE * 8
+    port = (NCCL_PORT_BASE + window * NCCL_PORT_STRIDE * 8
             + index * NCCL_PORT_STRIDE)
+    assert NCCL_PORT_BASE <= port <= NCCL_PORT_CEILING, port
+    return port
 
 # vLLM's KV dtype spelling -> SGLang's. SGLang names the float8
 # representation explicitly where vLLM takes a bare "fp8", so the

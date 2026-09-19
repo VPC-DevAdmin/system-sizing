@@ -194,3 +194,23 @@ def test_consecutive_launches_do_not_reuse_the_same_ports():
     # Deterministic for a given launch, so the replicas of one launch
     # agree with each other.
     assert nccl_port(3, "launch-aaa") == nccl_port(3, "launch-aaa")
+
+
+def test_every_possible_rendezvous_port_is_a_legal_port():
+    """The first version of this scheme needed 184,000 ports. SGLang
+    said so plainly -- "Port out of range 0-65535" -- one cell into a
+    roofline, which is a long way to travel for an arithmetic slip."""
+    from simulator.engines.sglang_cuda import (
+        NCCL_PORT_BASE, NCCL_PORT_CEILING, nccl_port)
+
+    seen = set()
+    for w in range(2000):                      # far more launches than real
+        for i in range(8):
+            p = nccl_port(i, f"launch-{w}")
+            assert NCCL_PORT_BASE <= p <= NCCL_PORT_CEILING, (w, i, p)
+            assert p < 65536
+            seen.add(p)
+    # And the replicas of any one launch are always distinct.
+    for w in range(50):
+        ports = {nccl_port(i, f"run-{w}") for i in range(8)}
+        assert len(ports) == 8

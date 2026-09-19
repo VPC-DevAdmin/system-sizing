@@ -126,6 +126,7 @@ class DockerReplicaEngine(Engine):
         # (index, devices, port, container_id, streamer) per replica
         self._replicas: list[tuple[int, list[int], int, str,
                                    Optional[subprocess.Popen]]] = []
+        self._run_id: str = ""
 
     # ── Subclass interface ────────────────────────────────────────────
 
@@ -213,6 +214,12 @@ class DockerReplicaEngine(Engine):
         log_dir = Path(log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         run_id = uuid.uuid4().hex[:8]
+        # Exposed so a subclass can derive per-LAUNCH resources from it.
+        # Fixed ports are safe within one launch and unsafe across
+        # consecutive ones: a sweep tears down eight replicas and
+        # immediately starts eight more, and the old sockets have not
+        # finished closing.
+        self._run_id = run_id
         self._log_path = log_dir / f"engine_{self.ENGINE_NAME}_{run_id}.log"
 
         try:

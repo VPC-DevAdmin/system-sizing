@@ -26,6 +26,7 @@ others, both encoded rather than glossed:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Optional
 
@@ -36,16 +37,36 @@ log = logging.getLogger(__name__)
 
 DEFAULT_IMAGE = "lmsysorg/sglang:latest"
 
-# Each replica needs its OWN torch.distributed rendezvous port. Left
-# to itself SGLang picks a free one at random, and eight replicas
-# starting at the same moment on host networking race for it: two
-# choose the same number before either binds, and the loser dies with
-# EADDRINUSE mid-startup. Observed on this box at port 40593.
+# Each replica needs its OWN torch.distributed rendezvous port, and
+# each LAUNCH needs its own range.
 #
-# The stride leaves room for the handful of consecutive ports a
-# replica may open around its base.
-NCCL_PORT_BASE = 42000
+# Left to itself SGLang picks a port at random and eight replicas
+# starting together race for it — two choose the same number before
+# either binds and the loser dies with EADDRINUSE (seen at 40593).
+# Fixing the ports solves that but creates a second collision a sweep
+# runs into constantly: it tears down eight replicas and immediately
+# starts eight more, and the previous set's sockets are still closing.
+# Observed at port 42128, one cell into a roofline.
+#
+# So the base is offset per launch as well as per replica. The stride
+# leaves room for the handful of consecutive ports a replica opens
+# around its base, and the window stays well clear of the 9100-range
+# HTTP ports the replicas serve on.
+NCCL_PORT_BASE = 20000
 NCCL_PORT_STRIDE = 64
+NCCL_PORT_WINDOWS = 360          # distinct per-launch ranges
+
+
+def nccl_port(index: int, run_id: str = "") -> int:
+    """Rendezvous port for one replica of one launch."""
+    window = 0
+    if run_id:
+        # Stable, cheap, and spread: consecutive launches get unrelated
+        # windows rather than adjacent ones.
+        window = int(hashlib.sha1(run_id.encode()).hexdigest()[:8], 16) \
+            % NCCL_PORT_WINDOWS
+    return (NCCL_PORT_BASE + window * NCCL_PORT_STRIDE * 8
+            + index * NCCL_PORT_STRIDE)
 
 # vLLM's KV dtype spelling -> SGLang's. SGLang names the float8
 # representation explicitly where vLLM takes a bare "fp8", so the
@@ -188,7 +209,7 @@ class SGLangCudaEngine(DockerReplicaEngine):
             quantization=sglang_quantization(
                 getattr(cfg, "model_quant", None),
                 cfg.quantization_kind or cfg.quantization),
-            nccl_port=NCCL_PORT_BASE + index * NCCL_PORT_STRIDE,
+            nccl_port=nccl_port(index, self._run_id),
             expert_parallel=bool(getattr(cfg, "expert_parallel", False)),
             trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),
             extra=list(cfg.sglang_extra_flags or []),

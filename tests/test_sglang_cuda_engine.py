@@ -164,8 +164,7 @@ def test_each_replica_gets_its_own_rendezvous_port():
     networking race for it: two choose the same number before either
     binds and the loser dies with EADDRINUSE mid-startup, which is
     what happened on this box at port 40593."""
-    from simulator.engines.sglang_cuda import (
-        NCCL_PORT_BASE, NCCL_PORT_STRIDE)
+    from simulator.engines.sglang_cuda import NCCL_PORT_STRIDE
 
     eng = SGLangCudaEngine(_cfg(
         replica_devices=[[i] for i in range(8)]))
@@ -174,9 +173,24 @@ def test_each_replica_gets_its_own_rendezvous_port():
         cmd = eng.build_replica_command(i, [i], f"sglang-r{i}-x")
         ports.append(int(cmd[cmd.index("--nccl-port") + 1]))
     assert len(set(ports)) == 8                    # all distinct
-    assert ports[0] == NCCL_PORT_BASE
     # Spaced, because a replica may open a few consecutive ports.
     assert min(b - a for a, b in zip(ports, ports[1:])) == NCCL_PORT_STRIDE
     # And distinct from the HTTP ports the replicas serve on.
     http = {eng._port(i) for i in range(8)}
     assert not (set(ports) & http)
+
+
+def test_consecutive_launches_do_not_reuse_the_same_ports():
+    """A sweep tears down eight replicas and immediately starts eight
+    more. Fixed ports are safe within a launch and collide across
+    them, because the previous set's sockets are still closing —
+    observed at port 42128, one cell into a roofline."""
+    from simulator.engines.sglang_cuda import nccl_port
+
+    a = {nccl_port(i, "launch-aaa") for i in range(8)}
+    b = {nccl_port(i, "launch-bbb") for i in range(8)}
+    assert len(a) == len(b) == 8
+    assert not (a & b), "consecutive launches reused a port"
+    # Deterministic for a given launch, so the replicas of one launch
+    # agree with each other.
+    assert nccl_port(3, "launch-aaa") == nccl_port(3, "launch-aaa")

@@ -88,17 +88,21 @@ LEVERS: list[Lever] = [
         key="trtllm_moe_backend", engine="trtllm",
         title="TensorRT · MoE backend",
         values=["auto", "CUTLASS", "TRTLLM", "VANILLA"], default="auto",
-        searchable=True, verdict="untested",
+        searchable=True, verdict="harm",
         text="Which kernel family serves the mixture-of-experts GEMMs. "
              "'auto' leaves the engine's own selection alone.",
-        measured="Under its default selection TensorRT-LLM 1.2.1 routes "
-                 "MoE GEMMs through DeepGEMM, which refuses SM120: "
-                 "'DeepGEMM only supports Hopper (SM90) architectures, "
-                 "but current device compute capability is 120'. "
-                 "Naming CUTLASS explicitly DOES clear that error — "
-                 "the declared default is already CUTLASS, so "
-                 "something selects DeepGEMM downstream of it and an "
-                 "explicit setting overrides the choice.",
+        measured="Does not help, and the workaround was tested rather "
+                 "than assumed. TensorRT-LLM 1.2.1 routes FP8 "
+                 "block-scale MoE GEMMs through DeepGEMM, which "
+                 "refuses this hardware: 'DeepGEMM only supports "
+                 "Hopper (SM90) architectures, but current device "
+                 "compute capability is 120'. Setting the backend to "
+                 "CUTLASS explicitly — verified present in the "
+                 "options document and named 232 times in the engine "
+                 "log — does NOT change the selection: DeepGEMM still "
+                 "fires and the replica still dies. FP8 MoE is "
+                 "unserviceable on SM120 with this release, and no "
+                 "top-level setting reaches it.",
     ),
     Lever(
         key="sglang_quantization", engine="sglang_cuda",

@@ -35,7 +35,8 @@ def test_harmful_levers_default_to_off():
     for lv in LEVERS:
         if lv.verdict == "harm":
             assert lv.default == lv.values[0], lv.key
-            assert lv.default in ("off", "0", "default"), lv.key
+            # All spellings of "leave the engine alone".
+            assert lv.default in ("off", "0", "default", "auto"), lv.key
 
 
 def test_levers_only_appear_for_staged_engines():

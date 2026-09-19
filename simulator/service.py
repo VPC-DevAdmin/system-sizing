@@ -260,6 +260,22 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
         raise HTTPException(
             422, f"unknown engine {engine_type!r} — expected one of "
                  f"{', '.join(GPU_ENGINES)}")
+    # Engine-specific levers (engine_notes.py). These are real
+    # EngineConfig fields, not flags, so they are copied straight
+    # through -- but only names the dataclass actually declares, so a
+    # typo in a request cannot inject a silent setting. Without this
+    # the levers were reachable from the arena search and NOT from a
+    # benchmark or roofline request, which is where they are most
+    # likely to be reached for.
+    from dataclasses import fields as _fields
+
+    from .config import EngineConfig as _EC
+    _lever_names = {f.name for f in _fields(_EC)
+                    if f.name.startswith(("trtllm_", "sglang_",
+                                          "ktransformers_"))}
+    levers = {k: v for k, v in custom.items()
+              if k in _lever_names and v not in (None, "")}
+
     knobs = canonical(custom)
     # Inputs to the one-memory-knob translation: the operator sets a
     # share of TOTAL VRAM and each engine gets whatever its own flag
@@ -292,6 +308,7 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
         "model_weights_gb": weights,
         "model_quant": model_quant,
         **to_engine_config(engine_type, knobs),
+        **levers,
     }
     if engine_type != "vllm_cuda_multi":
         # Every non-vLLM engine is a DockerReplicaEngine, so one code

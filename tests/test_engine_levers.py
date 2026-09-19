@@ -102,3 +102,67 @@ def test_api_view_is_serialisable():
     assert {r["engine"] for r in rows} <= {"trtllm", "sglang_cuda",
                                            "vllm_cuda_multi", "ktransformers"}
     assert levers_for("trtllm")
+
+
+def test_levers_reach_the_engine_from_a_benchmark_request():
+    """They were wired into the arena search and NOT into the direct
+    config path -- which is where an operator is most likely to reach
+    for them. A roofline passing trtllm_moe_backend had it silently
+    dropped, and the run failed exactly as it had without it."""
+    import tempfile
+    from pathlib import Path
+
+    import yaml
+
+    import simulator.arena as arena
+    from simulator.service import _build_custom_config
+
+    real = arena.hardware
+    arena.hardware = lambda: {"count": 8, "vram_per_gpu_gb": 95.6,
+                              "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]]}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            p = _build_custom_config({
+                "model_id": "org/M", "device": "gpu", "engine": "trtllm",
+                "replicas": 8, "tp": 1,
+                "trtllm_moe_backend": "CUTLASS",
+                "trtllm_chunked_prefill": True,
+            }, Path(td))
+            eng = yaml.safe_load(p.read_text())["engine"]
+    finally:
+        arena.hardware = real
+
+    assert eng["trtllm_moe_backend"] == "CUTLASS"
+    assert eng["trtllm_chunked_prefill"] is True
+
+    # ...and it actually shapes the options document the server reads.
+    from simulator.config import EngineConfig
+    from simulator.engines.trtllm import llm_api_options
+    opts = llm_api_options(EngineConfig(**eng))
+    assert opts["moe_config"]["backend"] == "CUTLASS"
+
+
+def test_an_unknown_key_cannot_inject_a_setting():
+    """A typo must not become a silent engine option."""
+    import tempfile
+    from pathlib import Path
+
+    import yaml
+
+    import simulator.arena as arena
+    from simulator.service import _build_custom_config
+
+    real = arena.hardware
+    arena.hardware = lambda: {"count": 8, "vram_per_gpu_gb": 95.6,
+                              "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]]}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            p = _build_custom_config({
+                "model_id": "org/M", "device": "gpu", "engine": "trtllm",
+                "replicas": 8, "tp": 1,
+                "trtllm_not_a_real_knob": "boom",
+            }, Path(td))
+            eng = yaml.safe_load(p.read_text())["engine"]
+    finally:
+        arena.hardware = real
+    assert "trtllm_not_a_real_knob" not in eng

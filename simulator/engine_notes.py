@@ -91,15 +91,14 @@ LEVERS: list[Lever] = [
         searchable=True, verdict="untested",
         text="Which kernel family serves the mixture-of-experts GEMMs. "
              "'auto' leaves the engine's own selection alone.",
-        measured="TensorRT-LLM 1.2.1 cannot serve MoE models on this "
-                 "hardware at all under its default selection: "
+        measured="Under its default selection TensorRT-LLM 1.2.1 routes "
+                 "MoE GEMMs through DeepGEMM, which refuses SM120: "
                  "'DeepGEMM only supports Hopper (SM90) architectures, "
-                 "but current device compute capability is 120'. Both "
-                 "Qwen MoE models failed at startup while the dense "
-                 "Llama-70B ran fine on the same engine — 4 of 6 cells "
-                 "lost. The declared default is already CUTLASS, so "
-                 "something selects DeepGEMM downstream of it; naming "
-                 "a backend explicitly is the untested workaround.",
+                 "but current device compute capability is 120'. "
+                 "Naming CUTLASS explicitly DOES clear that error — "
+                 "the declared default is already CUTLASS, so "
+                 "something selects DeepGEMM downstream of it and an "
+                 "explicit setting overrides the choice.",
     ),
     Lever(
         key="sglang_quantization", engine="sglang_cuda",
@@ -155,12 +154,12 @@ ENGINE_NOTES: dict[str, str] = {
         "NVIDIA's own server, and the engine vendor headline numbers "
         "are usually quoted on. Its stock configuration is already "
         "close to right for a large model: every top-level lever tried "
-        "here made it slower, twice by more than half. Two hard limits "
-        "on this box, both architectural rather than tuning: it cannot "
-        "serve MoE models at all (DeepGEMM is Hopper-only and this is "
-        "SM120), and on the dense model it landed ~12% behind vLLM. "
-        "Closing that gap would mean an engine build rather than a "
-        "config change.",
+        "here made it slower, twice by more than half, and on the "
+        "dense Llama-70B it landed ~12% behind vLLM. MoE needs the "
+        "CUTLASS backend named explicitly, or it routes through a "
+        "Hopper-only kernel and will not start at all; and a model "
+        "newer than the container's Transformers is simply unknown to "
+        "it, which is a staleness problem rather than a hardware one.",
     "sglang_cuda":
         "RadixAttention prefix caching and an aggressive scheduler. "
         "Competitive at moderate concurrency — it beat vLLM at 4,096 "

@@ -193,3 +193,30 @@ def test_startup_cause_skips_vllms_generic_wrapper(tmp_path) -> None:
     # A log line that merely contains a colon is not an exception.
     log.write_text("[r0] INFO 09-17 20:31:16 model: loaded fine\n")
     assert "INFO" in e._startup_cause()
+
+
+def test_teardown_noise_does_not_bury_the_real_cause(tmp_path):
+    """When init fails, cleanup touches attributes that were never
+    created and raises LAST -- winning the 'most recent exception'
+    contest and hiding the reason. This cost a wrong diagnosis:
+    TensorRT-LLM reported a missing cuda_graph_runner attribute while
+    the actual failure, thirty lines earlier, was that its Transformers
+    did not recognise the model architecture."""
+    from simulator.engines.trtllm import TrtLlmEngine
+
+    log = tmp_path / "engine.log"
+    log.write_text(
+        "[r4] loading weights\n"
+        "[r4] ValueError: The checkpoint you are trying to load has model "
+        "type `qwen3_5_moe` but Transformers does not recognize this "
+        "architecture.\n"
+        "[r4] during cleanup\n"
+        "[r4] AttributeError: 'PyTorchModelEngine' object has no attribute "
+        "'cuda_graph_runner'\n"
+        "[r4] RuntimeError: Executor worker returned error\n")
+    eng = TrtLlmEngine(EngineConfig(type="trtllm", model_id="org/M",
+                                    replica_devices=[[0]]))
+    eng._log_path = log
+    cause = eng._startup_cause()
+    assert "qwen3_5_moe" in cause
+    assert "cuda_graph_runner" not in cause

@@ -304,9 +304,20 @@ class DockerReplicaEngine(Engine):
             r"\s*:\s+(\S.*)")
         looks_like_exc = re.compile(
             r"(Error|Exception)$|\.(errors?|exceptions?)\.", re.I)
+        # Errors that are TEARDOWN NOISE, not causes. When init fails,
+        # cleanup touches attributes that were never created, and the
+        # resulting AttributeError is raised LAST -- so it wins the
+        # "most recent exception" contest and buries the real reason.
+        # This cost a wrong diagnosis once: TensorRT-LLM reported
+        # "'PyTorchModelEngine' object has no attribute
+        # 'cuda_graph_runner'" while the actual failure, 30 lines
+        # earlier, was that its Transformers did not recognise the
+        # model architecture at all.
         generic = re.compile(
             r"see root cause above|engine core initialization failed|"
-            r"engine process failed to start|see stack trace",
+            r"engine process failed to start|see stack trace|"
+            r"object has no attribute 'cuda_graph_runner'|"
+            r"executor worker returned error",
             re.I)
         fallback = None
         for ln in reversed(lines):

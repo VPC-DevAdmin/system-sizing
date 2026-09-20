@@ -59,7 +59,7 @@ def _stub_run_config(optimizer, seen):
     """Fake evaluator: fp8 + tp2 is the sweet spot; records what the
     driver bound per candidate."""
     async def fake_run_config(cfg, state, prompts, save,
-                              cells=None, early_stop=None):
+                              cells=None, early_stop=None, engine=None):
         # The driver now passes its ladder cells + SLA early-stop.
         assert cells and cells[0].name.startswith("ladder_c")
         assert callable(early_stop)
@@ -137,7 +137,7 @@ def test_search_driver_survives_launch_failures(
     optimizer, space_file, tmp_path, monkeypatch,
 ) -> None:
     async def failing_run_config(cfg, state, prompts, save,
-                                 cells=None, early_stop=None):
+                                 cells=None, early_stop=None, engine=None):
         return optimizer.ConfigResult(
             name=cfg.name, description=cfg.description,
             status="launch_failed", failure_reason="no CUDA here",
@@ -206,3 +206,184 @@ def test_search_seeding_skips_prior_results(
     assert "model_variant=bf16|tp=4" not in evaluated
     assert len(evaluated) > 1
     assert len(seen) == len(evaluated) - 1     # everything else ran
+
+
+# ── One launch path (improvement plan A7) ─────────────────────────────
+#
+# The driver used to assemble its own docker argv, so the TensorRT-LLM
+# levers the search enumerated never reached a container and vLLM's
+# share-of-total-VRAM number went straight into flags that mean
+# something else. Candidates now build through engines/custom.py and
+# launch through the engine classes -- the benchmark's path.
+
+
+def _write_space(tmp_path, text: str) -> Path:
+    p = tmp_path / "space.yaml"
+    p.write_text(text)
+    return p
+
+
+def test_trtllm_lever_values_produce_different_launches(
+    optimizer, tmp_path, monkeypatch,
+) -> None:
+    """The plan's acceptance test: two lever values, two launches."""
+    from simulator.search import candidate_summary, load_space
+
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path / "hf"))
+    space = load_space(_write_space(tmp_path, """
+name: trt
+engine: trtllm
+device_groups: [[0, 1], [2, 3]]
+vram_per_gpu_gb: 95.6
+model_variants:
+  m: {model: org/model, served_name: m}
+dimensions:
+  tp: [1]
+  dp: [2]
+  trtllm_moe_backend: [auto, CUTLASS]
+  trtllm_chunked_prefill: ['off', 'on']
+search: {budget: 4, initial_samples: 2}
+"""))
+    base = {"model_variant": "m", "tp": 1, "dp": 2,
+            "trtllm_chunked_prefill": "off"}
+    launches = {}
+    for backend in ("auto", "CUTLASS"):
+        view = candidate_summary({**base, "trtllm_moe_backend": backend},
+                                 space)
+        cfg, engine = optimizer._candidate_engine_config(view, 0, space)
+        assert engine.cfg.type == "trtllm"
+        assert cfg.engine == "trtllm"
+        assert [r.port for r in cfg.replicas] == [8000, 8001]
+        launches[backend] = optimizer.launch_description(engine)
+    assert launches["auto"] != launches["CUTLASS"]
+    assert launches["CUTLASS"]["llm_api_options"]["moe_config"] == {
+        "backend": "CUTLASS"}
+    assert "moe_config" not in launches["auto"]["llm_api_options"]
+    # The bool lever arrives as the arena's "on"/"off" string and must
+    # land as a real bool -- "off" is truthy.
+    view = candidate_summary({**base, "trtllm_chunked_prefill": "on",
+                              "trtllm_moe_backend": "auto"}, space)
+    _cfg, engine = optimizer._candidate_engine_config(view, 1, space)
+    assert engine.cfg.trtllm_chunked_prefill is True
+    assert optimizer.launch_description(engine)["llm_api_options"][
+        "enable_chunked_prefill"] is True
+    view = candidate_summary(base, space)
+    _cfg, engine = optimizer._candidate_engine_config(view, 2, space)
+    assert engine.cfg.trtllm_chunked_prefill is False
+    assert "enable_chunked_prefill" not in optimizer.launch_description(
+        engine)["llm_api_options"]
+
+
+def test_sglang_candidate_gets_the_translated_fraction(
+    optimizer, tmp_path, monkeypatch,
+) -> None:
+    from simulator.arena import FIXED_GMU
+    from simulator.engines.vram import SGLANG_ACTIVATION_RESERVE
+    from simulator.search import candidate_summary, load_space
+
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path / "hf"))
+    space = load_space(_write_space(tmp_path, """
+name: multi
+engine: vllm_cuda
+device_groups: [[0, 1, 2, 3]]
+vram_per_gpu_gb: 95.6
+model_variants:
+  m: {model: org/model, served_name: m}
+dimensions:
+  engine: [vllm_cuda_multi, sglang_cuda]
+  tp: [1]
+  dp: [4]
+  kv_cache_dtype: [auto, fp8]
+search: {budget: 4, initial_samples: 2}
+"""))
+    view = candidate_summary({"model_variant": "m", "engine": "sglang_cuda",
+                              "tp": 1, "dp": 4, "kv_cache_dtype": "fp8"},
+                             space)
+    cfg, engine = optimizer._candidate_engine_config(view, 0, space)
+    assert engine.cfg.type == "sglang_cuda"
+    argv = optimizer.launch_description(engine)["replicas"][0]
+    # The arena's fixed share of total VRAM, minus SGLang's activation
+    # reserve -- never the raw number.
+    want = round(FIXED_GMU - SGLANG_ACTIVATION_RESERVE, 2)
+    assert f"--mem-fraction-static {want}" in argv
+    assert f"--mem-fraction-static {FIXED_GMU}" not in argv
+    # KV dtype in SGLang's own spelling.
+    assert "--kv-cache-dtype fp8_e4m3" in argv
+    assert "--port 8000" in argv
+    assert [r.name for r in cfg.replicas][0] == "sglang-s0"
+
+
+def test_vllm_candidate_launches_through_the_engine_class(
+    optimizer, space_file, monkeypatch, tmp_path,
+) -> None:
+    from simulator.engines.vllm_cuda_multi import VllmCudaMultiEngine
+    from simulator.search import candidate_summary, load_space
+
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path / "hf"))
+    optimizer.IMAGE = "vllm/vllm-openai:pinned"
+    space = load_space(space_file)
+    view = candidate_summary({"model_variant": "fp8", "tp": 2, "dp": 2,
+                              "max_num_seqs": 256}, space)
+    cfg, engine = optimizer._candidate_engine_config(view, 3, space)
+    assert isinstance(engine, VllmCudaMultiEngine)
+    assert engine.cfg.gpu_image == "vllm/vllm-openai:pinned"
+    assert engine.cfg.replica_devices == [[0, 1], [2, 3]]
+    assert engine.cfg.max_num_seqs == 256
+    assert engine.cfg.served_model_name == "m"
+    assert engine.api_model_name == "m"
+    argv = optimizer.launch_description(engine)["replicas"][1]
+    assert "--tensor-parallel-size 2" in argv
+    assert "--max-num-seqs 256" in argv
+    assert "--served-model-name m" in argv
+    assert "--port 8001" in argv
+
+
+def test_a_refused_knob_is_recorded_without_a_launch(
+    optimizer, tmp_path, monkeypatch,
+) -> None:
+    """knobs.unsupported() is consulted BEFORE any container starts:
+    KTransformers has no KV precision knob, so every fp8 candidate is
+    unreachable and the search learns that at no cost."""
+    space_path = _write_space(tmp_path, """
+name: kt
+engine: vllm_cuda
+device_groups: [[0, 1, 2, 3]]
+model_variants:
+  m: {model: org/model, served_name: m}
+dimensions:
+  engine: [ktransformers]
+  tp: [4]
+  dp: [1]
+  kv_cache_dtype: [fp8]
+search: {budget: 3, initial_samples: 2, max_iterations: 1}
+""")
+    launched: list = []
+
+    async def never(cfg, state, prompts, save, cells=None,
+                    early_stop=None, engine=None):
+        launched.append(cfg.name)
+        raise AssertionError("a refused candidate must not launch")
+    monkeypatch.setattr(optimizer, "run_config", never)
+    monkeypatch.setattr(optimizer, "make_prompts", lambda cells: {})
+    out = tmp_path / "search.json"
+    asyncio.run(optimizer.run_search(space_path, out, new_run=False))
+    assert launched == []
+    doc = json.loads(out.read_text())
+    evaluated = doc["state"]["evaluated"]
+    assert evaluated
+    assert all(e["status"] == "launch_failed" for e in evaluated.values())
+    assert all(e["config_name"].endswith("_refused")
+               for e in evaluated.values())
+
+
+def test_the_private_argv_builder_is_gone(optimizer) -> None:
+    """One launch path. The registry keeps a vLLM-only launcher for
+    its CPU cpuset shapes; every other engine goes through the
+    simulator's engine classes."""
+    for name in ("_trtllm_tail", "_sglang_tail", "_ktransformers_tail"):
+        assert not hasattr(optimizer, name)
+    cfg = optimizer.EngineConfig(
+        name="x", description="", engine="trtllm",
+        replicas=[optimizer.ReplicaSpec(name="trtllm-s0", port=8000)])
+    with pytest.raises(RuntimeError, match="vLLM only"):
+        optimizer.docker_launch(cfg, cfg.replicas[0])

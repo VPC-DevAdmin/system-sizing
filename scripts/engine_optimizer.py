@@ -78,6 +78,7 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from simulator.engines.base import redact_argv  # noqa: E402
+from simulator.engines.custom import ShapeError  # noqa: E402
 
 try:
     from rich.console import Console, Group
@@ -143,13 +144,12 @@ class EngineConfig:
     name: str
     description: str
     replicas: list[ReplicaSpec]
-    # Which server to launch. TensorRT-LLM needs a different image, a
-    # different command form and an options YAML for the knobs it has
-    # no flag for -- see docker_launch.
+    # Which server. Informational for search candidates -- they launch
+    # through the simulator's engine classes, which own the image, the
+    # command form and every knob translation. The registry's private
+    # launcher (docker_launch) is vLLM only.
     engine: str = "vllm_cuda_multi"
     model: str = ""
-    kv_cache_dtype: Optional[str] = None
-    gpu_memory_utilization: Optional[float] = None
     replica_args: list[str] = field(default_factory=list)
     replica_env: dict = field(default_factory=dict)
     shm_size: str = "4g"
@@ -1265,132 +1265,49 @@ def run(cmd: list[str], check: bool = False, capture: bool = False, timeout: int
     )
 
 
+def _capsim_containers(all_states: bool) -> list[str]:
+    """Ids of containers whose name STARTS WITH a capsim prefix.
+
+    Docker's name filter is an unanchored regex, so ``name=vllm-``
+    also matched a user's ``my-vllm-dev`` and removed it. Anchored to
+    the start of the name (Docker reports names with a leading slash,
+    so the anchor tolerates it)."""
+    from simulator.engines.docker_replica import container_name_filter
+
+    out: list[str] = []
+    for flt in container_name_filter():
+        cmd = ["docker", "ps", "-aq" if all_states else "-q",
+               "--filter", flt]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        out.extend(res.stdout.split())
+    return out
+
+
 def cleanup_containers(state: "OptimizerState") -> None:
-    """Stop AND remove any container whose name starts with ``vllm-``.
+    """Stop AND remove any leftover capsim engine container.
 
     The remove step matters because docker_launch no longer uses
     ``--rm`` — we keep failed containers around between exit and the
     next config so ``docker logs`` can still scrape the failure
-    reason. cleanup is the place we actually delete them.
+    reason. cleanup is the place we actually delete them. Every capsim
+    prefix is swept, not just ``vllm-``: a search may launch
+    TensorRT-LLM or SGLang replicas, and a leftover one holds the
+    port and answers health checks for the wrong server.
     """
     state.set_phase("cleanup")
     state.append_log("== cleanup ==")
     # Running containers — stop them.
-    res = subprocess.run(
-        ["docker", "ps", "-q", "--filter", "name=vllm-"],
-        capture_output=True, text=True,
-    )
-    cids = res.stdout.split()
+    cids = _capsim_containers(all_states=False)
     if cids:
         state.append_log(f"stopping {len(cids)} container(s): {' '.join(cids)}")
         subprocess.run(["docker", "stop", "-t", "10", *cids], capture_output=True)
-    # Now also remove any vllm-* container including exited ones (no
-    # --filter status= so we catch both running and stopped).
-    res = subprocess.run(
-        ["docker", "ps", "-aq", "--filter", "name=vllm-"],
-        capture_output=True, text=True,
-    )
-    cids = res.stdout.split()
+    # Now also remove exited ones.
+    cids = _capsim_containers(all_states=True)
     if cids:
         state.append_log(f"removing {len(cids)} container(s)")
         subprocess.run(["docker", "rm", "-f", *cids], capture_output=True)
     # Ports take a moment to release.
     time.sleep(2)
-
-
-TRTLLM_OPTIONS_DIR = Path("runs/engine_optimizer")
-
-
-def _trtllm_tail(cfg: EngineConfig, replica: ReplicaSpec) -> list[str]:
-    """Image + CMD for a TensorRT-LLM replica.
-
-    Delegates to simulator.engines.trtllm so the two non-obvious rules
-    -- never override the image entrypoint, and KV dtype only travels
-    in the options YAML -- are stated once and cannot drift between
-    the benchmark path and the arena.
-    """
-    try:
-        from simulator.engines.trtllm import DEFAULT_IMAGE, OPTIONS_IN_CONTAINER, serve_argv
-    except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from simulator.engines.trtllm import DEFAULT_IMAGE, OPTIONS_IN_CONTAINER, serve_argv
-    import yaml as _yaml
-
-    opts: dict = {"return_perf_metrics": True}
-    kv: dict = {}
-    if cfg.kv_cache_dtype:
-        kv["dtype"] = cfg.kv_cache_dtype
-    if cfg.gpu_memory_utilization is not None:
-        kv["free_gpu_memory_fraction"] = float(cfg.gpu_memory_utilization)
-    if kv:
-        opts["kv_cache_config"] = kv
-    TRTLLM_OPTIONS_DIR.mkdir(parents=True, exist_ok=True)
-    opts_path = (TRTLLM_OPTIONS_DIR / f"trtllm_{cfg.name}.yaml").resolve()
-    opts_path.write_text(_yaml.safe_dump(opts, sort_keys=False))
-
-    image = os.environ.get("OPTIMIZER_TRTLLM_IMAGE", DEFAULT_IMAGE)
-    tail = ["-v", f"{opts_path}:{OPTIONS_IN_CONTAINER}:ro", image]
-    argv = serve_argv(
-        cfg.model or MODEL_PATH,
-        port=replica.port,
-        tp=max(1, len(replica.gpus.split(",")) if replica.gpus else 1),
-        max_seq_len=8192,
-        trust_remote_code=True,
-        options_path=OPTIONS_IN_CONTAINER,
-    )
-    # The searched tuning flags (--max_batch_size etc.) come from
-    # candidate_summary already in trtllm spelling; drop the --tp_size
-    # it leads with, which the replica's device list settles.
-    extra = list(cfg.replica_args)
-    if extra[:1] == ["--tp_size"]:
-        extra = extra[2:]
-    return tail + argv + extra
-
-
-def _replica_tp(replica: ReplicaSpec) -> int:
-    return max(1, len(replica.gpus.split(",")) if replica.gpus else 1)
-
-
-def _sglang_tail(cfg: EngineConfig, replica: ReplicaSpec) -> list[str]:
-    """Image + CMD for an SGLang GPU replica.
-
-    Delegates to simulator.engines.sglang_cuda so the KV-dtype
-    translation (SGLang names the float8 representation outright) is
-    stated once and cannot drift from the benchmark path.
-    """
-    try:
-        from simulator.engines.sglang_cuda import DEFAULT_IMAGE, launch_argv
-    except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from simulator.engines.sglang_cuda import DEFAULT_IMAGE, launch_argv
-    image = os.environ.get("OPTIMIZER_SGLANG_IMAGE", DEFAULT_IMAGE)
-    argv = launch_argv(
-        cfg.model or MODEL_PATH,
-        port=replica.port,
-        tp=_replica_tp(replica),
-        context_length=8192,
-        mem_fraction_static=cfg.gpu_memory_utilization,
-        kv_cache_dtype=cfg.kv_cache_dtype,
-        trust_remote_code=True,
-    )
-    extra = list(cfg.replica_args)
-    if extra[:1] == ["--tp"]:
-        extra = extra[2:]
-    return [image] + argv + extra
-
-
-def _ktransformers_tail(cfg: EngineConfig,
-                        replica: ReplicaSpec) -> list[str]:
-    """Image + CMD for a KTransformers replica."""
-    try:
-        from simulator.engines.ktransformers import DEFAULT_IMAGE, serve_argv
-    except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from simulator.engines.ktransformers import DEFAULT_IMAGE, serve_argv
-    image = os.environ.get("OPTIMIZER_KTRANSFORMERS_IMAGE", DEFAULT_IMAGE)
-    argv = serve_argv(cfg.model or MODEL_PATH, port=replica.port,
-                      cache_lens=8192)
-    return [image] + argv + list(cfg.replica_args)
 
 
 def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
@@ -1446,24 +1363,26 @@ def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
     env = {**cfg.replica_env, **replica.env}
     for k, v in env.items():
         args.extend(["-e", f"{k}={v}"])
-    if cfg.engine == "trtllm":
-        args.extend(_trtllm_tail(cfg, replica))
-    elif cfg.engine == "sglang_cuda":
-        args.extend(_sglang_tail(cfg, replica))
-    elif cfg.engine == "ktransformers":
-        args.extend(_ktransformers_tail(cfg, replica))
-    else:
-        args.append(IMAGE)
-        args.extend([
-            "--model", MODEL_PATH,
-            "--dtype", "bfloat16",
-            "--max-model-len", "8192",
-            "--trust-remote-code",
-            "--host", "0.0.0.0",
-            "--port", str(replica.port),
-            "--served-model-name", SERVED_NAME,
-        ])
-        args.extend(cfg.replica_args)
+    # Registry mode is vLLM only (CPU cpuset/NUMA shapes and the CUDA
+    # sweep). Every other engine -- and every arena/search candidate,
+    # whichever engine it names -- launches through the simulator's
+    # engine classes (see _candidate_engine_config), which is the same
+    # path the benchmark and the roofline use.
+    if cfg.engine not in ("vllm_cuda", "vllm_cuda_multi"):
+        raise RuntimeError(
+            f"registry launch supports vLLM only; {cfg.engine!r} runs "
+            f"through the engine classes (search/arena mode)")
+    args.append(IMAGE)
+    args.extend([
+        "--model", MODEL_PATH,
+        "--dtype", "bfloat16",
+        "--max-model-len", "8192",
+        "--trust-remote-code",
+        "--host", "0.0.0.0",
+        "--port", str(replica.port),
+        "--served-model-name", SERVED_NAME,
+    ])
+    args.extend(cfg.replica_args)
     res = subprocess.run(args, capture_output=True, text=True)
     if res.returncode != 0:
         # This message is persisted verbatim as the config's
@@ -1487,8 +1406,9 @@ def docker_logs_tail(name: str, n: int = 30) -> str:
 
 
 def container_running(name: str) -> bool:
+    # Anchored both ends: ``vllm-s1`` must not answer for ``vllm-s10``.
     res = subprocess.run(
-        ["docker", "ps", "-q", "--filter", f"name={name}"],
+        ["docker", "ps", "-q", "--filter", f"name=^/?{name}$"],
         capture_output=True, text=True, timeout=5,
     )
     return bool(res.stdout.strip())
@@ -2023,11 +1943,56 @@ def _fmt_ttft_with_timeouts(c: CellResult | None) -> str:
 # ── Main loop ───────────────────────────────────────────────────────────
 
 
+ENGINE_LOG_DIR = Path("runs/engine_optimizer/engine_logs")
+
+
+async def _launch_engine(engine, cfg: EngineConfig,
+                         state: "OptimizerState") -> HealthCheckResult:
+    """Launch a candidate through a simulator engine class.
+
+    The engine owns the stale sweep, the docker argv, the readiness
+    gate and the log capture -- the same code the benchmark and the
+    roofline run, so a lever or a memory-fraction translation applied
+    there applies here by construction. What remains ours is the
+    served-model probe, which catches "API up, model never
+    registered" -- the failure /v1/models does not see.
+    """
+    ENGINE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        await asyncio.to_thread(engine.launch, log_dir=ENGINE_LOG_DIR)
+    except Exception as e:  # noqa: BLE001
+        state.append_log(f"!! launch failed: {e}")
+        if getattr(engine, "log_path", None):
+            state.append_log(f"   engine log: {engine.log_path}")
+        return HealthCheckResult(healthy=False,
+                                 reason=f"launch_failed: {str(e)[:500]}")
+    state.append_log(f"engine ready; log -> {engine.log_path}")
+    state.set_phase("probing served_model_name")
+    for r in cfg.replicas:
+        ok, err = await _probe_served_model(r.name, r.port)
+        if not ok:
+            state.append_log(f"!! {r.name} probe failed: {err}")
+            return HealthCheckResult(healthy=False,
+                                     reason=f"model_not_registered: {err}")
+        state.append_log(f"✓ {r.name} probe ok (served={SERVED_NAME!r})")
+    return HealthCheckResult(healthy=True)
+
+
+async def _teardown(engine, state: "OptimizerState") -> None:
+    if engine is not None:
+        try:
+            await asyncio.to_thread(engine.shutdown)
+        except Exception as e:  # noqa: BLE001
+            state.append_log(f"engine shutdown raised: {e}")
+    cleanup_containers(state)
+
+
 async def run_config(
     cfg: EngineConfig, state: OptimizerState, prompts: dict[str, list[str]],
     save: Callable[[], None],
     cells: Optional[list[TestCell]] = None,
     early_stop: Optional[Callable[[CellResult], bool]] = None,
+    engine=None,
 ) -> ConfigResult:
     """Run one config end-to-end. ``save`` is invoked after every
     cell so a mid-config crash leaves up-to-date partial data on
@@ -2036,7 +2001,11 @@ async def run_config(
     ``cells`` overrides the registry's TEST_CELLS (the search's
     concurrency ladder passes its rungs); ``early_stop`` is consulted
     after each cell — return True to stop climbing (SLA already blown
-    at this rung, higher ones are strictly worse for latency)."""
+    at this rung, higher ones are strictly worse for latency).
+
+    ``engine`` is a simulator engine instance (search/arena mode): the
+    launch goes through it. Without one, the registry's private vLLM
+    launcher is used."""
     state.append_log(f"== {cfg.name} ==")
     state.append_log(cfg.description)
 
@@ -2052,28 +2021,32 @@ async def run_config(
     cleanup_containers(state)
     state.set_phase("launching")
     launch_t0 = time.monotonic()
-    try:
-        for r in cfg.replicas:
-            cid = docker_launch(cfg, r)
-            state.append_log(f"launched {r.name} ({cid[:12]})")
-    except Exception as e:  # noqa: BLE001
-        state.append_log(f"!! launch failed: {e}")
-        cleanup_containers(state)
-        result = ConfigResult(
-            name=cfg.name, description=cfg.description,
-            status="launch_failed", failure_reason=str(e)[:500],
-        )
-        state.upsert_result(result)
-        save()
-        return result
-    health = await wait_for_health(cfg, state)
+    if engine is not None:
+        health = await _launch_engine(engine, cfg, state)
+    else:
+        try:
+            for r in cfg.replicas:
+                cid = docker_launch(cfg, r)
+                state.append_log(f"launched {r.name} ({cid[:12]})")
+        except Exception as e:  # noqa: BLE001
+            state.append_log(f"!! launch failed: {e}")
+            cleanup_containers(state)
+            result = ConfigResult(
+                name=cfg.name, description=cfg.description,
+                status="launch_failed", failure_reason=str(e)[:500],
+            )
+            state.upsert_result(result)
+            save()
+            return result
+        health = await wait_for_health(cfg, state)
     launch_seconds = time.monotonic() - launch_t0
     if not health.healthy:
-        # Capture more log context before tearing down.
-        for r in cfg.replicas:
-            state.append_log(f"-- {r.name} tail --")
-            state.append_log(docker_logs_tail(r.name, 50))
-        cleanup_containers(state)
+        if engine is None:
+            # Capture more log context before tearing down.
+            for r in cfg.replicas:
+                state.append_log(f"-- {r.name} tail --")
+                state.append_log(docker_logs_tail(r.name, 50))
+        await _teardown(engine, state)
         result = ConfigResult(
             name=cfg.name, description=cfg.description,
             status="launch_failed",
@@ -2083,6 +2056,30 @@ async def run_config(
         state.upsert_result(result)
         save()
         return result
+    try:
+        cell_results = await _warmup_and_measure(
+            cfg, state, prompts, save, launch_seconds,
+            cells if cells is not None else TEST_CELLS, early_stop)
+    finally:
+        # The engine comes down whatever the measurement did: an
+        # exception mid-ladder must not leave eight replicas running
+        # into the next candidate's launch.
+        await _teardown(engine, state)
+    final = ConfigResult(
+        name=cfg.name, description=cfg.description, status="ok",
+        launch_seconds=launch_seconds, cells=cell_results,
+    )
+    state.upsert_result(final)
+    save()
+    return final
+
+
+async def _warmup_and_measure(
+    cfg: EngineConfig, state: OptimizerState, prompts: dict[str, list[str]],
+    save: Callable[[], None], launch_seconds: float,
+    cells: list[TestCell],
+    early_stop: Optional[Callable[[CellResult], bool]],
+) -> list[CellResult]:
     state.set_phase("warmup")
     state.append_log(f"warmup ({WARMUP_REQUESTS} reqs)")
     warmup_clients = [
@@ -2100,7 +2097,7 @@ async def run_config(
         )
     state.append_log("warmup done")
     cell_results: list[CellResult] = []
-    for cell in (cells if cells is not None else TEST_CELLS):
+    for cell in cells:
         cr = await measure_cell(cfg, cell, prompts[cell.name], state)
         cell_results.append(cr)
         state.push_cell_result(cr)
@@ -2131,14 +2128,7 @@ async def run_config(
                 f"climb (higher concurrency is strictly worse for p95s)"
             )
             break
-    cleanup_containers(state)
-    final = ConfigResult(
-        name=cfg.name, description=cfg.description, status="ok",
-        launch_seconds=launch_seconds, cells=cell_results,
-    )
-    state.upsert_result(final)
-    save()
-    return final
+    return cell_results
 
 
 def _load_existing(path: Path) -> dict | None:
@@ -2469,32 +2459,153 @@ def _set_model_globals(model: str, served_name: str) -> None:
     SERVED_NAME = served_name
 
 
-def _candidate_engine_config(view: dict, index: int) -> EngineConfig:
+# Search candidates serve on this port + replica index. Distinct from
+# the benchmark's 9100 range so a stale benchmark engine and a search
+# candidate can never answer each other's health checks.
+SEARCH_PORT_BASE = 8000
+SEARCH_LAUNCH_TIMEOUT_S = 2700
+SEARCH_MAX_MODEL_LEN = 8192
+
+# Per-engine image override, env var -> EngineConfig field. Space files
+# may pin the vLLM image; the others come from the engine defaults.
+ENGINE_IMAGE_ENV = {
+    "trtllm": ("OPTIMIZER_TRTLLM_IMAGE", "trtllm_image"),
+    "sglang_cuda": ("OPTIMIZER_SGLANG_IMAGE", "sglang_image"),
+    "ktransformers": ("OPTIMIZER_KTRANSFORMERS_IMAGE", "ktransformers_image"),
+}
+
+
+def candidate_custom(view: dict, space) -> dict:
+    """The custom-shape request for a search candidate -- the same
+    dict the benchmark form and the roofline send, so one builder
+    (``engines/custom.py``) turns all three into an engine.
+
+    This is the fix for the drift the review found: the driver used
+    to assemble its own argv, so the TensorRT-LLM levers the search
+    enumerated never reached the container, and vLLM's share-of-total-
+    VRAM number went straight into flags that mean something else.
+    """
+    from simulator.engines.custom import lever_owner
+    from simulator.search import DEFAULT
+
+    params = view["params"]
+    engine_type = str(view.get("engine") or "vllm_cuda_multi")
+
+    def _knob(key):
+        v = params.get(key)
+        return None if v in (None, DEFAULT) else v
+
+    custom: dict = {
+        "device": "gpu",
+        "model_id": view["model"],
+        "engine": engine_type,
+        "replicas": len(view["replica_devices"]),
+        "tp": int(view["tp"]),
+        "placement": params.get("placement") or "pack",
+        "max_num_seqs": _knob("max_num_seqs"),
+        "max_num_batched_tokens": _knob("max_num_batched_tokens"),
+        "kv_cache_dtype": view.get("kv_cache_dtype") or "auto",
+        "gpu_memory_utilization": view.get("gpu_memory_utilization"),
+        "expert_parallel": params.get("expert_parallel") == "on",
+        # The search has always launched with it: catalog models that
+        # ship their own model classes cannot load otherwise, and the
+        # arena is an operator-driven tool on the operator's own box.
+        "trust_remote_code": True,
+        "max_model_len": SEARCH_MAX_MODEL_LEN,
+    }
+    # Engine-specific levers ride along as themselves; the builder
+    # types them and the engine class applies them. Only the owning
+    # engine's levers are passed (normalize() has already collapsed the
+    # foreign ones to their defaults, so this is belt and braces).
+    for key, value in params.items():
+        if lever_owner(key) == engine_type:
+            custom[key] = value
+    if engine_type.startswith("vllm"):
+        # Only vLLM registers a served name; the others serve under
+        # the model id and would 404 on anything else.
+        custom["served_model_name"] = view.get("served_name") or "search-model"
+    return custom
+
+
+def _candidate_engine_config(view: dict, index: int, space) -> tuple:
+    """(script EngineConfig, simulator engine) for one candidate.
+
+    Raises ``ShapeError`` when the candidate cannot be built as
+    specified -- a refused knob, a shape that does not fit -- so the
+    caller records it unreachable without spending a launch.
+    """
+    from simulator.config import EngineConfig as SimEngineConfig
+    from simulator.engines import make_engine
+    from simulator.engines.custom import custom_engine
+
     params = view["params"]
     bits = [f"s{index:03d}", str(params.get("model_variant", "m")),
             f"tp{view['tp']}dp{len(view['replica_devices'])}"]
     if len(view["replica_devices"]) * view["tp"] > 1:
         bits.append(str(params.get("placement", "pack")))
     name = "_".join(bits)
+    engine_type = str(view.get("engine") or "vllm_cuda_multi")
+
+    hw = {"count": space.total_devices,
+          "device_groups": space.device_groups,
+          "vram_per_gpu_gb": space.vram_per_gpu_gb}
+    engine_dict = custom_engine(candidate_custom(view, space), hw=hw)
+    engine_dict.update({
+        "port": SEARCH_PORT_BASE,
+        "startup_timeout_s": SEARCH_LAUNCH_TIMEOUT_S,
+    })
+    if engine_dict["type"].startswith("vllm"):
+        # Bound in run_search: the space's image, or OPTIMIZER_IMAGE.
+        engine_dict["gpu_image"] = IMAGE
+        # The catalog's extra vLLM flags for this artifact.
+        extra = list(view.get("engine_args") or [])
+        if extra:
+            engine_dict["vllm_extra_flags"] = (
+                list(engine_dict.get("vllm_extra_flags") or []) + extra)
+    env_var, field_name = ENGINE_IMAGE_ENV.get(engine_type, (None, None))
+    if env_var and os.environ.get(env_var):
+        engine_dict[field_name] = os.environ[env_var]
+    sim_cfg = SimEngineConfig(**engine_dict)
+    engine = make_engine(sim_cfg.type, sim_cfg)
+
+    prefix = engine_type.split("_")[0]
     replicas = [
         ReplicaSpec(
-            name=f"vllm-s{i}", port=8000 + i,
+            name=f"{prefix}-s{i}", port=SEARCH_PORT_BASE + i,
             gpus="device=" + ",".join(str(d) for d in devices),
         )
         for i, devices in enumerate(view["replica_devices"])
     ]
-    return EngineConfig(
+    cfg = EngineConfig(
         name=name,
         description=", ".join(f"{k}={v}" for k, v in params.items()),
         replicas=replicas,
-        engine=str(view.get("engine") or "vllm_cuda_multi"),
+        engine=engine_type,
         model=str(view.get("model") or ""),
-        kv_cache_dtype=view.get("kv_cache_dtype"),
-        gpu_memory_utilization=view.get("gpu_memory_utilization"),
         replica_args=list(view["engine_args"]),
-        shm_size="32g" if view["tp"] > 1 else "16g",
-        launch_timeout_s=2700,
+        launch_timeout_s=SEARCH_LAUNCH_TIMEOUT_S,
     )
+    return cfg, engine
+
+
+def launch_description(engine) -> dict:
+    """What a candidate's launch would run, for the record: every
+    replica's docker argv (redacted) plus, for TensorRT-LLM, the
+    options document -- the levers travel in that YAML, not in argv.
+    The plan's acceptance test reads this: two lever values must
+    yield two different launches."""
+    from simulator.engines.docker_replica import DockerReplicaEngine
+
+    out: dict = {"engine": engine.cfg.type}
+    if isinstance(engine, DockerReplicaEngine):
+        out["replicas"] = [
+            redact_argv(engine.build_replica_command(i, devices, f"r{i}"))
+            for i, devices in enumerate(engine._device_groups())
+        ]
+    if engine.cfg.type == "trtllm":
+        from simulator.engines.trtllm import llm_api_options
+        out["llm_api_options"] = llm_api_options(engine.cfg)
+    return out
 
 
 def _save_search(out_path: Path, sstate, space, search_mod) -> None:
@@ -2639,14 +2750,33 @@ async def run_search(space_path: Path, out_path: Path, new_run: bool,
                       f"({blocked})")
                 continue
             view = search.candidate_summary(params, space)
-            cfg = _candidate_engine_config(view, eval_index)
-            _set_model_globals(view["model"], view["served_name"])
+            try:
+                cfg, engine = _candidate_engine_config(view, eval_index, space)
+            except ShapeError as e:
+                # A knob the engine cannot express (knobs.unsupported)
+                # or a shape that does not fit. Recorded as unreachable
+                # WITHOUT a launch: blocked_values then steers the
+                # search away from the value, exactly as a failed
+                # launch would, at no cost.
+                key = search.canonical_key(params, space)
+                print(f"    -> refused {key}: {e}")
+                search.record_evaluation(
+                    sstate, space, params, status="launch_failed",
+                    score=None, config_name=f"s{eval_index:03d}_refused",
+                    cells=[], iteration=sstate.iterations[-1]["index"],
+                )
+                _save_search(out_path, sstate, space, search)
+                eval_index += 1
+                continue
+            # The name requests carry: vLLM registers the variant's
+            # served name, the other engines answer to the model id.
+            _set_model_globals(view["model"], engine.api_model_name)
             state_ui.begin_config(eval_index, cfg.name)
             cand_cells = _ladder_cells(view)
             result = await run_config(
                 cfg, state_ui, make_prompts(cand_cells),
                 save=lambda: None,     # search persists its own state
-                cells=cand_cells, early_stop=climb_stop,
+                cells=cand_cells, early_stop=climb_stop, engine=engine,
             )
             cells = [dataclasses.asdict(c) for c in result.cells]
             score = (search.score_ladder(cells, space.objective)

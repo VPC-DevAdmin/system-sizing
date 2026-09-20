@@ -57,6 +57,19 @@ def gpus_arg_for(device_ids: list[int]) -> str:
     return f'"{arg}"' if len(device_ids) > 1 else arg
 
 
+def container_name_filter(prefixes=CAPSIM_CONTAINER_PREFIXES) -> list[str]:
+    """``docker ps --filter`` values that match capsim's containers and
+    ONLY capsim's.
+
+    Docker's ``name=`` filter is an unanchored regular expression, so
+    ``name=vllm-`` also matched a user's ``my-vllm-dev`` and the sweep
+    removed it. Anchored to the start of the name; Docker reports
+    names with a leading slash and matches the filter against that
+    form in some versions, so the anchor tolerates an optional one.
+    """
+    return [f"name=^/?{re.escape(p)}" for p in prefixes]
+
+
 def remove_stale_engine_containers() -> None:
     """rm -f any leftover capsim engine container before launching.
 
@@ -67,10 +80,11 @@ def remove_stale_engine_containers() -> None:
     prefixes are exclusively capsim-owned, and benchmark launches are
     mutually exclusive with the optimizer, so removal here is safe.
     """
-    for prefix in CAPSIM_CONTAINER_PREFIXES:
+    for prefix, flt in zip(CAPSIM_CONTAINER_PREFIXES,
+                           container_name_filter(), strict=True):
         try:
             res = subprocess.run(
-                ["docker", "ps", "-aq", "--filter", f"name={prefix}"],
+                ["docker", "ps", "-aq", "--filter", flt],
                 capture_output=True, text=True, timeout=30,
             )
             cids = res.stdout.split()

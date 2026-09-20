@@ -55,6 +55,11 @@ WORKDIR = "/workspace/ktransformers"
 # engine.
 DEFAULT_BACKEND = "balance_serve"
 
+# The batch width KTransformers' own documentation demonstrates. The
+# GPU engines hold thousands of streams; asking this one for 1,024 is
+# asking the wrong question, so the roofline clamps its cells here.
+DOCUMENTED_MAX_BATCH = 4
+
 
 def serve_argv(model: str, *, port: int,
                gguf_path: str | None = None,
@@ -117,11 +122,12 @@ class KTransformersEngine(DockerReplicaEngine):
             "docker", "run", "-d", "--rm",
             "--name", container_name,
             "--gpus", gpus_arg_for(devices),
+            # --ipc=host shares the host's /dev/shm outright, which is
+            # what the expert path needs; a --shm-size beside it would
+            # be a no-op (it sizes the private /dev/shm --ipc=host
+            # replaces).
             "--ipc=host",
             "--network", "host",
-            # The expert path is the whole point: give the container
-            # the machine's memory and cores, not docker's defaults.
-            "--shm-size", cfg.docker_shm_size,
             "-w", WORKDIR,
             # See PYTHON above -- the image's entrypoint is
             # `tail -f /dev/null` and would swallow the command.

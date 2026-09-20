@@ -172,6 +172,12 @@ class RooflineRequest(BaseModel):
     max_num_seqs: Optional[list[int]] = None
     output_tokens: Optional[list[int]] = None
     input_tokens: int = 128
+    # resume: true (default) reuses every cell of the previous run
+    # whose full launch shape -- model, engine, batch width, output
+    # AND input tokens, memory share, KV precision, levers -- matches.
+    # resume: false in the spec, or new_run: true on the enclosing
+    # start request, discards the previous state and measures every
+    # cell afresh.
     resume: bool = True
     confirm_winners: bool = True
 
@@ -1075,6 +1081,11 @@ def create_app(
             if not models:
                 raise HTTPException(422, "no model fits this host")
 
+            # GPU-engine defaults. Engines that are not GPU-resident
+            # servers (KTransformers: one replica, no KV precision
+            # knob) override these per cell -- roofline.engine_defaults
+            # -- through the same builder, so the cell records what
+            # actually launched.
             base_custom = dict(req.custom or {})
             base_custom.setdefault("device", "gpu")
             base_custom.setdefault("replicas", 8)
@@ -1087,15 +1098,20 @@ def create_app(
                 return _build_custom_config(
                     {**base_custom, **overrides}, runs_base)
 
+            from .roofline import shape_of
             shapes = {"max_num_seqs": spec.get("max_num_seqs"),
                       "output_tokens": spec.get("output_tokens")}
+            # Fresh run when either the top-level new_run or the spec's
+            # resume:false says so; the UI sends new_run.
+            resume = bool(spec.get("resume", True)) and not req.new_run
             coro_factory = lambda: run_roofline(  # noqa: E731
                 models=models, engines=engines,
                 shapes={k: v for k, v in shapes.items() if v},
                 input_tokens=int(spec.get("input_tokens") or 128),
                 build_config=_build_rf, runs_base=runs_base,
-                resume=bool(spec.get("resume", True)),
+                resume=resume,
                 confirm_winners=bool(spec.get("confirm_winners", True)),
+                engine_shape=shape_of(base_custom),
             )
         elif kind == "headline_optimize":
             # Engine shape and request shape are coupled, so they are

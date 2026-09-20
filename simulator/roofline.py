@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -193,18 +194,80 @@ def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
 
 # ── Plan ──────────────────────────────────────────────────────────────
 
-def cells(models: list[str], engines: list[str], shapes: dict) -> list[dict]:
+# Everything about a cell that changes what gets launched or offered,
+# beyond the four the matrix is drawn over. All of it is in the cell
+# key: a roofline restarted with a new prompt length, memory share or
+# KV precision measures NEW cells instead of reusing old ones.
+SHAPE_KEYS = ("input_tokens", "gpu_memory_utilization", "kv_cache_dtype",
+              "replicas", "tp", "max_model_len")
+LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_")
+
+
+def _is_shape_key(k: str) -> bool:
+    return k in SHAPE_KEYS or k.startswith(LEVER_PREFIXES)
+
+
+def shape_of(custom: dict) -> dict:
+    """The launch-shaping fields of a custom request, for the plan."""
+    return {k: v for k, v in custom.items()
+            if _is_shape_key(k) and v not in (None, "")}
+
+
+def engine_defaults(engine: str) -> dict:
+    """Per-engine overrides of the roofline's GPU-engine defaults.
+
+    The defaults (eight replicas, fp8 KV) describe a GPU-resident
+    server. KTransformers is not one: its expert path wants every core
+    and the whole memory bandwidth of the box, so a second replica
+    contends rather than doubles, and it has no KV precision knob at
+    all -- fp8 is refused, not ignored (knobs.unsupported). Without
+    this every KTransformers cell failed at config time and the matrix
+    showed a blank where the only engine able to serve a model larger
+    than VRAM should be.
+    """
+    if engine == "ktransformers":
+        return {"replicas": 1, "kv_cache_dtype": "auto"}
+    return {}
+
+
+def cells(models: list[str], engines: list[str], shapes: dict, *,
+          input_tokens: int = DEFAULT_INPUT_TOKENS,
+          engine_shape: dict | None = None) -> list[dict]:
     """Every (model, engine, shape) the run will measure, model-major.
 
     Model-major because switching model costs a full weight load while
     switching engine does not, and because a partial run then holds a
     COMPLETE answer for the models it reached rather than a fragment
     of each.
+
+    Each cell carries its full launch shape (``engine_shape`` plus the
+    engine's own defaults), so the cell IS the record of what was
+    measured. KTransformers cells are clamped to its documented batch
+    width and deduplicated: two cells that would launch identically
+    are one cell.
     """
+    from .engines.ktransformers import DOCUMENTED_MAX_BATCH
+
     mns = sorted(shapes.get("max_num_seqs") or DEFAULT_SHAPES["max_num_seqs"])
     outs = sorted(shapes.get("output_tokens") or DEFAULT_SHAPES["output_tokens"])
-    return [{"model": m, "engine": e, "max_num_seqs": n, "output_tokens": o}
-            for m in models for e in engines for n in mns for o in outs]
+    out: list[dict] = []
+    seen: set[str] = set()
+    for m in models:
+        for e in engines:
+            shape = {**shape_of(engine_shape or {}), **engine_defaults(e)}
+            for n in mns:
+                if e == "ktransformers":
+                    n = min(n, DOCUMENTED_MAX_BATCH)
+                for o in outs:
+                    cell = {"model": m, "engine": e, "max_num_seqs": n,
+                            "output_tokens": o, "input_tokens": input_tokens,
+                            **shape}
+                    key = cell_key(cell)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(cell)
+    return out
 
 
 def estimate_minutes(n_cells: int, *, launch_min: float = 6.0,
@@ -224,31 +287,56 @@ def estimate_minutes(n_cells: int, *, launch_min: float = 6.0,
 # resume costs an engine launch each time and never produces a number.
 GIVE_UP_AFTER = 2
 
+# Failures that say nothing about whether the cell CAN succeed: the
+# engine was slow to come up, a port was still closing, the smoke
+# request hit a server that was not quite ready, the sweep found no
+# peak. Two of these in a row are two bad launches, not an
+# impossibility, and the cell is retried on the next resume.
+TRANSIENT_FAILURE = re.compile(
+    r"TimeoutError|not healthy in|did not become healthy|"
+    r"EADDRINUSE|address already in use|"
+    r"smoke request|cannot serve requests|"
+    r"produced no peak|unreadable sweep summary|"
+    r"launch cancelled|timed out|Connect(ion|Error|Timeout)",
+    re.I)
+
+
+def is_transient(err: str) -> bool:
+    """A failure that must not write a cell off, however often it
+    repeats."""
+    return bool(err) and bool(TRANSIENT_FAILURE.search(err))
+
 
 def error_signature(err: str) -> str:
     """The stable part of a failure, for deciding 'same way twice'.
 
-    Run ids, ports and paths change between attempts; the exception
-    type and its message do not.
+    Run ids, ports, paths, replica indices and timings change between
+    attempts; the exception type and its message do not. The same
+    failure reported by replica 3 and by replica 5 is the same
+    failure.
     """
-    import re
     if not err:
         return ""
     # The "(full log: ...)" tail names a per-attempt file and is the
     # variable part by construction, so drop it whole rather than
     # trying to normalise what is inside it.
     s = re.sub(r"\(full log:[^)]*\)", "", err)
+    s = re.sub(r"\breplica \d+\b", "replica N", s)
+    s = re.sub(r"\[r\d+\]\s*", "", s)
+    s = re.sub(r"\b\d+(?:\.\d+)?\s*s\b", "Ns", s)         # 12.3s, 1800s
+    s = re.sub(r"\b\d+(?:\.\d+)?\s*ms\b", "Nms", s)
     s = re.sub(r"run_\d+|:\d{4,5}\b|[0-9a-f]{8,}", "", s)
     return " ".join(s.split())[:160]
 
 
 def permanently_failed(results: list[dict]) -> dict[str, str]:
-    """Cells that have failed identically at least GIVE_UP_AFTER times,
-    mapped to the reason. Reported, not hidden: a blank in the matrix
-    with a cause beside it is a finding."""
+    """Cells that have failed identically at least GIVE_UP_AFTER times
+    for a reason that is not transient, mapped to the reason.
+    Reported, not hidden: a blank in the matrix with a cause beside it
+    is a finding."""
     seen: dict[str, list[str]] = {}
     for r in results:
-        if not r.get("error"):
+        if not r.get("error") or is_transient(r["error"]):
             continue
         seen.setdefault(cell_key(r), []).append(error_signature(r["error"]))
     out = {}
@@ -260,9 +348,35 @@ def permanently_failed(results: list[dict]) -> dict[str, str]:
     return out
 
 
+def cell_overrides(cell: dict) -> dict:
+    """What a cell tells the config builder: model, engine, batch width
+    and every launch-shaping field it carries. The builder merges these
+    over the roofline's base defaults, so an engine's own defaults
+    (engine_defaults) win over the GPU-engine ones."""
+    out = {"model_id": cell["model"], "engine": cell["engine"],
+           "max_num_seqs": cell["max_num_seqs"]}
+    out.update({k: v for k, v in cell.items()
+                if _is_shape_key(k) and k != "input_tokens"
+                and v not in (None, "")})
+    return out
+
+
 def cell_key(c: dict) -> str:
-    return (f"{c['model']}|{c['engine']}|{c['max_num_seqs']}"
+    """Identity of a cell for resume: the four matrix axes plus every
+    launch-shaping field the cell carries (SHAPE_KEYS and levers).
+
+    Rows written before the shape fields existed lack them and so key
+    differently from any cell planned now -- they are re-measured,
+    which is the honest outcome: nobody knows what prompt length or
+    KV precision they ran with.
+    """
+    base = (f"{c['model']}|{c['engine']}|{c['max_num_seqs']}"
             f"|{c['output_tokens']}")
+    extra = sorted((k, c[k]) for k in c
+                   if _is_shape_key(k) and c[k] not in (None, ""))
+    if not extra:
+        return base
+    return base + "|" + "|".join(f"{k}={v}" for k, v in extra)
 
 
 # ── State (the only thing that matters across a disconnect) ───────────
@@ -406,8 +520,13 @@ async def run_roofline(
     state_path: Path | None = None,
     resume: bool = True,
     confirm_winners: bool = True,
+    engine_shape: dict | None = None,
 ) -> Path:
     """Stage, search the product, confirm each model's winner, report.
+
+    ``engine_shape`` is the launch shape shared by every cell (memory
+    share, KV precision, replica count, levers); it is recorded on
+    each cell and is part of the cell's resume identity.
 
     ``build_config`` is injected exactly as the joint search does it:
     it takes engine overrides and returns a config path, so this module
@@ -430,7 +549,8 @@ async def run_roofline(
     else:
         st = State()
 
-    plan_cells = cells(models, engines, shapes)
+    plan_cells = cells(models, engines, shapes, input_tokens=input_tokens,
+                       engine_shape=engine_shape)
     st.status = "staging"
     st.input_tokens = input_tokens
     st.plan = {"models": models, "engines": engines, "shapes": shapes,
@@ -481,10 +601,7 @@ async def run_roofline(
         try:
             apply_shape_to_generation(USER_CATALOG_DIR, input_tokens,
                                       cell["output_tokens"])
-            cfg_path = build_config({
-                "model_id": cell["model"], "engine": cell["engine"],
-                "max_num_seqs": cell["max_num_seqs"],
-            })
+            cfg_path = build_config(cell_overrides(cell))
             sub = load_config(cfg_path)
             sub.output.db_directory = str(runs_base)
             # Coarse ladder while RANKING: the peak sits at the top
@@ -513,10 +630,7 @@ async def run_roofline(
             try:
                 apply_shape_to_generation(USER_CATALOG_DIR, input_tokens,
                                           best["output_tokens"])
-                cfg_path = build_config({
-                    "model_id": mid, "engine": best["engine"],
-                    "max_num_seqs": best["max_num_seqs"],
-                })
+                cfg_path = build_config(cell_overrides(best))
                 sub = load_config(cfg_path)
                 sub.output.db_directory = str(runs_base)
                 final = await run_headline_sweep(

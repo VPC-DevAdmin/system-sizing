@@ -421,3 +421,52 @@ smoke → ready → sweep on the XE7740, now with an open-loop run, a
 scaled-out worker window, a TRT-LLM lever sweep, and a roofline
 restart with a changed prompt length. Those four exercise every fix
 above that the mock cannot.
+
+---
+
+## Status — 2026-09-20
+
+Implemented on `main` (commits `33b33e1` … this one), with the full suite
+at 608 passed:
+
+- **Step 0** — lint clean, `runs/doctor.json`, real config paths, one
+  version, `superseded` in the export contract.
+- **Step 1** — secrets redacted from logs and failure records; Results
+  keys on `methodology` with an empty state; dead and misrouted
+  controls fixed; `config/arena.yaml` is an example with a
+  detection-mismatch warning; anchored container sweeps; CPU engine
+  cleanup on health failure.
+- **Step 2** — in-flight cancel on trim/drain; worker-death detection;
+  token baseline across failed scrapes; settling detector before a
+  window; 5 s binning plus AR(1) effective-n in the stability test;
+  one SLA gate (Wilson upper < 5 %); natural-end session durations;
+  engine `num_running` as the significance basis; open-loop landing
+  zones ordered by arrival rate; TPOT excludes pre-first-token
+  failures; `--mode open|closed` on the CLI and `simulation.mode` in
+  YAML with unknown-key warnings.
+- **Step 3** — the arena driver launches through the engine classes
+  (levers and the memory-fraction translation apply); `normalize`
+  collapses engine-foreign levers; roofline cells keyed on the full
+  launch shape, `new_run` honoured, transient failures never written
+  off; monotonic SGLang port windows; optimizer start under the lock;
+  cancel-safe launches; KTransformers roofline defaults; doctor fails
+  on a broken GPU stack.
+- **Step 4** — README, deploy, roadmap rewritten; the schema doc is
+  generated from the DDL and tested for drift; `docs/algorithm.md`
+  matches the code it describes.
+- **Step 5** — `simulator/service/` router package (identical OpenAPI
+  document); `simulator/ui/` ES modules with one chart factory;
+  blocking IO off the event loop; `--insecure` bind guard;
+  accessibility pass; defaults from detected hardware.
+
+Found and fixed while deploying to the XE7740: the roofline endpoint
+required an engine template the UI never sent, and engines called the
+Hugging Face hub at startup even with staged weights (fatal on a box
+without outbound DNS) — containers now run with `HF_HUB_OFFLINE=1`
+when the snapshot is complete.
+
+Still open: the real-hardware acceptance runs listed above (the
+roofline started 2026-09-20 exercises the offline launch, the
+transient-failure rule and the KTransformers defaults); the registry
+mode of `scripts/engine_optimizer.py` still uses its own vLLM argv
+builder for CPU cpuset/NUMA shapes.

@@ -3,6 +3,8 @@ or cannot express at all."""
 
 from __future__ import annotations
 
+import pytest
+
 from simulator.config import EngineConfig
 from simulator.engines.knobs import canonical, unsupported
 from simulator.engines.sglang_cuda import (
@@ -185,15 +187,56 @@ def test_consecutive_launches_do_not_reuse_the_same_ports():
     more. Fixed ports are safe within a launch and collide across
     them, because the previous set's sockets are still closing —
     observed at port 42128, one cell into a roofline."""
-    from simulator.engines.sglang_cuda import nccl_port
+    from simulator.engines.sglang_cuda import nccl_port, port_windows
 
-    a = {nccl_port(i, "launch-aaa") for i in range(8)}
-    b = {nccl_port(i, "launch-bbb") for i in range(8)}
-    assert len(a) == len(b) == 8
-    assert not (a & b), "consecutive launches reused a port"
+    # A hash of the run id spread launches but did not separate them:
+    # 1/64 of consecutive pairs shared a window, a coin flip over a
+    # 48-cell roofline. A monotonic launch number never shares until
+    # every other window has been used.
+    for launch in range(3 * port_windows(8)):
+        a = {nccl_port(i, launch, 8) for i in range(8)}
+        b = {nccl_port(i, launch + 1, 8) for i in range(8)}
+        assert len(a) == len(b) == 8
+        assert not (a & b), f"launches {launch} and {launch + 1} share a port"
     # Deterministic for a given launch, so the replicas of one launch
     # agree with each other.
-    assert nccl_port(3, "launch-aaa") == nccl_port(3, "launch-aaa")
+    assert nccl_port(3, 17, 8) == nccl_port(3, 17, 8)
+
+
+def test_each_engine_object_is_its_own_launch():
+    """Two engines built back to back -- a sweep's teardown and the
+    next cell's start -- must not pick the same window, and a
+    relaunch of one object takes a fresh window too."""
+    from simulator.engines.sglang_cuda import next_launch_number
+
+    a = SGLangCudaEngine(_cfg(docker_volumes={}))
+    b = SGLangCudaEngine(_cfg(docker_volumes={}))
+    assert a._launch_no != b._launch_no
+    pa = {int(a.build_replica_command(i, [i], "x")[
+        a.build_replica_command(i, [i], "x").index("--nccl-port") + 1])
+        for i in range(4)}
+    pb = {int(b.build_replica_command(i, [i], "x")[
+        b.build_replica_command(i, [i], "x").index("--nccl-port") + 1])
+        for i in range(4)}
+    assert not (pa & pb)
+    # Strictly increasing across the process.
+    n1, n2 = next_launch_number(), next_launch_number()
+    assert n2 == n1 + 1
+
+
+def test_a_launch_wider_than_eight_replicas_cannot_spill_over():
+    """The old window was eight replicas wide regardless of how many
+    a launch had, so replica 8 of a sixteen-replica launch landed in
+    the NEXT launch's window."""
+    from simulator.engines.sglang_cuda import NCCL_PORT_STRIDE, nccl_port
+
+    wide = {nccl_port(i, 5, 16) for i in range(16)}
+    nxt = {nccl_port(i, 6, 16) for i in range(16)}
+    assert len(wide) == 16 and not (wide & nxt)
+    assert min(b - a for a, b in zip(sorted(wide), sorted(wide)[1:],
+                                     strict=False)) == NCCL_PORT_STRIDE
+    with pytest.raises(ValueError):
+        nccl_port(8, 5, 8)
 
 
 def test_every_possible_rendezvous_port_is_a_legal_port():
@@ -202,14 +245,13 @@ def test_every_possible_rendezvous_port_is_a_legal_port():
     roofline, which is a long way to travel for an arithmetic slip."""
     from simulator.engines.sglang_cuda import NCCL_PORT_BASE, NCCL_PORT_CEILING, nccl_port
 
-    seen = set()
-    for w in range(2000):                      # far more launches than real
-        for i in range(8):
-            p = nccl_port(i, f"launch-{w}")
-            assert NCCL_PORT_BASE <= p <= NCCL_PORT_CEILING, (w, i, p)
-            assert p < 65536
-            seen.add(p)
-    # And the replicas of any one launch are always distinct.
-    for w in range(50):
-        ports = {nccl_port(i, f"run-{w}") for i in range(8)}
-        assert len(ports) == 8
+    for n in (1, 4, 8, 16):
+        for w in range(2000):                  # far more launches than real
+            ports = set()
+            for i in range(n):
+                p = nccl_port(i, w, n)
+                assert NCCL_PORT_BASE <= p <= NCCL_PORT_CEILING, (w, i, p)
+                assert p < 65536
+                ports.add(p)
+            # The replicas of any one launch are always distinct.
+            assert len(ports) == n

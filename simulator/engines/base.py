@@ -6,17 +6,58 @@ implementations own their tuning recipe and metrics endpoint.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import re
 import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import httpx
 
 log = logging.getLogger(__name__)
+
+# Environment variable names whose VALUES must never reach a log line,
+# an exception message or a persisted failure reason. Matched as a
+# case-insensitive substring of the name, so HF_TOKEN,
+# HUGGING_FACE_HUB_TOKEN, OPENAI_API_KEY and AWS_SECRET_ACCESS_KEY are
+# all covered without enumerating them.
+SECRET_ENV_PATTERN = re.compile(r"TOKEN|SECRET|KEY|PASSWORD", re.I)
+_ENV_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+
+
+def _mask_assignment(token: str) -> str:
+    m = _ENV_ASSIGNMENT.match(token)
+    if m and m.group(2) and SECRET_ENV_PATTERN.search(m.group(1)):
+        return f"{m.group(1)}=***"
+    return token
+
+
+def redact_argv(cmd: Sequence[str]) -> str:
+    """``" ".join(cmd)`` with secret env values masked.
+
+    Every launcher passes the HF token to its container as
+    ``-e HF_TOKEN=<value>`` and then logs the whole argv, which put the
+    token in every engine log and -- via the optimizer's failure
+    reason -- in ``run.json``. The NAME is kept (that a token was passed
+    is diagnostic); the value is replaced by ``***``. Handles
+    ``-e NAME=VALUE`` / ``--env NAME=VALUE``, the joined forms
+    ``-eNAME=VALUE`` / ``--env=NAME=VALUE``, and a bare ``NAME=VALUE``
+    token anywhere in the command (``env HF_TOKEN=... cmd``).
+    """
+    out: list[str] = []
+    for tok in cmd:
+        tok = str(tok)
+        if tok.startswith("--env="):
+            out.append("--env=" + _mask_assignment(tok[len("--env="):]))
+        elif tok.startswith("-e") and not tok.startswith("--") and "=" in tok:
+            out.append("-e" + _mask_assignment(tok[2:]))
+        else:
+            out.append(_mask_assignment(tok))
+    return " ".join(out)
 
 
 class Engine:
@@ -108,7 +149,7 @@ class Engine:
 
         cmd = self._build_command()
         env = self._build_env()
-        log.info("Launching %s: %s", self.cfg.type, " ".join(cmd))
+        log.info("Launching %s: %s", self.cfg.type, redact_argv(cmd))
         log.info("Engine logs -> %s", log_path)
 
         self._proc = subprocess.Popen(
@@ -119,27 +160,48 @@ class Engine:
             preexec_fn=os.setsid if os.name != "nt" else None,
         )
 
-        self._wait_for_health(self.cfg.startup_timeout_s)
+        try:
+            self._wait_for_health(self.cfg.startup_timeout_s)
+        except Exception:
+            # A server that came up but never answered is still
+            # running. Left alone it holds the port and the CPU cores
+            # into the next launch, which then fails for a reason that
+            # has nothing to do with its own config.
+            self.shutdown()
+            raise
+
+    def _signal_group(self, sig: int) -> None:
+        """Signal the engine's whole process group; a group that has
+        already gone is not an error."""
+        if self._proc is None:
+            return
+        if os.name == "nt":
+            if sig == signal.SIGKILL:
+                self._proc.kill()
+            else:
+                self._proc.terminate()
+            return
+        try:
+            os.killpg(os.getpgid(self._proc.pid), sig)
+        except ProcessLookupError:
+            pass
 
     def shutdown(self) -> None:
         if self._proc is None:
             return
         log.info("Shutting down %s engine (pid=%s)", self.cfg.type, self._proc.pid)
         try:
-            if os.name != "nt":
-                os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
-            else:
-                self._proc.terminate()
+            self._signal_group(signal.SIGTERM)
             self._proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
             log.warning("Engine did not stop gracefully; killing")
-            if os.name != "nt":
-                os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
-            else:
-                self._proc.kill()
+            self._signal_group(signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self._proc.wait(timeout=10)
         finally:
             if self._log_file is not None:
                 self._log_file.close()
+                self._log_file = None
             self._proc = None
 
     def health_check(self) -> bool:

@@ -277,20 +277,27 @@ def preflight_check(reqs: HardwareRequirements, *, raise_on_fail: bool = True) -
     Otherwise returns False on failure.
     """
     info = detect_hardware()
+    needs_gpu = bool(reqs.requires_gpu or reqs.min_gpus or reqs.min_vram_gb)
     if info.detection_status == "no_proc_cpuinfo":
+        # No /proc/cpuinfo says nothing about the GPUs: the CPU gates
+        # cannot be checked, but a config that needs a GPU is still
+        # checked against nvidia-smi below. Returning here let a GPU
+        # config sail through preflight on any host without one.
         log.warning(
             "preflight: /proc/cpuinfo unavailable (non-Linux host?); "
-            "skipping hardware requirements validation"
+            "skipping CPU requirements validation%s",
+            "" if needs_gpu else " (nothing else to check)",
         )
-        return True
-
-    log.info(
-        "preflight: vendor=%s model=%r physical_cores=%s sockets=%s",
-        info.vendor, info.cpu_model, info.physical_cores, info.sockets,
-    )
-
-    failures = check_requirements(info, reqs)
-    if reqs.requires_gpu or reqs.min_gpus or reqs.min_vram_gb:
+        if not needs_gpu:
+            return True
+        failures: list[str] = []
+    else:
+        log.info(
+            "preflight: vendor=%s model=%r physical_cores=%s sockets=%s",
+            info.vendor, info.cpu_model, info.physical_cores, info.sockets,
+        )
+        failures = check_requirements(info, reqs)
+    if needs_gpu:
         gpus = detect_gpus()
         if gpus.detection_status == "ok" and gpus.count:
             log.info(

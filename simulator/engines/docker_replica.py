@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -35,7 +36,7 @@ from typing import Optional
 
 import httpx
 
-from .base import Engine
+from .base import Engine, redact_argv
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,22 @@ def gpus_arg_for(device_ids: list[int]) -> str:
     return f'"{arg}"' if len(device_ids) > 1 else arg
 
 
+def container_name_filter(prefixes=CAPSIM_CONTAINER_PREFIXES) -> list[str]:
+    """``docker ps --filter`` values that match capsim's containers and
+    ONLY capsim's.
+
+    Docker's ``name=`` filter is an unanchored regular expression, so
+    ``name=vllm-`` also matched a user's ``my-vllm-dev`` and the sweep
+    removed it. Anchored to the start of the name; Docker reports
+    names with a leading slash and matches the filter against that
+    form in some versions, so the anchor tolerates an optional one.
+    """
+    # The prefixes are letters and a hyphen, literal in a Go regexp
+    # outside a character class -- no escaping, which would only add
+    # a "\-" for the daemon to puzzle over.
+    return [f"name=^/?{p}" for p in prefixes]
+
+
 def remove_stale_engine_containers() -> None:
     """rm -f any leftover capsim engine container before launching.
 
@@ -67,10 +84,11 @@ def remove_stale_engine_containers() -> None:
     prefixes are exclusively capsim-owned, and benchmark launches are
     mutually exclusive with the optimizer, so removal here is safe.
     """
-    for prefix in CAPSIM_CONTAINER_PREFIXES:
+    for prefix, flt in zip(CAPSIM_CONTAINER_PREFIXES,
+                           container_name_filter(), strict=True):
         try:
             res = subprocess.run(
-                ["docker", "ps", "-aq", "--filter", f"name={prefix}"],
+                ["docker", "ps", "-aq", "--filter", flt],
                 capture_output=True, text=True, timeout=30,
             )
             cids = res.stdout.split()
@@ -127,6 +145,15 @@ class DockerReplicaEngine(Engine):
         self._replicas: list[tuple[int, list[int], int, str,
                                    Optional[subprocess.Popen]]] = []
         self._run_id: str = ""
+        # Cancel safety. launch() runs in a worker thread
+        # (asyncio.to_thread) and cancelling the awaiting task does
+        # NOT stop the thread: it goes on creating containers while
+        # the caller's shutdown() sees only what was appended so far.
+        # So shutdown() raises a flag, every step of the launch checks
+        # it, and the append is atomic with that check -- a container
+        # created after the flag is removed on the spot.
+        self._lock = threading.Lock()
+        self._stopping = threading.Event()
 
     # ── Subclass interface ────────────────────────────────────────────
 
@@ -221,13 +248,18 @@ class DockerReplicaEngine(Engine):
         # finished closing.
         self._run_id = run_id
         self._log_path = log_dir / f"engine_{self.ENGINE_NAME}_{run_id}.log"
+        # A shutdown() that arrives BEFORE this point (the awaiting task
+        # cancelled before the thread ran) is the one case not covered:
+        # the launch proceeds and the caller's shutdown() has already
+        # returned. Every later arrival is.
+        self._stopping.clear()
 
         try:
             log.info("Starting %d %s replicas on devices %s",
                      len(groups), self.ENGINE_NAME, groups)
             for i, devices in enumerate(groups):
                 self._launch_replica(i, devices, run_id)
-            for i, _devices, port, cid, _ in self._replicas:
+            for i, _devices, port, cid, _ in list(self._replicas):
                 self._wait_for_replica_ready(i, port, cid)
             log.info("All replicas ready: %s", ", ".join(self.replica_urls))
         except Exception:
@@ -235,30 +267,54 @@ class DockerReplicaEngine(Engine):
             raise
 
     def shutdown(self) -> None:
-        for i, _devices, _port, cid, streamer in self._replicas:
+        # Flag first, then take the list under the lock: a launch
+        # thread past the flag check but before its append will see
+        # the flag at the append and remove its own container.
+        self._stopping.set()
+        with self._lock:
+            replicas, self._replicas = list(self._replicas), []
+        for i, _devices, _port, cid, streamer in replicas:
             log.info("Stopping replica %d (%s)", i, cid[:12])
+            self._stop_container(cid)
+            self._stop_streamer(streamer)
+
+    @staticmethod
+    def _stop_container(cid: str) -> None:
+        try:
+            subprocess.run(["docker", "stop", "-t", "30", cid],
+                           capture_output=True, timeout=45)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["docker", "rm", "-f", cid],
+                           capture_output=True)
+
+    @staticmethod
+    def _stop_streamer(streamer: Optional[subprocess.Popen]) -> None:
+        if streamer is None:
+            return
+        try:
+            streamer.terminate()
             try:
-                subprocess.run(["docker", "stop", "-t", "30", cid],
-                               capture_output=True, timeout=45)
+                streamer.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                subprocess.run(["docker", "rm", "-f", cid],
-                               capture_output=True)
-            if streamer is not None:
-                try:
-                    streamer.terminate()
-                    try:
-                        streamer.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        streamer.kill()
-                except Exception:  # noqa: BLE001
-                    pass
-        self._replicas = []
+                streamer.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _cancelled(self) -> RuntimeError:
+        return RuntimeError(
+            f"{self.ENGINE_NAME} launch cancelled: shutdown() was called "
+            f"while replicas were still starting")
 
     def _launch_replica(self, index: int, devices: list[int],
                         run_id: str) -> None:
+        if self._stopping.is_set():
+            raise self._cancelled()
+        # The name is fixed BEFORE docker run so a run that hangs (the
+        # daemon stalls pulling an image, say) can still be cleaned up
+        # by name -- there is no id to remove it by until it returns.
         name = f"{self.ENGINE_NAME.split('_')[0]}-r{index}-{run_id}"
         cmd = self.build_replica_command(index, devices, name)
-        log.info("docker run r%d: %s", index, " ".join(cmd))
+        log.info("docker run r%d: %s", index, redact_argv(cmd))
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, check=True, timeout=120,
@@ -273,10 +329,25 @@ class DockerReplicaEngine(Engine):
                 f"docker run for replica {index} failed "
                 f"(rc={e.returncode}): {stderr}{hint}"
             ) from e
+        except subprocess.TimeoutExpired as e:
+            subprocess.run(["docker", "rm", "-f", name],
+                           capture_output=True, timeout=60)
+            raise RuntimeError(
+                f"docker run for replica {index} did not return in 120s; "
+                f"removed container {name} by name"
+            ) from e
         cid = result.stdout.strip()
         streamer = self._spawn_log_streamer(cid, prefix=f"[r{index}] ")
-        self._replicas.append((index, devices, self._port(index), cid,
-                               streamer))
+        with self._lock:
+            if self._stopping.is_set():
+                # shutdown() ran between docker run returning and this
+                # append; it never saw this container, so remove it.
+                self._stop_streamer(streamer)
+                subprocess.run(["docker", "rm", "-f", cid],
+                               capture_output=True, timeout=60)
+                raise self._cancelled()
+            self._replicas.append((index, devices, self._port(index), cid,
+                                   streamer))
 
     def _startup_cause(self, tail_bytes: int = 200_000) -> str:
         """The engine's OWN last error line, lifted out of the log.
@@ -341,6 +412,8 @@ class DockerReplicaEngine(Engine):
         start = time.time()
         backoff = 1.0
         while time.time() - start < self.cfg.startup_timeout_s:
+            if self._stopping.is_set():
+                raise self._cancelled()
             try:
                 r = subprocess.run(
                     ["docker", "inspect", "-f", "{{.State.Running}}",
@@ -434,8 +507,12 @@ class DockerReplicaEngine(Engine):
             return None
         try:
             log_file = open(self._log_path, "ab")
+            # sed -u: line-buffered. Into a file sed block-buffers by
+            # default, so the engine's last lines -- the ones a startup
+            # failure is diagnosed from -- sat in its buffer while
+            # _startup_cause read an empty log.
             shell_cmd = (f"docker logs -f {container_id} 2>&1 | "
-                         f"sed 's/^/{prefix}/'")
+                         f"sed -u 's/^/{prefix}/'")
             return subprocess.Popen(shell_cmd, shell=True, stdout=log_file,
                                     stderr=subprocess.STDOUT)
         except Exception as e:  # noqa: BLE001

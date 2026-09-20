@@ -270,3 +270,95 @@ def test_candidate_summary(space) -> None:
          "max_num_batched_tokens": "default", "placement": "pack"}, space)
     assert "--max-num-batched-tokens" not in " ".join(view2["engine_args"])
     assert "--tensor-parallel-size" not in " ".join(view2["engine_args"])
+
+
+def test_engine_foreign_levers_collapse_to_their_defaults(tmp_path) -> None:
+    """A TensorRT-LLM lever on a vLLM candidate changes nothing about
+    the launch, so two candidates differing only in it are the SAME
+    candidate. Without this the coverage sampler chased four copies of
+    every vLLM shape (improvement plan A7)."""
+    import random
+
+    from simulator.search import normalize
+
+    p = tmp_path / "space.yaml"
+    p.write_text("""
+name: multi
+engine: vllm_cuda
+device_groups: [[0, 1, 2, 3]]
+model_variants:
+  m: {model: org/model, served_name: m}
+dimensions:
+  engine: [vllm_cuda_multi, trtllm]
+  tp: [1]
+  dp: [4]
+  trtllm_moe_backend: [CUTLASS, auto]
+  trtllm_chunked_prefill: ['on', 'off']
+search: {budget: 8, initial_samples: 4}
+""")
+    space = load_space(p)
+    base = {"model_variant": "m", "tp": 1, "dp": 4}
+    a = canonical_key({**base, "engine": "vllm_cuda_multi",
+                       "trtllm_moe_backend": "CUTLASS",
+                       "trtllm_chunked_prefill": "on"}, space)
+    b = canonical_key({**base, "engine": "vllm_cuda_multi",
+                       "trtllm_moe_backend": "auto",
+                       "trtllm_chunked_prefill": "off"}, space)
+    assert a == b
+    # Collapsed to the engine's own default, not to whichever value
+    # happened to be listed first.
+    n = normalize({**base, "engine": "vllm_cuda_multi",
+                   "trtllm_moe_backend": "CUTLASS",
+                   "trtllm_chunked_prefill": "on"}, space)
+    assert n["trtllm_moe_backend"] == "auto"
+    assert n["trtllm_chunked_prefill"] == "off"
+    # On the owning engine the lever is real and the keys differ.
+    c = canonical_key({**base, "engine": "trtllm",
+                       "trtllm_moe_backend": "CUTLASS"}, space)
+    d = canonical_key({**base, "engine": "trtllm",
+                       "trtllm_moe_backend": "auto"}, space)
+    assert c != d
+    # The coverage sample never proposes two copies of one launch.
+    picked = propose_initial(space, random.Random(1))
+    keys = [canonical_key(x, space) for x in picked]
+    assert len(keys) == len(set(keys))
+
+
+def test_fixed_values_pin_a_dimension_for_every_candidate(tmp_path) -> None:
+    """``fixed:`` carries the arena's gpu_memory_utilization into the
+    space document, and the built-in default IS the arena's constant
+    rather than a second number kept in the search."""
+    from simulator.arena import FIXED_GMU
+
+    p = tmp_path / "space.yaml"
+    p.write_text("""
+name: f
+engine: vllm_cuda
+device_groups: [[0, 1]]
+model_variants:
+  m: {model: org/model, served_name: m}
+dimensions:
+  tp: [1]
+fixed:
+  gpu_memory_utilization: 0.8
+search: {budget: 2, initial_samples: 1}
+""")
+    space = load_space(p)
+    view = candidate_summary({"model_variant": "m", "tp": 1}, space)
+    assert view["gpu_memory_utilization"] == 0.8
+    # The pin is part of the fingerprint -- a different fixed value
+    # is a different space.
+    p.write_text(p.read_text().replace("0.8", "0.7"))
+    assert load_space(p).space_hash() != space.space_hash()
+    # Without a pin the default is the arena's advertised constant.
+    p.write_text(p.read_text().replace(
+        "fixed:\n  gpu_memory_utilization: 0.7\n", ""))
+    view = candidate_summary({"model_variant": "m", "tp": 1}, load_space(p))
+    assert view["gpu_memory_utilization"] == FIXED_GMU
+    # A value cannot be both searched and pinned.
+    p.write_text(p.read_text().replace(
+        "dimensions:\n  tp: [1]\n",
+        "dimensions:\n  tp: [1]\n  gpu_memory_utilization: [0.9]\n"
+        "fixed:\n  gpu_memory_utilization: 0.8\n"))
+    with pytest.raises(SearchSpaceError):
+        load_space(p)

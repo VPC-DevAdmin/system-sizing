@@ -130,11 +130,15 @@ def test_summary_reports_the_matrix_not_just_a_winner():
 
 
 def test_resume_skips_cells_already_measured():
-    """Each repeated cell costs minutes of engine launch."""
+    """Each repeated cell costs minutes of engine launch. A measured
+    row carries the shape it ran with (input_tokens at least), and a
+    planned cell of the same shape reuses it."""
     rows = [{"model": "m1", "engine": "e1", "max_num_seqs": 1,
-             "output_tokens": 8, "out_tok_s": 1.0, "steady_state": True}]
+             "output_tokens": 8, "input_tokens": 128,
+             "out_tok_s": 1.0, "steady_state": True}]
     done = {cell_key(r) for r in rows}
-    plan = cells(["m1"], ["e1"], {"max_num_seqs": [1], "output_tokens": [8]})
+    plan = cells(["m1"], ["e1"], {"max_num_seqs": [1], "output_tokens": [8]},
+                 input_tokens=128)
     assert cell_key(plan[0]) in done
 
 
@@ -259,3 +263,224 @@ def test_signature_ignores_run_ids_and_ports():
     a = error_signature("boom (full log: runs/run_12/engine_abc12345.log)")
     b = error_signature("boom (full log: runs/run_99/engine_def67890.log)")
     assert a == b
+
+
+# ── Resume identity and write-off rules (improvement plan A8) ─────────
+
+
+def test_cell_key_carries_the_full_launch_shape():
+    """Changing the prompt length, the memory share, the KV precision
+    or a lever and pressing Start must measure NEW cells. The old key
+    was (model, engine, max_num_seqs, output_tokens) and reused cells
+    measured under a different shape."""
+    base = {"model": "m", "engine": "trtllm", "max_num_seqs": 1024,
+            "output_tokens": 256, "input_tokens": 128,
+            "gpu_memory_utilization": 0.95, "kv_cache_dtype": "fp8"}
+    k = cell_key(base)
+    assert cell_key({**base, "input_tokens": 512}) != k
+    assert cell_key({**base, "gpu_memory_utilization": 0.9}) != k
+    assert cell_key({**base, "kv_cache_dtype": "auto"}) != k
+    assert cell_key({**base, "trtllm_moe_backend": "CUTLASS"}) != k
+    assert cell_key({**base, "replicas": 4}) != k
+    # Result fields are not identity.
+    assert cell_key({**base, "out_tok_s": 1.0, "run_dir": "x"}) == k
+    # A row from before the shape fields existed does not match a cell
+    # planned now: nobody knows what shape it ran with.
+    old = {"model": "m", "engine": "trtllm", "max_num_seqs": 1024,
+           "output_tokens": 256}
+    assert cell_key(old) != k
+
+
+def test_plan_cells_carry_the_shape_and_dedupe_identical_launches():
+    plan = cells(["m"], ["trtllm"], {"max_num_seqs": [1024],
+                                     "output_tokens": [128]},
+                 input_tokens=512,
+                 engine_shape={"gpu_memory_utilization": 0.95,
+                               "kv_cache_dtype": "fp8", "replicas": 8,
+                               "trtllm_moe_backend": "CUTLASS",
+                               "model_id": "ignored", "device": "gpu"})
+    assert len(plan) == 1
+    c = plan[0]
+    assert c["input_tokens"] == 512
+    assert c["gpu_memory_utilization"] == 0.95
+    assert c["kv_cache_dtype"] == "fp8"
+    assert c["trtllm_moe_backend"] == "CUTLASS"
+    assert "model_id" not in c and "device" not in c
+    # ...and every one of them reaches the config builder.
+    from simulator.roofline import cell_overrides
+    ov = cell_overrides(c)
+    assert ov["model_id"] == "m" and ov["engine"] == "trtllm"
+    assert ov["max_num_seqs"] == 1024
+    assert ov["kv_cache_dtype"] == "fp8" and ov["replicas"] == 8
+    assert ov["trtllm_moe_backend"] == "CUTLASS"
+    assert "input_tokens" not in ov          # a request property
+
+
+def test_resume_reuses_only_cells_of_the_same_shape():
+    rows = [{"model": "m1", "engine": "e1", "max_num_seqs": 1,
+             "output_tokens": 8, "input_tokens": 128,
+             "kv_cache_dtype": "fp8", "out_tok_s": 1.0,
+             "steady_state": True}]
+    done = {cell_key(r) for r in rows}
+    same = cells(["m1"], ["e1"], {"max_num_seqs": [1], "output_tokens": [8]},
+                 input_tokens=128, engine_shape={"kv_cache_dtype": "fp8"})
+    assert cell_key(same[0]) in done
+    longer = cells(["m1"], ["e1"], {"max_num_seqs": [1], "output_tokens": [8]},
+                   input_tokens=2048, engine_shape={"kv_cache_dtype": "fp8"})
+    assert cell_key(longer[0]) not in done
+
+
+def test_startup_timeouts_and_smoke_failures_are_never_written_off():
+    """Two slow launches are two slow launches, not an impossibility.
+    Only a failure that says the shape cannot run here -- an unknown
+    architecture, a kernel that refuses the GPU -- earns a write-off."""
+    from simulator.roofline import is_transient, permanently_failed
+
+    base = {"model": "m", "engine": "sglang_cuda", "max_num_seqs": 1024,
+            "output_tokens": 256}
+    timeouts = [
+        {**base, "error": "TimeoutError: replica 0 not healthy in 1800s "
+                          "— see runs/a/engine_sglang_cuda_1.log"},
+        {**base, "error": "TimeoutError: replica 0 not healthy in 1800s "
+                          "— see runs/b/engine_sglang_cuda_2.log"},
+        {**base, "error": "TimeoutError: replica 0 not healthy in 1800s "
+                          "— see runs/c/engine_sglang_cuda_3.log"},
+    ]
+    assert permanently_failed(timeouts) == {}
+    smoke = [
+        {**base, "error": "EngineBrokenError: smoke request to "
+                          "http://127.0.0.1:9100/v1/chat/completions failed "
+                          "before any load was offered: ReadTimeout"},
+    ] * 3
+    assert permanently_failed(smoke) == {}
+    no_peak = [{**base, "error": "sweep produced no peak"}] * 3
+    assert permanently_failed(no_peak) == {}
+    ports = [{**base, "error": "RuntimeError: EADDRINUSE port 42128"}] * 3
+    assert permanently_failed(ports) == {}
+    for rows in (timeouts, smoke, no_peak, ports):
+        assert is_transient(rows[0]["error"])
+    # An architectural failure still is written off.
+    arch = [{**base, "error": "RuntimeError: replica 2 container exited "
+                              "during startup: ValueError: unknown "
+                              "architecture Qwen3NextForCausalLM"}] * 2
+    assert not is_transient(arch[0]["error"])
+    assert len(permanently_failed(arch)) == 1
+
+
+def test_signature_ignores_replica_index_and_timing():
+    """The same failure from replica 3 and from replica 5 is one
+    failure; so is one reported after 12.3 s and after 40.1 s."""
+    from simulator.roofline import error_signature
+
+    a = error_signature("[r3] RuntimeError: replica 3 container exited "
+                        "during startup after 12.3s: DeepGEMM only "
+                        "supports Hopper (SM90) (full log: runs/a/x.log)")
+    b = error_signature("[r5] RuntimeError: replica 5 container exited "
+                        "during startup after 40.1s: DeepGEMM only "
+                        "supports Hopper (SM90) (full log: runs/b/y.log)")
+    assert a == b
+    assert "DeepGEMM" in a
+    assert "replica 3" not in a and "12.3" not in a
+
+
+def test_ktransformers_cells_get_their_own_defaults():
+    """The GPU-engine defaults (eight replicas, fp8 KV) are refused by
+    KTransformers at config time -- every cell failed and the matrix
+    showed a blank for the one engine that can serve a model larger
+    than VRAM. Its cells run one replica, no KV precision knob, and
+    its documented batch width."""
+    from simulator.engines.ktransformers import DOCUMENTED_MAX_BATCH
+    from simulator.roofline import cell_overrides, engine_defaults
+
+    assert engine_defaults("ktransformers") == {"replicas": 1,
+                                                "kv_cache_dtype": "auto"}
+    assert engine_defaults("trtllm") == {}
+    plan = cells(["m"], ["ktransformers", "trtllm"],
+                 {"max_num_seqs": [1024, 2048], "output_tokens": [128]},
+                 engine_shape={"replicas": 8, "kv_cache_dtype": "fp8",
+                               "gpu_memory_utilization": 0.95})
+    kt = [c for c in plan if c["engine"] == "ktransformers"]
+    trt = [c for c in plan if c["engine"] == "trtllm"]
+    # Two batch widths clamp to one documented width -> one cell.
+    assert len(kt) == 1
+    assert kt[0]["max_num_seqs"] == DOCUMENTED_MAX_BATCH
+    assert kt[0]["replicas"] == 1
+    assert kt[0]["kv_cache_dtype"] == "auto"
+    assert kt[0]["gpu_memory_utilization"] == 0.95     # untouched
+    ov = cell_overrides(kt[0])
+    assert ov["replicas"] == 1 and ov["kv_cache_dtype"] == "auto"
+    # The GPU engines keep the GPU defaults.
+    assert len(trt) == 2
+    assert all(c["replicas"] == 8 and c["kv_cache_dtype"] == "fp8"
+               for c in trt)
+    # And the KTransformers cell passes the builder's refusal gate.
+    from simulator.engines.custom import custom_engine
+    eng = custom_engine(
+        {**ov, "model_id": "org/M", "device": "gpu", "tp": 1},
+        hw={"count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+            "vram_per_gpu_gb": 96.0})
+    assert eng["type"] == "ktransformers"
+    assert eng["replica_devices"] == [[0]]
+    assert eng["max_num_seqs"] == DOCUMENTED_MAX_BATCH
+
+
+def test_start_honours_new_run_and_records_the_shape(tmp_path, monkeypatch):
+    """The UI could never start a fresh roofline: new_run was ignored
+    and the spec's resume defaulted true."""
+    from fastapi.testclient import TestClient
+
+    import simulator.arena as arena
+    import simulator.roofline as rf
+    from simulator.service import create_app
+
+    monkeypatch.setattr(arena, "hardware", lambda: {
+        "count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+        "vram_per_gpu_gb": 96.0})
+    captured: list[dict] = []
+
+    async def fake_run_roofline(**kw):
+        captured.append(kw)
+        return tmp_path / "roofline.json"
+    monkeypatch.setattr(rf, "run_roofline", fake_run_roofline)
+
+    body = {"workload": {"kind": "roofline",
+                         "spec": {"models": ["org/M"], "engines": ["trtllm"],
+                                  "input_tokens": 512}},
+            "custom": {"engine": "trtllm", "trtllm_moe_backend": "CUTLASS"}}
+    with TestClient(create_app(tmp_path / "runs")) as c:
+        r = c.post("/api/runs", json={**body, "new_run": True})
+        assert r.status_code == 202, r.text
+        import time
+        for _ in range(50):
+            if captured:
+                break
+            time.sleep(0.05)
+        c.post("/api/runs/stop")
+    assert captured and captured[0]["resume"] is False
+    assert captured[0]["input_tokens"] == 512
+    shape = captured[0]["engine_shape"]
+    assert shape["kv_cache_dtype"] == "fp8" and shape["replicas"] == 8
+    assert shape["trtllm_moe_backend"] == "CUTLASS"
+    assert "model_id" not in shape
+
+    captured.clear()
+    with TestClient(create_app(tmp_path / "runs2")) as c:
+        assert c.post("/api/runs", json=body).status_code == 202
+        for _ in range(50):
+            if captured:
+                break
+            time.sleep(0.05)
+        c.post("/api/runs/stop")
+    assert captured and captured[0]["resume"] is True
+    # resume:false in the spec is the same as new_run.
+    captured.clear()
+    spec_off = {**body, "workload": {"kind": "roofline", "spec": {
+        **body["workload"]["spec"], "resume": False}}}
+    with TestClient(create_app(tmp_path / "runs3")) as c:
+        assert c.post("/api/runs", json=spec_off).status_code == 202
+        for _ in range(50):
+            if captured:
+                break
+            time.sleep(0.05)
+        c.post("/api/runs/stop")
+    assert captured and captured[0]["resume"] is False

@@ -216,3 +216,24 @@ def test_preflight_check_passes_silently_when_satisfied(monkeypatch) -> None:
     reqs = HardwareRequirements(cpu_vendor="intel", cpu_features=["amx_tile"])
     # Should return True without raising
     assert preflight_check(reqs) is True
+
+
+def test_gpu_requirement_is_checked_even_without_proc_cpuinfo(monkeypatch) -> None:
+    """No /proc/cpuinfo says nothing about the GPUs. The early return
+    let a GPU config pass preflight on any host without one."""
+    import simulator.preflight as pf
+    from simulator.preflight import GpuInfo
+
+    monkeypatch.setattr(pf, "detect_hardware", lambda: HardwareInfo(
+        vendor=None, cpu_model=None, flags=set(), physical_cores=None,
+        sockets=None, detection_status="no_proc_cpuinfo"))
+    monkeypatch.setattr(pf, "detect_gpus",
+                        lambda: GpuInfo(0, [], [], "no_nvidia_smi"))
+    with pytest.raises(PreflightError, match="requires an NVIDIA GPU"):
+        preflight_check(HardwareRequirements(requires_gpu=True))
+    # With GPUs present it passes; without a GPU requirement the CPU
+    # gates are skipped as before.
+    monkeypatch.setattr(pf, "detect_gpus",
+                        lambda: GpuInfo(2, ["A", "B"], [96.0, 96.0], "ok"))
+    assert preflight_check(HardwareRequirements(requires_gpu=True)) is True
+    assert preflight_check(HardwareRequirements(cpu_vendor="intel")) is True

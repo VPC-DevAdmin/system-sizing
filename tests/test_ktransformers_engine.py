@@ -105,3 +105,13 @@ def test_every_engine_prefix_is_swept_before_launch():
 
     for engine in ("vllm-", "trtllm-", "sglang-", "ktransformers-"):
         assert engine in CAPSIM_CONTAINER_PREFIXES
+
+
+def test_shm_size_is_not_passed_beside_ipc_host():
+    """--ipc=host shares the host's /dev/shm; --shm-size sizes the
+    private one it replaces, so the flag was a no-op that read as a
+    deliberate setting."""
+    eng = KTransformersEngine(_cfg(docker_volumes={}))
+    cmd = eng.build_replica_command(0, [0], "ktransformers-r0-x")
+    assert "--ipc=host" in cmd
+    assert "--shm-size" not in cmd

@@ -172,6 +172,12 @@ class RooflineRequest(BaseModel):
     max_num_seqs: Optional[list[int]] = None
     output_tokens: Optional[list[int]] = None
     input_tokens: int = 128
+    # resume: true (default) reuses every cell of the previous run
+    # whose full launch shape -- model, engine, batch width, output
+    # AND input tokens, memory share, KV precision, levers -- matches.
+    # resume: false in the spec, or new_run: true on the enclosing
+    # start request, discards the previous state and measures every
+    # cell afresh.
     resume: bool = True
     confirm_winners: bool = True
 
@@ -218,131 +224,16 @@ def _build_custom_config(custom: dict, runs_base: Path) -> Path:
     a generated config file (same schema as promoted profiles).
     Devices come from the detected topology; infeasible shapes are
     refused with the reason."""
-    from .arena import hardware
-    from .search import assign_devices
-
-    model_id = str(custom.get("model_id") or "")
-    if "/" not in model_id:
-        raise HTTPException(422, "custom.model_id must be an org/name id")
-    if custom.get("device") == "cpu":
-        # Conservative CPU-only engine — for boxes without GPUs (or
-        # explicit CPU comparisons). No searched dimensions apply.
-        engine = {
-            "type": "vllm",
-            "model_id": model_id,
-            "max_model_len": int(custom.get("max_model_len") or 8192),
-            "vllm_extra_flags": (["--trust-remote-code"]
-                                 if custom.get("trust_remote_code") else []),
-            "port": 9100,
-            "host": "127.0.0.1",
-            "startup_timeout_s": 1800,
-        }
-        doc = {
-            "engine": engine,
-            "telemetry": {"enable_engine_metrics": True},
-            "output": {"db_directory": str(runs_base)},
-        }
-        import yaml as _yaml
-        out = runs_base / "custom_benchmark.yaml"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(_yaml.safe_dump(doc, sort_keys=False))
-        return out
-    replicas = int(custom.get("replicas") or 1)
-    tp = int(custom.get("tp") or 1)
-    placement = (custom.get("placement")
-                 if custom.get("placement") in ("pack", "spread") else "pack")
-    hw = hardware()
-    if not hw["count"]:
-        raise HTTPException(422, "custom engine shapes need a GPU host")
-    devices = assign_devices(tp, replicas, placement, hw["device_groups"])
-    if devices is None:
-        raise HTTPException(
-            422, f"{replicas} replicas × tp{tp} does not fit "
-                 f"{hw['count']} GPUs in domains {hw['device_groups']}")
-    from .engines.knobs import GPU_ENGINES, canonical, to_engine_config
-    engine_type = str(custom.get("engine") or "vllm_cuda_multi")
-    if engine_type not in GPU_ENGINES:
-        raise HTTPException(
-            422, f"unknown engine {engine_type!r} — expected one of "
-                 f"{', '.join(GPU_ENGINES)}")
-    # Engine-specific levers (engine_notes.py). These are real
-    # EngineConfig fields, not flags, so they are copied straight
-    # through -- but only names the dataclass actually declares, so a
-    # typo in a request cannot inject a silent setting. Without this
-    # the levers were reachable from the arena search and NOT from a
-    # benchmark or roofline request, which is where they are most
-    # likely to be reached for.
-    from dataclasses import fields as _fields
-
-    from .config import EngineConfig as _EC
-    _lever_names = {f.name for f in _fields(_EC)
-                    if f.name.startswith(("trtllm_", "sglang_",
-                                          "ktransformers_"))}
-    levers = {k: v for k, v in custom.items()
-              if k in _lever_names and v not in (None, "")}
-
-    knobs = canonical(custom)
-    # Inputs to the one-memory-knob translation: the operator sets a
-    # share of TOTAL VRAM and each engine gets whatever its own flag
-    # needs to mean the same allocation (engines/vram.py).
-    from .engines.vram import weights_per_gpu_gb
-    from .model_catalog import load_model_catalog
-    weights = None
-    model_quant = None
+    # The shape -> engine translation lives in engines/custom.py so the
+    # arena driver builds candidates through the SAME code (levers,
+    # the one-memory-knob translation, refused knobs) rather than a
+    # private copy that drifts.
+    from .engines.custom import ShapeError, config_doc, custom_engine
     try:
-        for e in load_model_catalog():
-            if e.get("id") == model_id:
-                weights = weights_per_gpu_gb(e.get("approx_size_gb"), tp)
-                model_quant = e.get("quant")
-                break
-    except Exception:  # noqa: BLE001
-        weights = None
-    from .engines.knobs import unsupported
-    why = unsupported(engine_type, knobs)
-    if why:
-        # Refuse rather than approximate: measuring "close enough" here
-        # answers a different question than the one asked.
-        raise HTTPException(422, f"{engine_type} cannot run this shape — {why}")
-    engine: dict = {
-        "model_id": model_id,
-        "tensor_parallel_size": tp,
-        "port": 9100,
-        "host": "127.0.0.1",
-        "startup_timeout_s": 1800,
-        "vram_per_gpu_gb": hw.get("vram_per_gpu_gb"),
-        "model_weights_gb": weights,
-        "model_quant": model_quant,
-        **to_engine_config(engine_type, knobs),
-        **levers,
-    }
-    if engine_type != "vllm_cuda_multi":
-        # Every non-vLLM engine is a DockerReplicaEngine, so one code
-        # path covers any replica count -- even a single replica is
-        # described by replica_devices.
-        #
-        # This MUST NOT be a list of known engines with a fall-through
-        # to vLLM. It was, and adding SGLang and KTransformers to the
-        # picker silently routed both to vllm_cuda_multi: the runs
-        # launched, measured and reported as though the requested
-        # engine had been used. Anything not explicitly vLLM keeps its
-        # own type, so a new engine cannot be quietly absorbed again.
-        engine["type"] = engine_type
-        engine["replica_devices"] = devices
-    elif replicas > 1:
-        engine["type"] = "vllm_cuda_multi"
-        engine["gpu_image"] = "vllm/vllm-openai:latest"
-        engine["replica_devices"] = devices
-    else:
-        engine["type"] = "vllm_cuda"
-        engine["gpu_image"] = "vllm/vllm-openai:latest"
-        engine["gpu_device_ids"] = devices[0]
-    doc = {
-        "engine": engine,
-        "telemetry": {"enable_pmu": True, "enable_memory_bandwidth": True,
-                      "enable_power": True, "enable_engine_metrics": True,
-                      "enable_gpu": True},
-        "output": {"db_directory": str(runs_base)},
-    }
+        engine = custom_engine(custom)
+    except ShapeError as e:
+        raise HTTPException(422, str(e)) from e
+    doc = config_doc(engine, runs_base)
     import yaml as _yaml
     out = runs_base / "custom_benchmark.yaml"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1190,6 +1081,11 @@ def create_app(
             if not models:
                 raise HTTPException(422, "no model fits this host")
 
+            # GPU-engine defaults. Engines that are not GPU-resident
+            # servers (KTransformers: one replica, no KV precision
+            # knob) override these per cell -- roofline.engine_defaults
+            # -- through the same builder, so the cell records what
+            # actually launched.
             base_custom = dict(req.custom or {})
             base_custom.setdefault("device", "gpu")
             base_custom.setdefault("replicas", 8)
@@ -1202,15 +1098,20 @@ def create_app(
                 return _build_custom_config(
                     {**base_custom, **overrides}, runs_base)
 
+            from .roofline import shape_of
             shapes = {"max_num_seqs": spec.get("max_num_seqs"),
                       "output_tokens": spec.get("output_tokens")}
+            # Fresh run when either the top-level new_run or the spec's
+            # resume:false says so; the UI sends new_run.
+            resume = bool(spec.get("resume", True)) and not req.new_run
             coro_factory = lambda: run_roofline(  # noqa: E731
                 models=models, engines=engines,
                 shapes={k: v for k, v in shapes.items() if v},
                 input_tokens=int(spec.get("input_tokens") or 128),
                 build_config=_build_rf, runs_base=runs_base,
-                resume=bool(spec.get("resume", True)),
+                resume=resume,
                 confirm_winners=bool(spec.get("confirm_winners", True)),
+                engine_shape=shape_of(base_custom),
             )
         elif kind == "headline_optimize":
             # Engine shape and request shape are coupled, so they are
@@ -2221,6 +2122,13 @@ def create_app(
 
     @app.post("/api/optimizer/start", status_code=202)
     async def optimizer_start(req: OptimizerStartRequest) -> dict:
+        # Same lock as run start: without it a run and an optimizer
+        # could both clear their guards and start together, and each
+        # engine launch sweeps the other's containers.
+        async with app.state.start_lock:
+            return await _optimizer_start_locked(req)
+
+    def _refuse_if_busy() -> None:
         active = app.state.active
         if active is not None and not active.task.done():
             raise HTTPException(
@@ -2229,6 +2137,9 @@ def create_app(
             )
         if _optimizer_running():
             raise HTTPException(409, "optimizer already running")
+
+    async def _optimizer_start_locked(req: OptimizerStartRequest) -> dict:
+        _refuse_if_busy()
         import sys
         _opt_out.parent.mkdir(parents=True, exist_ok=True)
         log_path = _opt_out.parent / (
@@ -2292,6 +2203,10 @@ def create_app(
                 cmd.extend(["--only", *req.only])
         else:
             raise HTTPException(422, "mode must be arena | search | registry")
+        # Re-checked after every await above: the lock keeps runs out,
+        # but an optimizer started from the CLI takes the flock without
+        # asking this process.
+        _refuse_if_busy()
         log_file = open(log_path, "w")
         proc = subprocess.Popen(
             cmd, stdout=log_file, stderr=subprocess.STDOUT,
@@ -2384,17 +2299,22 @@ def create_app(
                     time.sleep(0.5)
             await asyncio.to_thread(_wait_released)
         # The optimizer cleans containers between configs, not on
-        # SIGTERM — sweep up any vllm-* container it left running.
+        # SIGTERM — sweep up any capsim engine container it left
+        # running (a search may launch any engine, not just vLLM).
+        # Anchored to capsim's prefixes: ``name=vllm-`` also matched
+        # a user's my-vllm-dev.
         def _cleanup() -> None:
-            with contextlib.suppress(Exception):
-                res = subprocess.run(
-                    ["docker", "ps", "-aq", "--filter", "name=vllm-"],
-                    capture_output=True, text=True, timeout=20,
-                )
-                cids = res.stdout.split()
-                if cids:
-                    subprocess.run(["docker", "rm", "-f", *cids],
-                                   capture_output=True, timeout=60)
+            from .engines.docker_replica import container_name_filter
+            for flt in container_name_filter():
+                with contextlib.suppress(Exception):
+                    res = subprocess.run(
+                        ["docker", "ps", "-aq", "--filter", flt],
+                        capture_output=True, text=True, timeout=20,
+                    )
+                    cids = res.stdout.split()
+                    if cids:
+                        subprocess.run(["docker", "rm", "-f", *cids],
+                                       capture_output=True, timeout=60)
         await asyncio.to_thread(_cleanup)
         return {"stopped": True}
 

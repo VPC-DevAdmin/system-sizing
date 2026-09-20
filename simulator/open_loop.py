@@ -343,6 +343,7 @@ class WorkerPool:
                 s.get("prefill_in_flight", 0) for s in stats),
             "completed": sum(s.get("completed", 0) for s in stats),
             "errors": sum(s.get("errors", 0) for s in stats),
+            "cancelled": sum(s.get("cancelled", 0) for s in stats),
             "tardiness_p99_ms": max(
                 (s.get("tardiness_p99_ms", 0.0) for s in stats), default=0.0),
             "loop_lag_ms": max(

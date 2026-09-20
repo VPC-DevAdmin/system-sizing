@@ -172,6 +172,7 @@ async def _amain(config: dict) -> None:
                 "prefill_in_flight": state.prefill_in_flight,
                 "completed": state.completed,
                 "errors": state.errors,
+                "cancelled": state.cancelled,
                 "tardiness_p99_ms": round(s.tardiness_p99_ms(), 1),
                 "loop_lag_ms": round(lag_ms, 1),
                 "mean_session_s": (

@@ -153,6 +153,10 @@ class SharedState:
         self._lock = asyncio.Lock()
         self._completed = 0
         self._errors = 0
+        # Turns aborted by the load generator itself (open-loop trim /
+        # drain). Neither a completion nor an engine error: the
+        # request was cancelled inside the engine on our say-so.
+        self._cancelled = 0
         self._prefill_in_flight = 0
         self._warm_thinking = 0
         # Token-weighted hot set: Σ history tokens over warm sessions.
@@ -197,6 +201,10 @@ class SharedState:
     def errors(self) -> int:
         return self._errors
 
+    @property
+    def cancelled(self) -> int:
+        return self._cancelled
+
     async def submit(self) -> int:
         async with self._lock:
             self._in_flight += 1
@@ -222,6 +230,16 @@ class SharedState:
                 self._prefill_in_flight = max(0, self._prefill_in_flight - 1)
             self._errors += 1
 
+    async def cancel(self, *, first_token_seen: bool = True) -> None:
+        """A turn the generator aborted (session cancelled mid-request).
+        Leaves the in-flight gauges honest without recording either a
+        completed sample or an error."""
+        async with self._lock:
+            self._in_flight = max(0, self._in_flight - 1)
+            if not first_token_seen:
+                self._prefill_in_flight = max(0, self._prefill_in_flight - 1)
+            self._cancelled += 1
+
     def enter_warm_think(self, history_tokens: int = 0) -> None:
         self._warm_thinking += 1
         self._warm_kv_tokens += history_tokens
@@ -233,6 +251,38 @@ class SharedState:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+async def _consume_or_cancel(
+    consume_coro, cancel_event: asyncio.Event,
+):
+    """Run the stream consumer until it finishes OR ``cancel_event``
+    fires. On cancel the consumer task is cancelled — which closes the
+    HTTP response (see ``streaming.consume_with_tiers``), so the
+    engine aborts the request and frees its slot — and ``None`` is
+    returned. A cancel that lands after the consumer already finished
+    keeps the finished result."""
+    consume = asyncio.ensure_future(consume_coro)
+    waiter = asyncio.ensure_future(cancel_event.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {consume, waiter}, return_when=asyncio.FIRST_COMPLETED,
+        )
+    except asyncio.CancelledError:
+        consume.cancel()
+        waiter.cancel()
+        raise
+    waiter.cancel()
+    if consume in done:
+        return consume.result()
+    consume.cancel()
+    await asyncio.wait({consume})
+    if not consume.cancelled():
+        # Finished in the same tick the cancel landed: still a
+        # cancelled turn from the session's point of view; retrieve
+        # the outcome so a failure is not logged as unretrieved.
+        consume.exception()
+    return None
 
 
 async def run_virtual_user(
@@ -323,6 +373,12 @@ async def run_virtual_user(
                 in_flight_at_submit = await state.submit()
                 submitted_at = time.monotonic()
                 submitted_at_ms = _now_ms()
+                first_token_seen = False
+
+                def _on_first_token() -> None:
+                    nonlocal first_token_seen
+                    first_token_seen = True
+                    state.note_first_token()
 
                 # Tiered streaming consume. The persona owns the
                 # tier budgets — they're scaled from its SLA floors
@@ -349,7 +405,7 @@ async def run_virtual_user(
                 if getattr(persona, "ignore_eos", False):
                     extra_body["ignore_eos"] = True
                 extra_body = extra_body or None
-                stream_result = await consume_with_tiers(
+                stream_result = await _consume_or_cancel(consume_with_tiers(
                     # Bind loop-iteration values as defaults: the
                     # lambda is awaited within this iteration, but
                     # explicit binding is strictly safer (B023).
@@ -367,8 +423,14 @@ async def run_virtual_user(
                     inter_token_timeout_s=persona.inter_token_timeout_s,
                     hard_timeout_s=min(persona.hard_timeout_s, request_timeout_s),
                     capture_token_timestamps=capture_token_timestamps,
-                    on_first_token=state.note_first_token,
-                )
+                    on_first_token=_on_first_token,
+                ), cancel_event)
+                if stream_result is None:
+                    # Cancelled mid-request (open-loop trim / drain).
+                    # The request was aborted inside the engine; this
+                    # turn is neither a sample nor an error.
+                    await state.cancel(first_token_seen=first_token_seen)
+                    return
                 ttft_obs: float | None = (
                     stream_result.ttft_ms / 1000.0
                     if stream_result.ttft_ms is not None else None

@@ -23,6 +23,13 @@ Partial-progress is captured in the result regardless of tier — ttft_ms
 and inspect tail shape without paying for 15 minutes of "still stuck"
 data.
 
+Every early exit — a tier abort, a transport error, or the consuming
+task being cancelled (the open-loop trim/drain path) — closes the HTTP
+response before returning. The engine sees the disconnect and aborts
+the request, freeing its queue/batch slot; without that, an abandoned
+stream keeps generating until the connection is garbage-collected and
+"cancel the excess sessions" would not actually shrink the queue.
+
 Used by both ``simulator.virtual_user`` and the standalone optimizer
 script — single source of truth for the termination policy.
 """
@@ -30,6 +37,7 @@ script — single source of truth for the termination policy.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -41,6 +49,26 @@ from typing import Any, Callable, Optional
 # different failure than "stream emits nothing." Kept short so this
 # doesn't soak up the per-cell budget.
 CONNECT_TIMEOUT_S = 30.0
+
+# Cap on releasing an aborted response. Closing is normally
+# instantaneous; the cap only keeps a wedged transport from holding a
+# cancelled session hostage.
+CLOSE_TIMEOUT_S = 5.0
+
+
+async def _close_stream(stream: Any) -> None:
+    """Release the HTTP response of an abandoned stream so the engine
+    sees the disconnect and aborts the request. Best effort: a close
+    failure is not a measurement fact."""
+    close = getattr(stream, "close", None)
+    if close is None:
+        return
+    try:
+        result = close()
+        if inspect.isawaitable(result):
+            await asyncio.wait_for(result, timeout=CLOSE_TIMEOUT_S)
+    except (Exception, asyncio.TimeoutError):  # noqa: BLE001
+        pass
 
 
 @dataclass
@@ -145,103 +173,113 @@ async def consume_with_tiers(
         )
 
     aiter = stream.__aiter__()
-    while True:
-        now = time.monotonic()
+    # Every exit from this loop other than a clean StopAsyncIteration
+    # (tier abort, transport error, task cancellation) must release
+    # the response so the engine drops the request.
+    finished_cleanly = False
+    try:
+        while True:
+            now = time.monotonic()
 
-        # Compute the deadline for the next chunk: minimum of
-        #   * remaining tier-1 budget (only if no first token yet)
-        #     OR remaining tier-2 budget (after first token)
-        #   * remaining tier-3 budget (always applicable)
-        if ttft_obs is None:
-            tier_label = "ttft_stalled"
-            tier_remaining = pre_ttft_timeout_s - (now - submitted_at)
-        else:
-            tier_label = "decode_stalled"
-            tier_remaining = inter_token_timeout_s - (now - t_last_chunk)
-        hard_remaining = hard_timeout_s - (now - submitted_at)
-        if hard_remaining < tier_remaining:
-            tier_remaining = hard_remaining
-            tier_label = "hard_timeout"
-
-        if tier_remaining <= 0:
-            # We're already past the deadline — abort immediately.
-            return _abort_result(
-                tier_label, submitted_at, now, ttft_obs, ttfct_obs,
-                output_tokens, reasoning_tokens,
-                output_text_parts, token_timestamps,
-            )
-
-        try:
-            chunk = await asyncio.wait_for(
-                aiter.__anext__(), timeout=tier_remaining,
-            )
-        except asyncio.TimeoutError:
-            # Re-attribute by checking which budget is now exceeded.
-            now2 = time.monotonic()
-            attributed = _attribute_timeout(
-                ttft_obs, submitted_at, t_last_chunk, now2,
-                pre_ttft_timeout_s, inter_token_timeout_s, hard_timeout_s,
-            )
-            return _abort_result(
-                attributed, submitted_at, now2, ttft_obs, ttfct_obs,
-                output_tokens, reasoning_tokens,
-                output_text_parts, token_timestamps,
-            )
-        except StopAsyncIteration:
-            break
-        except Exception as e:  # noqa: BLE001
-            now2 = time.monotonic()
-            return StreamResult(
-                ttft_ms=ttft_obs * 1000.0 if ttft_obs is not None else None,
-                ttfct_ms=ttfct_obs * 1000.0 if ttfct_obs is not None else None,
-                total_ms=(now2 - submitted_at) * 1000.0,
-                output_tokens=output_tokens,
-                reasoning_tokens=reasoning_tokens,
-                output_text="".join(output_text_parts),
-                token_timestamps=token_timestamps,
-                error=type(e).__name__,
-            )
-
-        # Process the chunk. For reasoning models (GPT-OSS, etc.) the
-        # engine streams ``delta.reasoning`` BEFORE ``delta.content``.
-        # Both kinds are user-visible, so either one resets the inter-
-        # token deadline and either one (whichever arrives first) sets
-        # ttft_obs. Content arrival sets ttfct_obs separately.
-        delta = chunk.choices[0].delta if chunk.choices else None
-        reasoning_chunk = (
-            getattr(delta, "reasoning", None)
-            or getattr(delta, "reasoning_content", None)
-            if delta else None
-        )
-        content_chunk = getattr(delta, "content", None) if delta else None
-
-        if reasoning_chunk:
-            now_chunk = time.monotonic()
+            # Compute the deadline for the next chunk: minimum of
+            #   * remaining tier-1 budget (only if no first token yet)
+            #     OR remaining tier-2 budget (after first token)
+            #   * remaining tier-3 budget (always applicable)
             if ttft_obs is None:
-                ttft_obs = now_chunk - submitted_at
-                if on_first_token is not None:
-                    on_first_token()
-            t_last_chunk = now_chunk
-            reasoning_tokens += 1
-            # Note: reasoning text deliberately not appended to
-            # output_text_parts — analysis layers expect output_text
-            # to be the user-facing answer, not the chain-of-thought.
-        if content_chunk:
-            now_chunk = time.monotonic()
-            if ttft_obs is None:
-                ttft_obs = now_chunk - submitted_at
-                if on_first_token is not None:
-                    on_first_token()
-            if ttfct_obs is None:
-                ttfct_obs = now_chunk - submitted_at
-            t_last_chunk = now_chunk
-            output_text_parts.append(content_chunk)
-            output_tokens += 1
-            if capture_token_timestamps:
-                token_timestamps.append([
-                    round((now_chunk - submitted_at) * 1000.0, 3),
-                    output_tokens,
-                ])
+                tier_label = "ttft_stalled"
+                tier_remaining = pre_ttft_timeout_s - (now - submitted_at)
+            else:
+                tier_label = "decode_stalled"
+                tier_remaining = inter_token_timeout_s - (now - t_last_chunk)
+            hard_remaining = hard_timeout_s - (now - submitted_at)
+            if hard_remaining < tier_remaining:
+                tier_remaining = hard_remaining
+                tier_label = "hard_timeout"
+
+            if tier_remaining <= 0:
+                # We're already past the deadline — abort immediately.
+                return _abort_result(
+                    tier_label, submitted_at, now, ttft_obs, ttfct_obs,
+                    output_tokens, reasoning_tokens,
+                    output_text_parts, token_timestamps,
+                )
+
+            try:
+                chunk = await asyncio.wait_for(
+                    aiter.__anext__(), timeout=tier_remaining,
+                )
+            except asyncio.TimeoutError:
+                # Re-attribute by checking which budget is now exceeded.
+                now2 = time.monotonic()
+                attributed = _attribute_timeout(
+                    ttft_obs, submitted_at, t_last_chunk, now2,
+                    pre_ttft_timeout_s, inter_token_timeout_s, hard_timeout_s,
+                )
+                return _abort_result(
+                    attributed, submitted_at, now2, ttft_obs, ttfct_obs,
+                    output_tokens, reasoning_tokens,
+                    output_text_parts, token_timestamps,
+                )
+            except StopAsyncIteration:
+                finished_cleanly = True
+                break
+            except Exception as e:  # noqa: BLE001
+                now2 = time.monotonic()
+                return StreamResult(
+                    ttft_ms=ttft_obs * 1000.0 if ttft_obs is not None else None,
+                    ttfct_ms=ttfct_obs * 1000.0 if ttfct_obs is not None else None,
+                    total_ms=(now2 - submitted_at) * 1000.0,
+                    output_tokens=output_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    output_text="".join(output_text_parts),
+                    token_timestamps=token_timestamps,
+                    error=type(e).__name__,
+                )
+
+            # Process the chunk. For reasoning models (GPT-OSS, etc.) the
+            # engine streams ``delta.reasoning`` BEFORE ``delta.content``.
+            # Both kinds are user-visible, so either one resets the inter-
+            # token deadline and either one (whichever arrives first) sets
+            # ttft_obs. Content arrival sets ttfct_obs separately.
+            delta = chunk.choices[0].delta if chunk.choices else None
+            reasoning_chunk = (
+                getattr(delta, "reasoning", None)
+                or getattr(delta, "reasoning_content", None)
+                if delta else None
+            )
+            content_chunk = getattr(delta, "content", None) if delta else None
+
+            if reasoning_chunk:
+                now_chunk = time.monotonic()
+                if ttft_obs is None:
+                    ttft_obs = now_chunk - submitted_at
+                    if on_first_token is not None:
+                        on_first_token()
+                t_last_chunk = now_chunk
+                reasoning_tokens += 1
+                # Note: reasoning text deliberately not appended to
+                # output_text_parts — analysis layers expect output_text
+                # to be the user-facing answer, not the chain-of-thought.
+            if content_chunk:
+                now_chunk = time.monotonic()
+                if ttft_obs is None:
+                    ttft_obs = now_chunk - submitted_at
+                    if on_first_token is not None:
+                        on_first_token()
+                if ttfct_obs is None:
+                    ttfct_obs = now_chunk - submitted_at
+                t_last_chunk = now_chunk
+                output_text_parts.append(content_chunk)
+                output_tokens += 1
+                if capture_token_timestamps:
+                    token_timestamps.append([
+                        round((now_chunk - submitted_at) * 1000.0, 3),
+                        output_tokens,
+                    ])
+
+    finally:
+        if not finished_cleanly:
+            await _close_stream(stream)
 
     # Stream finished cleanly.
     if ttft_obs is None:

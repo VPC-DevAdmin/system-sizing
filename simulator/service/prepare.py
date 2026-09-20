@@ -46,40 +46,43 @@ def _tail_text(path: str | Path, n: int = 4096) -> str:
 # and destructive, so unmounted disks come with the exact commands
 # for a human instead.
 
+def _fs_list() -> list[dict]:
+    import psutil
+
+    out, seen = [], set()
+    for part in psutil.disk_partitions(all=False):
+        mp = part.mountpoint
+        if part.fstype in ("tmpfs", "devtmpfs", "squashfs",
+                           "overlay", "vfat", "autofs", "nullfs") \
+                or mp.startswith(("/boot", "/snap", "/System",
+                                  "/private/var", "/dev")):
+            continue
+        try:
+            usage = shutil.disk_usage(mp)
+            dev = Path(mp).stat().st_dev
+        except OSError:
+            continue
+        if dev in seen:
+            continue
+        seen.add(dev)
+        out.append({
+            "mountpoint": mp,
+            "device": part.device,
+            "fstype": part.fstype,
+            "total_gb": round(usage.total / 1e9, 1),
+            "free_gb": round(usage.free / 1e9, 1),
+        })
+    return sorted(out, key=lambda f: -f["free_gb"])
+
+
 @router.get("/api/storage")
 async def storage_status() -> dict:
-    import psutil
 
     from ..doctor import parse_lsblk_unmounted
     from ..models import hf_cache_dir, hf_cache_source
 
-    def _fs_list() -> list[dict]:
-        out, seen = [], set()
-        for part in psutil.disk_partitions(all=False):
-            mp = part.mountpoint
-            if part.fstype in ("tmpfs", "devtmpfs", "squashfs",
-                               "overlay", "vfat", "autofs", "nullfs") \
-                    or mp.startswith(("/boot", "/snap", "/System",
-                                      "/private/var", "/dev")):
-                continue
-            try:
-                usage = shutil.disk_usage(mp)
-                dev = Path(mp).stat().st_dev
-            except OSError:
-                continue
-            if dev in seen:
-                continue
-            seen.add(dev)
-            out.append({
-                "mountpoint": mp,
-                "device": part.device,
-                "fstype": part.fstype,
-                "total_gb": round(usage.total / 1e9, 1),
-                "free_gb": round(usage.free / 1e9, 1),
-            })
-        return sorted(out, key=lambda f: -f["free_gb"])
-
     unmounted: list[dict] = []
+    fs_rows: list[dict] = []
     try:
         res = await asyncio.to_thread(
             subprocess.run,
@@ -89,6 +92,18 @@ async def storage_status() -> dict:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         res = None                     # non-Linux host — no lsblk
     if res and res.returncode == 0 and res.stdout.strip():
+        # The recipe mounts at the first free /data, /data2, /data3 ...
+        # -- on a box whose live data disk already IS /data, telling
+        # the operator to mount a fresh disk over it is the one
+        # instruction that must never appear.
+        fs_rows = await asyncio.to_thread(_fs_list)
+        taken = {f["mountpoint"] for f in fs_rows}
+        mount = "/data"
+        n = 2
+        while mount in taken or Path(mount).is_mount():
+            mount = f"/data{n}"
+            n += 1
+        label = "capsim-data" if mount == "/data" else f"capsim-{mount.strip('/')}"
         try:
             for name, size_gb, has_partitions in parse_lsblk_unmounted(
                 json.loads(res.stdout), min_gb=200.0,
@@ -104,17 +119,18 @@ async def storage_status() -> dict:
                         f"sudo blkid /dev/{name}* ; lsblk -f /dev/{name}",
                         "# ONLY if the contents are disposable:",
                         f"sudo wipefs -a /dev/{name}",
-                        f"sudo mkfs.ext4 -L capsim-data /dev/{name}",
+                        f"sudo mkfs.ext4 -L {label} /dev/{name}",
                     ]
                 else:
                     commands = [
-                        f"sudo mkfs.ext4 -L capsim-data /dev/{name}",
+                        f"sudo mkfs.ext4 -L {label} /dev/{name}",
                     ]
                 commands += [
-                    "sudo mkdir -p /data",
-                    f"sudo mount /dev/{name} /data",
-                    "grep -q capsim-data /etc/fstab || echo 'LABEL=capsim-data /data ext4 defaults,nofail 0 2' | sudo tee -a /etc/fstab",
-                    "sudo chown $USER /data",
+                    f"sudo mkdir -p {mount}",
+                    f"sudo mount /dev/{name} {mount}",
+                    f"grep -q {label} /etc/fstab || echo 'LABEL={label} {mount} ext4 "
+                    f"defaults,nofail 0 2' | sudo tee -a /etc/fstab",
+                    f"sudo chown $USER {mount}",
                 ]
                 unmounted.append({
                     "name": name,
@@ -137,7 +153,7 @@ async def storage_status() -> dict:
         "hf_cache": str(cache),
         "hf_cache_source": hf_cache_source(),
         "hf_cache_free_gb": cache_free,
-        "filesystems": await asyncio.to_thread(_fs_list),
+        "filesystems": fs_rows or await asyncio.to_thread(_fs_list),
         "unmounted": unmounted,
     }
 

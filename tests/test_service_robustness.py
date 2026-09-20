@@ -294,3 +294,36 @@ def test_stop_returns_202_when_teardown_outlasts_timeout(
                 break
             time.sleep(0.05)
         assert not client.get("/api/status").json()["active_run"]["running"]
+
+
+def test_disk_recipe_never_mounts_over_the_live_data_disk(tmp_path, monkeypatch):
+    """On the XE7740 /data IS the live data disk; the recipe for a
+    fresh NVMe used to say 'mount /dev/nvme4n1 /data'."""
+    import json
+    import subprocess
+
+    from fastapi.testclient import TestClient
+
+    import simulator.service.prepare as prep
+    from simulator.service import create_app
+
+    lsblk = {"blockdevices": [
+        {"name": "nvme4n1", "size": 3200 * 10**9, "type": "disk",
+         "mountpoint": None, "children": []}]}
+
+    def fake_run(argv, **kw):
+        if argv and argv[0] == "lsblk":
+            return subprocess.CompletedProcess(argv, 0, json.dumps(lsblk), "")
+        return subprocess.CompletedProcess(argv, 1, "", "")
+    monkeypatch.setattr(prep.subprocess, "run", fake_run)
+    monkeypatch.setattr(prep, "_fs_list", lambda: [
+        {"mountpoint": "/data", "device": "/dev/nvme2n1", "fstype": "ext4",
+         "total_gb": 3149.0, "free_gb": 400.0},
+        {"mountpoint": "/", "device": "/dev/root", "fstype": "ext4",
+         "total_gb": 100.0, "free_gb": 80.0}])
+    with TestClient(create_app(tmp_path / "runs")) as c:
+        doc = c.get("/api/storage").json()
+    cmds = "\n".join(doc["unmounted"][0]["commands"])
+    assert "mount /dev/nvme4n1 /data2" in cmds
+    assert "mount /dev/nvme4n1 /data\n" not in cmds and "/data " not in cmds
+    assert "LABEL=capsim-data2 /data2" in cmds

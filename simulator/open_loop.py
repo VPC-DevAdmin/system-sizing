@@ -186,10 +186,20 @@ class _Worker:
     reader_task: asyncio.Task
     last_stat: dict = field(default_factory=dict)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
+    watch_task: asyncio.Task | None = None
+    dead: bool = False
 
 
 class WorkerPool:
-    """k load-generator subprocesses sharing one total arrival rate."""
+    """k load-generator subprocesses sharing one total arrival rate.
+
+    A worker that dies is noticed the moment its process exits (each
+    worker has a ``proc.wait()`` watcher): it leaves the live set, its
+    frozen counters stop being aggregated, the rate is redistributed
+    over the survivors so the offered load stays λ, and a death record
+    is queued for the window in progress — which is then discarded as
+    a measurement of the generator, never of the engine.
+    """
 
     def __init__(self, *, base_config: dict, log_dir: Path, max_workers: int):
         self._base = base_config
@@ -199,20 +209,32 @@ class WorkerPool:
         self._workers: list[_Worker] = []
         self._rate_total = 0.0
         self._stderr_files: list = []
+        self._next_index = 0
+        self._stopping = False
+        self._deaths: list[dict] = []
+        self.deaths_total = 0
 
     @property
     def size(self) -> int:
+        """Live workers (a dead one is removed as soon as it exits)."""
         return len(self._workers)
+
+    def take_deaths(self) -> list[dict]:
+        """Death records queued since the last call ({index,
+        returncode, at_ms}). The window loop polls this each tick."""
+        out, self._deaths = self._deaths, []
+        return out
 
     async def scale_to(self, k: int) -> None:
         k = max(1, min(k, self.max_workers))
         while len(self._workers) < k:
-            await self._spawn(len(self._workers))
+            await self._spawn(self._next_index)
         # Redistribute the current rate over the new worker count.
         if self._rate_total > 0:
             await self.set_rate(self._rate_total)
 
     async def _spawn(self, index: int) -> None:
+        self._next_index = index + 1
         cfg = dict(self._base)
         cfg["worker_index"] = index
         cfg["seed"] = (self._base.get("seed") or 0xC0FFEE) + index * 7919
@@ -229,17 +251,58 @@ class WorkerPool:
         )
         worker = _Worker(index=index, proc=proc, reader_task=None)  # type: ignore[arg-type]
         worker.reader_task = asyncio.create_task(self._read_loop(worker))
+        worker.watch_task = asyncio.create_task(self._watch(worker))
         self._workers.append(worker)
         # Tokenizer load can take a while on first spawn; don't start
         # the window clock until the worker can actually generate.
-        try:
-            await asyncio.wait_for(worker.ready.wait(), timeout=180.0)
-        except asyncio.TimeoutError as e:
+        # Raced against the process exiting: a worker that crashes on
+        # startup (bad config, import error) fails fast with its log
+        # path instead of a 180 s timeout.
+        ready = asyncio.ensure_future(worker.ready.wait())
+        done, _ = await asyncio.wait(
+            {ready, worker.watch_task}, timeout=180.0,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if ready not in done:
+            ready.cancel()
+            if worker.watch_task in done:
+                raise RuntimeError(
+                    f"loadgen worker {index} exited with code "
+                    f"{proc.returncode} before becoming ready "
+                    f"(see {stderr_path})"
+                )
             raise RuntimeError(
                 f"loadgen worker {index} did not become ready in 180s "
                 f"(see {stderr_path})"
-            ) from e
+            )
         log.info("loadgen worker %d ready (pid=%s)", index, proc.pid)
+
+    async def _watch(self, worker: _Worker) -> None:
+        """Notice a worker's death the moment it happens. Without this
+        the coordinator kept aggregating the dead worker's frozen
+        counters and offering λ·(k−1)/k while recording λ."""
+        try:
+            rc = await worker.proc.wait()
+        except asyncio.CancelledError:
+            return
+        if self._stopping or worker.dead:
+            return
+        worker.dead = True
+        self.deaths_total += 1
+        record = {"index": worker.index, "returncode": rc, "at_ms": _now_ms()}
+        self._deaths.append(record)
+        if worker in self._workers:
+            self._workers.remove(worker)
+        log.error(
+            "LOAD GENERATOR WORKER %d DIED (exit code %s, pid=%s) — the "
+            "window in progress is discarded; see %s",
+            worker.index, rc, worker.proc.pid,
+            self._log_dir / f"loadgen_worker_{worker.index}.log",
+        )
+        # Survivors pick up the dead worker's share so the offered
+        # load stays λ until the coordinator re-plans the pool.
+        if self._rate_total > 0 and self._workers:
+            await self.set_rate(self._rate_total)
 
     async def _read_loop(self, worker: _Worker) -> None:
         try:
@@ -351,9 +414,11 @@ class WorkerPool:
             "mean_session_s": (
                 sum(sess_durs) / len(sess_durs) if sess_durs else None
             ),
+            "dead_workers": self.deaths_total,
         }
 
     async def stop(self) -> None:
+        self._stopping = True
         for w in self._workers:
             await self._send(w, {"cmd": "stop"})
         for w in self._workers:
@@ -362,8 +427,12 @@ class WorkerPool:
             except asyncio.TimeoutError:
                 w.proc.kill()
             w.reader_task.cancel()
+            if w.watch_task is not None:
+                w.watch_task.cancel()
         await asyncio.gather(
-            *(w.reader_task for w in self._workers), return_exceptions=True,
+            *(w.reader_task for w in self._workers),
+            *(w.watch_task for w in self._workers if w.watch_task),
+            return_exceptions=True,
         )
         for f in self._stderr_files:
             try:
@@ -639,10 +708,22 @@ class OpenLoopRunner:
                     f"Check the engine log in the run directory."
                 )
 
+        # Worker deaths taint the window whenever they land (warmup
+        # included): the offered load was not λ. Records from before
+        # this window (e.g. during a revert) are cleared first.
+        worker_deaths: list[dict] = []
+        self.pool.take_deaths()
+
+        def _note_deaths() -> bool:
+            worker_deaths.extend(self.pool.take_deaths())
+            return bool(worker_deaths)
+
         warm_end = time.monotonic() + warmup
         while time.monotonic() < warm_end:
             await self._sample_engine()
             _check_fuse(self.pool.drain_turn_queue())  # discard settling turns
+            if _note_deaths():
+                break
             await asyncio.sleep(1.0)
 
         self.phase = "measuring"
@@ -684,7 +765,7 @@ class OpenLoopRunner:
         tardy0 = agg0.get("tardy_total", 0) if agg0 else 0
 
         try:
-            remaining = window_s
+            remaining = 0 if worker_deaths else window_s
             while remaining > 0:
                 tick_end = time.monotonic() + 1.0
                 m = await self._sample_engine()
@@ -723,6 +804,8 @@ class OpenLoopRunner:
                     })
                 await asyncio.sleep(max(0.0, tick_end - time.monotonic()))
                 remaining -= 1
+                if _note_deaths():
+                    remaining = 0  # discard: measure no further
 
                 if remaining <= 0:
                     served_mean = (
@@ -744,6 +827,8 @@ class OpenLoopRunner:
                     )
                     verdict_dict = verdict.to_dict()
                     verdict_dict["basis"] = basis
+                    if worker_deaths:
+                        break  # no extension: the window is void
                     if verdict.verdict == INCONCLUSIVE and not extended:
                         extended = True
                         remaining = window_s  # double once, keep sampling
@@ -774,7 +859,10 @@ class OpenLoopRunner:
                     self.db.update_measurement(measurement_id, agg_row)
             self.phase = "idle"
 
-        assert verdict is not None
+        if verdict is None:
+            # A worker died before a single measuring tick: nothing
+            # to assess, and the window is void anyway.
+            verdict = assess_queue_stability(queue_series or inflight_series)
         verdict_dict = verdict.to_dict()
         verdict_dict["basis"] = (
             "engine_queue"
@@ -795,6 +883,18 @@ class OpenLoopRunner:
         verdict_dict["tardy_fraction"] = round(tardy_fraction, 4)
         verdict_dict["tardy_arrivals"] = d_tardy
         self.client_max_lag_ms = max(self.client_max_lag_ms, max_lag)
+        if worker_deaths:
+            # The generator, not the engine, failed this window: the
+            # offered load was below λ from the moment of death.
+            client_saturated = True
+            verdict_dict["worker_deaths"] = worker_deaths
+            log.error(
+                "rate %.3g/s: window discarded — %d load worker(s) died "
+                "(%s); the offered load was not the recorded rate",
+                rate_per_s, len(worker_deaths),
+                ", ".join(f"#{d['index']} rc={d['returncode']}"
+                          for d in worker_deaths),
+            )
 
         # Final verdict mapping. An inconclusive verdict that survived
         # the extension gets settled by effect size alone: meaningful
@@ -1043,18 +1143,28 @@ class OpenLoopRunner:
                 # Each superseded attempt is re-labeled so it never
                 # counts as a ceiling in the export or reads as a
                 # verdict in the UI.
+                # A worker death also lands here (client_saturated):
+                # the dead worker is replaced rather than the pool
+                # grown, and the void window is superseded by the
+                # re-measurement.
                 while (
                     result.client_saturated
                     and self.pool.size < sim.open_loop_max_workers
                 ):
+                    died = result.verdict_detail.get("worker_deaths")
+                    target = (
+                        self.pool.size + len(died) if died
+                        else self.pool.size + 1
+                    )
                     log.info(
-                        "client saturation at %.3g/s with %d workers — "
-                        "scaling out and re-measuring",
+                        "%s at %.3g/s with %d workers — %s and re-measuring",
+                        "worker death" if died else "client saturation",
                         rate, self.pool.size,
+                        "replacing" if died else "scaling out",
                     )
                     self._mark_superseded(result.measurement_id)
                     self.phase = "starting load workers"
-                    await self.pool.scale_to(self.pool.size + 1)
+                    await self.pool.scale_to(target)
                     result = await self._measure_window(rate, window_s)
                 self.stepper.record(RateStep(
                     rate_per_s=rate,

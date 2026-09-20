@@ -61,7 +61,7 @@ async def roofline_candidates(limit: int = 8, diverse: bool = True,
 
     from ..arena import hardware
     from ..model_catalog import load_model_catalog
-    from ..roofline import pick_models, score_models
+    from ..roofline import max_tp_of, pick_models, score_models
 
     hw = await asyncio.to_thread(hardware)
     cat = await asyncio.to_thread(load_model_catalog)
@@ -71,13 +71,13 @@ async def roofline_candidates(limit: int = 8, diverse: bool = True,
     limit = max(1, limit)
     picked = await asyncio.to_thread(
         pick_models, cat, vram_per_gpu_gb=vram, host_ram_gb=ram,
-        gpu_count=gpus, limit=limit, diverse=diverse,
+        gpu_count=gpus, max_tp=max_tp_of(hw), limit=limit, diverse=diverse,
         cached_only=cached_only, spectrum=spectrum,
         large_limit=large_limit, beyond_limit=beyond_limit)
     chosen = {c.id for c in picked}
     rest = [c for c in await asyncio.to_thread(
         score_models, cat, vram_per_gpu_gb=vram, host_ram_gb=ram,
-        gpu_count=gpus) if c.id not in chosen]
+        gpu_count=gpus, max_tp=max_tp_of(hw)) if c.id not in chosen]
     return {"hardware": hw, "diverse": diverse, "cached_only": cached_only,
             "spectrum": spectrum,
             "candidates": [_asdict(c) for c in

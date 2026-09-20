@@ -292,7 +292,7 @@ async def _plan_roofline(spec: dict
     from ..arena import hardware as _hw
     from ..engine_runtimes import available_engines
     from ..model_catalog import load_model_catalog
-    from ..roofline import pick_models, score_models
+    from ..roofline import max_tp_of, pick_models, score_models
 
     engines = list(spec.get("engines") or available_engines())
     if not engines:
@@ -309,7 +309,7 @@ async def _plan_roofline(spec: dict
     if models:
         scored = await asyncio.to_thread(
             score_models, cat, vram_per_gpu_gb=vram, host_ram_gb=ram,
-            gpu_count=gpus)
+            gpu_count=gpus, max_tp=max_tp_of(hw))
         by_id = {c.id: c for c in scored}
         for m in models:
             c = by_id.get(m)
@@ -325,6 +325,7 @@ async def _plan_roofline(spec: dict
         picked = await asyncio.to_thread(
             pick_models, cat,
             vram_per_gpu_gb=vram, host_ram_gb=ram, gpu_count=gpus,
+            max_tp=max_tp_of(hw),
             limit=int(spec.get("model_limit") or 8),
             cached_only=bool(spec.get("cached_only")),
             diverse=bool(spec.get("diverse", True)),

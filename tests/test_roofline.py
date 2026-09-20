@@ -710,25 +710,28 @@ def test_ram_budget_decides_beyond_vram():
 
 
 def test_spectrum_pick_fills_three_tiers():
-    picks = pick_models(SPECTRUM, vram_per_gpu_gb=96, host_ram_gb=2048,
+    picks = pick_models(SPECTRUM, max_tp=4, vram_per_gpu_gb=96, host_ram_gb=2048,
                         limit=8, large_limit=2, beyond_limit=1)
     tiers = {c.id: c.tier for c in picks}
     assert tiers["deepseek-ai/DeepSeek-V4"] == "beyond_vram"
     assert "org/huge-no-gguf" not in tiers
-    # The largest the GPUs hold that FAST did not already take, one
-    # per vendor first: the 322 GB GLM-5.3 (the 360 GB GLM-4.7 is the
-    # vendor's FAST pick), then another vendor's largest.
+    # LARGE and BEYOND are settled before FAST, so a vendor's largest
+    # model is never consumed as its "fastest" pick. With TP capped at
+    # the 4-card domain the 360 GB GLM-4.7-FP8 (min 400 GB) does not
+    # fit at all; the 322 GB GLM-5.3 is the largest, then another
+    # vendor's largest (the 70 GB Llama).
     large = [c for c in picks if c.tier == "large"]
     assert [c.id for c in large][0] == "zai-org/GLM-5.3-Flash"
     assert large[0].tp == 4 and large[0].replicas == 2
     assert len({vendor_of(c.series) for c in large}) == 2
+    assert "zai-org/GLM-4.7-FP8" not in tiers
     fast = [c for c in picks if c.tier == "fast"]
-    # FAST stays vendor-diverse: 8 - 2 - 1 = 5 slots over the four
-    # vendors that fit the GPUs, so one vendor gets a second pick.
+    # FAST fills the remaining 8 - 2 - 1 = 5 slots, vendor round-robin
+    # over what LARGE left (Qwen and gpt-oss): both in round one, then
+    # Qwen's second, third and fourth.
     assert len(fast) == 5
-    assert len({vendor_of(c.series) for c in fast}) == 4
-    assert sorted(c.pick_round for c in fast) == [1, 1, 1, 1, 2]
-    assert "zai-org/GLM-4.7-FP8" in {c.id for c in fast}
+    assert {vendor_of(c.series) for c in fast} == {"Qwen", "gpt-oss"}
+    assert sorted(c.pick_round for c in fast) == [1, 1, 2, 3, 4]
     # The order is fast, large, beyond -- the tiers are labelled.
     assert [c.tier for c in picks] == ["fast"] * 5 + ["large"] * 2 + ["beyond_vram"]
     dsv4 = picks[-1]
@@ -741,7 +744,7 @@ def test_spectrum_pick_fills_three_tiers():
 
 
 def test_large_tier_reports_tp_and_replicas():
-    picks = pick_models(SPECTRUM, vram_per_gpu_gb=96, host_ram_gb=2048,
+    picks = pick_models(SPECTRUM, max_tp=4, vram_per_gpu_gb=96, host_ram_gb=2048,
                         limit=6, large_limit=1, beyond_limit=1)
     assert [c.tier for c in picks] == ["fast"] * 4 + ["large", "beyond_vram"]
     glm = picks[4]
@@ -993,3 +996,24 @@ def test_plan_carries_model_info_and_picks_engines(tmp_path, monkeypatch):
     assert captured
     assert "deepseek-ai/DeepSeek-V4" not in captured[0]["models"]
     assert all(v["fits_gpu"] for v in captured[0]["model_info"].values())
+
+
+def test_tensor_parallel_never_spans_a_device_group():
+    """TP peers stay inside one PCIe/NUMA domain (cross-domain
+    all-reduce is never the answer), so a 687 GB model on a box with
+    two groups of four 96 GB cards does NOT fit at tp8 -- it fits
+    only KTransformers, and only with a GGUF companion."""
+    from simulator.roofline import max_tp_of, tp_for
+
+    hw = {"count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+          "vram_per_gpu_gb": 96.0}
+    assert max_tp_of(hw) == 4
+    assert tp_for(322, 96, 8, max_tp=4) == 4
+    assert tp_for(687, 96, 8) == 8
+    assert tp_for(687, 96, 8, max_tp=4) is None
+    big = [{"id": "org/Huge", "family": "huge", "series": "Huge", "quant": "fp8",
+            "params_b": 671, "moe": True, "approx_size_gb": 687, "min_vram_gb": 730}]
+    c = score_models(big, vram_per_gpu_gb=96, gpu_count=8, max_tp=4)[0]
+    assert c.fits_gpu is False and c.fits is False
+    c = score_models(big, vram_per_gpu_gb=96, gpu_count=8)[0]
+    assert c.fits_gpu is True and c.tp == 8

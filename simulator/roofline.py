@@ -153,12 +153,21 @@ TIERS = ("fast", "large", "beyond_vram")
 RAM_SHARE = 0.85
 
 
-def tp_for(need_gb: float, vram_per_gpu_gb: float, gpu_count: int = 8
-           ) -> Optional[int]:
+def max_tp_of(hw: dict) -> Optional[int]:
+    """The largest device group in a hardware dict, or None."""
+    groups = hw.get("device_groups") or []
+    return max((len(g) for g in groups), default=None) or None
+
+
+def tp_for(need_gb: float, vram_per_gpu_gb: float, gpu_count: int = 8,
+           max_tp: Optional[int] = None) -> Optional[int]:
     """Smallest power-of-two tensor parallel with tp x VRAM >= need,
-    up to the box; None when even every card is not enough."""
+    up to ``max_tp`` (the largest PCIe/NUMA device group -- TP peers
+    never span domains, see config/arena.example.yaml) or the box;
+    None when even that is not enough."""
+    cap = min(int(gpu_count), int(max_tp)) if max_tp else int(gpu_count)
     tp = 1
-    while tp <= gpu_count:
+    while tp <= cap:
         if tp * float(vram_per_gpu_gb) >= float(need_gb):
             return tp
         tp *= 2
@@ -167,6 +176,7 @@ def tp_for(need_gb: float, vram_per_gpu_gb: float, gpu_count: int = 8
 
 def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
                  host_ram_gb: float | None = None, gpu_count: int = 8,
+                 max_tp: Optional[int] = None,
                  cache: Path | None = None) -> list[Candidate]:
     """Rank catalog models by how fast they could plausibly go here.
 
@@ -197,8 +207,13 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             # Whole-box: a model needing more than one card can still
             # run at tp>1, so this only excludes what will not fit the
             # box at all -- and records the tp that does fit it.
-            tp = tp_for(float(need), float(vram_per_gpu_gb), gpus)
+            tp = tp_for(float(need), float(vram_per_gpu_gb), gpus, max_tp)
             fits_gpu = tp is not None
+        if e.get("kt_only"):
+            # Staged config-only for KTransformers: its min_vram_gb is
+            # the GPU share attention needs, not a weights footprint.
+            # No GPU engine ever runs it.
+            fits_gpu, tp = False, None
         # KTransformers keeps the experts in host RAM and reads them
         # from GGUF, so a model beyond VRAM is in reach only when both
         # the companion is catalogued and the weights fit the RAM.
@@ -291,6 +306,7 @@ def vendor_of(series: str) -> str:
 
 def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
                 host_ram_gb: float | None = None, gpu_count: int = 8,
+                max_tp: Optional[int] = None,
                 limit: int = 8, cached_only: bool = False,
                 cache: Path | None = None,
                 diverse: bool = True, spectrum: bool = True,
@@ -338,28 +354,30 @@ def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
     """
     scored = score_models(catalog, vram_per_gpu_gb=vram_per_gpu_gb,
                           host_ram_gb=host_ram_gb, gpu_count=gpu_count,
-                          cache=cache)
+                          max_tp=max_tp, cache=cache)
     if cached_only:
         scored = [c for c in scored if c.cached]
     ranked = [c for c in scored if c.fits_gpu]
     limit = max(1, limit)
     large_limit = max(0, large_limit) if spectrum else 0
     beyond_limit = max(0, beyond_limit) if spectrum else 0
-    fast_budget = max(1, limit - large_limit - beyond_limit)
 
-    picks = _pick_fast(ranked, fast_budget, diverse)
     if not spectrum:
-        return picks
-    chosen = {c.id for c in picks}
+        return _pick_fast(ranked, limit, diverse)
+
+    # The spectrum's extremes are settled FIRST, so a vendor's largest
+    # model is not consumed as its "fastest" pick (GLM-5.3-Flash is the
+    # large end of the GLM line; GLM-4.7-Flash is its fast end).
+    picks: list[Candidate] = []
 
     # LARGE: biggest weights the cards hold, one per vendor first.
-    large_pool = sorted((c for c in ranked if c.id not in chosen and c.size_gb),
+    large_pool = sorted((c for c in ranked if c.size_gb),
                         key=lambda c: -float(c.size_gb))
     large: list[Candidate] = []
     seen_vendors: set[str] = set()
     for pass_no in (1, 2):
         for c in large_pool:
-            if len(large) >= large_limit or len(picks) + len(large) >= limit:
+            if len(large) >= large_limit or len(large) >= limit - 1:
                 break
             v = vendor_of(c.series or c.family or c.id)
             if c in large or (pass_no == 1 and v in seen_vendors):
@@ -371,29 +389,25 @@ def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             c.why = f"{note}; {c.why}" if c.why else note
             large.append(c)
     picks += large
-    chosen = {c.id for c in picks}
 
     # BEYOND VRAM: what only KTransformers can serve, largest first.
     beyond_pool = sorted(
         (c for c in scored if not c.fits_gpu and c.kt_eligible and c.fits_ram
-         and c.id not in chosen and c.size_gb),
+         and c.size_gb),
         key=lambda c: -float(c.size_gb))
     for c in beyond_pool[:beyond_limit]:
-        if len(picks) >= limit:
+        if len(picks) >= limit - 1:
             break
         c.tier = "beyond_vram"
         c.why = (f"beyond VRAM — KTransformers only, {float(c.size_gb):g} GB "
                  f"of weights in {_ram_label(host_ram_gb)} of RAM")
         picks.append(c)
 
-    # Whatever LARGE and BEYOND could not fill goes back to FAST.
-    if len(picks) < limit:
-        chosen = {c.id for c in picks}
-        more = _pick_fast([c for c in ranked if c.id not in chosen],
-                          limit - len(picks), diverse,
-                          already=[c for c in picks if c.tier == "fast"])
-        picks += more
-    return picks
+    # FAST: the vendor round-robin over what is left, filling the rest.
+    chosen = {c.id for c in picks}
+    fast = _pick_fast([c for c in ranked if c.id not in chosen],
+                      max(1, limit - len(picks)), diverse)
+    return fast + picks
 
 
 def _ram_label(gb: float | None) -> str:

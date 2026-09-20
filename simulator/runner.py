@@ -628,6 +628,10 @@ async def run_sweep(
     # powers-of-2 grid when adaptive=False.
     adaptive: bool = False,
     fixed_grid_pool_sizes: list[int] | None = None,
+    # Methodology per workload: "closed" (this module's pool ramp) or
+    # "open" (open_loop.run_cohort_open_loop, sharing the engine and
+    # run directory exactly like the closed path).
+    mode: str = "closed",
 ) -> list[Path]:
     """Run multiple personas + cohorts back-to-back against the same engine.
 
@@ -670,10 +674,14 @@ async def run_sweep(
             log.info("Resume: nothing to do — all workloads already completed")
             return []
 
+    if mode not in ("open", "closed"):
+        raise ValueError(f"run_sweep mode must be 'open' or 'closed', got {mode!r}")
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
     await asyncio.to_thread(engine.launch, log_dir=run_dir)
-    if adaptive:
+    if mode == "open":
+        log.info("Sweep mode: open-loop (arrival-rate capacity search)")
+    elif adaptive:
         log.info("Sweep mode: adaptive (TwoKneeStepper)")
     else:
         from .adaptive import DEFAULT_FIXED_GRID
@@ -682,24 +690,27 @@ async def run_sweep(
             "Sweep mode: fixed grid %s (early-stop one step past first failure)",
             grid,
         )
+
+    async def _one(cohort) -> Path:
+        if mode == "open":
+            from .open_loop import run_cohort_open_loop
+            return await run_cohort_open_loop(
+                cfg, cohort, engine=engine, run_dir=run_dir,
+            )
+        return await run_cohort(
+            cfg, cohort, engine=engine, run_dir=run_dir,
+            adaptive=adaptive,
+            fixed_grid_pool_sizes=fixed_grid_pool_sizes,
+        )
+
     paths: list[Path] = []
     try:
         for pid in persona_ids:
             log.info("=== Sweep: persona %s ===", pid)
-            path = await run_cohort(
-                cfg, cohort_from_persona(pid), engine=engine, run_dir=run_dir,
-                adaptive=adaptive,
-                fixed_grid_pool_sizes=fixed_grid_pool_sizes,
-            )
-            paths.append(path)
+            paths.append(await _one(cohort_from_persona(pid)))
         for cid in cohort_ids:
             log.info("=== Sweep: cohort %s ===", cid)
-            path = await run_cohort(
-                cfg, cid, engine=engine, run_dir=run_dir,
-                adaptive=adaptive,
-                fixed_grid_pool_sizes=fixed_grid_pool_sizes,
-            )
-            paths.append(path)
+            paths.append(await _one(cid))
     finally:
         await asyncio.to_thread(engine.shutdown)
     return paths

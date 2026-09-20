@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,10 @@ from typing import Any
 import yaml
 
 from .preflight import HardwareRequirements
+
+log = logging.getLogger(__name__)
+
+SIMULATION_MODES = ("open", "closed")
 
 
 @dataclass
@@ -252,6 +257,13 @@ class EngineConfig:
 
 @dataclass
 class SimulationConfig:
+    # Methodology. "open" (the default, and what the UI runs): sessions
+    # arrive as a Poisson process at a searched rate λ and capacity is
+    # the queue-stability boundary in rate space — docs/algorithm.md
+    # §0. "closed": the legacy fixed-pool ramp (§1), which the pool-
+    # grid / adaptive-stepper knobs below belong to. ``capsim run
+    # --mode`` overrides this per invocation.
+    mode: str = "open"
     initial_pool_size: int = 4
     # SAFETY RAIL, not a finding: high enough that no plausible host
     # hits it. The methodology's real upper boundary is client
@@ -447,13 +459,25 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
 
 
-def _merge_dataclass(target: Any, source: dict[str, Any]) -> None:
+def _merge_dataclass(target: Any, source: dict[str, Any], path: str = "") -> None:
+    """Overlay ``source`` (a YAML mapping) onto the config dataclass.
+
+    Unknown keys are NOT silently dropped: each is logged as a warning
+    with its dotted path. A typo (``open_loop_windows_s``) or a knob
+    that no longer exists used to vanish without a trace and leave the
+    user believing the run honoured it.
+    """
     for key, value in source.items():
+        dotted = f"{path}.{key}" if path else str(key)
         if not hasattr(target, key):
+            log.warning(
+                "config: unknown key %r ignored (no such field on %s)",
+                dotted, type(target).__name__,
+            )
             continue
         current = getattr(target, key)
         if hasattr(current, "__dataclass_fields__") and isinstance(value, dict):
-            _merge_dataclass(current, value)
+            _merge_dataclass(current, value, dotted)
         else:
             setattr(target, key, value)
 
@@ -473,7 +497,16 @@ def load_config(path: str | Path | None) -> Config:
     # inside a list; do it explicitly here.
     if cfg.engine.replicas and isinstance(cfg.engine.replicas[0], dict):
         cfg.engine.replicas = [ReplicaConfig(**r) for r in cfg.engine.replicas]
+    _validate_mode(cfg.simulation.mode)
     return cfg
+
+
+def _validate_mode(mode: str) -> str:
+    if mode not in SIMULATION_MODES:
+        raise ValueError(
+            f"simulation.mode must be one of {SIMULATION_MODES}, got {mode!r}"
+        )
+    return mode
 
 
 # ── Hardware profiles (roadmap 1.3) ──────────────────────────────────
@@ -513,11 +546,14 @@ def apply_cli_overrides(
     *,
     engine: str | None = None,
     model: str | None = None,
+    mode: str | None = None,
 ) -> Config:
     if engine:
         cfg.engine.type = engine
     if model:
         cfg.engine.model_id = model
+    if mode:
+        cfg.simulation.mode = _validate_mode(mode)
     # Allow env overrides for non-Make CLI paths
     if os.getenv("SIMULATOR_ENGINE"):
         cfg.engine.type = os.environ["SIMULATOR_ENGINE"]

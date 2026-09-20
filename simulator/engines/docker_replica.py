@@ -213,9 +213,8 @@ class DockerReplicaEngine(Engine):
             cache = hf_cache_dir()
             cache.mkdir(parents=True, exist_ok=True)
             out += ["-v", f"{cache}:/root/.cache/huggingface"]
-        for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-            if os.environ.get(var):
-                out += ["-e", f"{var}={os.environ[var]}"]
+        from .base import hub_env_args
+        out += hub_env_args(cfg.model_id)
         for k, v in (cfg.docker_extra_env or {}).items():
             out += ["-e", f"{k}={v}"]
         return out

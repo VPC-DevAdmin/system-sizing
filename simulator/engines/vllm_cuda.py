@@ -226,10 +226,9 @@ class VllmCudaEngine(Engine):
             cache = hf_cache_dir()
             cache.mkdir(parents=True, exist_ok=True)
             cmd += ["-v", f"{cache}:/root/.cache/huggingface"]
-        # Pass through an HF token for gated models.
-        for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-            if os.environ.get(var):
-                cmd += ["-e", f"{var}={os.environ[var]}"]
+        # HF token for gated models, offline mode for staged weights.
+        from .base import hub_env_args
+        cmd += hub_env_args(cfg.model_id)
         for k, v in (cfg.docker_extra_env or {}).items():
             cmd += ["-e", f"{k}={v}"]
         cmd += list(cfg.docker_extra_args or [])

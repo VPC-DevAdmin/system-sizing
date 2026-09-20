@@ -36,6 +36,40 @@ def _mask_assignment(token: str) -> str:
     return token
 
 
+def hub_env_args(model_id: str | None) -> list[str]:
+    """``-e`` arguments every engine container gets for the Hugging
+    Face hub: the token passthrough for gated models, and
+    ``HF_HUB_OFFLINE=1`` when the weights are already staged in the
+    cache the container mounts.
+
+    Engines call the hub at startup even when every file is cached
+    (vLLM lists the repo, tokenizers re-check revisions). On a
+    benchmark box without outbound DNS that call fails and the launch
+    dies with "Temporary failure in name resolution" -- the exact case
+    capsim's Prepare flow stages weights to avoid. Offline mode makes
+    the hub library serve the cache without the round-trip; it is set
+    only when the snapshot is complete, so a model that still needs
+    downloading keeps its network. An explicit ``HF_HUB_OFFLINE`` in
+    the environment wins either way.
+    """
+    out: list[str] = []
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(var):
+            out += ["-e", f"{var}={os.environ[var]}"]
+    explicit = os.environ.get("HF_HUB_OFFLINE")
+    if explicit is not None:
+        out += ["-e", f"HF_HUB_OFFLINE={explicit}"]
+    elif model_id and "/" in model_id:
+        from ..models import model_status
+        try:
+            cached = bool(model_status(model_id)["cached"])
+        except OSError:
+            cached = False
+        if cached:
+            out += ["-e", "HF_HUB_OFFLINE=1"]
+    return out
+
+
 def redact_argv(cmd: Sequence[str]) -> str:
     """``" ".join(cmd)`` with secret env values masked.
 

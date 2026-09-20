@@ -1356,9 +1356,8 @@ def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
     hf_cache = hf_cache_dir()
     hf_cache.mkdir(parents=True, exist_ok=True)
     args.extend(["-v", f"{hf_cache}:/root/.cache/huggingface"])
-    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        if os.environ.get(var):
-            args.extend(["-e", f"{var}={os.environ[var]}"])
+    from simulator.engines.base import hub_env_args
+    args.extend(hub_env_args(getattr(cfg, "model", None)))
     args.extend(["--name", replica.name])
     env = {**cfg.replica_env, **replica.env}
     for k, v in env.items():

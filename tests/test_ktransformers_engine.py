@@ -192,3 +192,99 @@ def test_launch_without_staged_gguf_is_refused_up_front(tmp_path):
     cmd = KTransformersEngine(_cfg(ktransformers_gguf_path=str(staged))
                               ).build_replica_command(0, [0], "ktransformers-r0-x")
     assert f"{staged}:/gguf:ro" in cmd and "--gguf_path" in cmd
+
+
+def test_optimize_rule_is_picked_from_the_staged_config(tmp_path, monkeypatch):
+    """KTransformers cannot infer its injection rule from the model
+    id, but capsim can read model_type from the staged config.json:
+    deepseek_v3 and qwen3_moe map to the serve rules the v0.3.2 image
+    ships; an explicit ktransformers_optimize_config wins; an
+    architecture without a rule passes nothing."""
+    from simulator.engines.ktransformers import OPTIMIZE_RULES_DIR, optimize_config_for
+
+    assert optimize_config_for("deepseek_v3") == \
+        f"{OPTIMIZE_RULES_DIR}/DeepSeek-V3-Chat-serve.yaml"
+    assert optimize_config_for("qwen3_moe") == \
+        f"{OPTIMIZE_RULES_DIR}/Qwen3Moe-serve.yaml"
+    assert OPTIMIZE_RULES_DIR.startswith("/workspace/ktransformers/")
+    assert optimize_config_for("deepseek_v32") is None
+    assert optimize_config_for(None) is None
+
+    def argv_of(cfg):
+        cmd = KTransformersEngine(cfg).build_replica_command(0, [0], "kt-r0-x")
+        return cmd[cmd.index(DEFAULT_IMAGE):]
+
+    # From a local model directory.
+    local = tmp_path / "local"
+    local.mkdir()
+    (local / "config.json").write_text('{"model_type": "deepseek_v3"}')
+    argv = argv_of(_cfg(model_local_path=str(local)))
+    assert argv[argv.index("--optimize_config_path") + 1] == \
+        f"{OPTIMIZE_RULES_DIR}/DeepSeek-V3-Chat-serve.yaml"
+    # From the HF cache snapshot of a hub id.
+    cache = tmp_path / "hf"
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(cache))
+    rev = cache / "hub" / "models--Qwen--Big" / "snapshots" / "r"
+    rev.mkdir(parents=True)
+    (rev / "config.json").write_text('{"model_type": "qwen3_moe"}')
+    argv = argv_of(_cfg(model_id="Qwen/Big"))
+    assert argv[argv.index("--optimize_config_path") + 1].endswith("Qwen3Moe-serve.yaml")
+    # Explicit wins; unknown architecture -> no flag at all.
+    argv = argv_of(_cfg(model_id="Qwen/Big", ktransformers_optimize_config="/mine.yaml"))
+    assert argv[argv.index("--optimize_config_path") + 1] == "/mine.yaml"
+    (rev / "config.json").write_text('{"model_type": "deepseek_v32"}')
+    assert "--optimize_config_path" not in argv_of(_cfg(model_id="Qwen/Big"))
+    assert "--optimize_config_path" not in argv_of(_cfg(model_id="Nobody/Staged"))
+
+
+def test_cpu_infer_defaults_to_physical_cores_minus_two(monkeypatch):
+    """The expert path wants every physical core except the two the
+    driver and scheduler need; hyperthreads add nothing on a
+    bandwidth-bound kernel. Explicit ktransformers_cpu_threads wins;
+    off Linux the host's cores mean nothing and the flag is omitted."""
+    from simulator.engines import ktransformers as kt
+
+    assert kt.default_cpu_infer(64) == 62
+    assert kt.default_cpu_infer(2) == 1
+    assert kt.default_cpu_infer(0) is None
+
+    cpuinfo = "".join(
+        f"processor\t: {i}\nphysical id\t: {i // 8}\ncore id\t: {(i % 8) % 4}\n\n"
+        for i in range(16))          # 2 sockets x 4 cores x 2 threads
+    assert kt.parse_cpuinfo_cores(cpuinfo) == 8
+    assert kt.parse_cpuinfo_cores("processor\t: 0\nflags\t: neon\n") == 0
+
+    monkeypatch.setattr(kt, "physical_cores", lambda: 172)
+    cmd = KTransformersEngine(_cfg()).build_replica_command(0, [0], "kt-r0-x")
+    assert cmd[cmd.index("--cpu_infer") + 1] == "170"
+    cmd = KTransformersEngine(_cfg(ktransformers_cpu_threads=32)
+                              ).build_replica_command(0, [0], "kt-r0-x")
+    assert cmd[cmd.index("--cpu_infer") + 1] == "32"
+    monkeypatch.setattr(kt, "physical_cores", lambda: None)
+    assert "--cpu_infer" not in KTransformersEngine(_cfg()).build_replica_command(
+        0, [0], "kt-r0-x")
+    monkeypatch.undo()
+    monkeypatch.setattr(kt.sys, "platform", "darwin")
+    assert kt.physical_cores() is None
+
+
+def test_kt_only_models_are_refused_by_gpu_engines(tmp_path):
+    """The catalog says the weights exceed the GPUs; a vLLM launch
+    would spend the health timeout discovering that."""
+    from simulator.engines.custom import ShapeError, custom_engine
+
+    catalog = [{"id": "org/Huge", "family": "h", "quant": "fp8", "kt_only": True,
+                "gguf": {"repo": "org/Huge-GGUF", "file": "Q4", "size_gb": 1.0}}]
+    hw = {"count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+          "vram_per_gpu_gb": 96.0}
+    base = {"model_id": "org/Huge", "device": "gpu", "replicas": 1, "tp": 4}
+    for engine in ("vllm_cuda_multi", "sglang_cuda", "trtllm"):
+        with pytest.raises(ShapeError, match="kt_only"):
+            custom_engine({**base, "engine": engine}, hw=hw, catalog=catalog)
+    staged = tmp_path / "gguf"
+    staged.mkdir()
+    eng = custom_engine({**base, "engine": "ktransformers", "tp": 1,
+                         "kv_cache_dtype": "auto",
+                         "ktransformers_gguf_path": str(staged)},
+                        hw=hw, catalog=catalog)
+    assert eng["type"] == "ktransformers"

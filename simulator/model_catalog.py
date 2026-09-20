@@ -60,8 +60,12 @@ def _normalize_gguf(raw: object, source: str, model_id: str) -> Optional[dict]:
     KTransformers loads weights from GGUF only, so a catalog entry
     that names its companion is what lets Prepare stage it and the
     launcher resolve ``--gguf_path`` without the operator hand-editing
-    a path. ``file`` may carry a subdirectory when the repo shards
-    its quants into folders."""
+    a path. ``file`` is one ``.gguf`` (it may carry a subdirectory
+    when the repo shards its quants into folders), or a DIRECTORY
+    when the quant itself is split into ``-00001-of-0000N`` shards --
+    a 400 GB DeepSeek quant is nine files, and KTransformers reads
+    every .gguf under ``--gguf_path``, so the directory is the unit
+    Prepare stages and the launcher mounts."""
     if raw in (None, {}, ""):
         return None
     if not isinstance(raw, dict):
@@ -72,12 +76,30 @@ def _normalize_gguf(raw: object, source: str, model_id: str) -> Optional[dict]:
     if not _MODEL_ID_RE.match(repo):
         raise CatalogError(f"{source}: '{model_id}' gguf.repo '{repo}' is "
                            f"not an org/name HF repo id")
-    if not file.endswith(".gguf") or ".." in file.split("/"):
+    parts = file.split("/")
+    if not file or ".." in parts or "." in parts or any(not x for x in parts):
+        raise CatalogError(f"{source}: '{model_id}' gguf.file '{file}' must "
+                           f"name a .gguf file or a shard directory inside "
+                           f"the repo")
+    if "." in parts[-1] and not file.endswith(".gguf"):
         raise CatalogError(f"{source}: '{model_id}' gguf.file '{file}' must "
                            f"name a .gguf file inside the repo")
     size = raw.get("size_gb")
     return {"repo": repo, "file": file,
             "size_gb": float(size) if size is not None else None}
+
+
+def _normalize_host_ram(raw: object, source: str, model_id: str) -> Optional[float]:
+    if raw in (None, ""):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        raise CatalogError(f"{source}: '{model_id}' host_ram_gb must be a "
+                           f"number of GB") from None
+    if val <= 0:
+        raise CatalogError(f"{source}: '{model_id}' host_ram_gb must be > 0")
+    return val
 
 
 def infer_quant(model_id: str) -> str:
@@ -112,6 +134,12 @@ def _normalize_entry(raw: dict, source: str) -> dict:
             f"known: {KNOWN_QUANTS}"
         )
     name = model_id.split("/")[-1]
+    gguf = _normalize_gguf(raw.get("gguf"), source, model_id)
+    kt_only = bool(raw.get("kt_only", False))
+    if kt_only and not gguf:
+        raise CatalogError(f"{source}: '{model_id}' is kt_only but names no "
+                           f"gguf companion -- KTransformers has nothing to "
+                           f"load")
     return {
         "id": model_id,
         "family": str(raw.get("family") or infer_family(model_id)),
@@ -128,7 +156,12 @@ def _normalize_entry(raw: dict, source: str) -> dict:
         "moe": bool(raw.get("moe", False)),
         "engine_args": list(raw.get("engine_args") or []),
         "notes": str(raw.get("notes") or ""),
-        "gguf": _normalize_gguf(raw.get("gguf"), source, model_id),
+        "gguf": gguf,
+        # The weights exceed the GPUs outright: GPU engines never run
+        # this one, only KTransformers does -- which needs the GGUF.
+        "kt_only": kt_only,
+        "host_ram_gb": _normalize_host_ram(raw.get("host_ram_gb"),
+                                           source, model_id),
         "source": source,
     }
 

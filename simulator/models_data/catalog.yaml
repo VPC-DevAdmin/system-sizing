@@ -20,10 +20,23 @@
 #                  weights from GGUF only (the HF repo above supplies
 #                  config + tokenizer). Prepare stages it next to the
 #                  weights and the launcher resolves --gguf_path from it.
+#                  Its presence is what makes the entry KTransformers-
+#                  eligible, so only name one for an architecture the
+#                  v0.3.2 image has an optimize rule for (deepseek_v3,
+#                  qwen3_moe, ...) -- engines/ktransformers.py maps them.
 #                    repo     HF repo id holding the GGUF
 #                    file     one .gguf file in that repo (a path when the
-#                             repo shards quants into subdirectories)
-#                    size_gb  its size, for the download button
+#                             repo shards quants into subdirectories), OR
+#                             a directory when the quant is split into
+#                             -00001-of-0000N shards (every shard is
+#                             staged; KTransformers reads the directory)
+#                    size_gb  its size (all shards), for the download button
+#   kt_only        true when the weights exceed the GPUs outright: GPU
+#                  engines never run it, only KTransformers does (CPU
+#                  experts in host RAM). Prepare then stages the HF repo
+#                  config-only -- config + tokenizer, no safetensors.
+#   host_ram_gb    host RAM a KTransformers launch needs: the GGUF (its
+#                  experts live in RAM) plus headroom for the runtime.
 
 models:
 - id: Qwen/Qwen3-30B-A3B-Instruct-2507
@@ -94,6 +107,12 @@ models:
   notes: needs TP8 on 96GB cards in bf16 — a true whole-box test
   series: Qwen3
   params_b: 235.0
+  # Sharded quant: the directory holds 3 shards, 142 GB in all.
+  gguf:
+    repo: unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF
+    file: Q4_K_M
+    size_gb: 142.2
+  host_ram_gb: 170
 - id: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
   family: qwen3-235b-a22b
   moe: true
@@ -103,6 +122,11 @@ models:
   notes: fits TP4 on 96GB cards — enables dp2 on an 8-GPU box
   series: Qwen3
   params_b: 235.0
+  gguf:
+    repo: unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF
+    file: Q4_K_M
+    size_gb: 142.2
+  host_ram_gb: 170
 - id: openai/gpt-oss-20b
   family: gpt-oss-20b
   moe: true
@@ -236,6 +260,9 @@ models:
   approx_size_gb: 322
   min_vram_gb: 350
   notes: GLM flagship-flash — native FP8, fits tp4
+  # unsloth/GLM-5.3-Flash-GGUF exists, but the model_type (glm5_next) has
+  # no injection rule in the KTransformers v0.3.2 image -- no companion,
+  # or the roofline would schedule KT cells that die at load.
 - id: zai-org/GLM-5.3
   family: glm-5.3
   series: GLM-5
@@ -280,6 +307,8 @@ models:
   approx_size_gb: 230
   min_vram_gb: 255
   notes: native FP8 — fits tp4
+  # unsloth/MiniMax-M2.7-GGUF exists, but minimax_m2 has no KTransformers
+  # v0.3.2 optimize rule -- no companion (see GLM-5.3-Flash).
 - id: deepseek-ai/DeepSeek-V3.2
   family: deepseek-v3.2
   series: DeepSeek V3.2
@@ -288,7 +317,30 @@ models:
   quant: fp8
   approx_size_gb: 687
   min_vram_gb: 730
-  notes: frontier reference — needs a bigger box than 4x96GB per domain
+  notes: frontier reference — needs a bigger box than 4x96GB per domain;
+    its sparse-attention architecture (deepseek_v32, DSA indexer) is NOT
+    served by the KTransformers v0.3.2 image, so no GGUF companion — use
+    DeepSeek-V3.1 for the CPU-expert path
+- id: deepseek-ai/DeepSeek-V3.1
+  family: deepseek-v3.1
+  series: DeepSeek V3.1
+  params_b: 685.0
+  moe: true
+  quant: fp8
+  approx_size_gb: 687
+  # KTransformers keeps only attention + KV on the GPU; the experts
+  # live in host RAM. min_vram_gb is that GPU share, not the weights.
+  min_vram_gb: 24
+  kt_only: true
+  host_ram_gb: 450
+  notes: beyond 8x96GB — KTransformers only (deepseek_v3, CPU experts in
+    2 TB RAM); Prepare stages config + tokenizer, weights come from the GGUF
+  # unsloth's dynamic 4-bit: 8 shards, 386.9 GB in all. The single-file
+  # UD-TQ1_0 (170 GB) is a ternary quant nobody should benchmark.
+  gguf:
+    repo: unsloth/DeepSeek-V3.1-GGUF
+    file: UD-Q4_K_XL
+    size_gb: 386.9
 - id: nvidia/Qwen3.6-35B-A3B-NVFP4
   family: qwen3.6-35b-a3b
   series: Qwen3.6

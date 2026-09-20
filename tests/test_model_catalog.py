@@ -240,3 +240,53 @@ def test_gguf_companion_parsing(tmp_path) -> None:
         (user / "a.yaml").write_text(f"models:\n  - id: org/Thing\n    {bad}\n")
         with pytest.raises(CatalogError, match="gguf"):
             load_model_catalog(user_dir=user)
+
+
+def test_kt_only_and_host_ram_and_shard_directories(tmp_path) -> None:
+    """The large end of the catalog: a model whose weights exceed the
+    GPUs is kt_only (GPU engines never run it), says how much host
+    RAM its GGUF needs, and its companion is a shard DIRECTORY --
+    unsloth splits a 387 GB quant into eight files."""
+    by_id = {e["id"]: e for e in load_model_catalog(user_dir=tmp_path / "none")}
+    v31 = by_id["deepseek-ai/DeepSeek-V3.1"]
+    assert v31["kt_only"] is True and v31["host_ram_gb"] == 450.0
+    assert v31["gguf"] == {"repo": "unsloth/DeepSeek-V3.1-GGUF",
+                           "file": "UD-Q4_K_XL", "size_gb": 386.9}
+    # V3.2's sparse-attention architecture is not served by the
+    # v0.3.2 image: no companion, and the notes say so.
+    v32 = by_id["deepseek-ai/DeepSeek-V3.2"]
+    assert v32["gguf"] is None and v32["kt_only"] is False
+    assert "KTransformers" in v32["notes"] and "V3.1" in v32["notes"]
+    # Qwen3-235B is GPU-fitting AND KTransformers-eligible: both
+    # precisions share the sharded Q4_K_M, neither is kt_only.
+    bf16 = by_id["Qwen/Qwen3-235B-A22B-Instruct-2507"]
+    fp8 = by_id["Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"]
+    assert bf16["gguf"] == fp8["gguf"]
+    assert bf16["gguf"]["file"] == "Q4_K_M" and bf16["gguf"]["size_gb"] == 142.2
+    assert bf16["kt_only"] is False and bf16["host_ram_gb"] == 170.0
+    # Every entry carries the keys Track I keys off, never a missing one.
+    for e in by_id.values():
+        assert "kt_only" in e and "host_ram_gb" in e
+        if e["kt_only"]:
+            assert e["gguf"], f"{e['id']} is kt_only without a companion"
+
+    user = tmp_path / "models"
+    user.mkdir()
+    ok = ("gguf: {repo: org/R, file: UD-Q4_K_XL}\n    kt_only: true\n"
+          "    host_ram_gb: 420")
+    (user / "a.yaml").write_text(f"models:\n  - id: org/Thing\n    {ok}\n")
+    e = {x["id"]: x for x in load_model_catalog(user_dir=user)}["org/Thing"]
+    assert e["gguf"]["file"] == "UD-Q4_K_XL" and e["kt_only"] is True
+    assert e["host_ram_gb"] == 420.0
+
+    for bad, msg in (
+        ("kt_only: true", "kt_only but names no gguf"),
+        ("gguf: {repo: org/R, file: x.gguf}\n    host_ram_gb: lots", "host_ram_gb"),
+        ("gguf: {repo: org/R, file: x.gguf}\n    host_ram_gb: 0", "host_ram_gb"),
+        ("gguf: {repo: org/R, file: weights.safetensors}", "gguf"),
+        ("gguf: {repo: org/R, file: ./Q4}", "gguf"),
+        ("gguf: {repo: org/R, file: Q4//x.gguf}", "gguf"),
+    ):
+        (user / "a.yaml").write_text(f"models:\n  - id: org/Thing\n    {bad}\n")
+        with pytest.raises(CatalogError, match=msg):
+            load_model_catalog(user_dir=user)

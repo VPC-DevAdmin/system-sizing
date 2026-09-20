@@ -146,6 +146,7 @@ def _open_loop_config(tmp_path) -> Config:
     sim.open_loop_window_s = 10
     sim.open_loop_refine_window_s = 10
     sim.open_loop_warmup_s = 2
+    sim.open_loop_settle_max_s = 2       # no settling extension
     sim.open_loop_drain_timeout_s = 10
     sim.max_total_duration_minutes = 3
     sim.request_timeout_s = 30
@@ -306,3 +307,66 @@ def test_fuse_keeps_token_baseline_across_failed_scrapes():
     assert _ErrorFuse(0, 0, None).tripped(30, 0, None)
     # A counter that stopped moving does not shield a broken engine.
     assert _ErrorFuse(0, 0, 2000).tripped(30, 0, 2000)
+
+
+# ── Settling detector (A4) ──────────────────────────────────────────
+
+
+def test_population_settled_rejects_a_ramp_and_accepts_a_plateau():
+    import random
+
+    from simulator.open_loop import _population_settled
+
+    rng = random.Random(4)
+    # Linear ramp 0 → 120 sessions over 240 s: at any point the drift
+    # across a 60 s trailing window is 30 sessions — far outside 5 %.
+    ramp = [0.5 * t + rng.gauss(0, 1.5) for t in range(240)]
+    settled, drift = _population_settled(ramp, 60)
+    assert not settled and drift > 0.2
+    # Poisson-jittered plateau around 100: settled.
+    flat = [100 + rng.gauss(0, 4) for _ in range(120)]
+    settled, drift = _population_settled(flat, 60)
+    assert settled and drift < 0.05
+    # Ramp then plateau: not settled while the trailing window still
+    # covers the ramp, settled once it is all plateau.
+    series = ramp + flat
+    assert not _population_settled(series[:250], 60)[0]
+    assert _population_settled(series, 60)[0]
+    # Too few samples for the trailing window: never settled.
+    assert not _population_settled(flat[:30], 60)[0]
+
+
+def test_warmup_plan_scales_with_session_length():
+    """Minimum warmup as before; the settling cap and trailing window
+    grow with the measured mean session duration (A4)."""
+    from simulator.open_loop import OpenLoopRunner
+
+    class Pool:
+        def __init__(self, mean):
+            self.mean = mean
+
+        def aggregate(self):
+            return {"mean_session_s": self.mean} if self.mean else {}
+
+    def plan(mean, cap=None, window=60):
+        r = OpenLoopRunner.__new__(OpenLoopRunner)
+        r.cfg = Config()
+        r.cfg.simulation.open_loop_settle_max_s = cap
+        r.cfg.simulation.open_loop_settle_window_s = window
+        r.pool = Pool(mean)
+        return r._warmup_plan()
+
+    # No session length known yet (first window): 90 s minimum, cap
+    # 300 s, 60 s trailing window.
+    assert plan(None) == (90.0, 300.0, 60)
+    # Short sessions: same minimum, same cap.
+    assert plan(20.0) == (90.0, 300.0, 60)
+    # document_qa-length sessions: 300 s minimum, 1.5 W cap, 0.2 W
+    # trailing window.
+    assert plan(1000.0) == (300.0, 1500.0, 200)
+    # Very long sessions: trailing window capped at 300 s.
+    assert plan(2000.0) == (300.0, 3000.0, 300)
+    # An explicit cap bounds the extension but never undercuts the
+    # minimum warmup.
+    assert plan(1000.0, cap=600) == (300.0, 600.0, 200)
+    assert plan(1000.0, cap=10) == (300.0, 300.0, 200)

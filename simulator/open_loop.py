@@ -51,7 +51,7 @@ from .rate_search import (
     RateStepper,
 )
 from .runs import resolve_run_dir
-from .stability import INCONCLUSIVE, assess_queue_stability
+from .stability import INCONCLUSIVE, assess_queue_stability, theil_sen_slope
 from .telemetry import MeasurementTelemetry
 
 log = logging.getLogger(__name__)
@@ -66,6 +66,35 @@ TARDY_MIN_COUNT = 5
 # Worker event-loop lag limit (same meaning as the closed-loop
 # CLIENT_SATURATION_LAG_MS: past this, latencies measure the client).
 WORKER_LAG_LIMIT_MS = 1000.0
+# Settling detector: the trailing population drift (Theil-Sen slope ×
+# trailing window) must be within this fraction of the trailing mean
+# before a window opens. See SimulationConfig.open_loop_settle_*.
+SETTLE_TOLERANCE = 0.05
+SETTLE_WINDOW_CAP_S = 300
+
+
+def _population_settled(
+    series: list[float], window_n: int, tol: float = SETTLE_TOLERANCE,
+) -> tuple[bool, float]:
+    """Is the active-session population flat over its trailing
+    ``window_n`` samples?
+
+    Returns ``(settled, drift_fraction)`` where drift is the Theil-Sen
+    slope projected across the trailing window, as a fraction of the
+    trailing mean. Settled when that drift is within ``tol`` of the
+    mean plus one session (the absolute slack lets a population of a
+    dozen integer-valued sessions settle at all). Theil-Sen — the
+    median pairwise slope — is what makes this robust to the Poisson
+    jitter of arrivals and departures: endpoint noise does not read
+    as a ramp, while a genuine ramp toward a new equilibrium does.
+    """
+    if window_n < 2 or len(series) < window_n:
+        return False, float("inf")
+    tail = series[-window_n:]
+    mean = statistics.fmean(tail)
+    drift = abs(theil_sen_slope(tail, 1.0)) * window_n
+    limit = tol * mean + 1.0
+    return drift <= limit, (drift / mean if mean > 0 else 0.0)
 
 
 class EngineBrokenError(RuntimeError):
@@ -692,13 +721,33 @@ class OpenLoopRunner:
 
     # ── Window machinery ────────────────────────────────────────────
 
-    def _warmup_s(self) -> float:
-        base = float(self.cfg.simulation.open_loop_warmup_s)
+    def _warmup_plan(self) -> tuple[float, float, int]:
+        """``(minimum_s, cap_s, settle_window_n)`` for the next window.
+
+        The minimum is the configured warmup stretched toward the
+        measured mean session duration (capped at 300 s). Past it the
+        settling detector decides, up to ``cap_s`` — by default
+        max(300 s, 1.5 × mean session duration), the time a rate step
+        needs to propagate through essentially every session — on a
+        trailing window of max(open_loop_settle_window_s, 0.2 × mean
+        session duration) samples, capped at 300, so a slow ramp on
+        long sessions is still visible.
+        """
+        sim = self.cfg.simulation
+        base = float(sim.open_loop_warmup_s)
         agg = self.pool.aggregate()
-        mean_sess = agg.get("mean_session_s") if agg else None
-        if mean_sess:
-            return max(base, min(300.0, float(mean_sess)))
-        return base
+        mean_sess = float(agg.get("mean_session_s") or 0.0) if agg else 0.0
+        minimum = max(base, min(300.0, mean_sess)) if mean_sess else base
+        cap = sim.open_loop_settle_max_s
+        cap_s = (
+            max(300.0, 1.5 * mean_sess) if cap is None else float(cap)
+        )
+        cap_s = max(cap_s, minimum)
+        window_n = int(min(
+            SETTLE_WINDOW_CAP_S,
+            max(sim.open_loop_settle_window_s, 0.2 * mean_sess),
+        ))
+        return minimum, cap_s, max(2, window_n)
 
     async def _measure_window(
         self, rate_per_s: float, window_s: int,
@@ -707,10 +756,12 @@ class OpenLoopRunner:
         await self.pool.set_rate(rate_per_s)
 
         self.phase = "warmup"
-        warmup = self._warmup_s()
+        warmup_min, settle_cap, settle_n = self._warmup_plan()
         log.info(
-            "rate %.3g/s (%.1f/min): warmup %.0fs, window %ds, workers=%d",
-            rate_per_s, rate_per_s * 60, warmup, window_s, self.pool.size,
+            "rate %.3g/s (%.1f/min): warmup ≥%.0fs (settling cap %.0fs, "
+            "trailing window %ds), window %ds, workers=%d",
+            rate_per_s, rate_per_s * 60, warmup_min, settle_cap, settle_n,
+            window_s, self.pool.size,
         )
 
         # Runaway-error fuse state: cumulative counters at phase
@@ -753,13 +804,39 @@ class OpenLoopRunner:
             worker_deaths.extend(self.pool.take_deaths())
             return bool(worker_deaths)
 
-        warm_end = time.monotonic() + warmup
-        while time.monotonic() < warm_end:
+        # Warmup = the minimum, then extend until the active-session
+        # population is flat (or the settling cap is hit).
+        active_warm: list[float] = []
+        settled = False
+        drift = float("inf")
+        warm_start = time.monotonic()
+        while True:
             await self._sample_engine()
             _check_fuse(self.pool.drain_turn_queue())  # discard settling turns
             if _note_deaths():
                 break
+            agg_w = self.pool.aggregate()
+            if agg_w:
+                active_warm.append(float(agg_w.get("sessions_active", 0)))
+            elapsed = time.monotonic() - warm_start
+            if elapsed >= warmup_min:
+                settled, drift = _population_settled(active_warm, settle_n)
+                if settled:
+                    break
+                if elapsed >= settle_cap:
+                    log.warning(
+                        "rate %.3g/s: population still drifting %.1f%% per "
+                        "%ds at the %.0fs settling cap — measuring anyway "
+                        "(raise open_loop_settle_max_s for long sessions)",
+                        rate_per_s, drift * 100, settle_n, settle_cap,
+                    )
+                    break
             await asyncio.sleep(1.0)
+        warmup_s = time.monotonic() - warm_start
+        if settled:
+            log.info("rate %.3g/s: population settled after %.0fs "
+                     "(drift %.1f%% per %ds)",
+                     rate_per_s, warmup_s, drift * 100, settle_n)
 
         self.phase = "measuring"
         measurement_started_at = datetime.now(timezone.utc).isoformat()
@@ -904,6 +981,8 @@ class OpenLoopRunner:
             if len(queue_series) >= len(inflight_series) // 2
             else "client_in_flight"
         )
+        verdict_dict["warmup_s"] = round(warmup_s, 1)
+        verdict_dict["settled"] = settled
 
         agg1 = self.pool.aggregate()
         d_arrivals = max(0, (agg1.get("arrivals_total", 0) if agg1 else 0)

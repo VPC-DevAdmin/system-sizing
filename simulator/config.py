@@ -342,11 +342,32 @@ class SimulationConfig:
     # converged to this percentage — 5 means λ_max is pinned within
     # 5%. Tighter costs ~1 extra refinement window per halving.
     open_loop_resolution_pct: float = 5.0
-    # Steady-state settling time before each window measures. The
+    # MINIMUM settling time before each window measures. The
     # orchestrator stretches this toward the measured mean session
-    # duration once one is known (equilibrium shifts take about one
-    # session length to propagate).
+    # duration (capped at 300 s) once one is known, and then runs the
+    # settling detector below.
     open_loop_warmup_s: int = 90
+    # ── Settling detector ──
+    # After a rate change the session population takes about one mean
+    # session length to reach its Little's-law equilibrium — for
+    # long-session personas (document_qa, code_assist: 1000–2000 s)
+    # far longer than any fixed warmup — and a window opened on that
+    # ramp reads the ramp as divergence. So the warmup EXTENDS past
+    # the minimum until the trailing population is flat: the Theil-Sen
+    # drift across the trailing settle window is within ±5 % of its
+    # mean (+1 session, so tiny populations can settle at all). The
+    # trailing window is max(open_loop_settle_window_s, 0.2 × mean
+    # session duration), capped at 300 s, so a slow ramp on long
+    # sessions is still visible to the detector.
+    open_loop_settle_window_s: int = 60
+    # Cap on that extension, in seconds. None = max(300, 1.5 × mean
+    # session duration): a step change in λ has propagated through
+    # essentially every session by 1.5 W (what remains is the
+    # length-biased tail of the duration distribution), so waiting
+    # longer buys nothing. Set a number to bound a long-session run's
+    # per-window cost explicitly — the window then measures whatever
+    # ramp remains, and its stability_detail records settled=false.
+    open_loop_settle_max_s: int | None = None
     # After overshooting the knee the search reverts to the last
     # stable rate and trims only the excess sessions; this caps how
     # long it waits for the queue to fall back to stable density

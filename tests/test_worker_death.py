@@ -63,7 +63,8 @@ def test_worker_exits_nonzero_when_a_loop_raises(tmp_path):
                 rc = await asyncio.wait_for(proc.wait(), timeout=10.0)
             except asyncio.TimeoutError:
                 raise AssertionError(
-                    "worker kept running after its stdin loop raised")
+                    "worker kept running after its stdin loop raised",
+                ) from None
             stderr = (await proc.stderr.read()).decode()
             return rc, stderr
         finally:

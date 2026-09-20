@@ -198,7 +198,10 @@
     <h2>Roofline autopilot</h2>
     <p class="msg">Stages the models, searches every engine against
       every shape for each of them, confirms each model's winner at
-      full resolution, and reports the matrix. Hours, not minutes
+      full resolution, and reports the matrix. The picks span a
+      spectrum: the fastest model of each vendor line, the largest
+      models the GPUs can hold, and models beyond VRAM that only
+      KTransformers can serve from host RAM. Hours, not minutes
       &mdash; every step is written to disk as it completes, so you can
       close this page and the numbers will be here when you come back.
       Interrupted runs resume where they stopped rather than repeating
@@ -207,13 +210,19 @@
     <div class="row wrap">
       <label>Models
         <select id="rf-model-mode">
-          <option value="auto">Pick the most promising automatically</option>
+          <option value="auto">Pick a spectrum automatically</option>
           <option value="cached">Only models already downloaded</option>
           <option value="manual">Choose below</option>
         </select></label>
       <label>How many
-        <input id="rf-model-limit" type="number" min="1" max="8" value="5"
+        <input id="rf-model-limit" type="number" min="1" max="16" value="8"
           style="width:64px"></label>
+      <label title="of those, the largest models the GPUs hold">Largest on GPU
+        <input id="rf-large-limit" type="number" min="0" max="8" value="3"
+          style="width:56px"></label>
+      <label title="of those, models beyond VRAM served by KTransformers from host RAM">Beyond VRAM
+        <input id="rf-beyond-limit" type="number" min="0" max="8" value="2"
+          style="width:56px"></label>
       <label>Prompt length
         <select id="rf-input-tokens">
           <option value="128">128 tokens (vendor convention)</option>
@@ -240,22 +249,35 @@
   </section>
 
   <section class="panel" id="rf-best-panel" hidden>
-    <h2>Best measured</h2>
-    <div class="hl-hero" style="padding:0">
-      <div class="hl-main">
-        <div class="hl-label" id="rf-best-label">output tokens / sec</div>
-        <div class="hl-now" id="rf-best">&mdash;</div>
-        <div class="hl-sub" id="rf-best-detail"></div>
-      </div>
-      <div class="hl-side">
-        <div class="hl-kv"><span>streams held</span><b id="rf-best-streams">&mdash;</b></div>
-        <div class="hl-kv"><span>efficiency</span><b id="rf-best-eff">&mdash;</b>
-          <i class="msg">tokens per watt</i></div>
-        <div class="hl-kv"><span>KV cache</span><b id="rf-best-kv">&mdash;</b></div>
-        <div class="hl-kv"><span>measured</span><b id="rf-best-count">&mdash;</b>
-          <i class="msg">cells that settled</i></div>
-      </div>
+    <h2>Best</h2>
+    <div class="rf-best">
+      <div class="rf-card" id="rf-fastest"></div>
+      <div class="rf-card" id="rf-largest"></div>
     </div>
+    <div class="chart-note">Two answers, because a box is not only its
+      fastest model. <b>Fastest</b> is the cell with the highest total
+      token rate; <b>largest served</b> is the biggest model any engine
+      actually produced a settled peak for. <span id="rf-best-count"></span></div>
+  </section>
+
+  <section class="panel" id="rf-spectrum-panel" hidden>
+    <h2>Spectrum &mdash; speed across size</h2>
+    <div class="rf-spectrum-chart"><canvas id="chart-rf-spectrum"></canvas></div>
+    <div class="chart-note">One point per model that served, at its best
+      engine and shape: weights on a log axis against total tokens per
+      second. <span class="tier tier-fast">fast</span> picks are the
+      vendor round-robin, <span class="tier tier-large">largest on GPU</span>
+      the biggest weights the cards hold (tensor-parallel where one card
+      is not enough), <span class="tier tier-beyond_vram">beyond VRAM</span>
+      what only KTransformers serves with the experts in host RAM
+      &mdash; a CPU-bound number, not a GPU one.</div>
+    <table id="rf-spectrum" style="margin-top:10px">
+      <thead><tr><th>Model</th><th>Tier</th><th>Vendor</th><th>Params</th>
+        <th>Weights</th><th>Best engine</th><th>Total tok/s</th>
+        <th>Output tok/s</th><th>Concurrency</th><th>KV capacity</th>
+        <th>TTFT p95</th><th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
   </section>
 
   <section class="panel" id="rf-matrix-panel" hidden>

@@ -74,7 +74,8 @@ def test_candidates_carry_family_and_series():
 
 
 def test_pure_ranking_fills_the_shortlist_with_one_vendor():
-    old = pick_models(VENDORS, vram_per_gpu_gb=96, limit=4, diverse=False)
+    old = pick_models(VENDORS, vram_per_gpu_gb=96, limit=4, diverse=False,
+                      spectrum=False)
     assert {vendor_of(c.series) for c in old} == {"Qwen"}
     assert [c.id for c in old] == [
         c.id for c in score_models(VENDORS, vram_per_gpu_gb=96)[:4]]
@@ -82,7 +83,7 @@ def test_pure_ranking_fills_the_shortlist_with_one_vendor():
 
 
 def test_diverse_pick_takes_the_best_of_every_series_first():
-    picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=4)
+    picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=4, spectrum=False)
     # Qwen3 and Qwen3.6 are separate series but ONE vendor: Qwen gets
     # one round-one slot, not two.
     assert [c.series for c in picks] == ["Qwen3.6", "gpt-oss", "Llama-3.3", "GLM-4.7"]
@@ -95,7 +96,7 @@ def test_diverse_pick_takes_the_best_of_every_series_first():
 
 
 def test_diverse_pick_returns_to_a_series_only_after_every_series_has_one():
-    picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=6)
+    picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=6, spectrum=False)
     assert [c.series for c in picks[:4]] == [
         "Qwen3.6", "gpt-oss", "Llama-3.3", "GLM-4.7"]
     assert [c.series for c in picks[4:]] == ["Qwen3", "Qwen3"]
@@ -110,7 +111,7 @@ def test_diverse_pick_returns_to_a_series_only_after_every_series_has_one():
 
 
 def test_diverse_pick_falls_back_to_a_precision_twin_last():
-    picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=7)
+    picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=7, spectrum=False)
     last = picks[-1]
     assert last.series == "Qwen3" and last.pick_round == 4
     assert last.family == "qwen3-30b-a3b"
@@ -262,11 +263,28 @@ def test_candidates_endpoint_ranks_and_explains():
     # Pick order: the tab's auto mode plans the first N of this list,
     # so each row says which round of the series round-robin chose it.
     assert d["diverse"] is True
-    assert all(x["pick_round"] >= 1 for x in d["candidates"])
+    assert d["spectrum"] is True
+    # Every pick says its tier; the FAST ones say which round of the
+    # vendor round-robin chose them.
+    assert all(x["tier"] in ("fast", "large", "beyond_vram")
+               for x in d["candidates"])
+    assert all(x["pick_round"] >= 1 for x in d["candidates"]
+               if x["tier"] == "fast")
     assert all(x["series"] and x["family"] for x in d["candidates"])
-    plain = c.get("/api/roofline/candidates?limit=3&diverse=false").json()
+    # And carries what decides its engines and shape.
+    assert all({"fits_gpu", "kt_eligible", "fits_ram", "tp", "replicas"}
+               <= set(x) for x in d["candidates"])
+    assert "host_ram_gb" in d["hardware"]
+    plain = c.get("/api/roofline/candidates?limit=3&diverse=false"
+                  "&spectrum=false").json()
     assert plain["diverse"] is False
     assert all(x["pick_round"] == 0 for x in plain["candidates"])
+    assert all(x["tier"] == "fast" for x in plain["candidates"])
+    # ``extra`` appends unpicked models (tier "") for the greyed rows.
+    more = c.get("/api/roofline/candidates?limit=2&extra=3").json()
+    assert 2 < len(more["candidates"]) <= 5
+    assert [x["tier"] for x in more["candidates"]][2:] == [""] * (
+        len(more["candidates"]) - 2)
 
 
 def test_measured_kv_outranks_a_guess(monkeypatch):
@@ -488,7 +506,8 @@ def test_ktransformers_cells_get_their_own_defaults():
     from simulator.roofline import cell_overrides, engine_defaults
 
     assert engine_defaults("ktransformers") == {"replicas": 1,
-                                                "kv_cache_dtype": "auto"}
+                                                "kv_cache_dtype": "auto",
+                                                "max_model_len": 4096}
     assert engine_defaults("trtllm") == {}
     plan = cells(["m"], ["ktransformers", "trtllm"],
                  {"max_num_seqs": [1024, 2048], "output_tokens": [128]},
@@ -638,3 +657,339 @@ def test_start_without_a_template_defaults_engine_and_model(tmp_path, monkeypatc
     assert captured[0]["engines"] == ["vllm_cuda_multi", "trtllm"]
     assert captured[0]["resume"] is False
     assert "model_id" not in captured[0]["engine_shape"]
+
+
+# ── Spectrum: fastest, largest the GPUs hold, beyond VRAM ─────────────
+
+# VENDORS plus the two ends of the spectrum: a 322 GB model that needs
+# four cards, and a 700 GB one no card set holds but KTransformers can
+# serve from RAM because a GGUF companion is catalogued.
+SPECTRUM = VENDORS + [
+    # Ranked below GLM-4.7 (more parameters, no better precision) so
+    # the GLM vendor's FAST pick is settled and this one is free for
+    # the LARGE tier.
+    {"id": "zai-org/GLM-5.3-Flash", "family": "glm-5.3-flash", "series": "GLM-5",
+     "quant": "fp8", "params_b": 744.0, "moe": True, "approx_size_gb": 322,
+     "min_vram_gb": 350},
+    {"id": "deepseek-ai/DeepSeek-V4", "family": "deepseek-v4",
+     "series": "DeepSeek V4", "quant": "fp8", "params_b": 1000.0, "moe": True,
+     "approx_size_gb": 700, "min_vram_gb": 5000,
+     "gguf": {"repo": "u/DeepSeek-V4-GGUF", "file": "q4.gguf", "size_gb": 380}},
+    {"id": "org/huge-no-gguf", "family": "huge", "series": "Huge",
+     "quant": "fp8", "params_b": 1200.0, "moe": True, "approx_size_gb": 900,
+     "min_vram_gb": 5000},
+]
+
+
+def test_candidates_know_how_they_fit():
+    by = {c.id: c for c in score_models(SPECTRUM, vram_per_gpu_gb=96,
+                                        host_ram_gb=2048)}
+    small = by["Qwen/Qwen3-30B-A3B-FP8"]
+    assert small.fits_gpu and small.tp == 1 and small.replicas == 8
+    big = by["zai-org/GLM-5.3-Flash"]
+    assert big.fits_gpu and big.tp == 4 and big.replicas == 2
+    beyond = by["deepseek-ai/DeepSeek-V4"]
+    assert not beyond.fits_gpu and beyond.tp is None
+    assert beyond.kt_eligible and beyond.fits_ram and beyond.fits
+    assert beyond.score == 0.0 and "KTransformers" in beyond.why
+    nope = by["org/huge-no-gguf"]
+    assert not nope.kt_eligible and not nope.fits
+    assert "no GGUF" in nope.why
+
+
+def test_ram_budget_decides_beyond_vram():
+    """700 GB of weights fit 85% of 2 TB but not of 512 GB; and with
+    no RAM figure at all nothing is beyond VRAM, only beyond reach."""
+    def dsv4(**kw):
+        return {c.id: c for c in score_models(SPECTRUM, vram_per_gpu_gb=96,
+                                              **kw)}["deepseek-ai/DeepSeek-V4"]
+    assert dsv4(host_ram_gb=2048).fits_ram
+    assert not dsv4(host_ram_gb=512).fits_ram
+    assert "exceed 85%" in dsv4(host_ram_gb=512).why
+    assert not dsv4().fits and "RAM is unknown" in dsv4().why
+
+
+def test_spectrum_pick_fills_three_tiers():
+    picks = pick_models(SPECTRUM, vram_per_gpu_gb=96, host_ram_gb=2048,
+                        limit=8, large_limit=2, beyond_limit=1)
+    tiers = {c.id: c.tier for c in picks}
+    assert tiers["deepseek-ai/DeepSeek-V4"] == "beyond_vram"
+    assert "org/huge-no-gguf" not in tiers
+    # The largest the GPUs hold that FAST did not already take, one
+    # per vendor first: the 322 GB GLM-5.3 (the 360 GB GLM-4.7 is the
+    # vendor's FAST pick), then another vendor's largest.
+    large = [c for c in picks if c.tier == "large"]
+    assert [c.id for c in large][0] == "zai-org/GLM-5.3-Flash"
+    assert large[0].tp == 4 and large[0].replicas == 2
+    assert len({vendor_of(c.series) for c in large}) == 2
+    fast = [c for c in picks if c.tier == "fast"]
+    # FAST stays vendor-diverse: 8 - 2 - 1 = 5 slots over the four
+    # vendors that fit the GPUs, so one vendor gets a second pick.
+    assert len(fast) == 5
+    assert len({vendor_of(c.series) for c in fast}) == 4
+    assert sorted(c.pick_round for c in fast) == [1, 1, 1, 1, 2]
+    assert "zai-org/GLM-4.7-FP8" in {c.id for c in fast}
+    # The order is fast, large, beyond -- the tiers are labelled.
+    assert [c.tier for c in picks] == ["fast"] * 5 + ["large"] * 2 + ["beyond_vram"]
+    dsv4 = picks[-1]
+    assert dsv4.why == ("beyond VRAM — KTransformers only, 700 GB of weights "
+                        "in 2.048 TB of RAM")
+    assert large[0].why.startswith("largest that fits the GPUs: 322 GB at tp4")
+    big = large[1]
+    assert big.why.startswith(f"largest that fits the GPUs: {big.size_gb} GB "
+                              f"at tp{big.tp}")
+
+
+def test_large_tier_reports_tp_and_replicas():
+    picks = pick_models(SPECTRUM, vram_per_gpu_gb=96, host_ram_gb=2048,
+                        limit=6, large_limit=1, beyond_limit=1)
+    assert [c.tier for c in picks] == ["fast"] * 4 + ["large", "beyond_vram"]
+    glm = picks[4]
+    assert glm.id == "zai-org/GLM-5.3-Flash"
+    assert glm.tp == 4 and glm.replicas == 2
+    assert "322 GB at tp4" in glm.why
+
+
+def test_without_ram_the_beyond_tier_is_empty_and_fast_takes_the_slot():
+    picks = pick_models(SPECTRUM, vram_per_gpu_gb=96, limit=8,
+                        large_limit=2, beyond_limit=1)
+    assert "deepseek-ai/DeepSeek-V4" not in {c.id for c in picks}
+    assert len(picks) == 8
+    assert sum(c.tier == "fast" for c in picks) == 6
+    # The top-up continues the round-robin rather than restarting it:
+    # a vendor's second pick says so.
+    assert any(c.pick_round == 2 for c in picks if c.tier == "fast")
+
+
+def test_spectrum_false_is_the_fast_tier_alone():
+    picks = pick_models(SPECTRUM, vram_per_gpu_gb=96, host_ram_gb=2048,
+                        limit=8, spectrum=False)
+    assert all(c.tier == "fast" for c in picks)
+    assert "deepseek-ai/DeepSeek-V4" not in {c.id for c in picks}
+
+
+def test_cells_choose_engines_per_model():
+    """GPU engines only where the weights fit the cards; KTransformers
+    only where a GGUF companion exists; a beyond-VRAM model gets
+    KTransformers cells alone; a model needing four cards launches at
+    tp4 x 2 replicas rather than the tp1 x 8 default."""
+    from simulator.roofline import KT_MAX_MODEL_LEN
+    picks = pick_models(SPECTRUM, vram_per_gpu_gb=96, host_ram_gb=2048,
+                        limit=8, large_limit=2, beyond_limit=1)
+    info = {c.id: c.info() for c in picks}
+    notes: list[str] = []
+    plan = cells([c.id for c in picks], ["vllm_cuda_multi", "ktransformers"],
+                 {"max_num_seqs": [1024], "output_tokens": [128]},
+                 engine_shape={"replicas": 8, "tp": 1, "kv_cache_dtype": "fp8"},
+                 model_info=info, notes=notes)
+    by = {}
+    for c in plan:
+        by.setdefault(c["model"], {}).setdefault(c["engine"], []).append(c)
+    dsv4 = by["deepseek-ai/DeepSeek-V4"]
+    assert set(dsv4) == {"ktransformers"}
+    kt = dsv4["ktransformers"][0]
+    assert kt["replicas"] == 1 and kt["max_model_len"] == KT_MAX_MODEL_LEN
+    assert kt["max_num_seqs"] == 4
+    assert "tp" not in kt or kt["tp"] == 1
+    # A GPU-only model without a companion: no KTransformers cell, and
+    # the plan says why.
+    gpt = by["openai/gpt-oss-120b"]
+    assert set(gpt) == {"vllm_cuda_multi"}
+    assert any("gpt-oss-120b" in n and "no GGUF companion" in n for n in notes)
+    assert any("DeepSeek-V4: no vllm_cuda_multi cells" in n for n in notes)
+    # The 322 GB GLM needs four cards: tp4, two replicas, in the key.
+    glm = by["zai-org/GLM-5.3-Flash"]["vllm_cuda_multi"][0]
+    assert glm["tp"] == 4 and glm["replicas"] == 2
+    assert "tp=4" in cell_key(glm) and "replicas=2" in cell_key(glm)
+    from simulator.roofline import cell_overrides
+    assert cell_overrides(glm)["tp"] == 4
+    # And the 360 GB one needs every card: tp8, one replica.
+    glm47 = by["zai-org/GLM-4.7-FP8"]["vllm_cuda_multi"][0]
+    assert glm47["tp"] == 8 and glm47["replicas"] == 1
+    # A one-card model keeps the shared shape.
+    small = by["Qwen/Qwen3-30B-A3B-FP8"]["vllm_cuda_multi"][0]
+    assert small["tp"] == 1 and small["replicas"] == 8
+    # Without model_info the old behaviour holds: every engine.
+    old = cells(["x"], ["vllm_cuda_multi", "ktransformers"],
+                {"max_num_seqs": [1024], "output_tokens": [128]})
+    assert {c["engine"] for c in old} == {"vllm_cuda_multi", "ktransformers"}
+
+
+def test_a_tp8_model_gets_one_replica():
+    from simulator.roofline import tp_for
+    assert tp_for(730, 96) == 8
+    assert tp_for(350, 96) == 4
+    assert tp_for(97, 96) == 2
+    assert tp_for(96, 96) == 1
+    assert tp_for(800, 96) is None
+    by = {c.id: c for c in score_models(
+        [{"id": "o/tp8", "approx_size_gb": 687, "min_vram_gb": 730}],
+        vram_per_gpu_gb=96)}
+    assert by["o/tp8"].tp == 8 and by["o/tp8"].replicas == 1
+
+
+def test_summary_names_fastest_and_largest_and_draws_the_spectrum():
+    info = {
+        "o/small": {"tier": "fast", "approx_size_gb": 30, "params_b": 30,
+                    "vendor": "O"},
+        "o/big": {"tier": "large", "approx_size_gb": 322, "params_b": 355,
+                  "vendor": "O"},
+        "o/beyond": {"tier": "beyond_vram", "approx_size_gb": 700,
+                     "params_b": 1000, "vendor": "O"},
+        "o/pending": {"tier": "fast", "approx_size_gb": 60, "params_b": 60,
+                      "vendor": "O"},
+    }
+    rows = [
+        {"model": "o/small", "engine": "vllm", "out_tok_s": 5000.0,
+         "total_tok_s": 9000.0, "concurrency": 2048, "kv_cache_tokens": 1e6,
+         "ttft_p95_ms": 900.0, "steady_state": True},
+        {"model": "o/small", "engine": "trt", "out_tok_s": 5200.0,
+         "total_tok_s": 8000.0, "steady_state": True},
+        {"model": "o/big", "engine": "vllm", "out_tok_s": 800.0,
+         "total_tok_s": 1500.0, "steady_state": True},
+        {"model": "o/beyond", "engine": "ktransformers",
+         "error": "RuntimeError: boom"},
+    ]
+    s = summarize(rows, model_info=info,
+                  models=["o/small", "o/big", "o/beyond", "o/pending"])
+    # Fastest is by TOTAL tok/s (the vllm cell), while ``best`` keeps
+    # its output-rate meaning (the trt cell).
+    assert s["fastest"]["engine"] == "vllm"
+    assert s["best"]["engine"] == "trt"
+    assert s["largest_served"]["model"] == "o/big"
+    assert s["largest_served"]["best_engine"] == "vllm"
+    assert s["largest_served"]["total_tok_s"] == 1500.0
+    assert s["largest_attempted"]["model"] == "o/beyond"
+    assert s["largest_attempted"]["status"] == "failed"
+    spec = s["spectrum"]
+    assert [r["model"] for r in spec] == ["o/small", "o/pending", "o/big",
+                                          "o/beyond"]
+    assert [r["status"] for r in spec] == ["served", "pending", "served",
+                                           "failed"]
+    small = spec[0]
+    assert small["tier"] == "fast" and small["best_engine"] == "vllm"
+    assert small["total_tok_s"] == 9000.0 and small["concurrency"] == 2048
+    assert small["kv_capacity_tokens"] == 1e6 and small["ttft_p95_ms"] == 900.0
+    assert {"model", "vendor", "params_b", "approx_size_gb", "tier",
+            "best_engine", "out_tok_s", "total_tok_s", "concurrency",
+            "kv_capacity_tokens", "ttft_p95_ms", "status"} == set(small)
+    # A model that could not be staged says so.
+    s2 = summarize(rows, model_info=info, models=["o/pending"],
+                   staging={"o/pending": "unavailable"})
+    assert next(r for r in s2["spectrum"] if r["model"] == "o/pending"
+                )["status"] == "unavailable"
+    # Without a plan record the spectrum still lists what was measured.
+    bare = summarize(rows)
+    assert {r["model"] for r in bare["spectrum"]} == {"o/small", "o/big",
+                                                       "o/beyond"}
+    assert bare["largest_served"]["model"] in ("o/small", "o/big")
+
+
+def test_state_carries_the_plan_record_into_the_summary(tmp_path):
+    st = State(plan={"models": ["a", "b"], "engines": ["e"],
+                     "model_info": {"a": {"tier": "fast", "approx_size_gb": 10},
+                                    "b": {"tier": "large",
+                                          "approx_size_gb": 300}},
+                     "notes": ["b: no ktransformers cells — no GGUF companion "
+                               "staged"]},
+               models=[{"id": "a", "status": "cached"},
+                       {"id": "b", "status": "unavailable"}],
+               results=[{"model": "a", "engine": "e", "max_num_seqs": 1,
+                         "output_tokens": 8, "out_tok_s": 10.0,
+                         "total_tok_s": 20.0}])
+    save_state(tmp_path / "r.json", st)
+    d = json.loads((tmp_path / "r.json").read_text())
+    assert d["summary"]["fastest"]["model"] == "a"
+    assert d["summary"]["largest_served"]["model"] == "a"
+    assert [r["status"] for r in d["summary"]["spectrum"]] == [
+        "served", "unavailable"]
+    assert d["plan"]["notes"]
+
+
+def test_roofline_state_endpoint_carries_the_spectrum_fields():
+    from fastapi.testclient import TestClient
+
+    from simulator.service import create_app
+
+    d = TestClient(create_app()).get("/api/roofline").json()
+    assert d["status"] == "none"
+    for k in ("fastest", "largest_served", "largest_attempted"):
+        assert d["summary"][k] is None
+    assert d["summary"]["spectrum"] == []
+
+
+def test_roofline_request_defaults_to_the_spectrum():
+    from simulator.service.schemas import RooflineRequest
+    r = RooflineRequest()
+    assert (r.model_limit, r.large_limit, r.beyond_limit) == (8, 3, 2)
+    assert r.spectrum is True and r.diverse is True
+
+
+def test_plan_carries_model_info_and_picks_engines(tmp_path, monkeypatch):
+    """The auto plan hands run_roofline the per-model record (tier,
+    fits_gpu, kt_eligible, tp) it needs to choose engines, and the
+    beyond-VRAM tier is only requested when KTransformers is among the
+    engines that will run."""
+    from fastapi.testclient import TestClient
+
+    import simulator.arena as arena
+    import simulator.engine_runtimes as runtimes
+    import simulator.model_catalog as mc
+    import simulator.roofline as rf
+    from simulator.service import create_app
+
+    monkeypatch.setattr(arena, "hardware", lambda: {
+        "count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+        "vram_per_gpu_gb": 96.0, "host_ram_gb": 2048.0})
+    monkeypatch.setattr(runtimes, "available_engines",
+                        lambda: ["vllm_cuda_multi", "ktransformers"])
+    monkeypatch.setattr(mc, "load_model_catalog", lambda: SPECTRUM)
+    captured: list[dict] = []
+
+    async def fake_run_roofline(**kw):
+        captured.append(kw)
+        return tmp_path / "roofline.json"
+    monkeypatch.setattr(rf, "run_roofline", fake_run_roofline)
+
+    body = {"workload": {"kind": "roofline",
+                         "spec": {"models": None, "engines": None,
+                                  "model_limit": 8, "large_limit": 2,
+                                  "beyond_limit": 1,
+                                  "max_num_seqs": [1024], "output_tokens": [128],
+                                  "input_tokens": 128}},
+            "new_run": True}
+    with TestClient(create_app(tmp_path / "runs")) as c:
+        r = c.post("/api/runs", json=body)
+        assert r.status_code == 202, r.text
+        import time
+        for _ in range(50):
+            if captured:
+                break
+            time.sleep(0.05)
+        c.post("/api/runs/stop")
+    assert captured, "run_roofline was never reached"
+    kw = captured[0]
+    info = kw["model_info"]
+    assert set(info) == set(kw["models"])
+    assert info["deepseek-ai/DeepSeek-V4"]["tier"] == "beyond_vram"
+    assert info["deepseek-ai/DeepSeek-V4"]["fits_gpu"] is False
+    assert info["zai-org/GLM-5.3-Flash"]["tp"] == 4
+    assert info["zai-org/GLM-5.3-Flash"]["tier"] == "large"
+    # The shared shape stays tp1 x 8 even though the pre-flight had to
+    # validate a tp4 model.
+    assert kw["engine_shape"]["tp"] == 1 and kw["engine_shape"]["replicas"] == 8
+
+    # Without KTransformers in the run, nothing beyond VRAM is picked.
+    captured.clear()
+    body["workload"]["spec"]["engines"] = ["vllm_cuda_multi"]
+    with TestClient(create_app(tmp_path / "runs2")) as c:
+        assert c.post("/api/runs", json=body).status_code == 202
+        import time
+        for _ in range(50):
+            if captured:
+                break
+            time.sleep(0.05)
+        c.post("/api/runs/stop")
+    assert captured
+    assert "deepseek-ai/DeepSeek-V4" not in captured[0]["models"]
+    assert all(v["fits_gpu"] for v in captured[0]["model_info"].values())

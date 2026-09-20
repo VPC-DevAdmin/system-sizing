@@ -313,3 +313,37 @@ def test_example_config_is_shipped_and_real_one_is_not() -> None:
     assert arena_mod.ARENA_CONFIG == Path("config/arena.yaml")
     doc = yaml.safe_load((root / "config" / "arena.example.yaml").read_text())
     assert doc["device_groups"] == [[0, 1, 2, 3], [4, 5, 6, 7]]
+
+
+def test_hardware_reports_host_ram_for_the_ktransformers_budget(
+        monkeypatch, tmp_path) -> None:
+    """host_ram_gb comes from /proc/meminfo on Linux, from arena.yaml
+    when a laptop describes the box, and is None otherwise -- the
+    roofline treats None as 'nothing is beyond VRAM here'."""
+    monkeypatch.setattr(arena_mod, "ARENA_CONFIG", tmp_path / "absent.yaml")
+    monkeypatch.setattr(arena_mod, "detect_gpus", lambda: [96.0] * 8)
+    monkeypatch.setattr(arena_mod, "detect_host_ram", lambda: 2015.6)
+    assert arena_mod.hardware()["host_ram_gb"] == 2015.6
+    monkeypatch.setattr(arena_mod, "detect_host_ram", lambda: None)
+    assert arena_mod.hardware()["host_ram_gb"] is None
+    cfg = tmp_path / "arena.yaml"
+    cfg.write_text("host_ram_gb: 2048\n")
+    monkeypatch.setattr(arena_mod, "ARENA_CONFIG", cfg)
+    assert arena_mod.hardware()["host_ram_gb"] == 2048.0
+
+
+def test_detect_host_ram_parses_meminfo(monkeypatch, tmp_path) -> None:
+    import builtins
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:       2113929216 kB\nMemFree: 1 kB\n")
+    real_open = builtins.open
+
+    def fake_open(path, *a, **kw):
+        if str(path) == "/proc/meminfo":
+            return real_open(meminfo, *a, **kw)
+        return real_open(path, *a, **kw)
+    monkeypatch.setattr(builtins, "open", fake_open)
+    assert arena_mod.detect_host_ram() == 2016.0
+    monkeypatch.setattr(builtins, "open", lambda *a, **kw: (_ for _ in ()).throw(
+        FileNotFoundError()))
+    assert arena_mod.detect_host_ram() is None

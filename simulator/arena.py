@@ -85,6 +85,24 @@ def detect_gpus() -> list[float]:
     return out
 
 
+def detect_host_ram() -> Optional[float]:
+    """Host RAM in GB from /proc/meminfo MemTotal; None off-Linux.
+
+    This is the KTransformers budget: a model whose weights exceed
+    every card on the box can still be served when its experts fit in
+    RAM next to the GPUs, so the roofline needs the number to know
+    which models are beyond VRAM rather than beyond the box."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    kb = int(line.split()[1])
+                    return round(kb / 1024 / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
 def _arena_config() -> dict:
     if ARENA_CONFIG.exists():
         try:
@@ -95,8 +113,8 @@ def _arena_config() -> dict:
 
 
 def hardware() -> dict:
-    """{count, vram_per_gpu_gb, device_groups, detected_count, source}
-    — detected, with config/arena.yaml (when present) able to pin
+    """{count, vram_per_gpu_gb, host_ram_gb, device_groups,
+    detected_count, source} — detected, with config/arena.yaml (when present) able to pin
     device_groups (PCIe/NUMA domains aren't reliably auto-detectable).
 
     Config wins on SHAPE: containerized nvidia-smi sometimes sees a
@@ -119,10 +137,16 @@ def hardware() -> dict:
         groups = [list(range(count))] if count else []
         source = "detected"
     vram = min(vrams) if vrams else cfg.get("vram_per_gpu_gb")
+    # Host RAM: detected on Linux, else whatever arena.yaml pins
+    # (a laptop describing the XE7740), else unknown.
+    ram = detect_host_ram()
+    if ram is None and cfg.get("host_ram_gb"):
+        ram = float(cfg["host_ram_gb"])
     return {
         "count": count,
         "detected_count": detected,
         "vram_per_gpu_gb": float(vram) if vram else None,
+        "host_ram_gb": ram,
         "device_groups": groups,
         "source": source,
     }

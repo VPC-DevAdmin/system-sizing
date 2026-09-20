@@ -90,11 +90,17 @@ class RooflineRequest(BaseModel):
     """Autopilot: stage models, search engines x shapes, confirm, report."""
     # Explicit model list, or None to let the ranker choose.
     models: Optional[list[str]] = None
-    # How many the ranker picks. Five, because the pick is diverse:
-    # one model per vendor line (Qwen3, gpt-oss, GLM, Llama...) in
-    # score order before any line gets a second, so the roofline
-    # spans vendors instead of three quantisations of one favourite.
-    model_limit: int = 5
+    # How many the ranker picks, across three tiers: FAST (one model
+    # per vendor line -- Qwen3, gpt-oss, GLM, Llama... -- in score
+    # order before any line gets a second), LARGE (the biggest models
+    # the GPUs hold, up to large_limit) and BEYOND_VRAM (models only
+    # KTransformers can serve from host RAM, up to beyond_limit). The
+    # fast tier takes what the other two leave. Eight = 3 + 3 + 2.
+    model_limit: int = 8
+    large_limit: int = 3
+    beyond_limit: int = 2
+    # false = the FAST tier alone (the pre-spectrum roofline).
+    spectrum: bool = True
     # false = the pure KV-cost ranking, precision twins and all.
     diverse: bool = True
     cached_only: bool = False

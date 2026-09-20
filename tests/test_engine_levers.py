@@ -97,6 +97,18 @@ def test_every_staged_engine_has_a_narrative():
         assert ENGINE_NOTES.get(engine), engine
 
 
+def test_trtllm_narrative_agrees_with_the_lever_evidence():
+    """Commit 7a86433 corrected the lever: naming CUTLASS does NOT
+    avoid DeepGEMM (tested, not assumed). The engine card kept saying
+    the opposite."""
+    note = ENGINE_NOTES["trtllm"]
+    assert "needs the CUTLASS backend named" not in note
+    assert "DeepGEMM" in note
+    assert "does NOT change" in note
+    lever = next(lv for lv in LEVERS if lv.key == "trtllm_moe_backend")
+    assert lever.verdict == "harm"
+
+
 def test_api_view_is_serialisable():
     rows = as_dicts()
     assert rows and all(isinstance(r["values"], list) for r in rows)

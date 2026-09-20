@@ -159,11 +159,15 @@ ENGINE_NOTES: dict[str, str] = {
         "are usually quoted on. Its stock configuration is already "
         "close to right for a large model: every top-level lever tried "
         "here made it slower, twice by more than half, and on the "
-        "dense Llama-70B it landed ~12% behind vLLM. MoE needs the "
-        "CUTLASS backend named explicitly, or it routes through a "
-        "Hopper-only kernel and will not start at all; and a model "
-        "newer than the container's Transformers is simply unknown to "
-        "it, which is a staleness problem rather than a hardware one.",
+        "dense Llama-70B it landed ~12% behind vLLM. FP8 block-scale "
+        "MoE is unserviceable on this hardware with release 1.2.1: it "
+        "routes through DeepGEMM, which refuses anything but Hopper, "
+        "and naming the CUTLASS backend does NOT change the selection "
+        "— that was tested, not assumed (the options document carried "
+        "it, the log named CUTLASS 232 times, DeepGEMM fired anyway). "
+        "A model newer than the container's Transformers is simply "
+        "unknown to it, which is a staleness problem rather than a "
+        "hardware one.",
     "sglang_cuda":
         "RadixAttention prefix caching and an aggressive scheduler. "
         "Competitive at moderate concurrency — it beat vLLM at 4,096 "

@@ -87,7 +87,13 @@ class RooflineRequest(BaseModel):
     """Autopilot: stage models, search engines x shapes, confirm, report."""
     # Explicit model list, or None to let the ranker choose.
     models: Optional[list[str]] = None
-    model_limit: int = 3
+    # How many the ranker picks. Five, because the pick is diverse:
+    # one model per vendor line (Qwen3, gpt-oss, GLM, Llama...) in
+    # score order before any line gets a second, so the roofline
+    # spans vendors instead of three quantisations of one favourite.
+    model_limit: int = 5
+    # false = the pure KV-cost ranking, precision twins and all.
+    diverse: bool = True
     cached_only: bool = False
     engines: Optional[list[str]] = None      # None = every staged engine
     max_num_seqs: Optional[list[int]] = None

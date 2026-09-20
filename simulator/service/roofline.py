@@ -39,17 +39,32 @@ async def roofline_state(request: Request) -> dict:
 
 
 @router.get("/api/roofline/candidates")
-async def roofline_candidates(limit: int = 12) -> dict:
-    """The ranked model shortlist, with the reasoning shown."""
+async def roofline_candidates(limit: int = 12, diverse: bool = True,
+                              cached_only: bool = False) -> dict:
+    """The model shortlist in PICK ORDER, with the reasoning shown.
+
+    The Roofline tab's auto mode plans the first N of this list, so
+    it has to be the same list ``pick_models`` would run -- with
+    ``diverse`` (the default) that is a series round-robin, and each
+    candidate carries ``series``, ``family`` and the ``pick_round``
+    that chose it. Models that do not fit the box are appended after
+    the picks so the table can still show, greyed, why they are out.
+    """
     from dataclasses import asdict as _asdict
 
     from ..arena import hardware
     from ..model_catalog import load_model_catalog
-    from ..roofline import score_models
+    from ..roofline import pick_models, score_models
 
     hw = await asyncio.to_thread(hardware)
     cat = await asyncio.to_thread(load_model_catalog)
-    ranked = await asyncio.to_thread(
-        score_models, cat, vram_per_gpu_gb=hw.get("vram_per_gpu_gb"))
-    return {"hardware": hw,
-            "candidates": [_asdict(c) for c in ranked[:max(1, limit)]]}
+    vram = hw.get("vram_per_gpu_gb")
+    limit = max(1, limit)
+    picked = await asyncio.to_thread(
+        pick_models, cat, vram_per_gpu_gb=vram, limit=limit, diverse=diverse,
+        cached_only=cached_only)
+    chosen = {c.id for c in picked}
+    rest = [c for c in await asyncio.to_thread(
+        score_models, cat, vram_per_gpu_gb=vram) if c.id not in chosen]
+    return {"hardware": hw, "diverse": diverse, "cached_only": cached_only,
+            "candidates": [_asdict(c) for c in (picked + rest)[:limit]]}

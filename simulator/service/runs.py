@@ -292,8 +292,9 @@ async def _plan_roofline(spec: dict) -> tuple[list[str], list[str]]:
         picked = await asyncio.to_thread(
             pick_models, cat,
             vram_per_gpu_gb=hw.get("vram_per_gpu_gb"),
-            limit=int(spec.get("model_limit") or 3),
-            cached_only=bool(spec.get("cached_only")))
+            limit=int(spec.get("model_limit") or 5),
+            cached_only=bool(spec.get("cached_only")),
+            diverse=bool(spec.get("diverse", True)))
         models = [c.id for c in picked]
     if not models:
         raise HTTPException(422, "no model fits this host")

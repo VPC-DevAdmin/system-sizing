@@ -95,6 +95,13 @@ class Candidate:
     """One model, scored for its roofline potential."""
     id: str
     quant: str = ""
+    # ``family`` groups the precision variants of one set of weights
+    # (qwen3-30b-a3b); ``series`` is the vendor line those weights
+    # belong to (Qwen3, gpt-oss, GLM-4.7). Diverse picking round-robins
+    # over series so a shortlist spans vendors instead of being three
+    # quantisations of the one model the ranker likes best.
+    family: str = ""
+    series: str = ""
     params_b: Optional[float] = None
     active_b: Optional[float] = None
     moe: bool = False
@@ -105,6 +112,9 @@ class Candidate:
     score: float = 0.0
     measured_kv: bool = False
     why: str = ""
+    # Which pass of the series round-robin chose it (1 = best of its
+    # series); 0 when it was not picked, or picking was not diverse.
+    pick_round: int = 0
 
 
 def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
@@ -121,12 +131,14 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
     This is a PREDICTION and is labelled as one. It orders the search;
     it does not decide the answer.
     """
+    from .model_catalog import infer_family
+    from .models import model_status
+
     out: list[Candidate] = []
     for e in catalog:
         mid = str(e.get("id") or "")
         if not mid:
             continue
-        from .models import model_status
         st = model_status(mid, cache) if cache else model_status(mid)
         size = e.get("approx_size_gb")
         need = e.get("min_vram_gb") or size
@@ -136,8 +148,11 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             # card can still run at tp>1, so this only excludes what
             # will not fit the box at all.
             fits = float(need) <= float(vram_per_gpu_gb) * 8
+        family = str(e.get("family") or infer_family(mid))
         c = Candidate(
             id=mid, quant=str(e.get("quant") or ""),
+            family=family,
+            series=str(e.get("series") or family.split("-")[0]),
             params_b=e.get("params_b"), moe=bool(e.get("moe")),
             size_gb=size, cached=bool(st.get("cached")),
             kv_bytes=kv_bytes_per_token(mid, cache), fits=fits,
@@ -182,14 +197,74 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
     return sorted(out, key=lambda x: (not x.measured_kv, -x.score))
 
 
+_ROUND_WORDS = {1: "best of", 2: "second pick from", 3: "third pick from",
+                4: "fourth pick from", 5: "fifth pick from"}
+
+
+def _round_label(n: int, series: str) -> str:
+    word = _ROUND_WORDS.get(n, f"pick {n} from")
+    return f"{word} the {series} line" if n == 1 else f"{word} {series}"
+
+
 def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
-                limit: int = 3, cached_only: bool = False,
-                cache: Path | None = None) -> list[Candidate]:
+                limit: int = 5, cached_only: bool = False,
+                cache: Path | None = None,
+                diverse: bool = True) -> list[Candidate]:
+    """The shortlist a roofline runs when the operator names no model.
+
+    ``diverse`` (the default) round-robins over ``series``: the best
+    candidate of every series in score order, then every series'
+    second-best, and so on until ``limit``. The pure ranking had a
+    failure mode the XE7740 hit on its first run: three quantisations
+    of Qwen filled the shortlist and the roofline never looked at
+    gpt-oss, GLM, Llama or the rest. A roofline is a search over what
+    the box can do, and a search that only ever tries one vendor's
+    weights has not searched.
+
+    Within a series a different ``family`` (different weights) is
+    taken before a second precision variant of weights already on
+    the list -- the FP8 twin of a model already measured teaches
+    less than a model nobody measured. "Measured beats estimated"
+    stays the primary sort inside every series, and orders the
+    series themselves in the first round.
+
+    ``diverse=False`` is the old behaviour: the top ``limit`` of the
+    global ranking, precision twins and all.
+    """
     ranked = [c for c in score_models(
         catalog, vram_per_gpu_gb=vram_per_gpu_gb, cache=cache) if c.fits]
     if cached_only:
         ranked = [c for c in ranked if c.cached]
-    return ranked[:max(1, limit)]
+    limit = max(1, limit)
+    if not diverse:
+        return ranked[:limit]
+
+    # Series in order of their best candidate; score_models already
+    # sorted with measured-first, so first-seen order is that order.
+    by_series: dict[str, list[Candidate]] = {}
+    for c in ranked:
+        by_series.setdefault(c.series or c.family or c.id, []).append(c)
+
+    picks: list[Candidate] = []
+    rnd = 0
+    while len(picks) < limit and any(by_series.values()):
+        rnd += 1
+        for series, pool in by_series.items():
+            if not pool:
+                continue
+            if len(picks) >= limit:
+                break
+            taken_families = {p.family for p in picks if p.series == series}
+            fresh = [c for c in pool if c.family not in taken_families]
+            choice = fresh[0] if fresh else pool[0]
+            pool.remove(choice)
+            choice.pick_round = rnd
+            note = _round_label(rnd, series)
+            if not fresh:
+                note += f" (another precision of {choice.family})"
+            choice.why = f"{note}; {choice.why}" if choice.why else note
+            picks.append(choice)
+    return picks
 
 
 # ── Plan ──────────────────────────────────────────────────────────────

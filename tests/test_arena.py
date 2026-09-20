@@ -265,3 +265,51 @@ def test_summarize_carries_recommendation_tiers(xe7740) -> None:
     assert names == ["screening", "recommended", "thorough"]
     assert all(t["hours"] > 0 for t in rec["tiers"])
     assert rec["tiers"][0]["budget"] < rec["tiers"][2]["budget"]
+
+
+def test_hardware_flags_config_claiming_more_gpus_than_detected(
+        monkeypatch, tmp_path) -> None:
+    """A copied arena.yaml on a smaller (or GPU-less) host keeps its
+    shape but must say so: source carries the detected count and
+    detected_count is what nvidia-smi actually saw."""
+    cfg = tmp_path / "arena.yaml"
+    cfg.write_text("device_groups: [[0, 1, 2, 3], [4, 5, 6, 7]]\n")
+    monkeypatch.setattr(arena_mod, "ARENA_CONFIG", cfg)
+
+    monkeypatch.setattr(arena_mod, "detect_gpus", lambda: [])
+    hw = arena_mod.hardware()
+    assert hw["count"] == 8 and hw["detected_count"] == 0
+    assert hw["source"] == "config (unverified: detected 0)"
+
+    monkeypatch.setattr(arena_mod, "detect_gpus", lambda: [96.0] * 4)
+    hw = arena_mod.hardware()
+    assert hw["source"] == "config (unverified: detected 4)"
+
+    monkeypatch.setattr(arena_mod, "detect_gpus", lambda: [96.0] * 8)
+    assert arena_mod.hardware()["source"] == "config"
+
+
+def test_hardware_without_config_is_detection_only(
+        monkeypatch, tmp_path) -> None:
+    """No config/arena.yaml (the shipped state — only the .example is
+    committed): detection alone decides, so a laptop reports 0 GPUs."""
+    monkeypatch.setattr(arena_mod, "ARENA_CONFIG", tmp_path / "absent.yaml")
+    monkeypatch.setattr(arena_mod, "detect_gpus", lambda: [])
+    hw = arena_mod.hardware()
+    assert hw["count"] == 0 and hw["device_groups"] == []
+    assert hw["source"] == "detected"
+    monkeypatch.setattr(arena_mod, "detect_gpus", lambda: [48.0, 48.0])
+    hw = arena_mod.hardware()
+    assert hw["count"] == 2 and hw["device_groups"] == [[0, 1]]
+    assert hw["vram_per_gpu_gb"] == 48.0
+
+
+def test_example_config_is_shipped_and_real_one_is_not() -> None:
+    """The XE7740 map ships as the example only; the loader's path is
+    the per-host file that the operator copies into place."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    assert (root / "config" / "arena.example.yaml").exists()
+    assert arena_mod.ARENA_CONFIG == Path("config/arena.yaml")
+    doc = yaml.safe_load((root / "config" / "arena.example.yaml").read_text())
+    assert doc["device_groups"] == [[0, 1, 2, 3], [4, 5, 6, 7]]

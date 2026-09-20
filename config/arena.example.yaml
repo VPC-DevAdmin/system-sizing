@@ -1,11 +1,24 @@
-# Arena hardware hints — the one thing detection can't do reliably:
-# which GPUs share a PCIe/NUMA domain. TP peers must stay inside one
-# domain (cross-domain all-reduce is never the answer), so the arena's
-# TP ceiling is the largest group listed here.
+# Arena hardware hints — EXAMPLE. Copy to config/arena.yaml to use:
 #
-# XE7740: nvidia-smi order 0-3 are PCI domain 0000, 4-7 are 0001.
-# Delete or edit this file for other hosts; without it, all detected
-# GPUs form a single group (TP up to the full count).
+#     cp config/arena.example.yaml config/arena.yaml
+#
+# config/arena.yaml is gitignored (it describes ONE host) and is read
+# only when present; without it every detected GPU forms a single
+# group (TP up to the full count).
+#
+# The one thing detection can't do reliably is say which GPUs share
+# a PCIe/NUMA domain. TP peers must stay inside one domain
+# (cross-domain all-reduce is never the answer), so the arena's TP
+# ceiling is the largest group listed here.
+#
+# The groups below are the XE7740's: nvidia-smi order 0-3 are PCI
+# domain 0000, 4-7 are 0001. Edit them for your host.
+#
+# When this file claims more GPUs than nvidia-smi reports, the arena
+# keeps the configured shape (containerized nvidia-smi sometimes sees
+# a subset) but flags it: hardware.source becomes
+# "config (unverified: detected N)" and the Optimize tab shows a
+# warning — a laptop with a copied arena.yaml must not claim 8 GPUs.
 
 device_groups: [[0, 1, 2, 3], [4, 5, 6, 7]]
 

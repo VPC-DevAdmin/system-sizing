@@ -98,15 +98,78 @@ Chart.register(zoneLinesPlugin);
 
 /* ── Tabs ─────────────────────────────────────────────────────── */
 
-for (const btn of document.querySelectorAll("#tabs button")) {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll("#tabs button").forEach(b => b.classList.remove("active"));
-    document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
-    btn.classList.add("active");
-    $(`#view-${btn.dataset.view}`).classList.add("active");
-    if (btn.dataset.view === "results") Results.onShow();
+const TABS = [...document.querySelectorAll('#tabs [role="tab"]')];
+const VIEWS = TABS.map(b => b.dataset.view);
+
+function currentView() {
+  return TABS.find(b => b.classList.contains("active"))?.dataset.view
+    ?? VIEWS[0];
+}
+
+/* Activate a view: class + ARIA state + URL hash, so a reload (or a
+ * pasted link) lands on the same tab. Modules hook the tab button's
+ * click event for their refreshes, which is why programmatic
+ * switches go through btn.click() rather than calling this. */
+function showView(name) {
+  const btn = TABS.find(b => b.dataset.view === name);
+  if (!btn) return;
+  for (const b of TABS) {
+    const on = b === btn;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+    b.tabIndex = on ? 0 : -1;          // roving tabindex: one tab stop
+  }
+  document.querySelectorAll(".view").forEach(v =>
+    v.classList.toggle("active", v.id === `view-${name}`));
+  if (location.hash !== `#${name}`) {
+    history.replaceState(null, "", `#${name}`);
+  }
+  if (name === "results") Results.onShow();
+}
+
+for (const btn of TABS) {
+  btn.addEventListener("click", () => showView(btn.dataset.view));
+}
+
+/* Arrow keys move between tabs (the WAI-ARIA tabs pattern, automatic
+ * activation); Home/End jump to the ends. */
+$("#tabs").addEventListener("keydown", (e) => {
+  const i = TABS.indexOf(document.activeElement);
+  if (i < 0) return;
+  const step = { ArrowRight: 1, ArrowLeft: -1, Home: -i,
+                 End: TABS.length - 1 - i }[e.key];
+  if (step == null) return;
+  e.preventDefault();
+  const next = TABS[(i + step + TABS.length) % TABS.length];
+  next.focus();
+  next.click();
+});
+
+/* Deep link + back/forward: #results opens Results. */
+function viewFromHash() {
+  const h = location.hash.replace(/^#/, "");
+  return VIEWS.includes(h) ? h : null;
+}
+window.addEventListener("hashchange", () => {
+  const v = viewFromHash();
+  if (v && v !== currentView()) TABS.find(b => b.dataset.view === v).click();
+});
+
+/* Enter/Space on a clickable non-button (run rows, filesystem chips,
+ * persona list items): the keyboard path buttons get for free. Keys
+ * pressed on a focusable CHILD (a row's checkbox) are left alone. */
+function keyActivate(el) {
+  el.setAttribute("role", "button");
+  el.tabIndex = 0;
+  el.addEventListener("keydown", (e) => {
+    if (e.target !== el) return;
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); el.click(); }
   });
 }
+
+/* The Workload picker's value for the mock profile: a self-test
+ * engine that needs no download and no GPU. */
+const MOCK_MODEL = "__mock__";
 
 /* ══ Run control ══════════════════════════════════════════════── */
 
@@ -146,8 +209,23 @@ const Control = {
     $("#stop-btn").addEventListener("click", () => this.stop());
     $("#runs-refresh").addEventListener("click", () => this.refreshRuns());
     $("#doctor-btn").addEventListener("click", () => this.doctor());
+    // Bound ONCE. This used to live in updateWorkloadNote, which runs
+    // on every 2 s status poll — the button gained a listener per
+    // poll and one click launched the search N times.
+    $("#hl-optimize")?.addEventListener("click", () =>
+      this.startHeadlineOptimize());
+    document.querySelector('#tabs button[data-view="prepare"]')
+      .addEventListener("click", () => this.onPrepareShow());
     setInterval(() => this.pollStatus(), 2000);
     this.pollStatus();
+  },
+
+  /* GPUs nvidia-smi actually saw. `gpus` may come from a pinned
+   * config/arena.yaml (a planning shape); the CPU/GPU toggle follows
+   * reality, not the plan. */
+  detectedGpus() {
+    const hw = this.hw || {};
+    return (hw.detected_gpus ?? hw.gpus ?? 0) || 0;
   },
 
   async loadCatalogs() {
@@ -160,7 +238,7 @@ const Control = {
       this.catalogs = { profiles, personas, cohorts };
       this.modelList = models.models || [];
       this.hw = hw;
-      this.deviceMode = hw.gpus > 0 ? "gpu" : "cpu";
+      this.deviceMode = this.detectedGpus() > 0 ? "gpu" : "cpu";
       this.renderDeviceSeg();
       this.fillModels();
       this.fillWorkloadPicker();
@@ -173,8 +251,8 @@ const Control = {
 
   renderDeviceSeg() {
     const seg = $("#device-seg");
-    seg.classList.toggle("disabled", !(this.hw.gpus > 0));
-    if (!(this.hw.gpus > 0)) this.deviceMode = "cpu";
+    seg.classList.toggle("disabled", !(this.detectedGpus() > 0));
+    if (!(this.detectedGpus() > 0)) this.deviceMode = "cpu";
     seg.querySelectorAll("button").forEach(b =>
       b.classList.toggle("active", b.dataset.dev === this.deviceMode));
   },
@@ -199,14 +277,43 @@ const Control = {
     };
     mkGroup("Downloaded", cached);
     mkGroup("Not downloaded", rest);
-    if (!prev) {
-      // Default to the optimized model when one exists, else the
-      // first downloaded model.
+    // The self-test engine is offered whenever nothing is staged: a
+    // fresh host can exercise the whole pipeline in minutes, and the
+    // default must never be a 230 GB model nobody downloaded.
+    const mockAvail = !!this.catalogs.profiles?.mock && !cached.length;
+    if (mockAvail) {
+      const g = document.createElement("optgroup");
+      g.label = "No hardware needed";
+      g.append(new Option("Mock engine (no hardware) — pipeline self-test",
+                          MOCK_MODEL, false, prev === MOCK_MODEL));
+      sel.prepend(g);
+    }
+    const stillThere = [...sel.options].some(o => o.value === prev);
+    if (!prev || !stillThere) {
+      // Default order: the optimized model when one is cached, else
+      // any cached model, else the mock, else the first catalog entry.
       const opt = Object.values(this.catalogs.profiles).find(p =>
         p?.optimized && p.fits_hardware
         && cached.some(m => m.model === p.model_id));
-      sel.value = opt?.model_id ?? cached[0]?.model ?? rest[0]?.model ?? "";
+      sel.value = opt?.model_id ?? cached[0]?.model
+        ?? (mockAvail ? MOCK_MODEL : rest[0]?.model ?? "");
     }
+  },
+
+  /* The mock profile is a pipeline self-test: no engine form, no
+   * device choice, no download. */
+  onMockSelected() {
+    this.matchedProfile = null;
+    this._formKey = MOCK_MODEL;
+    $("#engine-form").style.display = "none";
+    $("#engine-note").textContent =
+      "Mock engine — a simulated server; exercises the run pipeline "
+      + "without hardware.";
+    $("#device-seg").classList.add("disabled");
+    $("#model-note").innerHTML = `<span class="ok-note">✓ Self-test
+      engine — completes in minutes, needs no GPU and no download</span>`;
+    this.headlineShape = null;
+    this.updateWorkloadNote();
   },
 
   modelEntry() {
@@ -371,6 +478,8 @@ const Control = {
    * green check, optimize link, or download link. */
   onModelChange() {
     const model = $("#bench-model").value;
+    if (model === MOCK_MODEL) { this.onMockSelected(); return; }
+    this.renderDeviceSeg();       // re-enable after the mock disabled it
     const entry = this.modelEntry();
     const cpuMode = this.deviceMode === "cpu";
     const gpuEngines = ["vllm_cuda", "vllm_cuda_multi", "trtllm"];
@@ -430,10 +539,13 @@ const Control = {
       note.innerHTML = `<span class="ok-note">✓ Using optimized engine
         — ${this.matchedProfile.detail || this.matchedProfile.label}</span>`;
     } else {
+      // Its own id: this used to inject a second #goto-optimize (the
+      // Prepare tab owns that one), so $() found Prepare's button and
+      // this link did nothing.
       note.innerHTML = `<button type="button" class="note-link"
-        id="goto-optimize">No optimized engine for this model yet —
-        run the optimizer →</button>`;
-      $("#goto-optimize").addEventListener("click", () =>
+        id="goto-optimize-workload">No optimized engine for this model
+        yet — run the optimizer →</button>`;
+      $("#goto-optimize-workload").addEventListener("click", () =>
         document.querySelector('#tabs button[data-view="optimizer"]')?.click());
     }
   },
@@ -465,6 +577,7 @@ const Control = {
         clearInterval(this._dlPoll);
         this.fillModels();
         this.onModelChange();
+        Optimizer.invalidateArena();   // a new model is now runnable
         return;
       }
       // hf's progress lines carry percentages — show the last one.
@@ -588,6 +701,11 @@ const Control = {
     const model = $("#bench-model").value;
     const entry = this.modelEntry();
     if (!model) { this.msg("pick a model first", "error"); return null; }
+    if (model === MOCK_MODEL) {
+      body.profile = "mock";
+      body.engineDesc = "the mock engine (no hardware)";
+      return body;
+    }
     if (entry && !entry.cached) {
       this.msg("that model isn't downloaded yet — use the download "
         + "link under the picker", "error");
@@ -710,8 +828,7 @@ const Control = {
          Optimize the shape</button>`;
     $("#load-best-shape")?.addEventListener("click", () =>
       this.applyHeadlineShape());
-    $("#hl-optimize")?.addEventListener("click", () =>
-      this.startHeadlineOptimize());
+    // #hl-optimize is bound once in init(): it is static markup.
     $("#optimize-shape")?.addEventListener("click", () =>
       this.startShapeSearch());
   },
@@ -804,7 +921,9 @@ const Control = {
 
   async pollStatus() {
     let status;
-    try { status = await api("/api/status"); } catch { return; }
+    try { status = await api("/api/status"); }
+    catch (e) { this.setDisconnected(e); return; }
+    if (this._offline) this.setReconnected();
     const active = status.active_run;
     const pill = $("#status-pill");
     const box = $("#active-run-box");
@@ -824,6 +943,7 @@ const Control = {
     // Saturation runs get their own instrument; see the Headline
     // module for why the capacity panels do not fit them.
     Headline.fromStatus(active);
+    Live.setIdle(!running && !Live.hasData);
     $("#stop-btn").disabled = !running;
     $("#start-btn").disabled = running;
     if (running) {
@@ -901,10 +1021,50 @@ const Control = {
     }
   },
 
+  /* The server stopped answering. Say so on the pill (it used to
+   * freeze on "run active" forever after a serve crash) and hold
+   * Start until it is back; Stop stays enabled — a stop against a
+   * dead server just reports the error. */
+  setDisconnected(err) {
+    if (this._offline) return;
+    this._offline = true;
+    const pill = $("#status-pill");
+    pill.textContent = "disconnected";
+    pill.className = "pill offline";
+    pill.title = `no answer from the service: ${err?.message ?? err}`;
+    $("#start-btn").disabled = true;
+    this.msg("lost contact with the capsim service — is it still "
+      + "running? Retrying every 2 s.", "error");
+  },
+
+  setReconnected() {
+    this._offline = false;
+    $("#status-pill").title = "";
+    this.msg("reconnected", "ok");
+    // The server may have restarted with different state.
+    this.loadCatalogs();
+    this.refreshRuns();
+    Optimizer.invalidateArena();
+  },
+
   async refreshRuns() {
     let runs;
     try { runs = await api("/api/runs"); } catch { return; }
     Results.setRuns(runs);
+  },
+
+  /* Prepare's first visit runs doctor unless this browser tab has a
+   * result already (sessionStorage survives reloads, not new tabs —
+   * a host can change between sessions). */
+  onPrepareShow() {
+    if (this._doctorShown) return;
+    this._doctorShown = true;
+    let cached = null;
+    try {
+      cached = JSON.parse(sessionStorage.getItem("capsim.doctor") || "null");
+    } catch { /* storage unavailable */ }
+    if (cached?.report) this.renderDoctor(cached.report, cached.at);
+    else this.doctor();
   },
 
   async doctor() {
@@ -912,16 +1072,28 @@ const Control = {
     out.textContent = "probing host…";
     try {
       const report = await api("/api/doctor");
-      const rows = report.checks.map(c =>
-        `<tr><td>${c.name}</td><td class="d-${c.status}">${c.status}</td>
-         <td>${c.detail}</td></tr>`).join("");
-      const rec = report.recommended_configs.length
-        ? `<p>Recommended profiles: <b>${report.recommended_configs.join(", ")}</b></p>` : "";
-      out.innerHTML = `<table><thead><tr><th>Check</th><th>Status</th>
-        <th>Detail</th></tr></thead><tbody>${rows}</tbody></table>${rec}`;
+      this.renderDoctor(report, null);
+      try {
+        sessionStorage.setItem("capsim.doctor",
+          JSON.stringify({ report, at: Date.now() }));
+      } catch { /* storage unavailable */ }
     } catch (e) {
       out.innerHTML = `<span class="d-fail">doctor failed: ${e.message}</span>`;
     }
+  },
+
+  renderDoctor(report, cachedAt) {
+    const out = $("#doctor-out");
+    const rows = report.checks.map(c =>
+      `<tr><td>${c.name}</td><td class="d-${c.status}">${c.status}</td>
+       <td>${c.detail}</td></tr>`).join("");
+    const rec = report.recommended_configs.length
+      ? `<p>Recommended profiles: <b>${report.recommended_configs.join(", ")}</b></p>` : "";
+    const stale = cachedAt
+      ? `<p class="msg">Result from ${fmt.clock(cachedAt)} this session —
+         press Run doctor to probe again.</p>` : "";
+    out.innerHTML = `<table><thead><tr><th>Check</th><th>Status</th>
+      <th>Detail</th></tr></thead><tbody>${rows}</tbody></table>${rec}${stale}`;
   },
 };
 
@@ -950,6 +1122,38 @@ const Live = {
   charts: {},
   turns: [],           // recent {ttft_ms, tpot_ms, ts}
   stepsSeen: new Set(),
+  hasData: false,      // anything plotted (live or replayed)?
+
+  /* Idle = no run and nothing replayed: the five charts and the stat
+   * bar hide behind a "no run in progress" panel rather than sitting
+   * as empty 0–1 axes. Driven by Control.pollStatus. */
+  setIdle(idle) {
+    const wasIdle = $("#live-panels").hidden;
+    $("#live-idle").hidden = !idle;
+    $("#live-panels").hidden = idle;
+    if (wasIdle && !idle) {
+      // Charts laid out while hidden have no size; let them measure.
+      for (const c of Object.values(this.charts)) c.resize();
+    }
+  },
+
+  /* Turn events only flow once the measuring window opens, so the
+   * latency charts stay empty through warmup even as turns complete.
+   * Say what is happening on the cards instead of showing bare axes. */
+  setWarmNote(s) {
+    const warm = /warm/i.test(s.phase || "")
+      && !this.charts.ttft.data.labels.length;
+    for (const id of ["#ttft-warm", "#tpot-warm"]) {
+      const el = $(id);
+      if (!el) continue;
+      el.hidden = !warm;
+      if (warm) {
+        el.textContent = `warming up — ${s.requests_completed ?? 0} turns
+          completed so far; rolling percentiles start with the first
+          measuring window`;
+      }
+    }
+  },
 
   init() {
     this.charts.pool = makeLiveChart("#chart-pool", [
@@ -1003,6 +1207,8 @@ const Live = {
       doc = await api("/api/live/backfill?window_s=21600");
     } catch { return; }
     if (!doc.run) return;
+    this.hasData = true;
+    this.setIdle(false);
     for (const t of doc.turns ?? []) this.onTurn(t.completed_at_ms, t);
     for (const s of doc.snapshots ?? []) this.onSnapshot(s.snapshot_at_ms, s);
     for (const t of doc.telemetry ?? []) this.onTelemetry(t.sampled_at_ms, t);
@@ -1027,6 +1233,7 @@ const Live = {
   },
 
   push(chart, label, values) {
+    this.hasData = true;
     const d = chart.data;
     d.labels.push(label);
     values.forEach((v, i) => d.datasets[i].data.push(v));
@@ -1070,6 +1277,7 @@ const Live = {
                             : `${inPhase}s`}`
       : "";
     $("#live-phase").textContent = s.phase + el;
+    this.setWarmNote(s);
     $("#live-pool").textContent = s.pool_size;
     $("#live-inflight").textContent = s.in_flight;
     $("#live-completed").textContent = s.requests_completed;
@@ -1246,6 +1454,12 @@ const Live = {
       this.resetCharts();
       this._phaseName = null;
       $("#live-phase").textContent = "starting…";
+      this.hasData = true;
+      this.setIdle(false);
+      for (const id of ["#ttft-warm", "#tpot-warm"]) {
+        const el = $(id);
+        if (el) el.hidden = true;
+      }
     }
     if (r.event === "finished") {
       $("#live-phase").textContent = `finished (${r.final_status})`;
@@ -1379,6 +1593,9 @@ const Results = {
         this.deleteEntry(e);
       });
       row.addEventListener("click", () => this.openEntry(e));
+      keyActivate(row);
+      row.setAttribute("aria-label",
+        `${e.cohort_name || e.cohort_id}, ${model}, ${mode}, ${status}`);
       box.append(row);
     }
     $("#compare-btn").disabled = this.checked.size < 2;
@@ -1603,6 +1820,7 @@ const Results = {
     $("#result-title").textContent =
       `${c.name || c.id} — ${(c.model || "").split("/").pop()}` +
       (ctx.isOpen ? " · open-loop" : " · pool ramp");
+    if (!ctx.pts.length) { this.renderEmpty(c, ctx); return; }
     this.renderHeadline(c, ctx);
     this.renderUX(c, ctx);
     this.renderGPU(c, ctx);
@@ -1620,8 +1838,11 @@ const Results = {
       .filter(p => p.stability !== "superseded"
                 && p.stability !== "client_limited")
       .sort((a, b) => (a[ax.key] ?? 0) - (b[ax.key] ?? 0));
-    const isOpen = c.open_loop != null
-      && pts.some(p => p.arrival_rate_per_min != null);
+    // The export SAYS which methodology ran; inferring it from the
+    // points sent a cancelled open-loop run (one empty window) down
+    // the pool-ramp template as "stable up to 0 users".
+    const isOpen = c.methodology === "open_loop"
+      || (c.open_loop != null && pts.some(p => p.arrival_rate_per_min != null));
     const stable = pts.filter(p =>
       isOpen ? p.stability === "stable" : p.status === "pass");
     const last = stable.length ? stable[stable.length - 1]
@@ -1630,6 +1851,29 @@ const Results = {
       isOpen ? p.stability === "divergent" : p.status === "fail") ?? null;
     const xOf = p => p ? `${p[ax.key]}${isOpen ? "/min" : " users"}` : "—";
     return { ax, pts, isOpen, last, knee, xOf, ol: c.open_loop };
+  },
+
+  /* Nothing measured: a run cancelled during warmup, or one whose
+   * only windows were superseded / client-limited. Say that, rather
+   * than driving the report template to "stable up to 0 users". */
+  renderEmpty(c, ctx) {
+    $("#report").hidden = true;
+    const status = c.final_status;
+    const cancelled = status === "interrupted" || status === "cancelled";
+    const why = cancelled
+      ? "the run was cancelled before its first verdict"
+      : (c.curve || []).length
+        ? "every window was superseded or client-limited — the load "
+          + "generator, not the engine, was what got measured"
+        : "no measurement window completed";
+    $("#headline-stats").innerHTML = "";
+    $("#headline-verdict").innerHTML =
+      `<b>No measured windows</b> — ${why}.`
+      + (status ? ` <span class="msg">Run status: ${status}.</span>` : "")
+      + ` <span class="msg">Start it again from the Workload tab; ${
+          ctx.isOpen
+            ? "the first verdict arrives after warmup plus one measuring window"
+            : "the first pool step has to complete"}.</span>`;
   },
 
   /* Bottleneck evidence → a human phrase ("KV cache at 97%, GPU DRAM
@@ -2227,16 +2471,20 @@ const Optimizer = {
     });
     $("#opt-history").addEventListener("change", () => this.showHistory());
     document.querySelector('#tabs button[data-view="optimizer"]')
-      .addEventListener("click", () => { this.refresh(); this.loadArena(); });
+      .addEventListener("click", () => { this.refresh(); this.loadArena(true); });
     this.loadArena().then(() => this.refresh());
   },
+
+  /* Models added or downloaded in Prepare change what the arena can
+   * run; drop the cache so the next visit refetches. */
+  invalidateArena() { this.arena = null; },
 
   /* ── Arena: dropdowns + cards, everything in play by default ─── */
 
   filters: { series: "all", size: "all" },
 
-  async loadArena() {
-    if (!this.arena) {
+  async loadArena(force = false) {
+    if (!this.arena || force) {
       try { this.arena = await api("/api/arena"); }
       catch (e) { this.msg(e.message, "error"); return; }
     }
@@ -2416,9 +2664,22 @@ const Optimizer = {
     if (!hw.count) {
       box.innerHTML = `<div class="callout">No GPUs detected on this host —
         the arena needs a GPU box (or <code>device_groups</code> in
-        <code>config/arena.yaml</code> for planning).</div>`;
+        <code>config/arena.yaml</code> for planning — copy
+        <code>config/arena.example.yaml</code>).</div>`;
       return;
     }
+    // config/arena.yaml pinned a shape that nvidia-smi does not back
+    // up: the arena is a plan, and a search here fails at launch.
+    const unverified = /unverified/.test(hw.source || "");
+    const hwWarn = !unverified ? "" : `<div class="callout"
+      style="border-left-color:var(--warn);margin-top:14px" role="alert">
+      <b>Hardware map is unverified.</b> <code>config/arena.yaml</code>
+      declares ${hw.count} GPUs but nvidia-smi found
+      ${hw.detected_count ?? 0} on this host. The arena below is sized
+      from the file, not the box; fix or delete
+      <code>config/arena.yaml</code> (the shipped template is
+      <code>config/arena.example.yaml</code>) to size from what is
+      detected.</div>`;
     const uniq = arr => [...new Set(arr)];
     const seriesOpts = uniq(a.models.filter(m => m.feasible).map(m => m.series))
       .sort();
@@ -2470,7 +2731,7 @@ const Optimizer = {
           · tp ${m.feasible_tps.join("/")})</i></label>`).join("")}
       </div></div>`;
 
-    box.innerHTML = `
+    box.innerHTML = hwWarn + `
       <div class="row wrap" style="margin-top:14px">
         <label>Model family
           <select id="arena-series">
@@ -2484,9 +2745,11 @@ const Optimizer = {
             ${sizeOpts.map(s => `<option value="${s}"
               ${this.filters.size === s ? "selected" : ""}>${s}</option>`).join("")}
           </select></label>
-        <span class="msg" style="align-self:end">${hw.count} GPUs ·
+        <span class="msg" style="align-self:end">${hw.count} GPUs${
+            unverified ? ` <span class="status-marginal">(unverified)</span>` : ""} ·
           ${hw.vram_per_gpu_gb ?? "?"} GB each · ${hw.device_groups.length}
-          PCIe/NUMA domain(s) · gmu fixed ${a.fixed.gpu_memory_utilization}</span>
+          PCIe/NUMA domain(s) · <abbr title="GPU memory fraction">gmu</abbr>
+          fixed ${a.fixed.gpu_memory_utilization}</span>
       </div>
       <div class="arena-cards">${modelsCard}${this.cards().map(cardHtml).join("")}</div>
       <div id="opt-arena-cost" class="callout arena-cost">computing the arena…</div>`;
@@ -3124,6 +3387,9 @@ const Storage = {
         fsBox.querySelectorAll(".fs-chip").forEach(c => c.classList.remove("selected"));
         el.classList.add("selected");
       });
+      keyActivate(el);
+      el.setAttribute("aria-label",
+        `use ${fs.mountpoint}, ${fs.free_gb.toFixed(0)} GB free`);
       fsBox.append(el);
     }
 
@@ -3137,15 +3403,26 @@ const Storage = {
       // The pasteable example must be the SAFEST candidate: a blank
       // disk when one exists (the API sorts blank-first).
       const example = doc.unmounted.find(d => !d.has_partitions) ?? doc.unmounted[0];
+      // The recipe wipes a disk, so it is folded away and armed by a
+      // checkbox rather than sitting pasteable on the page.
       un.innerHTML = `<div class="unmounted-box callout">
         <b>${doc.unmounted.length} unmounted disk(s) on this box:</b><br>` +
         doc.unmounted.map(label).join("<br>") +
         `<br><br>capsim won't format or mount disks — that needs root and destroys
-        whatever is on them. Run these on the host <b>one line at a time</b>
-        (this example uses <code>${example.name}</code>${example.has_partitions
-          ? " — read the check-first lines carefully" : ", which is blank"}),
-        then Refresh:
-        <pre>${example.commands.join("\n")}</pre></div>`;
+        whatever is on them.
+        <details><summary>Show the format &amp; mount recipe for
+          <code>/dev/${example.name}</code> (destructive)</summary>
+          <label class="arm"><input type="checkbox" id="unmounted-arm">
+            I understand these commands erase <code>/dev/${example.name}</code>${
+              example.has_partitions ? " and everything on its partitions" : ""}</label>
+          <div id="unmounted-cmds" hidden>Run these on the host <b>one line at
+            a time</b>${example.has_partitions
+              ? " — read the check-first lines carefully" : " (the disk is blank)"},
+            then Refresh:
+            <pre>${example.commands.join("\n")}</pre></div></details></div>`;
+      $("#unmounted-arm").addEventListener("change", (e) => {
+        $("#unmounted-cmds").hidden = !e.target.checked;
+      });
     } else {
       un.innerHTML = "";
     }
@@ -3193,6 +3470,15 @@ const Models = {
   },
 
   discovered: null,
+
+  /* Staging-side messages (download failures used to land in the
+   * Optimize tab's #opt-msg, where nobody on Prepare could see them). */
+  msg(text, cls = "") {
+    const el = $("#models-msg");
+    if (!el) return;
+    el.textContent = text;
+    el.className = `msg ${cls}`;
+  },
 
   /* Live Hub discovery: recent models from the leading orgs, sized
    * from their own safetensors metadata and validated against this
@@ -3261,6 +3547,7 @@ const Models = {
           m.in_catalog = true;
           this.addMsg(`added ${m.id}`, "ok");
           this.renderDiscovered();
+          Optimizer.invalidateArena();
           this.refresh();
         } catch (e) {
           this.addMsg(e.message, "error");
@@ -3293,6 +3580,7 @@ const Models = {
     this.addMsg(r.created
       ? `added ${model} (family ${r.entry.family}, ${r.entry.quant})`
       : `${model} is already in the catalog`, "ok");
+    if (r.created) Optimizer.invalidateArena();
     // A sibling click passes an id — keep the base model's chip box
     // (minus the consumed chip) instead of replacing it.
     if (!id) this.renderSiblings(model, r.siblings);
@@ -3320,9 +3608,19 @@ const Models = {
 
   async refresh() {
     let doc;
-    try { doc = await api("/api/models"); } catch { return; }
+    try { doc = await api("/api/models"); }
+    catch (e) { this.msg(`could not load the model list: ${e.message}`, "error"); return; }
     this.doc = doc;
     $("#models-cache-dir").textContent = doc.cache_dir;
+    // A download finishing (or a cache dir change) alters what the
+    // arena and the Workload picker can offer.
+    const cachedKey = doc.models.filter(m => m.cached).map(m => m.model)
+      .sort().join("|");
+    if (this._cachedKey != null && cachedKey !== this._cachedKey) {
+      Optimizer.invalidateArena();
+      Control.loadCatalogs();
+    }
+    this._cachedKey = cachedKey;
     // (Re)build filter options, preserving the current selection.
     const fill = (sel, values) => {
       const prev = sel.value || "all";
@@ -3360,6 +3658,14 @@ const Models = {
       : `${rows.length} of ${doc.models.length} models`;
     const tbody = $("#models-table tbody");
     tbody.innerHTML = "";
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="msg"
+        style="padding:16px 8px;text-align:center">${doc.models.length
+          ? "No models match these filters — clear the family, precision "
+            + "or status filter, or the search box."
+          : "The catalog is empty — add a model by its Hugging Face id "
+            + "below, or press <b>Discover new models</b>."}</td></tr>`;
+    }
     let anyRunning = false;
     for (const m of rows) {
       const dl = doc.downloads[m.model];
@@ -3410,8 +3716,11 @@ const Models = {
         method: "POST", body: JSON.stringify({ model }),
       });
     } catch (e) {
-      Optimizer.msg(e.message, "error");
+      this.msg(`${model}: ${e.message}`, "error");
+      this.refresh();
+      return;
     }
+    this.msg(`downloading ${model} — progress shows in the table`, "ok");
     this.refresh();
   },
 };
@@ -3474,9 +3783,15 @@ const Editor = {
   },
 
   async refreshLists() {
-    const [personas, cohorts] = await Promise.all([
-      api("/api/personas"), api("/api/cohorts"),
-    ]);
+    let personas, cohorts;
+    try {
+      [personas, cohorts] = await Promise.all([
+        api("/api/personas"), api("/api/cohorts"),
+      ]);
+    } catch (e) {
+      this.msg(`could not load the workload lists: ${e.message}`, "error");
+      return;
+    }
     const fill = (sel, items, kind) => {
       const ul = $(sel);
       ul.innerHTML = "";
@@ -3486,6 +3801,7 @@ const Editor = {
         li.classList.toggle(
           "active", this.kind === kind && this.editing === item.id);
         li.addEventListener("click", () => this.open(kind, item.id));
+        keyActivate(li);
         ul.append(li);
       }
     };
@@ -3494,9 +3810,15 @@ const Editor = {
   },
 
   async open(kind, id) {
+    let detail;
+    try {
+      detail = await api(`/api/${kind}/${id}`);
+    } catch (e) {
+      this.msg(`could not open ${id}: ${e.message}`, "error");
+      return;
+    }
     this.kind = kind;
     this.editing = id;
-    const detail = await api(`/api/${kind}/${id}`);
     $("#editor-id").value = id;
     $("#editor-kind-badge").textContent = kind.slice(0, -1);
     this.msg(`editing ${id} — changes apply to the next run`);
@@ -4988,3 +5310,15 @@ Engines.init();
 Roofline.init();
 Models.init();
 Editor.init();
+
+// Land on the tab in the URL (a reload keeps the operator where
+// they were; a pasted #results link opens Results). Goes through
+// click() so the module refresh hooks run. The default view runs
+// its own first-visit hook.
+const initialView = viewFromHash();
+if (initialView && initialView !== currentView()) {
+  TABS.find(b => b.dataset.view === initialView).click();
+} else {
+  showView(currentView());
+  Control.onPrepareShow();
+}

@@ -21,3 +21,6 @@ dist/
 # Per-host model additions (UI "Add model" writes here)
 config/models/local.yaml
 doctor.json
+
+# Per-host GPU topology (copy config/arena.example.yaml)
+config/arena.yaml

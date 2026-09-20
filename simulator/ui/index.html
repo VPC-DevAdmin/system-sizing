@@ -14,19 +14,25 @@
     <span class="logo">capsim</span>
     <span class="sub">Size &middot; Optimize &middot; Measure</span>
   </div>
-  <nav id="tabs">
-    <button data-view="prepare" class="active">Prepare</button>
-    <button data-view="optimizer">Optimize</button>
-    <button data-view="roofline">Roofline</button>
-    <button data-view="control">Workload</button>
-    <button data-view="results">Results</button>
-    <button data-view="personas">Edit&nbsp;workloads</button>
+  <nav id="tabs" role="tablist" aria-label="Sections">
+    <button role="tab" id="tab-prepare" data-view="prepare" class="active"
+      aria-selected="true" aria-controls="view-prepare">Prepare</button>
+    <button role="tab" id="tab-optimizer" data-view="optimizer"
+      aria-selected="false" aria-controls="view-optimizer" tabindex="-1">Optimize</button>
+    <button role="tab" id="tab-roofline" data-view="roofline"
+      aria-selected="false" aria-controls="view-roofline" tabindex="-1">Roofline</button>
+    <button role="tab" id="tab-control" data-view="control"
+      aria-selected="false" aria-controls="view-control" tabindex="-1">Workload</button>
+    <button role="tab" id="tab-results" data-view="results"
+      aria-selected="false" aria-controls="view-results" tabindex="-1">Results</button>
+    <button role="tab" id="tab-personas" data-view="personas"
+      aria-selected="false" aria-controls="view-personas" tabindex="-1">Edit&nbsp;workloads</button>
   </nav>
-  <div id="status-pill" class="pill idle">idle</div>
+  <div id="status-pill" class="pill idle" role="status" aria-live="polite">idle</div>
 </header>
 
 <!-- ── 1 · Prepare ─────────────────────────────────────────────── -->
-<main id="view-prepare" class="view active">
+<main id="view-prepare" class="view active" role="tabpanel" aria-labelledby="tab-prepare">
   <div class="steps-grid">
     <section class="panel">
       <div class="step-head"><span class="step-num">1</span>
@@ -67,6 +73,7 @@
             timeouts measure engines — not your network.</div></div>
         <button id="models-refresh" class="small" style="margin-left:auto">Refresh</button>
       </div>
+      <div id="models-msg" class="msg" role="status" aria-live="polite"></div>
       <div class="row wrap" style="margin-bottom:10px">
         <label>Family <select id="mf-family"><option value="all">All</option></select></label>
         <label>Precision <select id="mf-quant"><option value="all">All</option></select></label>
@@ -128,7 +135,7 @@
 </main>
 
 <!-- ── 2 · Optimize ────────────────────────────────────────────── -->
-<main id="view-optimizer" class="view">
+<main id="view-optimizer" class="view" role="tabpanel" aria-labelledby="tab-optimizer">
   <section class="panel">
     <h2>Build the test arena</h2>
     <p class="msg">Everything this host can run is in play by default — every model,
@@ -185,7 +192,7 @@
      sustained token rate this hardware can produce is, over every
      model, engine and shape worth trying. It runs for hours, so the
      page is built to be correct for someone who was not watching. -->
-<main id="view-roofline" class="view">
+<main id="view-roofline" class="view" role="tabpanel" aria-labelledby="tab-roofline">
   <section class="panel">
     <h2>Roofline autopilot</h2>
     <p class="msg">Stages the models, searches every engine against
@@ -276,7 +283,8 @@
   <section class="panel" id="rf-results-panel" hidden>
     <h2>Every cell</h2>
     <table id="rf-results">
-      <thead><tr><th>Model</th><th>Engine</th><th>mns</th><th>Shape</th>
+      <thead><tr><th>Model</th><th>Engine</th>
+        <th><abbr title="max sequences per replica">mns</abbr></th><th>Shape</th>
         <th>Output tok/s</th><th>Streams</th><th>TTFT p95</th>
         <th>TPOT p95</th><th>KV %</th><th>GPU W</th><th>tok/W</th>
         <th></th></tr></thead>
@@ -289,7 +297,7 @@
 </main>
 
 <!-- ── Workload benchmark (setup + live telemetry, one place) ──── -->
-<main id="view-control" class="view">
+<main id="view-control" class="view" role="tabpanel" aria-labelledby="tab-control">
   <section class="panel">
     <h2>Start a capacity benchmark</h2>
     <div class="form-grid">
@@ -407,6 +415,12 @@
             <option value="on">on</option>
           </select></label>
       </div>
+      <div class="hint" style="margin-top:8px" id="eng-legend">Shorthand
+        used in run banners and tables: <abbr title="GPU memory fraction">gmu</abbr>
+        = GPU memory fraction &middot; <abbr title="max sequences per replica">mns</abbr>
+        = max sequences / replica &middot; <abbr title="batched tokens per step">mbt</abbr>
+        = batched tokens / step &middot; <abbr title="tensor parallel">tp</abbr>
+        = GPUs per replica.</div>
       <div id="eng-trc-warn" class="hint" style="margin-top:8px" hidden></div>
       <div id="eng-engine-note" class="hint" style="margin-top:8px" hidden></div>
     </details>
@@ -433,7 +447,7 @@
         <div class="hl-now" id="hl-now">&mdash;</div>
         <div class="hl-sub">peak this sweep <b id="hl-peak">&mdash;</b>
           <span id="hl-peak-at" class="msg"></span></div>
-        <div id="hl-now-note" class="msg" style="font-size:.72rem"></div>
+        <div id="hl-now-note" class="msg" style="font-size:.8rem"></div>
       </div>
       <div class="hl-side">
         <div class="hl-kv"><span>held / offered</span>
@@ -539,6 +553,13 @@
     </section>
   </div>
 
+  <div id="live-idle" class="callout live-idle" hidden>
+    <b>No run in progress.</b> Pick a model and a workload above and press
+    <b>Start run</b>. Live charts &mdash; sessions, latency percentiles, engine
+    and host utilization &mdash; appear here as soon as the engine is up, and
+    the most recent run is replayed when you come back to this tab.
+  </div>
+  <div id="live-panels">
   <section class="panel statusbar">
     <div class="stat"><span class="k">Phase</span><span id="live-phase" class="v">&mdash;</span>
       <span class="c">warmup &rarr; measure &rarr; verdict</span></div>
@@ -567,10 +588,12 @@
         climb at fixed arrival rate is the collapse signature the open-loop search
         hunts for.</div></section>
     <section class="panel" id="panel-ttft"><h2>Time to first token &middot; rolling p50 / p95</h2>
+      <div class="chart-warm" id="ttft-warm" hidden></div>
       <canvas id="chart-ttft"></canvas>
       <div class="chart-note">Computed over the trailing turns of the measuring window.
         Rising p95 with a flat p50 is the first sign of queueing.</div></section>
     <section class="panel" id="panel-tpot"><h2>Time per output token &middot; rolling p50 / p95</h2>
+      <div class="chart-warm" id="tpot-warm" hidden></div>
       <canvas id="chart-tpot"></canvas>
       <div class="chart-note">Decode pacing per token. Degrades when batches widen past
         the engine's comfort point.</div></section>
@@ -618,10 +641,11 @@
       <tbody></tbody>
     </table>
   </section>
+  </div><!-- /live-panels -->
 </main>
 
 <!-- ── 4 · Results ─────────────────────────────────────────────── -->
-<main id="view-results" class="view">
+<main id="view-results" class="view" role="tabpanel" aria-labelledby="tab-results">
   <section class="panel">
     <div class="row wrap" style="margin-bottom:12px">
       <h2 style="margin:0">Runs</h2>
@@ -786,7 +810,7 @@
 </main>
 
 <!-- ── 5 · Workloads ───────────────────────────────────────────── -->
-<main id="view-personas" class="view">
+<main id="view-personas" class="view" role="tabpanel" aria-labelledby="tab-personas">
   <section class="panel">
     <h2>Workload designer</h2>
     <p class="msg">Personas describe one kind of user &mdash; how much they ask,

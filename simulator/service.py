@@ -50,6 +50,10 @@ from .bus import BUS
 
 log = logging.getLogger(__name__)
 
+# How long POST /api/runs/stop waits for engine teardown before
+# answering 202 "stopping" instead of holding the request open.
+STOP_TIMEOUT_S = 20.0
+
 
 # ── Run lifecycle state ───────────────────────────────────────────────
 
@@ -357,6 +361,9 @@ def _resolve_config_path(req: StartRunRequest) -> Path:
             raise HTTPException(404, str(e)) from e
     if req.config:
         p = Path(req.config)
+        if p.suffix.lower() not in (".yaml", ".yml"):
+            raise HTTPException(
+                422, f"config must be a .yaml file, got {p.name!r}")
         if not p.exists():
             raise HTTPException(404, f"config not found: {p}")
         return p
@@ -510,11 +517,113 @@ def _log_heartbeat(log_path) -> Optional[dict]:
     return hb
 
 
+SERVE_LOCK_NAME = ".capsim-serve.lock"
+
+
+class RunsDirBusy(RuntimeError):
+    """Another ``capsim serve`` holds this runs dir."""
+
+
+# Locks this process holds, by resolved runs dir: [file, refcount].
+# Re-entrant within the process (tests build several apps on one
+# dir; flock on a second descriptor would otherwise self-deadlock),
+# exclusive across processes, which is the case that matters.
+_HELD_RUNS_LOCKS: dict[str, list] = {}
+
+
+def _acquire_runs_lock(base: Path):
+    """Exclusive advisory lock on ``<runs>/.capsim-serve.lock``, held
+    for the service's lifetime. A second ``capsim serve`` on the same
+    dir would otherwise run ``_finalise_orphan_runs`` and stamp the
+    FIRST service's live run 'interrupted' (D3). Returns a lock record
+    for _release_runs_lock, or None when the platform has no flock."""
+    try:
+        import fcntl
+    except ImportError:            # not a supported host anyway
+        return None
+    key = str(base.resolve())
+    held = _HELD_RUNS_LOCKS.get(key)
+    if held is not None:
+        held[1] += 1
+        return held
+    base.mkdir(parents=True, exist_ok=True)
+    fh = open(base / SERVE_LOCK_NAME, "a+")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        fh.close()
+        raise RunsDirBusy(
+            f"another capsim serve is already using {base} (lock "
+            f"{SERVE_LOCK_NAME} is held) — stop it, or pass a different "
+            f"--runs-dir") from e
+    fh.seek(0)
+    fh.truncate()
+    import os as _os
+    fh.write(f"{_os.getpid()}\n")
+    fh.flush()
+    rec = [fh, 1, key]
+    _HELD_RUNS_LOCKS[key] = rec
+    return rec
+
+
+def _release_runs_lock(rec) -> None:
+    if rec is None:
+        return
+    rec[1] -= 1
+    if rec[1] > 0:
+        return
+    fh, _, key = rec
+    _HELD_RUNS_LOCKS.pop(key, None)
+    with contextlib.suppress(OSError):
+        import fcntl
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    with contextlib.suppress(OSError):
+        fh.close()
+
+
+def _read_json(p: Path) -> Any:
+    """json.loads off the event loop — exports and search docs run to
+    tens of MB, and parsing them inline stalled every other client."""
+    return json.loads(p.read_text())
+
+
+def _tail_text(path: str | Path, n: int = 4096) -> str:
+    """Last ``n`` bytes of a log, decoded leniently. Download logs
+    grow to MB over a 60 GB pull and /api/models is polled every
+    2.5 s; reading the whole file each time was the stall."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - n))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+_CUSTOM_INT_FIELDS = ("replicas", "tp", "max_num_seqs",
+                      "max_num_batched_tokens", "max_model_len")
+
+
+def _validate_custom_ints(custom: dict) -> None:
+    """The Advanced form's integer levers arrive as JSON from any
+    client; a non-integer used to surface as a 500 from int()."""
+    for key in _CUSTOM_INT_FIELDS:
+        v = custom.get(key)
+        if v is None or v == "" or v == "default":
+            continue
+        ok = (isinstance(v, int) and not isinstance(v, bool)) or (
+            isinstance(v, str) and v.strip().isdigit())
+        if not ok or int(v) < 1:
+            raise HTTPException(
+                422, f"custom.{key} must be a positive integer, got {v!r}")
+
+
 def _finalise_orphan_runs(base: Path) -> None:
     """Stamp 'interrupted' on cohort_run rows left unfinalised by a
     hard serve kill. Runs at service startup, when nothing can be
     executing in-process — without this, a killed run reads as
-    'running' in the UI forever."""
+    'running' in the UI forever. Only safe under the runs-dir lock:
+    see _acquire_runs_lock."""
     if not base.exists():
         return
     from datetime import datetime, timezone
@@ -543,10 +652,23 @@ def create_app(
     optimizer_script: Path | str = Path("scripts/engine_optimizer.py"),
 ) -> FastAPI:
     runs_base = Path(runs_base)
+    # Lock first, THEN finalise: a second service on the same dir
+    # must refuse to start rather than stamp the live run interrupted.
+    runs_lock = _acquire_runs_lock(runs_base)
     _finalise_orphan_runs(runs_base)
     catalog_dir = Path(catalog_dir) if catalog_dir is not None else None
     optimizer_script = Path(optimizer_script)
-    app = FastAPI(title="capsim", version=__version__)
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            _release_runs_lock(runs_lock)
+
+    app = FastAPI(title="capsim", version=__version__, lifespan=_lifespan)
+    app.state.runs_lock = runs_lock
+    app.state.export_locks: dict[str, asyncio.Lock] = {}  # run_name -> lock
     app.state.active: Optional[ActiveRun] = None
     app.state.optimizer: Optional[dict] = None       # {proc, profile, started_at, log}
     app.state.optimizer_catalog: Optional[dict] = None
@@ -908,25 +1030,34 @@ def create_app(
             hw = await asyncio.to_thread(_hw)
         except Exception:  # noqa: BLE001
             hw = {}
+        # `gpus` keeps the arena's view (config may pin the shape);
+        # `detected_gpus` is what nvidia-smi saw, which is what decides
+        # whether a GPU engine can actually launch here.
         return {
             "gpus": hw.get("count", 0) or 0,
+            "detected_gpus": hw.get("detected_count", hw.get("count", 0)) or 0,
+            "source": hw.get("source", "detected"),
             "vram_per_gpu_gb": hw.get("vram_per_gpu_gb"),
         }
 
     @app.get("/api/runs")
     async def runs() -> list[dict]:
-        return _list_runs(runs_base)
+        # One sqlite open per run dir — dozens of them on a box that
+        # has been benchmarking for a month. Off the loop.
+        return await asyncio.to_thread(_list_runs, runs_base)
 
     @app.get("/api/runs/{run}/headline")
     async def headline_sweep_doc(run: str) -> dict:
         """The saturation-sweep summary for a headline run. Separate
         from the capacity export because it answers a different
         question and shares none of its shape."""
+        if "/" in run or run.startswith("."):
+            raise HTTPException(422, "bad run name")
         path = runs_base / run / "headline_sweep.json"
         if not path.exists():
             raise HTTPException(404, f"{run} has no headline sweep summary")
         try:
-            return json.loads(path.read_text())
+            return await asyncio.to_thread(_read_json, path)
         except (OSError, json.JSONDecodeError) as e:
             raise HTTPException(500, f"unreadable sweep summary: {e}") from e
 
@@ -970,6 +1101,7 @@ def create_app(
             # rebuilds a config for every cell anyway, and validating
             # the template here still catches a bad engine or a shape
             # that does not fit the box.
+            _validate_custom_ints(req.custom)
             pre = dict(req.custom)
             if not pre.get("model_id"):
                 planned = ((req.workload or {}).get("spec") or {}).get("models")
@@ -980,10 +1112,23 @@ def create_app(
         else:
             config_path = _resolve_config_path(req)
 
+        import yaml as _yaml
+
         from .config import load_config
         from .headline_shapes import is_headline_persona
         from .personas import COHORTS, PERSONAS, cohort_from_persona
-        cfg = load_config(config_path)
+        try:
+            cfg = await asyncio.to_thread(load_config, config_path)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+        except (_yaml.YAMLError, TypeError, ValueError, AttributeError,
+                KeyError) as e:
+            # A file that exists but is not a capsim config (wrong
+            # schema, not YAML at all) is the caller's error, not a
+            # crash.
+            raise HTTPException(
+                422, f"{config_path} is not a valid capsim config: "
+                     f"{type(e).__name__}: {e}") from e
         cfg.output.db_directory = str(runs_base)
 
         kind = req.workload.get("kind")
@@ -1265,8 +1410,18 @@ def create_app(
         if active is None or active.task.done():
             raise HTTPException(409, "no active run")
         active.task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await active.task
+        # Engine teardown (container stop, replica drain) can take
+        # longer than a browser is willing to wait on one request.
+        # After STOP_TIMEOUT_S answer 202 "stopping": the cancel is
+        # delivered and /api/status will flip when teardown ends.
+        done, _ = await asyncio.wait({active.task}, timeout=STOP_TIMEOUT_S)
+        if not done:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=202, content={
+                "stopped": False, "stopping": True,
+                "detail": f"stop requested; engine teardown still running "
+                          f"after {STOP_TIMEOUT_S:.0f}s — poll /api/status",
+            })
         return {"stopped": True}
 
 
@@ -1398,12 +1553,7 @@ def create_app(
         downloads = {}
         for model, dl in list(app.state.model_downloads.items()):
             exit_code = dl["proc"].poll()
-            tail = ""
-            try:
-                text = Path(dl["log"]).read_text(errors="replace")
-                tail = text[-400:]
-            except OSError:
-                pass
+            tail = (await asyncio.to_thread(_tail_text, dl["log"]))[-400:]
             downloads[model] = {
                 "running": exit_code is None,
                 "exit_code": exit_code,
@@ -1503,19 +1653,20 @@ def create_app(
             + f"_{time.strftime('%Y%m%dT%H%M%S')}.log"
         )
         import os as _os
-        log_file = open(log_path, "w")
-        try:
-            proc = subprocess.Popen(
-                argv, stdout=log_file, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, start_new_session=True,
-                env={**_os.environ, **extra_env},
-            )
-        except FileNotFoundError as e:
-            log_file.close()
-            raise HTTPException(
-                500, f"hf CLI not found ({e}) — is huggingface_hub "
-                     f"installed in the service environment?",
-            ) from e
+        # The child inherits the descriptor; our copy closes either way
+        # (it leaked one handle per download otherwise).
+        with open(log_path, "w") as log_file:
+            try:
+                proc = subprocess.Popen(
+                    argv, stdout=log_file, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, start_new_session=True,
+                    env={**_os.environ, **extra_env},
+                )
+            except FileNotFoundError as e:
+                raise HTTPException(
+                    500, f"hf CLI not found ({e}) — is huggingface_hub "
+                         f"installed in the service environment?",
+                ) from e
         app.state.model_downloads[req.model] = {
             "proc": proc, "log": str(log_path), "started_at": time.time(),
         }
@@ -1634,18 +1785,17 @@ def create_app(
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / (
             req.engine + f"_{time.strftime('%Y%m%dT%H%M%S')}.log")
-        log_file = open(log_path, "w")
-        try:
-            proc = subprocess.Popen(
-                ["docker", "pull", meta["image"]],
-                stdout=log_file, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, start_new_session=True,
-            )
-        except FileNotFoundError as e:
-            log_file.close()
-            raise HTTPException(
-                500, f"docker not found ({e}) — the service host must be "
-                     f"the one that launches engines") from e
+        with open(log_path, "w") as log_file:
+            try:
+                proc = subprocess.Popen(
+                    ["docker", "pull", meta["image"]],
+                    stdout=log_file, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, start_new_session=True,
+                )
+            except FileNotFoundError as e:
+                raise HTTPException(
+                    500, f"docker not found ({e}) — the service host must "
+                         f"be the one that launches engines") from e
         app.state.engine_pulls[req.engine] = {
             "proc": proc, "log": str(log_path), "started_at": time.time(),
         }
@@ -1936,7 +2086,7 @@ def create_app(
         p = _history_dir / name
         if not p.exists():
             raise HTTPException(404, f"no archived search '{name}'")
-        return json.loads(p.read_text())
+        return await asyncio.to_thread(_read_json, p)
 
     async def _optimizer_catalog() -> dict:
         if app.state.optimizer_catalog is None:
@@ -2180,14 +2330,14 @@ def create_app(
                     src = _search_out
                     if not src.exists():
                         raise HTTPException(404, "no guided-search results yet")
-                doc = json.loads(src.read_text())
+                doc = await asyncio.to_thread(_read_json, src)
                 result = await asyncio.to_thread(promote_search_winner, doc)
             elif req.source == "registry":
                 if not req.config_name:
                     raise HTTPException(422, "registry promote needs config_name")
                 if not _opt_out.exists():
                     raise HTTPException(404, "no registry-sweep results yet")
-                doc = json.loads(_opt_out.read_text())
+                doc = await asyncio.to_thread(_read_json, _opt_out)
                 catalog = await _optimizer_catalog()
                 result = await asyncio.to_thread(
                     promote_registry_winner, catalog, doc, req.config_name,
@@ -2278,7 +2428,7 @@ def create_app(
             raise HTTPException(
                 404, f"{p} not built — POST /api/export first",
             )
-        return json.loads(p.read_text())
+        return await asyncio.to_thread(_read_json, p)
 
     @app.get("/api/runs/{run_name}/export")
     async def run_export(run_name: str, slim: bool = False) -> Any:
@@ -2292,21 +2442,29 @@ def create_app(
             raise HTTPException(404, f"no run.db in {d}")
         fname = "buyer_page_data_slim.json" if slim else "buyer_page_data.json"
         p = d / fname
-        # Rebuild when the DB has newer data than the cached export —
-        # a Results tab opened mid-run builds a partial export, and
-        # serving that snapshot forever would freeze the run at
-        # whatever step it happened to be on.
-        stale = (
-            p.exists()
-            and p.stat().st_mtime < (d / "run.db").stat().st_mtime
-        )
-        if not p.exists() or stale:
-            from .export import export_dir
-            try:
-                await asyncio.to_thread(export_dir, d, p, slim=slim)
-            except Exception as e:  # noqa: BLE001
-                raise HTTPException(500, f"export failed: {e}") from e
-        return json.loads(p.read_text())
+        # One build at a time per run: the Results list and a
+        # comparison can ask for the same run together, and two
+        # concurrent export_dir calls wrote the same file over each
+        # other. The second waiter re-checks staleness under the lock
+        # and finds the first one's fresh file.
+        lock = app.state.export_locks.setdefault(
+            f"{run_name}|{fname}", asyncio.Lock())
+        async with lock:
+            # Rebuild when the DB has newer data than the cached export
+            # — a Results tab opened mid-run builds a partial export,
+            # and serving that snapshot forever would freeze the run at
+            # whatever step it happened to be on.
+            stale = (
+                p.exists()
+                and p.stat().st_mtime < (d / "run.db").stat().st_mtime
+            )
+            if not p.exists() or stale:
+                from .export import export_dir
+                try:
+                    await asyncio.to_thread(export_dir, d, p, slim=slim)
+                except Exception as e:  # noqa: BLE001
+                    raise HTTPException(500, f"export failed: {e}") from e
+            return await asyncio.to_thread(_read_json, p)
 
     @app.get("/api/live/backfill")
     async def live_backfill(window_s: int = 600) -> dict:
@@ -2394,13 +2552,36 @@ def create_app(
     async def ws_telemetry(ws: WebSocket) -> None:
         await ws.accept()
         q = BUS.subscribe()
-        try:
+
+        # Two halves: the sender pushes bus events; the receiver only
+        # exists to notice the client going away. Without it a closed
+        # tab left the handler parked on q.get() forever, and its
+        # subscriber queue kept filling (the bus drops oldest, so it
+        # was a leak of one queue per stale tab, not a crash).
+        async def _send() -> None:
             while True:
                 event = await q.get()
                 await ws.send_json(event)
-        except (WebSocketDisconnect, RuntimeError):
-            pass
+
+        async def _recv() -> None:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    return
+
+        tasks = [asyncio.create_task(_send()), asyncio.create_task(_recv())]
+        try:
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+            for t in done:
+                with contextlib.suppress(WebSocketDisconnect, RuntimeError,
+                                         asyncio.CancelledError):
+                    t.result()
         finally:
+            for t in tasks:
+                t.cancel()
             BUS.unsubscribe(q)
 
     # ── UI (Phase 3) ──────────────────────────────────────────────
@@ -2435,6 +2616,8 @@ def create_app(
 
 def serve(host: str = "127.0.0.1", port: int = 8321,
           runs_base: Path | str = Path("runs")) -> None:
-    """Blocking uvicorn entrypoint used by ``capsim serve``."""
+    """Blocking uvicorn entrypoint used by ``capsim serve``. The
+    loopback-only guard lives in the CLI (``--insecure``); this
+    function binds wherever it is told."""
     import uvicorn
     uvicorn.run(create_app(runs_base), host=host, port=port, log_level="info")

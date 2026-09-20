@@ -24,6 +24,10 @@ the operator sees the cost model, not just the combinatorics.
 
 Device groups (PCIe/NUMA domains) can't be reliably auto-detected, so
 ``config/arena.yaml`` may pin them; otherwise all GPUs form one group.
+That file is per-host and gitignored — ``config/arena.example.yaml``
+is the template (the XE7740's map). It is read only when present, and
+when it claims more GPUs than detection finds the result is flagged
+``source: "config (unverified: detected N)"`` rather than trusted.
 """
 
 from __future__ import annotations
@@ -36,6 +40,8 @@ from typing import Optional
 
 import yaml
 
+# Per-host, optional, gitignored. config/arena.example.yaml documents
+# the format; nothing is loaded unless the operator copies it here.
 ARENA_CONFIG = Path("config/arena.yaml")
 
 # Dimension values offered beyond the hardware-derived ones. Batch
@@ -89,26 +95,36 @@ def _arena_config() -> dict:
 
 
 def hardware() -> dict:
-    """{count, vram_per_gpu_gb, device_groups} — detected, with
-    config/arena.yaml able to pin device_groups (PCIe/NUMA domains
-    aren't reliably auto-detectable)."""
+    """{count, vram_per_gpu_gb, device_groups, detected_count, source}
+    — detected, with config/arena.yaml (when present) able to pin
+    device_groups (PCIe/NUMA domains aren't reliably auto-detectable).
+
+    Config wins on SHAPE: containerized nvidia-smi sometimes sees a
+    subset of the box, so a pinned map is kept even when detection
+    finds fewer devices. But that must never pass silently — a copied
+    arena.yaml on a GPU-less laptop would otherwise announce eight
+    GPUs — so ``source`` says "config (unverified: detected N)" and
+    ``detected_count`` carries what nvidia-smi actually saw."""
     vrams = detect_gpus()
     cfg = _arena_config()
     groups = cfg.get("device_groups")
+    detected = len(vrams)
     if groups and all(isinstance(g, list) for g in groups):
         groups = [[int(d) for d in g] for g in groups]
-        # Config wins on shape even if detection saw fewer GPUs
-        # (containerized nvidia-smi quirks); count follows the config.
         count = sum(len(g) for g in groups)
+        source = ("config" if detected >= count
+                  else f"config (unverified: detected {detected})")
     else:
-        count = len(vrams)
+        count = detected
         groups = [list(range(count))] if count else []
+        source = "detected"
     vram = min(vrams) if vrams else cfg.get("vram_per_gpu_gb")
     return {
         "count": count,
+        "detected_count": detected,
         "vram_per_gpu_gb": float(vram) if vram else None,
         "device_groups": groups,
-        "source": "config" if cfg.get("device_groups") else "detected",
+        "source": source,
     }
 
 
@@ -270,7 +286,8 @@ def build_space_doc(
     hw = arena["hardware"]
     if not hw["count"]:
         raise ValueError("no GPUs detected — the arena needs a GPU host "
-                         "(or device_groups in config/arena.yaml)")
+                         "(or device_groups in config/arena.yaml — see "
+                         "config/arena.example.yaml)")
 
     by_id = {m["id"]: m for m in arena["models"]}
     chosen_ids = selection.get("models") or [

@@ -19,7 +19,11 @@ from .personas import (
     resolve_workload_group,
 )
 
-app = typer.Typer(add_completion=False, help="Persona Capacity Simulator")
+app = typer.Typer(
+    add_completion=False,
+    help="capsim — AI sizing and capacity engine. Open-loop capacity benchmarks for LLM "
+         "inference engines; `capsim serve` starts the web UI.",
+)
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -641,18 +645,47 @@ def _ensure_model(cfg) -> None:
     typer.echo(f"==> Downloaded to {host_dir}")
 
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def check_serve_host(host: str, insecure: bool) -> None:
+    """Refuse a non-loopback bind unless ``--insecure`` says the
+    operator knows what the API can do. There is no auth, and the API
+    launches arbitrary container images with arbitrary arguments,
+    mounts host paths into them (``custom`` levers), loads any
+    filesystem path as a config, and picks the RW model-cache
+    directory (``POST /api/storage``): on a shared network that is
+    remote code execution on the box."""
+    if host.strip() in LOOPBACK_HOSTS or insecure:
+        return
+    raise typer.BadParameter(
+        f"refusing to bind {host!r}: the service has no authentication, "
+        f"and its API can run arbitrary container images and mount host "
+        f"paths — anyone who can reach the port can run code on this "
+        f"host. Bind 127.0.0.1 (the default) and reach it over an SSH "
+        f"tunnel, or pass --insecure to bind it anyway on a network you "
+        f"trust.", param_hint="--host")
+
+
 @app.command("serve")
 def serve_cmd(
     host: str = typer.Option(
         "127.0.0.1", "--host",
         help="Bind address. Localhost by default — the service has no "
-             "auth; open it up only on a network you trust.",
+             "auth and its API can launch containers and mount host "
+             "paths, so any other address is refused without --insecure.",
     ),
     port: int = typer.Option(8321, "--port"),
     runs_dir: Path = typer.Option(
         Path("runs"), "--runs-dir",
         help="Base directory the service reads runs from and starts "
              "runs into.",
+    ),
+    insecure: bool = typer.Option(
+        False, "--insecure",
+        help="Allow --host other than loopback. The API is unauthenticated "
+             "remote code execution (container images, host mounts); "
+             "only on a network you trust.",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
@@ -669,10 +702,19 @@ def serve_cmd(
              curl -X POST localhost:8321/api/runs -H 'content-type: application/json' \\
                   -d '{"profile": "mock", "workload": {"kind": "cohort", "id": "chat_heavy"}}'
     """
+    check_serve_host(host, insecure)
     _setup_logging(verbose)
-    from .service import serve
+    from .service import RunsDirBusy, serve
+    if insecure and host.strip() not in LOOPBACK_HOSTS:
+        typer.echo(f"WARNING: binding {host} with no authentication — "
+                   f"the API can run containers and mount host paths",
+                   err=True)
     typer.echo(f"capsim service on http://{host}:{port}  (runs dir: {runs_dir})")
-    serve(host=host, port=port, runs_base=runs_dir)
+    try:
+        serve(host=host, port=port, runs_base=runs_dir)
+    except RunsDirBusy as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=2) from e
 
 
 @app.command("doctor")

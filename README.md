@@ -168,7 +168,16 @@ simulator/
   timeline.py         # per-measurement phase-distribution timeline
   runner.py           # top-level closed-loop cohort-run orchestration
   # control plane
-  service.py          # control-plane HTTP service + UI host (FastAPI, /api + /ws/telemetry)
+  service/            # control-plane HTTP service + UI host (FastAPI, /api + /ws/telemetry)
+    app.py            #   create_app / serve: state on app.state, runs-dir lock, routers, UI mount
+    state.py          #   ActiveRun, Paths, the runs-dir lock
+    schemas.py        #   request bodies
+    runs.py           #   run lifecycle, run list, exports, live backfill
+    catalog.py        #   profiles, personas/cohorts + editor, headline shapes, hardware
+    prepare.py        #   storage, model staging, engine runtime pulls
+    optimizer.py      #   engine optimizer + arena, history, promote
+    roofline.py       #   roofline state + candidates
+    telemetry.py      #   /ws/telemetry
   bus.py              # in-process telemetry event bus
   runs.py             # run-directory layout helpers (run_NN, resume-by-default)
   cli.py              # `capsim` command-line interface (typer)

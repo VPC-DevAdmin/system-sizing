@@ -54,6 +54,32 @@ class CatalogError(ValueError):
     """A catalog file or entry that doesn't validate."""
 
 
+def _normalize_gguf(raw: object, source: str, model_id: str) -> Optional[dict]:
+    """The optional GGUF companion: ``{repo, file, size_gb}`` or None.
+
+    KTransformers loads weights from GGUF only, so a catalog entry
+    that names its companion is what lets Prepare stage it and the
+    launcher resolve ``--gguf_path`` without the operator hand-editing
+    a path. ``file`` may carry a subdirectory when the repo shards
+    its quants into folders."""
+    if raw in (None, {}, ""):
+        return None
+    if not isinstance(raw, dict):
+        raise CatalogError(f"{source}: '{model_id}' gguf must be a mapping "
+                           f"with repo and file")
+    repo = str(raw.get("repo") or "")
+    file = str(raw.get("file") or "").strip("/")
+    if not _MODEL_ID_RE.match(repo):
+        raise CatalogError(f"{source}: '{model_id}' gguf.repo '{repo}' is "
+                           f"not an org/name HF repo id")
+    if not file.endswith(".gguf") or ".." in file.split("/"):
+        raise CatalogError(f"{source}: '{model_id}' gguf.file '{file}' must "
+                           f"name a .gguf file inside the repo")
+    size = raw.get("size_gb")
+    return {"repo": repo, "file": file,
+            "size_gb": float(size) if size is not None else None}
+
+
 def infer_quant(model_id: str) -> str:
     name = model_id.split("/")[-1]
     for pat, quant in _QUANT_PATTERNS:
@@ -102,6 +128,7 @@ def _normalize_entry(raw: dict, source: str) -> dict:
         "moe": bool(raw.get("moe", False)),
         "engine_args": list(raw.get("engine_args") or []),
         "notes": str(raw.get("notes") or ""),
+        "gguf": _normalize_gguf(raw.get("gguf"), source, model_id),
         "source": source,
     }
 

@@ -207,3 +207,36 @@ def test_models_add_api(tmp_path, monkeypatch) -> None:
         r = client.post("/api/models/add",
                         json={"model": "not-an-id", "check_hub": False})
         assert r.status_code == 422
+
+
+def test_gguf_companion_parsing(tmp_path) -> None:
+    """KTransformers loads weights from GGUF only, so a catalog entry
+    may name its GGUF companion; both precisions of a family share
+    the same one because it is the same weights."""
+    by_id = {e["id"]: e for e in load_model_catalog(user_dir=tmp_path / "none")}
+    bf16 = by_id["Qwen/Qwen3-30B-A3B-Instruct-2507"]["gguf"]
+    fp8 = by_id["Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"]["gguf"]
+    assert bf16 == fp8
+    assert bf16["repo"] == "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF"
+    assert bf16["file"].endswith("Q4_K_M.gguf") and bf16["size_gb"] == 18.6
+    # Entries without one carry an explicit None, never a missing key.
+    assert by_id["Qwen/Qwen3-32B"]["gguf"] is None
+
+    user = tmp_path / "models"
+    user.mkdir()
+    (user / "a.yaml").write_text(textwrap.dedent("""\
+        models:
+          - id: org/Thing
+            gguf: {repo: org/Thing-GGUF, file: Q4_K_M/Thing-Q4_K_M.gguf}
+    """))
+    e = {x["id"]: x for x in load_model_catalog(user_dir=user)}["org/Thing"]
+    assert e["gguf"] == {"repo": "org/Thing-GGUF",
+                         "file": "Q4_K_M/Thing-Q4_K_M.gguf", "size_gb": None}
+
+    for bad in ("gguf: {repo: not-a-repo, file: x.gguf}",
+                "gguf: {repo: org/R, file: weights.safetensors}",
+                "gguf: {repo: org/R, file: ../escape.gguf}",
+                "gguf: just-a-string"):
+        (user / "a.yaml").write_text(f"models:\n  - id: org/Thing\n    {bad}\n")
+        with pytest.raises(CatalogError, match="gguf"):
+            load_model_catalog(user_dir=user)

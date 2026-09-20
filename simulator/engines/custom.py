@@ -146,6 +146,34 @@ def ktransformers_gguf_missing(gguf_path: object) -> Optional[str]:
     return None
 
 
+def resolve_gguf_companion(model_id: str,
+                           catalog: Optional[list[dict]] = None) -> Optional[str]:
+    """The staged GGUF companion's directory for ``model_id``, from
+    the catalog entry's ``gguf`` block -- None when the model has no
+    companion (the caller then falls back to the generic "configure
+    ktransformers_gguf_path" refusal).
+
+    A companion that exists but is not staged raises ShapeError
+    naming the fix (Prepare's "Download GGUF" button): telling the
+    operator to point ktransformers_gguf_path somewhere would be the
+    wrong advice for a model capsim already knows how to stage."""
+    from ..models import gguf_status
+    if catalog is not None:
+        entry = next((e for e in catalog if e.get("id") == model_id), None)
+        status = gguf_status(entry) if entry else None
+    else:
+        status = gguf_status(model_id)
+    if status is None:
+        return None
+    if not status["cached"]:
+        raise ShapeError(
+            f"ktransformers cannot run {model_id} — its GGUF companion "
+            f"{status['repo']}/{status['file']} is not staged; stage the "
+            f"GGUF companion in Prepare (Download GGUF) or set "
+            f"ktransformers_gguf_path explicitly")
+    return status["path"]
+
+
 def custom_engine(custom: dict, *, hw: Optional[dict] = None,
                   catalog: Optional[list[dict]] = None) -> dict:
     """The ``engine`` section for a custom shape.
@@ -192,7 +220,12 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
         # answers a different question than the one asked.
         raise ShapeError(f"{engine_type} cannot run this shape — {why}")
     if engine_type == "ktransformers":
-        why = ktransformers_gguf_missing(custom.get("ktransformers_gguf_path"))
+        gguf_path = custom.get("ktransformers_gguf_path")
+        if not gguf_path:
+            gguf_path = resolve_gguf_companion(model_id, catalog)
+            if gguf_path:
+                levers["ktransformers_gguf_path"] = gguf_path
+        why = ktransformers_gguf_missing(gguf_path)
         if why:
             raise ShapeError(f"ktransformers cannot run {model_id} — {why}")
 

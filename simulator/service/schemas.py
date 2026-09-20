@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -63,6 +63,9 @@ class SaveSpecRequest(BaseModel):
 
 class ModelDownloadRequest(BaseModel):
     model: str
+    # "gguf": stage the model's GGUF companion (KTransformers' weights,
+    # from the catalog entry's ``gguf`` block) instead of the HF repo.
+    companion: Optional[Literal["gguf"]] = None
 
 
 class ModelAddRequest(BaseModel):

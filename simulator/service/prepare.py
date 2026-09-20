@@ -173,6 +173,12 @@ async def models_list(request: Request) -> dict:
             "log": dl["log"],
             "log_tail": tail,
         }
+    # A companion download is keyed "<model>#gguf"; the row's gguf
+    # block says whether one is in flight so the UI needs no join.
+    for row in entries:
+        if row.get("gguf"):
+            dl = downloads.get(f"{row['model']}#gguf")
+            row["gguf"]["downloading"] = bool(dl and dl["running"])
     return {
         "cache_dir": str(hf_cache_dir()),
         "models": entries,
@@ -249,7 +255,7 @@ async def models_discover(orgs: Optional[str] = None) -> dict:
 @router.post("/api/models/download", status_code=202)
 async def models_download(req: ModelDownloadRequest, request: Request) -> dict:
     from ..models import download_command, referenced_models
-    known = {m["model"] for m in await asyncio.to_thread(referenced_models)}
+    known = {m["model"]: m for m in await asyncio.to_thread(referenced_models)}
     if req.model not in known:
         # Only models the configs actually reference — the service
         # is not a general download proxy.
@@ -257,14 +263,26 @@ async def models_download(req: ModelDownloadRequest, request: Request) -> dict:
             404, f"'{req.model}' is not referenced by any profile "
                  f"or search space",
         )
-    existing = request.app.state.model_downloads.get(req.model)
+    # The GGUF companion (KTransformers' weights) is staged under its
+    # own key so it can run beside, and be reported apart from, the
+    # safetensors download of the same model.
+    key = req.model if req.companion is None else f"{req.model}#{req.companion}"
+    if req.companion == "gguf" and not known[req.model].get("gguf"):
+        raise HTTPException(
+            422, f"'{req.model}' has no GGUF companion in the catalog — "
+                 f"add a gguf: {{repo, file}} block to its entry",
+        )
+    existing = request.app.state.model_downloads.get(key)
     if existing and existing["proc"].poll() is None:
         raise HTTPException(409, "download already running for this model")
-    argv, extra_env = download_command(req.model)
+    try:
+        argv, extra_env = download_command(req.model, companion=req.companion)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
     log_dir = request.app.state.paths.runs_base / "model_downloads"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / (
-        req.model.replace("/", "--")
+        key.replace("/", "--").replace("#", "--")
         + f"_{time.strftime('%Y%m%dT%H%M%S')}.log"
     )
     import os as _os
@@ -282,10 +300,11 @@ async def models_download(req: ModelDownloadRequest, request: Request) -> dict:
                 500, f"hf CLI not found ({e}) — is huggingface_hub "
                      f"installed in the service environment?",
             ) from e
-    request.app.state.model_downloads[req.model] = {
+    request.app.state.model_downloads[key] = {
         "proc": proc, "log": str(log_path), "started_at": time.time(),
     }
-    return {"accepted": True, "model": req.model, "log": str(log_path)}
+    return {"accepted": True, "model": req.model, "companion": req.companion,
+            "key": key, "log": str(log_path)}
 
 
 # ── engine runtimes (Prepare: stage the servers) ─────────────

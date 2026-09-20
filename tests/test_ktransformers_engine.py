@@ -20,6 +20,47 @@ from simulator.engines.ktransformers import (
 GGUF_DIR = tempfile.mkdtemp(prefix="kt-gguf-")
 
 
+def test_gguf_path_resolves_from_a_staged_catalog_companion(tmp_path, monkeypatch):
+    """An operator stages the catalog's GGUF companion in Prepare and
+    never types a path: the launcher resolves --gguf_path to the
+    snapshot directory holding it. Unstaged, the refusal names the
+    Prepare button rather than a config key."""
+    from simulator.engines.custom import ShapeError, custom_engine
+
+    cache = tmp_path / "hf"
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(cache))
+    spec = {"repo": "org/M-GGUF", "file": "M-Q4_K_M.gguf", "size_gb": 1.0}
+    catalog = [{"id": "org/M", "family": "m", "quant": "bf16", "gguf": spec},
+               {"id": "org/Plain", "family": "p", "quant": "bf16", "gguf": None}]
+    hw = {"count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+          "vram_per_gpu_gb": 96.0}
+    base = {"model_id": "org/M", "device": "gpu", "engine": "ktransformers",
+            "replicas": 1, "tp": 1, "kv_cache_dtype": "auto"}
+
+    with pytest.raises(ShapeError, match="stage the GGUF companion in Prepare"):
+        custom_engine(base, hw=hw, catalog=catalog)
+    # No companion at all: today's "configure ktransformers_gguf_path".
+    with pytest.raises(ShapeError, match="ktransformers_gguf_path is configured"):
+        custom_engine({**base, "model_id": "org/Plain"}, hw=hw, catalog=catalog)
+
+    rev = cache / "hub" / "models--org--M-GGUF" / "snapshots" / "deadbeef"
+    rev.mkdir(parents=True)
+    (rev / "M-Q4_K_M.gguf").write_bytes(b"gguf")
+    eng = custom_engine(base, hw=hw, catalog=catalog)
+    assert eng["type"] == "ktransformers"
+    assert eng["ktransformers_gguf_path"] == str(rev)
+    cmd = KTransformersEngine(_cfg(ktransformers_gguf_path=eng["ktransformers_gguf_path"])
+                              ).build_replica_command(0, [0], "ktransformers-r0-x")
+    assert f"{rev}:/gguf:ro" in cmd
+
+    # An explicit path still wins over the companion.
+    explicit = tmp_path / "mine"
+    explicit.mkdir()
+    eng = custom_engine({**base, "ktransformers_gguf_path": str(explicit)},
+                        hw=hw, catalog=catalog)
+    assert eng["ktransformers_gguf_path"] == str(explicit)
+
+
 def _cfg(**kw) -> EngineConfig:
     base = dict(type="ktransformers", model_id="deepseek-ai/DeepSeek-V3",
                 port=9100, replica_devices=[[0, 1, 2, 3]],

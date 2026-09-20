@@ -40,7 +40,12 @@ from .config import Config
 from .cpu_binding import expand_thread_binding
 from .database import AGGREGATE_COLUMN_NAMES, Database
 from .engines import Engine, make_engine
-from .measurement import _classify_status, _percentile, _wilson_ci
+from .measurement import (
+    _classify_status,
+    _percentile,
+    _tpot_measured,
+    _wilson_ci,
+)
 from .personas import Cohort, get_cohort
 from .preflight import preflight_check
 from .rate_search import (
@@ -51,7 +56,7 @@ from .rate_search import (
     RateStepper,
 )
 from .runs import resolve_run_dir
-from .stability import INCONCLUSIVE, assess_queue_stability
+from .stability import INCONCLUSIVE, assess_queue_stability, theil_sen_slope
 from .telemetry import MeasurementTelemetry
 
 log = logging.getLogger(__name__)
@@ -66,6 +71,35 @@ TARDY_MIN_COUNT = 5
 # Worker event-loop lag limit (same meaning as the closed-loop
 # CLIENT_SATURATION_LAG_MS: past this, latencies measure the client).
 WORKER_LAG_LIMIT_MS = 1000.0
+# Settling detector: the trailing population drift (Theil-Sen slope ×
+# trailing window) must be within this fraction of the trailing mean
+# before a window opens. See SimulationConfig.open_loop_settle_*.
+SETTLE_TOLERANCE = 0.05
+SETTLE_WINDOW_CAP_S = 300
+
+
+def _population_settled(
+    series: list[float], window_n: int, tol: float = SETTLE_TOLERANCE,
+) -> tuple[bool, float]:
+    """Is the active-session population flat over its trailing
+    ``window_n`` samples?
+
+    Returns ``(settled, drift_fraction)`` where drift is the Theil-Sen
+    slope projected across the trailing window, as a fraction of the
+    trailing mean. Settled when that drift is within ``tol`` of the
+    mean plus one session (the absolute slack lets a population of a
+    dozen integer-valued sessions settle at all). Theil-Sen — the
+    median pairwise slope — is what makes this robust to the Poisson
+    jitter of arrivals and departures: endpoint noise does not read
+    as a ramp, while a genuine ramp toward a new equilibrium does.
+    """
+    if window_n < 2 or len(series) < window_n:
+        return False, float("inf")
+    tail = series[-window_n:]
+    mean = statistics.fmean(tail)
+    drift = abs(theil_sen_slope(tail, 1.0)) * window_n
+    limit = tol * mean + 1.0
+    return drift <= limit, (drift / mean if mean > 0 else 0.0)
 
 
 class EngineBrokenError(RuntimeError):
@@ -96,6 +130,36 @@ def _engine_broken(errors: int, completions: int,
         return False
     return (errors >= 25 and completions == 0) or \
            (errors >= 100 and errors > 4 * completions)
+
+
+class _ErrorFuse:
+    """Runaway-error fuse armed at window start.
+
+    Deltas of the workers' cumulative error / completion counters and
+    the engine's ``generation_tokens_total`` since arming feed
+    ``_engine_broken``. The token side is read from the LAST GOOD
+    scrape, not the latest attempt: a single failed /metrics scrape
+    used to hand ``None`` to the fuse, which then fell back to the
+    completions-only test and could abort a healthy-but-slow run —
+    the exact false abort the token counter was added to prevent.
+    """
+
+    def __init__(self, errors: int, completions: int,
+                 tokens_last_good: int | None):
+        self.errors0 = int(errors)
+        self.completions0 = int(completions)
+        self.tokens0 = tokens_last_good
+
+    def tripped(self, errors: int, completions: int,
+                tokens_last_good: int | None) -> bool:
+        err_d = int(errors) - self.errors0
+        comp_d = int(completions) - self.completions0
+        tok_d = (
+            int(tokens_last_good) - int(self.tokens0)
+            if tokens_last_good is not None and self.tokens0 is not None
+            else None
+        )
+        return _engine_broken(err_d, comp_d, tok_d)
 
 
 REQUEST_TIMEOUT_CEILING_S = 1800
@@ -186,10 +250,20 @@ class _Worker:
     reader_task: asyncio.Task
     last_stat: dict = field(default_factory=dict)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
+    watch_task: asyncio.Task | None = None
+    dead: bool = False
 
 
 class WorkerPool:
-    """k load-generator subprocesses sharing one total arrival rate."""
+    """k load-generator subprocesses sharing one total arrival rate.
+
+    A worker that dies is noticed the moment its process exits (each
+    worker has a ``proc.wait()`` watcher): it leaves the live set, its
+    frozen counters stop being aggregated, the rate is redistributed
+    over the survivors so the offered load stays λ, and a death record
+    is queued for the window in progress — which is then discarded as
+    a measurement of the generator, never of the engine.
+    """
 
     def __init__(self, *, base_config: dict, log_dir: Path, max_workers: int):
         self._base = base_config
@@ -199,20 +273,32 @@ class WorkerPool:
         self._workers: list[_Worker] = []
         self._rate_total = 0.0
         self._stderr_files: list = []
+        self._next_index = 0
+        self._stopping = False
+        self._deaths: list[dict] = []
+        self.deaths_total = 0
 
     @property
     def size(self) -> int:
+        """Live workers (a dead one is removed as soon as it exits)."""
         return len(self._workers)
+
+    def take_deaths(self) -> list[dict]:
+        """Death records queued since the last call ({index,
+        returncode, at_ms}). The window loop polls this each tick."""
+        out, self._deaths = self._deaths, []
+        return out
 
     async def scale_to(self, k: int) -> None:
         k = max(1, min(k, self.max_workers))
         while len(self._workers) < k:
-            await self._spawn(len(self._workers))
+            await self._spawn(self._next_index)
         # Redistribute the current rate over the new worker count.
         if self._rate_total > 0:
             await self.set_rate(self._rate_total)
 
     async def _spawn(self, index: int) -> None:
+        self._next_index = index + 1
         cfg = dict(self._base)
         cfg["worker_index"] = index
         cfg["seed"] = (self._base.get("seed") or 0xC0FFEE) + index * 7919
@@ -229,17 +315,58 @@ class WorkerPool:
         )
         worker = _Worker(index=index, proc=proc, reader_task=None)  # type: ignore[arg-type]
         worker.reader_task = asyncio.create_task(self._read_loop(worker))
+        worker.watch_task = asyncio.create_task(self._watch(worker))
         self._workers.append(worker)
         # Tokenizer load can take a while on first spawn; don't start
         # the window clock until the worker can actually generate.
-        try:
-            await asyncio.wait_for(worker.ready.wait(), timeout=180.0)
-        except asyncio.TimeoutError as e:
+        # Raced against the process exiting: a worker that crashes on
+        # startup (bad config, import error) fails fast with its log
+        # path instead of a 180 s timeout.
+        ready = asyncio.ensure_future(worker.ready.wait())
+        done, _ = await asyncio.wait(
+            {ready, worker.watch_task}, timeout=180.0,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if ready not in done:
+            ready.cancel()
+            if worker.watch_task in done:
+                raise RuntimeError(
+                    f"loadgen worker {index} exited with code "
+                    f"{proc.returncode} before becoming ready "
+                    f"(see {stderr_path})"
+                )
             raise RuntimeError(
                 f"loadgen worker {index} did not become ready in 180s "
                 f"(see {stderr_path})"
-            ) from e
+            )
         log.info("loadgen worker %d ready (pid=%s)", index, proc.pid)
+
+    async def _watch(self, worker: _Worker) -> None:
+        """Notice a worker's death the moment it happens. Without this
+        the coordinator kept aggregating the dead worker's frozen
+        counters and offering λ·(k−1)/k while recording λ."""
+        try:
+            rc = await worker.proc.wait()
+        except asyncio.CancelledError:
+            return
+        if self._stopping or worker.dead:
+            return
+        worker.dead = True
+        self.deaths_total += 1
+        record = {"index": worker.index, "returncode": rc, "at_ms": _now_ms()}
+        self._deaths.append(record)
+        if worker in self._workers:
+            self._workers.remove(worker)
+        log.error(
+            "LOAD GENERATOR WORKER %d DIED (exit code %s, pid=%s) — the "
+            "window in progress is discarded; see %s",
+            worker.index, rc, worker.proc.pid,
+            self._log_dir / f"loadgen_worker_{worker.index}.log",
+        )
+        # Survivors pick up the dead worker's share so the offered
+        # load stays λ until the coordinator re-plans the pool.
+        if self._rate_total > 0 and self._workers:
+            await self.set_rate(self._rate_total)
 
     async def _read_loop(self, worker: _Worker) -> None:
         try:
@@ -282,6 +409,12 @@ class WorkerPool:
         self._rate_total = 0.0
         for w in self._workers:
             await self._send(w, {"cmd": "drain"})
+
+    async def mark_window(self) -> None:
+        """A measurement window opened: every worker's tardiness p99
+        is scoped to arrivals from here on."""
+        for w in self._workers:
+            await self._send(w, {"cmd": "mark"})
 
     async def trim(self, target_total: int) -> None:
         """Cancel newest sessions across workers down to
@@ -343,6 +476,7 @@ class WorkerPool:
                 s.get("prefill_in_flight", 0) for s in stats),
             "completed": sum(s.get("completed", 0) for s in stats),
             "errors": sum(s.get("errors", 0) for s in stats),
+            "cancelled": sum(s.get("cancelled", 0) for s in stats),
             "tardiness_p99_ms": max(
                 (s.get("tardiness_p99_ms", 0.0) for s in stats), default=0.0),
             "loop_lag_ms": max(
@@ -350,9 +484,11 @@ class WorkerPool:
             "mean_session_s": (
                 sum(sess_durs) / len(sess_durs) if sess_durs else None
             ),
+            "dead_workers": self.deaths_total,
         }
 
     async def stop(self) -> None:
+        self._stopping = True
         for w in self._workers:
             await self._send(w, {"cmd": "stop"})
         for w in self._workers:
@@ -361,8 +497,12 @@ class WorkerPool:
             except asyncio.TimeoutError:
                 w.proc.kill()
             w.reader_task.cancel()
+            if w.watch_task is not None:
+                w.watch_task.cancel()
         await asyncio.gather(
-            *(w.reader_task for w in self._workers), return_exceptions=True,
+            *(w.reader_task for w in self._workers),
+            *(w.watch_task for w in self._workers if w.watch_task),
+            return_exceptions=True,
         )
         for f in self._stderr_files:
             try:
@@ -397,7 +537,12 @@ def _summarize_turns(turns: list[dict]) -> dict:
     if n == 0:
         return {"sample_size": 0}
     ttft = [t["ttft_ms"] for t in turns]
-    tpot = [t["tpot_ms"] for t in turns]
+    # Failed-before-first-token turns carry no decode rate (see
+    # measurement._tpot_measured); they stay in TTFT and the rates.
+    tpot = [
+        t["tpot_ms"] for t in turns
+        if _tpot_measured(t.get("error"), t["tpot_ms"])
+    ]
     ttfct = [t.get("ttfct_ms") or t["ttft_ms"] for t in turns]
     ttft_v = sum(1 for t in turns if t["ttft_violation"])
     tpot_v = sum(1 for t in turns if t["tpot_violation"])
@@ -436,6 +581,29 @@ def _summarize_turns(turns: list[dict]) -> dict:
         "target_status": _classify_status(comb_m, n),
         "combined_violations": comb_v,
     }
+
+
+def _served_mean(
+    running_series: list[float], inflight_series: list[float],
+) -> tuple[float | None, str]:
+    """Mean number of requests actually being served during the
+    window — the practical-significance basis for the stability
+    verdict (growing the backlog by half the active batch in one
+    window is collapse). The engine's own ``num_running`` gauge is
+    the honest number: the client's in-flight count also includes
+    requests still WAITING in the engine's queue, which inflates the
+    basis exactly when the queue is growing. Falls back to client
+    in-flight when the engine exposes no running gauge (or fewer
+    than half the ticks scraped one).
+
+    Returns ``(mean, basis)`` with basis ``"engine_running"`` or
+    ``"client_in_flight"``; ``(None, ...)`` with no samples at all.
+    """
+    if running_series and len(running_series) >= len(inflight_series) // 2:
+        return statistics.fmean(running_series), "engine_running"
+    if inflight_series:
+        return statistics.fmean(inflight_series), "client_in_flight"
+    return None, "none"
 
 
 def _turn_row(t: dict, measurement_id: int) -> dict:
@@ -530,6 +698,10 @@ class OpenLoopRunner:
         self.step_index = 0
         self.client_max_lag_ms = 0.0
         self._last_engine_metrics: dict = {}
+        # generation_tokens_total from the last SUCCESSFUL scrape —
+        # survives failed scrapes so the error fuse keeps its token
+        # evidence (see _ErrorFuse).
+        self._tokens_last_good: int | None = None
         self._snapshot_task: asyncio.Task | None = None
         self._last_inflight_mean: float | None = None
         self._last_stable: dict | None = None  # {rate, sessions}
@@ -545,6 +717,8 @@ class OpenLoopRunner:
         self._last_engine_metrics = m
         if m.get("queue_depth") is not None:
             self._queue_gauge_seen = True
+        if m.get("generation_tokens_total") is not None:
+            self._tokens_last_good = int(m["generation_tokens_total"])
         return m
 
     # ── Live snapshots (1 Hz, whole run) ────────────────────────────
@@ -586,13 +760,33 @@ class OpenLoopRunner:
 
     # ── Window machinery ────────────────────────────────────────────
 
-    def _warmup_s(self) -> float:
-        base = float(self.cfg.simulation.open_loop_warmup_s)
+    def _warmup_plan(self) -> tuple[float, float, int]:
+        """``(minimum_s, cap_s, settle_window_n)`` for the next window.
+
+        The minimum is the configured warmup stretched toward the
+        measured mean session duration (capped at 300 s). Past it the
+        settling detector decides, up to ``cap_s`` — by default
+        max(300 s, 1.5 × mean session duration), the time a rate step
+        needs to propagate through essentially every session — on a
+        trailing window of max(open_loop_settle_window_s, 0.2 × mean
+        session duration) samples, capped at 300, so a slow ramp on
+        long sessions is still visible.
+        """
+        sim = self.cfg.simulation
+        base = float(sim.open_loop_warmup_s)
         agg = self.pool.aggregate()
-        mean_sess = agg.get("mean_session_s") if agg else None
-        if mean_sess:
-            return max(base, min(300.0, float(mean_sess)))
-        return base
+        mean_sess = float(agg.get("mean_session_s") or 0.0) if agg else 0.0
+        minimum = max(base, min(300.0, mean_sess)) if mean_sess else base
+        cap = sim.open_loop_settle_max_s
+        cap_s = (
+            max(300.0, 1.5 * mean_sess) if cap is None else float(cap)
+        )
+        cap_s = max(cap_s, minimum)
+        window_n = int(min(
+            SETTLE_WINDOW_CAP_S,
+            max(sim.open_loop_settle_window_s, 0.2 * mean_sess),
+        ))
+        return minimum, cap_s, max(2, window_n)
 
     async def _measure_window(
         self, rate_per_s: float, window_s: int,
@@ -601,18 +795,22 @@ class OpenLoopRunner:
         await self.pool.set_rate(rate_per_s)
 
         self.phase = "warmup"
-        warmup = self._warmup_s()
+        warmup_min, settle_cap, settle_n = self._warmup_plan()
         log.info(
-            "rate %.3g/s (%.1f/min): warmup %.0fs, window %ds, workers=%d",
-            rate_per_s, rate_per_s * 60, warmup, window_s, self.pool.size,
+            "rate %.3g/s (%.1f/min): warmup ≥%.0fs (settling cap %.0fs, "
+            "trailing window %ds), window %ds, workers=%d",
+            rate_per_s, rate_per_s * 60, warmup_min, settle_cap, settle_n,
+            window_s, self.pool.size,
         )
 
         # Runaway-error fuse state: cumulative counters at phase
         # start; checked every tick in warmup AND measurement.
         fuse_agg = self.pool.aggregate()
-        fuse_err0 = fuse_agg.get("errors", 0) if fuse_agg else 0
-        fuse_comp0 = fuse_agg.get("completed", 0) if fuse_agg else 0
-        fuse_tok0 = self._last_engine_metrics.get("generation_tokens_total")
+        fuse = _ErrorFuse(
+            fuse_agg.get("errors", 0) if fuse_agg else 0,
+            fuse_agg.get("completed", 0) if fuse_agg else 0,
+            self._tokens_last_good,
+        )
         last_error: list[str] = []
 
         def _check_fuse(fresh_turns: list[dict]) -> None:
@@ -623,28 +821,64 @@ class OpenLoopRunner:
             agg_now = self.pool.aggregate()
             if not agg_now:
                 return
-            err_d = agg_now.get("errors", 0) - fuse_err0
-            comp_d = agg_now.get("completed", 0) - fuse_comp0
-            tok_now = self._last_engine_metrics.get("generation_tokens_total")
-            tok_d = (int(tok_now) - int(fuse_tok0)
-                     if tok_now is not None and fuse_tok0 is not None
-                     else None)
-            if _engine_broken(err_d, comp_d, tok_d):
+            errors = agg_now.get("errors", 0)
+            completions = agg_now.get("completed", 0)
+            if fuse.tripped(errors, completions, self._tokens_last_good):
                 raise EngineBrokenError(
-                    f"aborting run: {err_d} failed requests against "
-                    f"{comp_d} completions at {rate_per_s * 60:.0f}/min — "
-                    f"the engine is rejecting the load, not serving it "
-                    f"(recent errors: {', '.join(last_error) or 'unknown'}). "
+                    f"aborting run: {errors - fuse.errors0} failed requests "
+                    f"against {completions - fuse.completions0} completions "
+                    f"at {rate_per_s * 60:.0f}/min — the engine is rejecting "
+                    f"the load, not serving it (recent errors: "
+                    f"{', '.join(last_error) or 'unknown'}). "
                     f"Check the engine log in the run directory."
                 )
 
-        warm_end = time.monotonic() + warmup
-        while time.monotonic() < warm_end:
+        # Worker deaths taint the window whenever they land (warmup
+        # included): the offered load was not λ. Records from before
+        # this window (e.g. during a revert) are cleared first.
+        worker_deaths: list[dict] = []
+        self.pool.take_deaths()
+
+        def _note_deaths() -> bool:
+            worker_deaths.extend(self.pool.take_deaths())
+            return bool(worker_deaths)
+
+        # Warmup = the minimum, then extend until the active-session
+        # population is flat (or the settling cap is hit).
+        active_warm: list[float] = []
+        settled = False
+        drift = float("inf")
+        warm_start = time.monotonic()
+        while True:
             await self._sample_engine()
             _check_fuse(self.pool.drain_turn_queue())  # discard settling turns
+            if _note_deaths():
+                break
+            agg_w = self.pool.aggregate()
+            if agg_w:
+                active_warm.append(float(agg_w.get("sessions_active", 0)))
+            elapsed = time.monotonic() - warm_start
+            if elapsed >= warmup_min:
+                settled, drift = _population_settled(active_warm, settle_n)
+                if settled:
+                    break
+                if elapsed >= settle_cap:
+                    log.warning(
+                        "rate %.3g/s: population still drifting %.1f%% per "
+                        "%ds at the %.0fs settling cap — measuring anyway "
+                        "(raise open_loop_settle_max_s for long sessions)",
+                        rate_per_s, drift * 100, settle_n, settle_cap,
+                    )
+                    break
             await asyncio.sleep(1.0)
+        warmup_s = time.monotonic() - warm_start
+        if settled:
+            log.info("rate %.3g/s: population settled after %.0fs "
+                     "(drift %.1f%% per %ds)",
+                     rate_per_s, warmup_s, drift * 100, settle_n)
 
         self.phase = "measuring"
+        await self.pool.mark_window()
         measurement_started_at = datetime.now(timezone.utc).isoformat()
         start_mono = time.monotonic()
         pre_row = {
@@ -671,8 +905,11 @@ class OpenLoopRunner:
         turns: list[dict] = []
         queue_series: list[float] = []
         inflight_series: list[float] = []
+        running_series: list[float] = []   # engine num_running gauge
         active_series: list[float] = []
-        max_tardiness = 0.0
+        # The workers' p99 is over THIS window's arrivals (mark_window
+        # above); the last tick's value is the window figure.
+        tardiness_p99 = 0.0
         max_lag = 0.0
         extended = False
         verdict = None
@@ -683,7 +920,7 @@ class OpenLoopRunner:
         tardy0 = agg0.get("tardy_total", 0) if agg0 else 0
 
         try:
-            remaining = window_s
+            remaining = 0 if worker_deaths else window_s
             while remaining > 0:
                 tick_end = time.monotonic() + 1.0
                 m = await self._sample_engine()
@@ -691,11 +928,13 @@ class OpenLoopRunner:
                 qd = m.get("queue_depth")
                 if qd is not None:
                     queue_series.append(float(qd))
+                nr = m.get("num_running")
+                if nr is not None:
+                    running_series.append(float(nr))
                 if agg:
                     inflight_series.append(float(agg.get("in_flight", 0)))
                     active_series.append(float(agg.get("sessions_active", 0)))
-                    max_tardiness = max(
-                        max_tardiness, agg.get("tardiness_p99_ms", 0.0))
+                    tardiness_p99 = agg.get("tardiness_p99_ms", 0.0)
                     max_lag = max(max_lag, agg.get("loop_lag_ms", 0.0))
                 fresh = self.pool.drain_turn_queue()
                 _check_fuse(fresh)
@@ -722,12 +961,12 @@ class OpenLoopRunner:
                     })
                 await asyncio.sleep(max(0.0, tick_end - time.monotonic()))
                 remaining -= 1
+                if _note_deaths():
+                    remaining = 0  # discard: measure no further
 
                 if remaining <= 0:
-                    served_mean = (
-                        statistics.fmean(inflight_series)
-                        if inflight_series else None
-                    )
+                    served_mean, served_basis = _served_mean(
+                        running_series, inflight_series)
                     basis = "engine_queue"
                     series = queue_series
                     # Engines without a queue gauge (or scrape
@@ -743,6 +982,9 @@ class OpenLoopRunner:
                     )
                     verdict_dict = verdict.to_dict()
                     verdict_dict["basis"] = basis
+                    verdict_dict["served_basis"] = served_basis
+                    if worker_deaths:
+                        break  # no extension: the window is void
                     if verdict.verdict == INCONCLUSIVE and not extended:
                         extended = True
                         remaining = window_s  # double once, keep sampling
@@ -773,13 +1015,21 @@ class OpenLoopRunner:
                     self.db.update_measurement(measurement_id, agg_row)
             self.phase = "idle"
 
-        assert verdict is not None
+        if verdict is None:
+            # A worker died before a single measuring tick: nothing
+            # to assess, and the window is void anyway.
+            verdict = assess_queue_stability(queue_series or inflight_series)
+        served_mean, served_basis = _served_mean(
+            running_series, inflight_series)
         verdict_dict = verdict.to_dict()
         verdict_dict["basis"] = (
             "engine_queue"
             if len(queue_series) >= len(inflight_series) // 2
             else "client_in_flight"
         )
+        verdict_dict["served_basis"] = served_basis
+        verdict_dict["warmup_s"] = round(warmup_s, 1)
+        verdict_dict["settled"] = settled
 
         agg1 = self.pool.aggregate()
         d_arrivals = max(0, (agg1.get("arrivals_total", 0) if agg1 else 0)
@@ -794,17 +1044,25 @@ class OpenLoopRunner:
         verdict_dict["tardy_fraction"] = round(tardy_fraction, 4)
         verdict_dict["tardy_arrivals"] = d_tardy
         self.client_max_lag_ms = max(self.client_max_lag_ms, max_lag)
+        if worker_deaths:
+            # The generator, not the engine, failed this window: the
+            # offered load was below λ from the moment of death.
+            client_saturated = True
+            verdict_dict["worker_deaths"] = worker_deaths
+            log.error(
+                "rate %.3g/s: window discarded — %d load worker(s) died "
+                "(%s); the offered load was not the recorded rate",
+                rate_per_s, len(worker_deaths),
+                ", ".join(f"#{d['index']} rc={d['returncode']}"
+                          for d in worker_deaths),
+            )
 
         # Final verdict mapping. An inconclusive verdict that survived
         # the extension gets settled by effect size alone: meaningful
         # growth is divergence, marginal drift is stability — either
         # way the detail JSON records the ambiguity.
         if verdict.verdict == INCONCLUSIVE:
-            floor = max(
-                10.0,
-                0.5 * (statistics.fmean(inflight_series)
-                       if inflight_series else 0.0),
-            )
+            floor = max(10.0, 0.5 * (served_mean or 0.0))
             stability = (
                 DIVERGENT
                 if verdict.growth_over_window >= 0.5 * floor else STABLE
@@ -816,6 +1074,10 @@ class OpenLoopRunner:
             stability = CLIENT_LIMITED
 
         summary = _summarize_turns(turns)
+        # The SLA gate (one rule, stated in rate_search.py and
+        # docs/algorithm.md §0): pass iff the Wilson 95 % upper bound
+        # of the combined violation rate is below 5 % — a "marginal"
+        # window is an SLA fail for the search.
         sla_pass: bool | None = None
         if stability == STABLE and summary["sample_size"] > 0:
             sla_pass = summary["capacity_status"] == "pass"
@@ -854,7 +1116,7 @@ class OpenLoopRunner:
             "stability_detail": json.dumps(verdict_dict),
             "queue_depth_mean": round(verdict.mean_depth, 2),
             "queue_depth_slope_per_min": round(verdict.slope_per_min, 3),
-            "arrival_tardiness_p99_ms": round(max_tardiness, 1),
+            "arrival_tardiness_p99_ms": round(tardiness_p99, 1),
             "load_workers": self.pool.size,
             "active_sessions_mean": round(active_mean, 2),
             "mean_session_duration_s": pool_agg.get("mean_session_s"),
@@ -901,7 +1163,7 @@ class OpenLoopRunner:
             rate_per_s, stability, verdict_dict.get("reason", ""),
             summary.get("sample_size", 0),
             (summary.get("combined_violation_rate", 0.0) or 0.0) * 100,
-            verdict.mean_depth, verdict.slope_per_min, max_tardiness,
+            verdict.mean_depth, verdict.slope_per_min, tardiness_p99,
         )
         self.step_index += 1
         return _WindowResult(
@@ -1042,18 +1304,28 @@ class OpenLoopRunner:
                 # Each superseded attempt is re-labeled so it never
                 # counts as a ceiling in the export or reads as a
                 # verdict in the UI.
+                # A worker death also lands here (client_saturated):
+                # the dead worker is replaced rather than the pool
+                # grown, and the void window is superseded by the
+                # re-measurement.
                 while (
                     result.client_saturated
                     and self.pool.size < sim.open_loop_max_workers
                 ):
+                    died = result.verdict_detail.get("worker_deaths")
+                    target = (
+                        self.pool.size + len(died) if died
+                        else self.pool.size + 1
+                    )
                     log.info(
-                        "client saturation at %.3g/s with %d workers — "
-                        "scaling out and re-measuring",
+                        "%s at %.3g/s with %d workers — %s and re-measuring",
+                        "worker death" if died else "client saturation",
                         rate, self.pool.size,
+                        "replacing" if died else "scaling out",
                     )
                     self._mark_superseded(result.measurement_id)
                     self.phase = "starting load workers"
-                    await self.pool.scale_to(self.pool.size + 1)
+                    await self.pool.scale_to(target)
                     result = await self._measure_window(rate, window_s)
                 self.stepper.record(RateStep(
                     rate_per_s=rate,

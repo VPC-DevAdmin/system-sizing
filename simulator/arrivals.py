@@ -50,10 +50,17 @@ class ArrivalStats:
     tardy_total: int = 0        # cumulative arrivals later than TARDY_THRESHOLD_MS
     sessions_active: int = 0
     sessions_done: int = 0
-    # Recent arrival-lateness samples (ms): actual spawn − scheduled.
-    tardiness_ms: deque = field(default_factory=lambda: deque(maxlen=2000))
+    # Arrival-lateness samples (ms): actual spawn − scheduled, since
+    # the last ``reset_tardiness`` — the coordinator resets it when a
+    # measurement window opens, so the reported p99 is THAT window's
+    # (a trailing buffer smeared one bad burst across later windows).
+    tardiness_ms: deque = field(default_factory=lambda: deque(maxlen=10000))
     # Durations (s) of recently completed sessions — feeds the
-    # Little's-law concurrency derivation and warmup sizing.
+    # Little's-law concurrency derivation and warmup sizing. Only
+    # sessions that ran their full turn count count: one ended by a
+    # trim / drain / cancel or by a failed turn is not a session
+    # length, and mixing those in shortened W and inflated the
+    # derived concurrency (L = λ·W).
     session_durations_s: deque = field(default_factory=lambda: deque(maxlen=500))
 
     def tardiness_p99_ms(self) -> float:
@@ -61,6 +68,12 @@ class ArrivalStats:
             return 0.0
         vals = sorted(self.tardiness_ms)
         return float(vals[min(len(vals) - 1, int(0.99 * len(vals)))])
+
+    def reset_tardiness(self) -> None:
+        """Start a new tardiness scope (a measurement window opened).
+        The cumulative ``tardy_total`` counter is untouched — the
+        per-window tardy FRACTION is a delta of that."""
+        self.tardiness_ms.clear()
 
     def mean_session_s(self) -> float | None:
         if not self.session_durations_s:
@@ -140,6 +153,11 @@ class SessionArrivalLauncher:
         while not self._stopped and len(self._sessions) < target:
             self.stats.tardiness_ms.append(0.0)
             self._spawn_session()
+
+    def mark_window(self) -> None:
+        """A measurement window opened: scope the tardiness percentile
+        to arrivals from here on."""
+        self.stats.reset_tardiness()
 
     def cancel_active_sessions(self) -> None:
         """Abort in-flight sessions (drain aid — aborted HTTP requests
@@ -268,9 +286,11 @@ class SessionArrivalLauncher:
                 )
             finally:
                 self.stats.sessions_done += 1
-                self.stats.session_durations_s.append(
-                    time.monotonic() - started,
-                )
+                if stats.sessions_completed > 0:
+                    # Natural end only — see ArrivalStats.
+                    self.stats.session_durations_s.append(
+                        time.monotonic() - started,
+                    )
                 self._sessions.pop(user_id, None)
                 self._cancel_events.pop(user_id, None)
                 self.stats.sessions_active = len(self._sessions)

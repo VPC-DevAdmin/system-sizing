@@ -613,6 +613,7 @@ def _hardware_recommendation(bottleneck: str) -> str:
 def _landing_zones(
     measurements: list[dict],
     status_field: str = "capacity_status",
+    key=None,
 ) -> tuple[int | None, int | None, int | None]:
     """Pick the three landing-zone boundaries from a measurement list:
 
@@ -647,39 +648,64 @@ def _landing_zones(
     re-samples around a noisy boundary. The "sustained" criterion
     (no later pool returns to a better band) tolerates that noise.
 
+    ``key`` orders the measurements along the load axis. Default is
+    ``target_pool_size`` (closed loop). Open-loop cohorts MUST pass
+    the arrival rate: their ``target_pool_size`` is the measured mean
+    session count, which is not monotone in λ (a divergent window
+    reverted early, or measured from a trimmed population, can carry
+    fewer sessions than a stable one below it) — ordered by it, a
+    divergent window could vanish behind a stable one and the export
+    would say ``none_observed``.
+
     Returns (None, None, None) when no measurements exist or the
     status field isn't populated.
     """
+    cap, soft, fail = _landing_zone_rows(measurements, status_field, key)
+    return (
+        cap["target_pool_size"] if cap else None,
+        soft["target_pool_size"] if soft else None,
+        fail["target_pool_size"] if fail else None,
+    )
+
+
+def _landing_zone_rows(
+    measurements: list[dict],
+    status_field: str = "capacity_status",
+    key=None,
+) -> tuple[dict | None, dict | None, dict | None]:
+    """``_landing_zones`` returning the measurement rows themselves
+    (capacity, soft_capacity, fail) — see there for the semantics."""
     if not measurements:
         return None, None, None
+    if key is None:
+        def key(m):
+            return m["target_pool_size"]
     # Drop measurements missing the requested status field — happens
     # for legacy (pre-target-status) data when querying target_status.
     typed = [m for m in measurements if m.get(status_field)]
     if not typed:
         return None, None, None
-    sorted_m = sorted(typed, key=lambda m: m["target_pool_size"])
+    sorted_m = sorted(typed, key=key)
 
     # capacity: largest pass below first sustained non-pass.
-    capacity_knee: int | None = None
+    capacity_knee = None
     for i, m in enumerate(sorted_m):
         if m[status_field] == "pass":
             continue
         # Non-pass at i: counts as the capacity boundary only if no
-        # higher pool returns to pass.
+        # higher load returns to pass.
         if any(later[status_field] == "pass" for later in sorted_m[i + 1:]):
             continue
-        capacity_knee = m["target_pool_size"]
+        capacity_knee = key(m)
         break
-    pass_pools = [
-        m["target_pool_size"] for m in sorted_m if m[status_field] == "pass"
-    ]
+    pass_rows = [m for m in sorted_m if m[status_field] == "pass"]
     if capacity_knee is not None:
-        pass_pools = [p for p in pass_pools if p < capacity_knee]
-    capacity = max(pass_pools) if pass_pools else None
+        pass_rows = [m for m in pass_rows if key(m) < capacity_knee]
+    capacity = max(pass_rows, key=key) if pass_rows else None
 
-    # fail: smallest pool with status='fail' that's sustained
-    # (no higher pool returns to pass-or-marginal).
-    fail_pool: int | None = None
+    # fail: lowest load with status='fail' that's sustained (no
+    # higher load returns to pass-or-marginal).
+    fail = None
     for i, m in enumerate(sorted_m):
         if m[status_field] != "fail":
             continue
@@ -688,19 +714,18 @@ def _landing_zones(
             for later in sorted_m[i + 1:]
         ):
             continue
-        fail_pool = m["target_pool_size"]
+        fail = m
         break
 
-    # soft_capacity: largest pass-or-marginal below fail_pool.
-    tolerable_pools = [
-        m["target_pool_size"] for m in sorted_m
-        if m[status_field] in ("pass", "marginal")
+    # soft_capacity: highest pass-or-marginal load below fail.
+    tolerable = [
+        m for m in sorted_m if m[status_field] in ("pass", "marginal")
     ]
-    if fail_pool is not None:
-        tolerable_pools = [p for p in tolerable_pools if p < fail_pool]
-    soft_capacity = max(tolerable_pools) if tolerable_pools else None
+    if fail is not None:
+        tolerable = [m for m in tolerable if key(m) < key(fail)]
+    soft_capacity = max(tolerable, key=key) if tolerable else None
 
-    return capacity, soft_capacity, fail_pool
+    return capacity, soft_capacity, fail
 
 
 # Backwards-compat alias for callers that want the old (capacity, knee)
@@ -734,7 +759,9 @@ def _open_loop_summary(measurements: list[dict]) -> dict | None:
 
     The capacity story in rate space: **rate_max** (highest stable
     arrival rate — the stability boundary from below), **rate_sla**
-    (highest stable rate whose steady-state turns also pass SLA) and
+    (highest stable rate whose steady-state turns also pass the SLA
+    gate — ``capacity_status == "pass"``, the Wilson upper bound of the
+    violation rate below 5 %; ``marginal`` does not qualify) and
     **rate_ceiling** (lowest rate observed to diverge — the boundary
     from above; rate_max and rate_ceiling bracket the true limit).
     Concurrency is *derived*, not assumed: Little's law at the SLA
@@ -859,6 +886,22 @@ def _summarise_cohort(
     AMD/Intel sweep). Use slim for buyer-page summary distribution;
     use the full export when drilling into per-step diagnostics."""
     measurements = run.get("measurements", [])
+    # Open-loop runs: the authoritative capacity story lives in rate
+    # space, and every "which window is the knee" question below is
+    # answered in RATE order (bisection makes step order non-
+    # monotonic, and the measured session count is not monotone in λ
+    # either).
+    methodology = (
+        "open_loop"
+        if (run.get("mode") == "open_loop"
+            or any(m.get("arrival_rate_per_min") is not None
+                   for m in measurements))
+        else "closed_loop"
+    )
+    zone_key = (
+        (lambda m: m.get("arrival_rate_per_min") or 0)
+        if methodology == "open_loop" else None
+    )
     curve = []
     for m in measurements:
         entry = {
@@ -986,11 +1029,14 @@ def _summarise_cohort(
     # On both the failure-bound (hard SLA) and target-bound (premium
     # SLA) axes — six numbers per cohort that map directly onto the
     # buyer-page narrative "fast / acceptable / degraded".
+    capacity_row, _soft_row, _fail_row = _landing_zone_rows(
+        measurements, "capacity_status", zone_key,
+    )
     capacity_pool, soft_capacity_pool, fail_pool = _landing_zones(
-        measurements, "capacity_status",
+        measurements, "capacity_status", zone_key,
     )
     target_capacity_pool, target_soft_capacity_pool, target_fail_pool = (
-        _landing_zones(measurements, "target_status")
+        _landing_zones(measurements, "target_status", zone_key)
     )
 
     # Derived deployment-shape fields. These are pure post-processing
@@ -1097,17 +1143,9 @@ def _summarise_cohort(
             pass
 
     cohort_def = json.loads(run["cohort_definition_json"])
-    # Open-loop runs: the authoritative capacity story lives in rate
-    # space. Bottleneck attribution walks measurements in RATE order
-    # (bisection makes step order non-monotonic), and coverage /
-    # lower-bound semantics come from the rate search.
-    methodology = (
-        "open_loop"
-        if (run.get("mode") == "open_loop"
-            or any(m.get("arrival_rate_per_min") is not None
-                   for m in measurements))
-        else "closed_loop"
-    )
+    # Bottleneck attribution walks measurements in RATE order for
+    # open-loop runs, and coverage / lower-bound semantics come from
+    # the rate search.
     open_loop = (
         _open_loop_summary(measurements)
         if methodology == "open_loop" else None
@@ -1148,16 +1186,25 @@ def _summarise_cohort(
     # reported "frequency_droop" for a box at 1.5% GPU utilization).
     max_tested = max((m["target_pool_size"] for m in measurements),
                      default=None)
+    max_rate_tested = max(
+        (m["arrival_rate_per_min"] for m in measurements
+         if m.get("arrival_rate_per_min") is not None),
+        default=None,
+    )
     if fail_pool is None:
         bottleneck = "none_observed"
         evidence = {"note": ("no SLA knee within the tested range — "
                              "capacity figures are lower bounds"),
                     "max_pool_tested": max_tested}
+        if max_rate_tested is not None:
+            evidence["max_rate_tested_per_min"] = max_rate_tested
     if all(m.get("target_status") == "pass" for m in measurements):
         target_bottleneck = "none_observed"
         target_evidence = {"note": "no target-miss knee within the "
                                    "tested range",
                            "max_pool_tested": max_tested}
+        if max_rate_tested is not None:
+            target_evidence["max_rate_tested_per_min"] = max_rate_tested
     return {
         "id": run["cohort_id"],
         "cohort_run_id": run["cohort_run_id"],
@@ -1247,16 +1294,33 @@ def _summarise_cohort(
         # buyer-page question "how many tokens/sec does this hardware
         # sustain at the recommended deployment concurrency."
         "capacity_throughput": _capacity_throughput(
-            measurements, capacity_pool,
+            capacity_row if methodology == "open_loop"
+            else _capacity_row(measurements, capacity_pool),
         ),
     }
 
 
-def _capacity_throughput(
+def _capacity_row(
     measurements: list[dict], capacity_pool: int | None,
 ) -> dict | None:
+    """Closed loop: the measurement at ``capacity_pool``. If several
+    landed on the same pool size (e.g. a spot-check appended a
+    re-measurement), prefer the one with the most samples — the more
+    statistically meaningful row. Open-loop cohorts pass the landing-
+    zone row directly instead (pool sizes are not unique in λ)."""
+    if capacity_pool is None:
+        return None
+    matching = [
+        m for m in measurements if m.get("target_pool_size") == capacity_pool
+    ]
+    if not matching:
+        return None
+    return max(matching, key=lambda r: r.get("sample_size") or 0)
+
+
+def _capacity_throughput(m: dict | None) -> dict | None:
     """Aggregate token-volume + per-second rates at the cohort's
-    capacity_pool_size measurement. Returns None when capacity isn't
+    capacity measurement ``m``. Returns None when capacity isn't
     located (cohort never produced a clean-pass measurement).
 
     The block answers "deploy at this concurrency to sustain X
@@ -1266,17 +1330,9 @@ def _capacity_throughput(
       * reasoning_tokens — chain-of-thought (zero for non-reasoning)
       * total_visible_output_tokens = content + reasoning
     """
-    if capacity_pool is None:
+    if m is None:
         return None
-    matching = [
-        m for m in measurements if m.get("target_pool_size") == capacity_pool
-    ]
-    if not matching:
-        return None
-    # If multiple measurements landed on the same pool size (e.g. a
-    # spot-check appended a re-measurement), prefer the one with the
-    # most samples — that's the more statistically meaningful row.
-    m = max(matching, key=lambda r: r.get("sample_size") or 0)
+    capacity_pool = m.get("target_pool_size")
     tokens = m.get("tokens") or {}
     prompt_tok = tokens.get("prompt_tok") or 0
     content_tok = tokens.get("content_tok") or 0

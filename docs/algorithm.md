@@ -9,11 +9,15 @@ The primary capacity methodology is **partly-open loop** (`simulator/open_loop.p
 - **Sessions arrive open-loop** — a Poisson process at a controlled rate λ (sessions/min). Arrivals do not care how busy the engine is; that independence is what makes the capacity limit observable at all.
 - **Within a session, behavior is closed-loop** — turn N+1 waits for turn N's response plus the persona's read+think time, exactly as humans behave. The persona/cohort definitions below are unchanged; they parameterize the session generator.
 
-**Capacity is the stability boundary in rate space.** At λ below capacity, the engine's waiting queue is stationary and concurrency settles at Little's-law equilibrium (L = λ·W). At λ above it, the queue grows without bound. Per measured λ, the per-second engine waiting-queue series gets a statistical verdict (`simulator/stability.py`): Mann-Kendall trend test (is there a confident upward trend?) × Theil-Sen slope (is the projected growth operationally meaningful relative to the active batch?) → `stable` / `divergent` / `inconclusive` (inconclusive extends the window once).
+**Capacity is the stability boundary in rate space.** At λ below capacity, the engine's waiting queue is stationary and concurrency settles at Little's-law equilibrium (L = λ·W). At λ above it, the queue grows without bound. Per measured λ, the per-second engine waiting-queue series gets a statistical verdict (`simulator/stability.py`): Mann-Kendall trend test (is there a confident upward trend?) × Theil-Sen slope (is the projected growth operationally meaningful relative to the engine's running batch?) → `stable` / `divergent` / `inconclusive` (inconclusive extends the window once). Per-second queue depths are strongly autocorrelated (a stationary queue wanders like an AR(1) process with ρ ≈ 0.9), so the statistics run on 5 s bin means with the AR(1) effective-sample-size variance correction, and the growth criterion uses the Sen slope's 90 % lower confidence bound; a stationary queue reads stable in ≥ 95 % of windows while a real ramp stays unmistakable.
 
-`simulator/rate_search.py` searches λ coarse-to-fine: geometric doubling to bracket the boundary, log-space bisection to tighten it until the stable/divergent bracket converges to the configured resolution (`open_loop_resolution_pct`, default **5%** — the run is not "complete" while the capacity is only known to a coarse jump), then a second bisection on the SLA axis inside the stable region. Two knees come out: **λ_max** (highest stable rate; the lowest divergent rate brackets it from above) and **λ_sla** (highest stable rate whose steady-state turns also pass SLA). Concurrent-session capacity is *derived* — λ_sla × measured mean session duration — never assumed.
+`simulator/rate_search.py` searches λ coarse-to-fine: geometric doubling to bracket the boundary, log-space bisection to tighten it until the stable/divergent bracket converges to the configured resolution (`open_loop_resolution_pct`, default **5%** — the run is not "complete" while the capacity is only known to a coarse jump), then a second bisection on the SLA axis inside the stable region. Two knees come out: **λ_max** (highest stable rate; the lowest divergent rate brackets it from above) and **λ_sla** (highest stable rate whose steady-state turns also pass the SLA gate). The SLA gate is the window's `capacity_status == "pass"` (§9): the Wilson 95 % *upper* bound of the combined violation rate is below 5 %. A `marginal` window — point estimate under 5 % but the upper bound not — counts as an SLA **fail** for the search, so λ_sla is conservative: the highest rate at which the SLA is demonstrably met. Concurrent-session capacity is *derived* — λ_sla × measured mean session duration, where the mean counts only sessions that ran to their natural end (not ones cut short by a revert, drain or failed turn) — never assumed.
 
-The load never tears down between probes. Stable → next rate is an in-place λ change (the session population carries over and settles at the new Little's-law equilibrium). Overshooting the knee reverts to the last stable rate and cancels only the *excess* sessions, newest first — aborted requests are cancelled inside the engine, so the queue falls back to the stable density — and the bisection resumes with smaller increments from a warm system. A full drain to zero happens only when the very first probe diverges (no stable point exists to fall back to).
+The load never tears down between probes. Stable → next rate is an in-place λ change (the session population carries over and settles at the new Little's-law equilibrium). Overshooting the knee reverts to the last stable rate and cancels only the *excess* sessions, newest first — the cancelled sessions' in-flight HTTP streams are closed, so the engine aborts those requests and the queue falls back to the stable density — and the bisection resumes with smaller increments from a warm system. A full drain to zero happens only when the very first probe diverges (no stable point exists to fall back to).
+
+**Settling before a window opens.** The population takes about one mean session length to reach the new equilibrium after a rate change, and a window opened on that ramp reads the ramp as divergence. Each window therefore warms up for at least `open_loop_warmup_s` (stretched toward the measured mean session duration, capped at 300 s) and then keeps waiting until the active-session population is flat — the Theil-Sen drift across a trailing window of max(`open_loop_settle_window_s`, 0.2 × mean session duration) seconds is within ±5 % of its mean — or until the settling cap `open_loop_settle_max_s` (default max(300 s, 1.5 × mean session duration)) is reached, in which case the window measures anyway and its `stability_detail` records `settled: false`. Long-session personas therefore pay a long warmup per doubling step; bisection steps, whose ramps are small, release early.
+
+**Load-generator honesty.** A worker process that dies mid-window is noticed the moment it exits: the window is discarded (`superseded`, with the death in its detail JSON), the worker is replaced and the rate re-measured — never recorded as a verdict on the engine at a load it did not see.
 
 Load generation shards across worker subprocesses (`simulator/loadgen_worker.py`): superposition of k Poisson processes at λ/k is exactly Poisson(λ), so the generator scales horizontally. Its honesty signal is **arrival tardiness** (scheduled vs actual send time, pinned to the wall clock — no coordinated omission): when arrivals fall behind, the coordinator adds workers, and only a maxed-out generator records `client_limited`.
 
@@ -316,7 +320,7 @@ Rationale: capacity-curve generation wants uniform x-axis density across powers 
 
 [`TwoKneeStepper`](../simulator/adaptive.py) — five-phase Wilson-CI-aware bisection that locates two knees plus infill points. Use when you care about precise knee placement rather than uniform sampling.
 
-- **Phase 1 (DOUBLING):** start at `initial_pool_size`, double until `violation_rate ≥ stop_violation_threshold` OR `max_pool_size`
+- **Phase 1 (DOUBLING):** start at `initial_pool_size`, double until the Wilson lower bound of `violation_rate` ≥ `fail_threshold` (0.30, the `capacity_status = fail` boundary) OR `max_pool_size`. `stop_violation_threshold` (0.5) does not stop adaptive doubling — it is the fixed-grid early-stop.
 - **Phase 1b (DOWNWARD_SEARCH):** if the initial pool already fails, halve down looking for an acceptable zone
 - **Phase 2 (BISECT_FAIL):** bisect between the largest passing pool and smallest failing pool until gap ≤ `bisect_resolution` (4). Locates `fail_pool_size` (knee 2)
 - **Phase 3 (BISECT_TARGET):** bisect between the largest target-passing pool and the smallest target-missing pool. Locates `soft_capacity_pool_size` (knee 1)
@@ -451,7 +455,18 @@ In `SimulationConfig` (loaded from YAML, `simulator/config.py`):
 | `convergence_window_s` | 60 | throughput-comparison window |
 | `convergence_threshold` | 0.20 | relative-change threshold for "converged" |
 | `convergence_min_completions_per_window` | 5 | sample floor for valid convergence comparison |
-| `stop_violation_threshold` | 0.5 | violation rate that triggers stepper stop / fixed-grid early-stop |
+| `stop_violation_threshold` | 0.5 | fixed-grid early-stop violation rate (adaptive doubling stops at the 0.30 fail threshold instead) |
+
+Open-loop (`simulation.mode: open`, the default — §0):
+
+| field | default | meaning |
+|---|---|---|
+| `mode` | `open` | `open` (arrival-rate search, §0) or `closed` (pool ramp, §1) |
+| `open_loop_warmup_s` | 90 | minimum settling time per window (stretched toward the mean session duration, ≤ 300 s) |
+| `open_loop_settle_window_s` | 60 | trailing window for the settling detector (grows to 0.2 × mean session duration, ≤ 300 s) |
+| `open_loop_settle_max_s` | None | cap on the settling extension; None = max(300 s, 1.5 × mean session duration) |
+| `open_loop_window_s` | 120 | coarse-phase measurement window |
+| `open_loop_refine_window_s` | 240 | measurement window during bisection |
 
 ## Glossary
 

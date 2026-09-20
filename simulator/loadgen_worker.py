@@ -13,6 +13,8 @@ Protocol (line-delimited JSON):
 
   stdin  ← {"cmd": "rate", "per_s": 2.5}     set this worker's λ share
            {"cmd": "drain"}                   rate→0 + abort sessions
+           {"cmd": "mark"}                    a window opened: scope the
+                                              tardiness p99 from here
            {"cmd": "stop"}                    clean shutdown
   stdout → {"t": "ready"}                     init done (tokenizer loaded)
            {"t": "turn", ...}                 one completed/failed turn,
@@ -66,7 +68,7 @@ def _turn_to_wire(e: TurnEvent) -> dict:
     }
 
 
-async def _amain(config: dict) -> None:
+async def _amain(config: dict) -> bool:
     from openai import AsyncOpenAI
 
     from .tokenizer_corpus import TokenCorpus
@@ -120,6 +122,8 @@ async def _amain(config: dict) -> None:
                 launcher.cancel_active_sessions()
             elif cmd == "trim":
                 launcher.trim_active(int(msg.get("target") or 0))
+            elif cmd == "mark":
+                launcher.mark_window()
             elif cmd == "outstanding":
                 launcher.set_outstanding(int(msg.get("n") or 0))
             elif cmd == "restart":
@@ -172,6 +176,7 @@ async def _amain(config: dict) -> None:
                 "prefill_in_flight": state.prefill_in_flight,
                 "completed": state.completed,
                 "errors": state.errors,
+                "cancelled": state.cancelled,
                 "tardiness_p99_ms": round(s.tardiness_p99_ms(), 1),
                 "loop_lag_ms": round(lag_ms, 1),
                 "mean_session_s": (
@@ -181,15 +186,29 @@ async def _amain(config: dict) -> None:
             })
 
     tasks = [
-        asyncio.create_task(_stdin_loop()),
-        asyncio.create_task(_event_pump()),
-        asyncio.create_task(_stat_loop()),
+        asyncio.create_task(_stdin_loop(), name="stdin"),
+        asyncio.create_task(_event_pump(), name="event_pump"),
+        asyncio.create_task(_stat_loop(), name="stat"),
     ]
-    await stop_event.wait()
+    # Every loop exits on stop_event; an exception in ANY of them ends
+    # the worker immediately with a non-zero exit code. Swallowing it
+    # (the old ``gather(return_exceptions=True)`` at shutdown) left a
+    # worker generating at a stale rate and deaf to commands — a
+    # failure the coordinator could not see.
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+    failure: BaseException | None = None
+    for t in done:
+        if not t.cancelled() and t.exception() is not None:
+            failure = t.exception()
+            print(f"loadgen worker task {t.get_name()!r} failed: "
+                  f"{type(failure).__name__}: {failure}", file=sys.stderr)
+            break
+    stop_event.set()
     await launcher.stop()
-    for t in tasks:
+    for t in pending:
         t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.gather(*pending, return_exceptions=True)
+    return failure is None
 
 
 def main() -> None:
@@ -199,7 +218,8 @@ def main() -> None:
         raise SystemExit(2)
     with open(sys.argv[1]) as f:
         config = json.load(f)
-    asyncio.run(_amain(config))
+    if not asyncio.run(_amain(config)):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

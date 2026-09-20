@@ -112,3 +112,28 @@ def test_mock_end_to_end_run_and_export(tmp_path, fast_persona) -> None:
     assert cohort_doc["id"] == "mock_smoke"
     assert cohort_doc["curve"][0]["sample_size"] >= 6
     assert cohort_doc["collectors"]["engine_metrics"] == "ok"
+
+
+def test_user_stop_is_recorded_as_cancelled(tmp_path, fast_persona, monkeypatch) -> None:
+    """Ctrl-C mid-run stamps the cohort_run 'cancelled' — the same
+    word the open-loop runner and the service use — never
+    'interrupted'."""
+    import simulator.runner as runner
+    from simulator.database import Database
+
+    async def boom(*_a, **_k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "run_measurement_step", boom)
+    cfg = _mock_config(tmp_path)
+    cfg.engine.port = MOCK_PORT + 2
+    cohort = Cohort(id="cancel_test", name="t", description="t",
+                    category="test", persona_weights={"fast_test": 1.0})
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(runner.run_cohort(cfg, cohort, new_run=True))
+    db_files = list((tmp_path / "runs").glob("run_*/run.db"))
+    assert len(db_files) == 1
+    db = Database(db_files[0])
+    row = db.fetchone("SELECT final_status FROM cohort_run")
+    db.close()
+    assert row["final_status"] == "cancelled"

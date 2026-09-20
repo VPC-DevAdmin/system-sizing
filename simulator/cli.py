@@ -109,6 +109,39 @@ _ADAPTIVE_HELP = (
 )
 
 
+_MODE_HELP = (
+    "Methodology: 'open' (default — sessions arrive as a Poisson "
+    "process at a searched rate; capacity is the queue-stability "
+    "boundary in rate space) or 'closed' (legacy fixed-pool ramp). "
+    "Overrides simulation.mode from the config. --pool-sizes and "
+    "--adaptive are closed-loop knobs: passing either without --mode "
+    "selects closed; with --mode open they are an error."
+)
+
+
+def _resolve_mode(
+    cfg, mode: str | None, adaptive: bool, pool_sizes: str | None,
+) -> str:
+    """Pick the methodology for this invocation. Explicit ``--mode``
+    wins; otherwise the closed-loop knobs imply closed (the same rule
+    the service applies to API requests); otherwise the config."""
+    closed_knobs = adaptive or bool(pool_sizes)
+    if mode is None:
+        return "closed" if closed_knobs else cfg.simulation.mode
+    from .config import SIMULATION_MODES
+    if mode not in SIMULATION_MODES:
+        raise typer.BadParameter(
+            f"--mode must be one of {SIMULATION_MODES}, got {mode!r}"
+        )
+    if mode == "open" and closed_knobs:
+        raise typer.BadParameter(
+            "--pool-sizes / --adaptive are closed-loop knobs; the "
+            "open-loop search has no pool grid. Drop them or pass "
+            "--mode closed."
+        )
+    return mode
+
+
 def _resolve_stepper_args(
     pool_sizes: str | None, adaptive: bool
 ) -> tuple[bool, list[int] | None]:
@@ -135,23 +168,38 @@ def run(
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
     pool_sizes: str = typer.Option(None, "--pool-sizes", help=_POOL_SIZES_HELP),
     adaptive: bool = typer.Option(False, "--adaptive", help=_ADAPTIVE_HELP),
+    mode: str = typer.Option(None, "--mode", help=_MODE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
-    """Run a single cohort (team mix) end-to-end."""
+    """Run a single cohort (team mix) end-to-end.
+
+    Open-loop by default (arrival-rate capacity search, the same
+    methodology the UI runs); ``--mode closed`` for the legacy pool
+    ramp."""
     _setup_logging(verbose)
     cfg = load_config(_config_from_options(config, profile, Path("config/default.yaml")))
     apply_cli_overrides(cfg, engine=engine, model=model)
     if cohort not in COHORTS:
         raise typer.BadParameter(f"Unknown cohort '{cohort}'. Known: {sorted(COHORTS)}")
 
+    db_path = asyncio.run(_run_one(cfg, cohort, mode, adaptive, pool_sizes))
+    typer.echo(f"Run complete -> {db_path}")
+
+
+def _run_one(cfg, cohort, mode, adaptive, pool_sizes):
+    """Dispatch one cohort run to the selected methodology."""
+    selected = _resolve_mode(cfg, mode, adaptive, pool_sizes)
+    cfg.simulation.mode = selected
+    if selected == "open":
+        from .open_loop import run_cohort_open_loop
+        return run_cohort_open_loop(cfg, cohort)
     use_adaptive, grid = _resolve_stepper_args(pool_sizes, adaptive)
     from .runner import run_cohort
-    db_path = asyncio.run(run_cohort(
+    return run_cohort(
         cfg, cohort,
         adaptive=use_adaptive,
         fixed_grid_pool_sizes=grid,
-    ))
-    typer.echo(f"Run complete -> {db_path}")
+    )
 
 
 @app.command("run-persona")
@@ -163,6 +211,7 @@ def run_persona_cmd(
     model: str = typer.Option(None, help="Override engine.model_id from CONFIG"),
     pool_sizes: str = typer.Option(None, "--pool-sizes", help=_POOL_SIZES_HELP),
     adaptive: bool = typer.Option(False, "--adaptive", help=_ADAPTIVE_HELP),
+    mode: str = typer.Option(None, "--mode", help=_MODE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Run a single persona end-to-end (one user archetype, no team mix).
@@ -170,7 +219,8 @@ def run_persona_cmd(
     Useful for measuring each archetype's individual capacity so multi-
     persona cohort results can be decomposed: if software_engineering
     underperforms, you can compare against the code_assist persona run
-    to see whether the mix itself is producing interference."""
+    to see whether the mix itself is producing interference. Open-loop
+    by default; ``--mode closed`` for the legacy pool ramp."""
     _setup_logging(verbose)
     cfg = load_config(_config_from_options(config, profile, Path("config/default.yaml")))
     apply_cli_overrides(cfg, engine=engine, model=model)
@@ -179,12 +229,8 @@ def run_persona_cmd(
             f"Unknown persona '{persona}'. Known: {sorted(PERSONAS)}"
         )
 
-    use_adaptive, grid = _resolve_stepper_args(pool_sizes, adaptive)
-    from .runner import run_cohort
-    db_path = asyncio.run(run_cohort(
-        cfg, cohort_from_persona(persona),
-        adaptive=use_adaptive,
-        fixed_grid_pool_sizes=grid,
+    db_path = asyncio.run(_run_one(
+        cfg, cohort_from_persona(persona), mode, adaptive, pool_sizes,
     ))
     typer.echo(f"Run complete -> {db_path}")
 
@@ -217,14 +263,17 @@ def sweep(
     ),
     pool_sizes: str = typer.Option(None, "--pool-sizes", help=_POOL_SIZES_HELP),
     adaptive: bool = typer.Option(False, "--adaptive", help=_ADAPTIVE_HELP),
+    mode: str = typer.Option(None, "--mode", help=_MODE_HELP),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Run multiple personas + cohorts back-to-back against one engine.
 
     Personas run first as ephemeral one-persona Cohorts, then cohorts.
-    The engine launches once and stays up for the whole sweep.
+    The engine launches once and stays up for the whole sweep. Each
+    workload runs with the selected methodology (open-loop by default,
+    ``--mode closed`` for the pool ramp).
 
-    Resumes the latest ``runs/run_NN/`` by default — interrupted sweeps
+    Resumes the latest ``runs/run_NN/`` by default — cancelled sweeps
     pick up where they left off automatically. Pass ``--new-run`` to
     cut a fresh ``run_NN+1`` directory."""
     _setup_logging(verbose)
@@ -237,12 +286,15 @@ def sweep(
     if not persona_ids and not cohort_ids:
         raise typer.BadParameter(f"Nothing resolved from --type={type!r}")
 
+    selected = _resolve_mode(cfg, mode, adaptive, pool_sizes)
+    cfg.simulation.mode = selected
     use_adaptive, grid = _resolve_stepper_args(pool_sizes, adaptive)
     from .runner import run_sweep
     paths = asyncio.run(run_sweep(
         cfg, persona_ids=persona_ids, cohort_ids=cohort_ids, new_run=new_run,
         adaptive=use_adaptive,
         fixed_grid_pool_sizes=grid,
+        mode=selected,
     ))
     typer.echo(
         f"Sweep complete: {len(paths)} runs "

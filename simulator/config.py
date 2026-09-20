@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,10 @@ from typing import Any
 import yaml
 
 from .preflight import HardwareRequirements
+
+log = logging.getLogger(__name__)
+
+SIMULATION_MODES = ("open", "closed")
 
 
 @dataclass
@@ -252,6 +257,13 @@ class EngineConfig:
 
 @dataclass
 class SimulationConfig:
+    # Methodology. "open" (the default, and what the UI runs): sessions
+    # arrive as a Poisson process at a searched rate λ and capacity is
+    # the queue-stability boundary in rate space — docs/algorithm.md
+    # §0. "closed": the legacy fixed-pool ramp (§1), which the pool-
+    # grid / adaptive-stepper knobs below belong to. ``capsim run
+    # --mode`` overrides this per invocation.
+    mode: str = "open"
     initial_pool_size: int = 4
     # SAFETY RAIL, not a finding: high enough that no plausible host
     # hits it. The methodology's real upper boundary is client
@@ -342,11 +354,32 @@ class SimulationConfig:
     # converged to this percentage — 5 means λ_max is pinned within
     # 5%. Tighter costs ~1 extra refinement window per halving.
     open_loop_resolution_pct: float = 5.0
-    # Steady-state settling time before each window measures. The
+    # MINIMUM settling time before each window measures. The
     # orchestrator stretches this toward the measured mean session
-    # duration once one is known (equilibrium shifts take about one
-    # session length to propagate).
+    # duration (capped at 300 s) once one is known, and then runs the
+    # settling detector below.
     open_loop_warmup_s: int = 90
+    # ── Settling detector ──
+    # After a rate change the session population takes about one mean
+    # session length to reach its Little's-law equilibrium — for
+    # long-session personas (document_qa, code_assist: 1000–2000 s)
+    # far longer than any fixed warmup — and a window opened on that
+    # ramp reads the ramp as divergence. So the warmup EXTENDS past
+    # the minimum until the trailing population is flat: the Theil-Sen
+    # drift across the trailing settle window is within ±5 % of its
+    # mean (+1 session, so tiny populations can settle at all). The
+    # trailing window is max(open_loop_settle_window_s, 0.2 × mean
+    # session duration), capped at 300 s, so a slow ramp on long
+    # sessions is still visible to the detector.
+    open_loop_settle_window_s: int = 60
+    # Cap on that extension, in seconds. None = max(300, 1.5 × mean
+    # session duration): a step change in λ has propagated through
+    # essentially every session by 1.5 W (what remains is the
+    # length-biased tail of the duration distribution), so waiting
+    # longer buys nothing. Set a number to bound a long-session run's
+    # per-window cost explicitly — the window then measures whatever
+    # ramp remains, and its stability_detail records settled=false.
+    open_loop_settle_max_s: int | None = None
     # After overshooting the knee the search reverts to the last
     # stable rate and trims only the excess sessions; this caps how
     # long it waits for the queue to fall back to stable density
@@ -426,13 +459,25 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
 
 
-def _merge_dataclass(target: Any, source: dict[str, Any]) -> None:
+def _merge_dataclass(target: Any, source: dict[str, Any], path: str = "") -> None:
+    """Overlay ``source`` (a YAML mapping) onto the config dataclass.
+
+    Unknown keys are NOT silently dropped: each is logged as a warning
+    with its dotted path. A typo (``open_loop_windows_s``) or a knob
+    that no longer exists used to vanish without a trace and leave the
+    user believing the run honoured it.
+    """
     for key, value in source.items():
+        dotted = f"{path}.{key}" if path else str(key)
         if not hasattr(target, key):
+            log.warning(
+                "config: unknown key %r ignored (no such field on %s)",
+                dotted, type(target).__name__,
+            )
             continue
         current = getattr(target, key)
         if hasattr(current, "__dataclass_fields__") and isinstance(value, dict):
-            _merge_dataclass(current, value)
+            _merge_dataclass(current, value, dotted)
         else:
             setattr(target, key, value)
 
@@ -452,7 +497,16 @@ def load_config(path: str | Path | None) -> Config:
     # inside a list; do it explicitly here.
     if cfg.engine.replicas and isinstance(cfg.engine.replicas[0], dict):
         cfg.engine.replicas = [ReplicaConfig(**r) for r in cfg.engine.replicas]
+    _validate_mode(cfg.simulation.mode)
     return cfg
+
+
+def _validate_mode(mode: str) -> str:
+    if mode not in SIMULATION_MODES:
+        raise ValueError(
+            f"simulation.mode must be one of {SIMULATION_MODES}, got {mode!r}"
+        )
+    return mode
 
 
 # ── Hardware profiles (roadmap 1.3) ──────────────────────────────────
@@ -492,11 +546,14 @@ def apply_cli_overrides(
     *,
     engine: str | None = None,
     model: str | None = None,
+    mode: str | None = None,
 ) -> Config:
     if engine:
         cfg.engine.type = engine
     if model:
         cfg.engine.model_id = model
+    if mode:
+        cfg.simulation.mode = _validate_mode(mode)
     # Allow env overrides for non-Make CLI paths
     if os.getenv("SIMULATOR_ENGINE"):
         cfg.engine.type = os.environ["SIMULATOR_ENGINE"]

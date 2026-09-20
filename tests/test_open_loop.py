@@ -146,6 +146,7 @@ def _open_loop_config(tmp_path) -> Config:
     sim.open_loop_window_s = 10
     sim.open_loop_refine_window_s = 10
     sim.open_loop_warmup_s = 2
+    sim.open_loop_settle_max_s = 2       # no settling extension
     sim.open_loop_drain_timeout_s = 10
     sim.max_total_duration_minutes = 3
     sim.request_timeout_s = 30
@@ -260,3 +261,265 @@ def test_request_timeout_scales_with_pinned_output_length():
         cohort_from_persona("headline_generation"), sim)
     assert headline > sim.request_timeout_s
     assert headline <= REQUEST_TIMEOUT_CEILING_S
+
+
+def test_fuse_keeps_token_baseline_across_failed_scrapes():
+    """One failed /metrics scrape must not re-arm the completions-only
+    fuse: the token evidence from the last good scrape stands (A6)."""
+    from simulator.open_loop import OpenLoopRunner, _ErrorFuse
+
+    class FlakyEngine:
+        def __init__(self, values):
+            self._values = list(values)
+
+        def get_metrics(self):
+            v = self._values.pop(0)
+            if v is None:
+                raise ConnectionError("scrape failed")
+            return {"generation_tokens_total": v}
+
+    runner = OpenLoopRunner.__new__(OpenLoopRunner)
+    runner._last_engine_metrics = {}
+    runner._queue_gauge_seen = False
+    runner._tokens_last_good = None
+
+    # Baseline scrape fails at window start: the fuse still arms on
+    # the last good value from before the window.
+    runner.engine = FlakyEngine([1000, None, 1500, None, 2000])
+    asyncio.run(runner._sample_engine())            # 1000 (good)
+    asyncio.run(runner._sample_engine())            # failed scrape
+    assert runner._tokens_last_good == 1000
+    fuse = _ErrorFuse(0, 0, runner._tokens_last_good)
+    assert fuse.tokens0 == 1000
+
+    asyncio.run(runner._sample_engine())            # 1500
+    assert not fuse.tripped(30, 0, runner._tokens_last_good)
+    asyncio.run(runner._sample_engine())            # failed scrape
+    # 30 client timeouts, zero completions, tokens still flowing per
+    # the last good scrape: NOT broken. (Old code: tok_now None ->
+    # completions-only test -> abort.)
+    assert runner._tokens_last_good == 1500
+    assert not fuse.tripped(30, 0, runner._tokens_last_good)
+    asyncio.run(runner._sample_engine())            # 2000
+    assert not fuse.tripped(200, 10, runner._tokens_last_good)
+
+    # A counter that never existed still falls back to the strict test.
+    assert _ErrorFuse(0, 0, None).tripped(30, 0, None)
+    # A counter that stopped moving does not shield a broken engine.
+    assert _ErrorFuse(0, 0, 2000).tripped(30, 0, 2000)
+
+
+# ── Settling detector (A4) ──────────────────────────────────────────
+
+
+def test_population_settled_rejects_a_ramp_and_accepts_a_plateau():
+    import random
+
+    from simulator.open_loop import _population_settled
+
+    rng = random.Random(4)
+    # Linear ramp 0 → 120 sessions over 240 s: at any point the drift
+    # across a 60 s trailing window is 30 sessions — far outside 5 %.
+    ramp = [0.5 * t + rng.gauss(0, 1.5) for t in range(240)]
+    settled, drift = _population_settled(ramp, 60)
+    assert not settled and drift > 0.2
+    # Poisson-jittered plateau around 100: settled.
+    flat = [100 + rng.gauss(0, 4) for _ in range(120)]
+    settled, drift = _population_settled(flat, 60)
+    assert settled and drift < 0.05
+    # Ramp then plateau: not settled while the trailing window still
+    # covers the ramp, settled once it is all plateau.
+    series = ramp + flat
+    assert not _population_settled(series[:250], 60)[0]
+    assert _population_settled(series, 60)[0]
+    # Too few samples for the trailing window: never settled.
+    assert not _population_settled(flat[:30], 60)[0]
+
+
+def test_warmup_plan_scales_with_session_length():
+    """Minimum warmup as before; the settling cap and trailing window
+    grow with the measured mean session duration (A4)."""
+    from simulator.open_loop import OpenLoopRunner
+
+    class Pool:
+        def __init__(self, mean):
+            self.mean = mean
+
+        def aggregate(self):
+            return {"mean_session_s": self.mean} if self.mean else {}
+
+    def plan(mean, cap=None, window=60):
+        r = OpenLoopRunner.__new__(OpenLoopRunner)
+        r.cfg = Config()
+        r.cfg.simulation.open_loop_settle_max_s = cap
+        r.cfg.simulation.open_loop_settle_window_s = window
+        r.pool = Pool(mean)
+        return r._warmup_plan()
+
+    # No session length known yet (first window): 90 s minimum, cap
+    # 300 s, 60 s trailing window.
+    assert plan(None) == (90.0, 300.0, 60)
+    # Short sessions: same minimum, same cap.
+    assert plan(20.0) == (90.0, 300.0, 60)
+    # document_qa-length sessions: 300 s minimum, 1.5 W cap, 0.2 W
+    # trailing window.
+    assert plan(1000.0) == (300.0, 1500.0, 200)
+    # Very long sessions: trailing window capped at 300 s.
+    assert plan(2000.0) == (300.0, 3000.0, 300)
+    # An explicit cap bounds the extension but never undercuts the
+    # minimum warmup.
+    assert plan(1000.0, cap=600) == (300.0, 600.0, 200)
+    assert plan(1000.0, cap=10) == (300.0, 300.0, 200)
+
+
+# ── A6: smaller measurement biases ──────────────────────────────────
+
+
+def test_marginal_window_is_an_sla_fail_for_the_search():
+    """One rule everywhere: the SLA gate is capacity_status == 'pass'
+    (Wilson upper bound < 5 %), so a marginal window does not pass.
+    Also pins the summary's own classification of 5/100 as marginal,
+    which is what makes the rule bite."""
+    turns = [_turn() for _ in range(95)] + [_turn(ok=False) for _ in range(5)]
+    s = _summarize_turns(turns)
+    assert s["capacity_status"] == "marginal"
+    assert (s["capacity_status"] == "pass") is False
+    clean = _summarize_turns([_turn() for _ in range(200)])
+    assert clean["capacity_status"] == "pass"
+
+
+def test_served_mean_prefers_engine_running_batch():
+    """The practical-significance basis is the engine's running batch
+    (num_running), not the client's in-flight count, which also holds
+    the queued requests — the very thing that grows in overload."""
+    from simulator.open_loop import _served_mean
+
+    running = [8.0] * 60
+    inflight = [8.0 + t for t in range(60)]      # queue building up
+    mean, basis = _served_mean(running, inflight)
+    assert (mean, basis) == (8.0, "engine_running")
+    # No running gauge (or too few scrapes): client in-flight fallback.
+    assert _served_mean([], inflight)[1] == "client_in_flight"
+    assert _served_mean([8.0] * 10, inflight)[1] == "client_in_flight"
+    assert _served_mean([], []) == (None, "none")
+
+
+def test_mean_session_duration_counts_natural_ends_only(monkeypatch):
+    """Sessions cut short by a cancel (trim / drain) or a failed turn
+    must not feed the Little's-law session length."""
+    import simulator.arrivals as arrivals
+    from simulator.virtual_user import SharedState
+
+    async def fake_user(*, stats, cancel_event, **_kw):
+        # 'natural' sessions take 0.3 s and complete; the others are
+        # cancelled after 0.05 s (no sessions_completed increment).
+        try:
+            await asyncio.wait_for(cancel_event.wait(), timeout=0.3)
+            return
+        except asyncio.TimeoutError:
+            stats.sessions_completed += 1
+
+    monkeypatch.setattr(arrivals, "run_virtual_user", fake_user)
+
+    async def main():
+        launcher = arrivals.SessionArrivalLauncher(
+            persona_weights={"quick_lookup": 1.0},
+            clients=[object()], model_id="m", corpus=None,
+            state=SharedState(), request_timeout_s=5,
+        )
+        launcher.start()
+        launcher.set_outstanding(6)
+        await asyncio.sleep(0.05)
+        launcher.set_rate(0.0)                 # stop respawns
+        launcher.trim_active(3)                # cancel the 3 newest
+        await asyncio.sleep(0.5)
+        durations = list(launcher.stats.session_durations_s)
+        done = launcher.stats.sessions_done
+        await launcher.stop()
+        return durations, done
+
+    durations, done = asyncio.run(main())
+    assert done == 6
+    assert len(durations) == 3                 # only the natural ends
+    assert all(d >= 0.29 for d in durations)
+
+
+def test_pre_first_token_failures_do_not_zero_the_tpot_percentiles():
+    """A turn that failed before its first token has no decode rate;
+    its placeholder tpot_ms=0 must not enter the TPOT percentiles
+    (it still counts in TTFT and the violation rates)."""
+    from simulator.measurement import _tpot_measured
+
+    ok = [dict(_turn(), tpot_ms=10.0, error=None) for _ in range(10)]
+    stalled = [
+        dict(_turn(ok=False), tpot_ms=0.0, error="ttft_stalled")
+        for _ in range(12)
+    ]
+    partial = [dict(_turn(ok=False), tpot_ms=40.0, error="hard_timeout")]
+    s = _summarize_turns(ok + stalled + partial)
+    assert s["sample_size"] == 23
+    assert s["tpot_p50_ms"] == 10.0          # the zeros dragged it to 0
+    assert s["tpot_p95_ms"] > 10.0           # partial-stream TPOT stays in the tail
+    assert s["combined_violation_rate"] == 13 / 23
+    assert s["ttft_p95_ms"] == 12000.0       # failures still in TTFT
+    assert _tpot_measured(None, 0.0)         # 1-token success is fine
+    assert not _tpot_measured("ttft_stalled", 0.0)
+    assert _tpot_measured("hard_timeout", 40.0)
+
+
+def test_adaptive_doubling_stops_at_the_fail_threshold_not_50_percent():
+    """Doubling brackets the fail knee once the Wilson lower bound of
+    the violation rate reaches fail_threshold (0.30) — there is no
+    separate 0.50 stop (it was unreachable and is gone)."""
+    from simulator.adaptive import PHASE_BISECT_FAIL, StepResult, TwoKneeStepper
+
+    st = TwoKneeStepper(initial_pool_size=8, max_pool_size=256)
+    assert st.next_pool_size() == 8
+    st.record(StepResult(pool_size=8, violation_rate=0.0, sample_size=200))
+    assert st.next_pool_size() == 16
+    # 35 % with n=200: Wilson lower bound ≈ 0.28 < 0.30 → keep doubling.
+    st.record(StepResult(pool_size=16, violation_rate=0.35, sample_size=200))
+    assert st.next_pool_size() == 32
+    # 45 % with n=200: lower bound ≈ 0.38 ≥ 0.30 → bisect, well below 0.50.
+    st.record(StepResult(pool_size=32, violation_rate=0.45, sample_size=200))
+    nxt = st.next_pool_size()
+    # Bisects between the last clean pass (8) and the failing side.
+    assert st.phase == PHASE_BISECT_FAIL and 8 < nxt < 32
+
+
+def test_prefix_hit_rate_is_a_fraction():
+    from simulator.measurement import _estimate_prefix_hit_rate
+
+    rows = [
+        {"prefix_cache_hits": 100, "prefix_cache_misses": 200},
+        {"prefix_cache_hits": 160, "prefix_cache_misses": 240},
+    ]
+    assert abs(_estimate_prefix_hit_rate(rows) - 0.6) < 1e-9
+    # Hits only (no miss counter): no rate can be formed.
+    assert _estimate_prefix_hit_rate(
+        [{"prefix_cache_hits": 100}, {"prefix_cache_hits": 160}]) is None
+    assert _estimate_prefix_hit_rate(rows[:1]) is None
+
+
+def test_tardiness_p99_is_window_scoped():
+    """A burst of late arrivals before a window opens must not show up
+    in that window's arrival_tardiness_p99_ms."""
+    from simulator.arrivals import SessionArrivalLauncher
+    from simulator.virtual_user import SharedState
+
+    async def main():
+        launcher = SessionArrivalLauncher(
+            persona_weights={"quick_lookup": 1.0},
+            clients=[object()], model_id="m", corpus=None,
+            state=SharedState(), request_timeout_s=5,
+        )
+        launcher.stats.tardiness_ms.extend([900.0] * 50)   # pre-window burst
+        launcher.stats.tardy_total = 50
+        assert launcher.stats.tardiness_p99_ms() == 900.0
+        launcher.mark_window()                             # the 'mark' cmd
+        assert launcher.stats.tardiness_p99_ms() == 0.0
+        assert launcher.stats.tardy_total == 50            # cumulative stays
+        launcher.stats.tardiness_ms.extend([5.0] * 50)
+        return launcher.stats.tardiness_p99_ms()
+
+    assert asyncio.run(main()) == 5.0

@@ -411,12 +411,11 @@ async def run_cohort(
                 stepper.next_pool_size() if stepper is not None
                 else next(override_iter, None)
             )
-    except KeyboardInterrupt:
-        final_status = "interrupted"
-        raise
-    except asyncio.CancelledError:
-        # Service-initiated stop (or loop teardown). Mark the run so
-        # resume logic re-measures it instead of skipping a half-run
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # A user stop — Ctrl-C / SSH disconnect, or the service's stop
+        # button (loop teardown) — is 'cancelled' in every path (the
+        # open-loop runner and the export/UI use the same word). Marked
+        # so resume logic re-measures it instead of skipping a half-run
         # stamped 'ok'.
         final_status = "cancelled"
         raise
@@ -585,9 +584,10 @@ def find_completed_runs(
     ``runs_dir/run.db``.
 
     A run counts as completed iff ``cohort_run.final_status == 'ok'``.
-    Other statuses — ``interrupted`` (Ctrl-C / SSH disconnect),
-    ``time_limit`` (max duration hit), ``no_samples`` / ``unstable``
-    (didn't capture useful data) — are deliberately NOT skipped: those
+    Other statuses — ``cancelled`` (Ctrl-C / SSH disconnect / service
+    stop; older DBs may say ``interrupted``), ``time_limit`` (max
+    duration hit), ``no_samples`` / ``unstable`` (didn't capture useful
+    data) — are deliberately NOT skipped: those
     are exactly the runs the user probably wants to retry. Their
     leftover rows aren't deleted; they're available for inspection
     inside the same DB, just not counted as "done."
@@ -628,6 +628,10 @@ async def run_sweep(
     # powers-of-2 grid when adaptive=False.
     adaptive: bool = False,
     fixed_grid_pool_sizes: list[int] | None = None,
+    # Methodology per workload: "closed" (this module's pool ramp) or
+    # "open" (open_loop.run_cohort_open_loop, sharing the engine and
+    # run directory exactly like the closed path).
+    mode: str = "closed",
 ) -> list[Path]:
     """Run multiple personas + cohorts back-to-back against the same engine.
 
@@ -670,10 +674,14 @@ async def run_sweep(
             log.info("Resume: nothing to do — all workloads already completed")
             return []
 
+    if mode not in ("open", "closed"):
+        raise ValueError(f"run_sweep mode must be 'open' or 'closed', got {mode!r}")
     preflight_check(cfg.engine.hardware_requirements)
     engine = make_engine(cfg.engine.type, cfg.engine)
     await asyncio.to_thread(engine.launch, log_dir=run_dir)
-    if adaptive:
+    if mode == "open":
+        log.info("Sweep mode: open-loop (arrival-rate capacity search)")
+    elif adaptive:
         log.info("Sweep mode: adaptive (TwoKneeStepper)")
     else:
         from .adaptive import DEFAULT_FIXED_GRID
@@ -682,24 +690,27 @@ async def run_sweep(
             "Sweep mode: fixed grid %s (early-stop one step past first failure)",
             grid,
         )
+
+    async def _one(cohort) -> Path:
+        if mode == "open":
+            from .open_loop import run_cohort_open_loop
+            return await run_cohort_open_loop(
+                cfg, cohort, engine=engine, run_dir=run_dir,
+            )
+        return await run_cohort(
+            cfg, cohort, engine=engine, run_dir=run_dir,
+            adaptive=adaptive,
+            fixed_grid_pool_sizes=fixed_grid_pool_sizes,
+        )
+
     paths: list[Path] = []
     try:
         for pid in persona_ids:
             log.info("=== Sweep: persona %s ===", pid)
-            path = await run_cohort(
-                cfg, cohort_from_persona(pid), engine=engine, run_dir=run_dir,
-                adaptive=adaptive,
-                fixed_grid_pool_sizes=fixed_grid_pool_sizes,
-            )
-            paths.append(path)
+            paths.append(await _one(cohort_from_persona(pid)))
         for cid in cohort_ids:
             log.info("=== Sweep: cohort %s ===", cid)
-            path = await run_cohort(
-                cfg, cid, engine=engine, run_dir=run_dir,
-                adaptive=adaptive,
-                fixed_grid_pool_sizes=fixed_grid_pool_sizes,
-            )
-            paths.append(path)
+            paths.append(await _one(cid))
     finally:
         await asyncio.to_thread(engine.shutdown)
     return paths

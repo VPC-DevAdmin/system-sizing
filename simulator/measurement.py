@@ -373,7 +373,11 @@ async def run_measurement_step(
 
     # Aggregate
     ttft_values = [e.ttft_ms for e in buffer]
-    tpot_values = [e.tpot_ms for e in buffer]
+    # Failed-before-first-token turns carry no decode rate; see
+    # ``_tpot_measured`` (they stay in TTFT and the violation rates).
+    tpot_values = [
+        e.tpot_ms for e in buffer if _tpot_measured(e.error, e.tpot_ms)
+    ]
     # TTFCT (time to first content token). For non-reasoning models
     # these equal ttft trivially; for reasoning models, ttfct lags
     # ttft by the chain-of-thought duration. Reported as a parallel
@@ -557,6 +561,21 @@ def _event_to_row(e: TurnEvent, measurement_id: int) -> dict:
     }
 
 
+def _tpot_measured(error: Optional[str], tpot_ms: Optional[float]) -> bool:
+    """Does this turn carry a measured decode rate?
+
+    Every successful turn does. A failed turn does only when it
+    reached its first token and streamed more than one (the partial
+    TPOT the virtual user computes); one that failed BEFORE the first
+    token carries the placeholder ``tpot_ms=0.0`` — there is no decode
+    rate to report — and letting that zero into the TPOT percentiles
+    made knee-side latency look optimistic exactly where requests were
+    stalling. Such turns still count in TTFT and in the violation
+    rates (an error is a violation of both).
+    """
+    return error is None or (tpot_ms is not None and tpot_ms > 0.0)
+
+
 def _avg_field(rows: list[dict], key: str) -> Optional[float]:
     vals = [r[key] for r in rows if r.get(key) is not None]
     if not vals:
@@ -565,9 +584,26 @@ def _avg_field(rows: list[dict], key: str) -> Optional[float]:
 
 
 def _estimate_prefix_hit_rate(rows: list[dict]) -> Optional[float]:
-    # Best-effort: if engine reports running counters, use deltas.
-    hits = [r["prefix_cache_hits"] for r in rows if r.get("prefix_cache_hits") is not None]
-    if len(hits) < 2:
+    """Within-window prefix-cache hit RATE (0..1) from the deltas of
+    the engine's cumulative hit / miss counters in the telemetry rows.
+
+    None when the counters are not both present with two samples —
+    the previous version returned the raw delta hit COUNT under this
+    name, which then landed in the ``estimated_prefix_hit_rate`` REAL
+    column as if it were a fraction. The end-of-run engine scrape
+    (``prefix_cache_engine_hit_rate`` on cohort_run) is the primary
+    hit-rate figure; this is the per-window best effort.
+    """
+    paired = [
+        (r["prefix_cache_hits"], r["prefix_cache_misses"]) for r in rows
+        if r.get("prefix_cache_hits") is not None
+        and r.get("prefix_cache_misses") is not None
+    ]
+    if len(paired) < 2:
         return None
-    delta_hits = max(0, hits[-1] - hits[0])
-    return float(delta_hits) if delta_hits >= 0 else None
+    delta_hits = paired[-1][0] - paired[0][0]
+    delta_misses = paired[-1][1] - paired[0][1]
+    total = delta_hits + delta_misses
+    if delta_hits < 0 or delta_misses < 0 or total <= 0:
+        return None
+    return float(delta_hits) / float(total)

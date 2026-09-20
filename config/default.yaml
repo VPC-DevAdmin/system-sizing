@@ -30,13 +30,16 @@ engine:
     OMP_NUM_THREADS: '64'
 
 simulation:
+  # open  — arrival-rate capacity search (docs/algorithm.md §0), the
+  #         default and what the UI runs; the open_loop_* knobs apply.
+  # closed — legacy fixed-pool ramp (§1); the pool-size knobs apply.
+  # ``capsim run --mode`` overrides per invocation. Unknown keys under
+  # any section are reported as warnings at load time, not ignored.
+  mode: open
   initial_pool_size: 4
   max_pool_size: 1024
   target_samples_per_step: 500
   measurement_timeout_s: 300
-  stabilization_cv_threshold: 0.15
-  stabilization_min_duration_s: 60
-  stabilization_max_duration_s: 300
   knee_slope_threshold: 0.005
   stop_violation_threshold: 0.5
   max_total_duration_minutes: 180

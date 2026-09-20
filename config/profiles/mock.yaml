@@ -6,13 +6,16 @@
 # tool, or exercise the run → telemetry → DB → export pipeline on a
 # laptop:
 #
-#   capsim run --cohort chat_heavy --profile mock
+#   capsim run --cohort chat_heavy --profile mock                # open-loop
+#   capsim run --cohort chat_heavy --profile mock --mode closed  # pool ramp
 #   capsim serve                    # then start mock runs from the API/UI
 #
 # Simulation knobs are shrunk so a full cohort run completes in
-# minutes, not hours; the knee lands around pool ~24-48 depending on
-# the cohort's duty cycle (capacity_inflight=6 with chat-style ~15%
-# duty ≈ 40 concurrent sessions).
+# minutes, not hours, in BOTH methodologies: the open-loop windows,
+# warmup and settling cap below are a tenth of the production
+# defaults, and the closed-loop knee lands around pool ~24-48
+# depending on the cohort's duty cycle (capacity_inflight=6 with
+# chat-style ~15% duty ≈ 40 concurrent sessions).
 
 engine:
   type: mock
@@ -27,6 +30,15 @@ engine:
   mock_jitter: 0.1
 
 simulation:
+  # Open-loop (default): short windows so a rate search finishes in a
+  # few minutes. Production defaults are 120/240 s windows, 90 s
+  # minimum warmup and a settling cap of max(300 s, 1.5 × session).
+  open_loop_window_s: 20
+  open_loop_refine_window_s: 30
+  open_loop_warmup_s: 10
+  open_loop_settle_max_s: 20
+  open_loop_drain_timeout_s: 30
+  # Closed-loop (--mode closed).
   target_samples_per_step: 40
   warmup_min_duration_s: 5
   warmup_max_duration_s: 30

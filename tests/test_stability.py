@@ -89,3 +89,61 @@ def test_intermediate_drift_inconclusive_asks_for_longer_window():
     v = assess_queue_stability(series, served_mean=256)
     assert v.verdict == INCONCLUSIVE
     assert "extend" in v.reason
+
+
+# ── Autocorrelated input (A5) ──────────────────────────────────────
+
+
+def _ar1(seed, n=120, rho=0.9, mean=40.0, sd_innov=3.0):
+    """Stationary AR(1) queue-depth series (integer, non-negative),
+    burnt in so it starts at equilibrium."""
+    rng = random.Random(seed)
+    x = mean
+    out = []
+    for _ in range(n + 50):
+        x = mean + rho * (x - mean) + rng.gauss(0, sd_innov)
+        out.append(max(0.0, float(round(x))))
+    return out[50:]
+
+
+def test_stationary_ar1_reads_stable_at_least_95_percent():
+    """A flat-but-wandering queue (ρ=0.9 per second, n=120, stationary
+    sd ≈ 7 around 40 with a 100-request running batch) must read
+    stable in ≥ 95 % of windows. Fed raw to Mann-Kendall it did so
+    in ~90 % (the rest inconclusive) — binning plus the AR(1)
+    variance correction plus the growth lower bound fix that."""
+    verdicts = [
+        assess_queue_stability(_ar1(seed), served_mean=100).verdict
+        for seed in range(200)
+    ]
+    assert verdicts.count(STABLE) >= 190, verdicts.count(STABLE)
+
+
+def test_linear_ramp_on_ar1_noise_is_still_divergent():
+    """The corrections must not blunt a real collapse: a 2/s ramp
+    under the same AR(1) noise, against a 64-request batch."""
+    for seed in range(20):
+        base = _ar1(seed, mean=20.0, sd_innov=2.0)
+        series = [v + 2.0 * t for t, v in enumerate(base)]
+        v = assess_queue_stability(series, served_mean=64)
+        assert v.verdict == DIVERGENT, (seed, v.reason)
+        # Slope reported per minute, unaffected by the 5 s binning.
+        assert 100 < v.slope_per_min < 140
+
+
+def test_bin_means_keeps_full_bins_only():
+    from simulator.stability import bin_means
+
+    binned, dt = bin_means([1.0] * 5 + [3.0] * 5 + [9.0] * 3, 1.0, 5.0)
+    assert binned == [1.0, 3.0] and dt == 5.0      # trailing partial dropped
+    assert bin_means([1.0, 2.0], 1.0, 5.0) == ([1.0, 2.0], 1.0)  # too short
+    assert bin_means([1.0, 2.0, 3.0], 5.0, 5.0) == ([1.0, 2.0, 3.0], 5.0)
+
+
+def test_ar1_variance_factor_engages_only_on_significant_rho():
+    from simulator.stability import ar1_variance_factor
+
+    assert ar1_variance_factor(0.05, 120) == 1.0        # inside the band
+    f = ar1_variance_factor(0.9, 120, bin_k=5)          # ρ_b = 0.9⁵ ≈ 0.59
+    assert abs(f - (1 + 0.9 ** 5) / (1 - 0.9 ** 5)) < 1e-9
+    assert ar1_variance_factor(0.9, 120, bin_k=1) > f   # raw is worse

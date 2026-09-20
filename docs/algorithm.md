@@ -320,7 +320,7 @@ Rationale: capacity-curve generation wants uniform x-axis density across powers 
 
 [`TwoKneeStepper`](../simulator/adaptive.py) — five-phase Wilson-CI-aware bisection that locates two knees plus infill points. Use when you care about precise knee placement rather than uniform sampling.
 
-- **Phase 1 (DOUBLING):** start at `initial_pool_size`, double until `violation_rate ≥ stop_violation_threshold` OR `max_pool_size`
+- **Phase 1 (DOUBLING):** start at `initial_pool_size`, double until the Wilson lower bound of `violation_rate` ≥ `fail_threshold` (0.30, the `capacity_status = fail` boundary) OR `max_pool_size`. `stop_violation_threshold` (0.5) does not stop adaptive doubling — it is the fixed-grid early-stop.
 - **Phase 1b (DOWNWARD_SEARCH):** if the initial pool already fails, halve down looking for an acceptable zone
 - **Phase 2 (BISECT_FAIL):** bisect between the largest passing pool and smallest failing pool until gap ≤ `bisect_resolution` (4). Locates `fail_pool_size` (knee 2)
 - **Phase 3 (BISECT_TARGET):** bisect between the largest target-passing pool and the smallest target-missing pool. Locates `soft_capacity_pool_size` (knee 1)
@@ -455,7 +455,7 @@ In `SimulationConfig` (loaded from YAML, `simulator/config.py`):
 | `convergence_window_s` | 60 | throughput-comparison window |
 | `convergence_threshold` | 0.20 | relative-change threshold for "converged" |
 | `convergence_min_completions_per_window` | 5 | sample floor for valid convergence comparison |
-| `stop_violation_threshold` | 0.5 | violation rate that triggers stepper stop / fixed-grid early-stop |
+| `stop_violation_threshold` | 0.5 | fixed-grid early-stop violation rate (adaptive doubling stops at the 0.30 fail threshold instead) |
 
 Open-loop (`simulation.mode: open`, the default — §0):
 

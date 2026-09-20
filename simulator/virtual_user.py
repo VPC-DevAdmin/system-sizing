@@ -459,6 +459,10 @@ async def run_virtual_user(
                     # ("did the request even start?" vs "did it
                     # stall mid-stream?") via the ``error`` category.
                     partial_ttft_ms = stream_result.ttft_ms
+                    # 0.0 is a PLACEHOLDER for "no decode rate was
+                    # measured" (the column is NOT NULL); the
+                    # aggregators exclude such turns from the TPOT
+                    # percentiles via measurement._tpot_measured.
                     partial_tpot_ms = 0.0
                     # Honest TPOT from the partial stream — useful for
                     # distinguishing "tier 2 stalled hard" vs "tier 3

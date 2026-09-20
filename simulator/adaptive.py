@@ -5,9 +5,11 @@ designed to extract a specific piece of the violation curve:
 
     Phase 1 (DOUBLING):
         Start at ``initial_pool_size`` (typically 8), double until
-        violation_rate ≥ ``stop_violation_threshold`` (0.50) OR pool
+        the Wilson lower bound of violation_rate ≥ ``fail_threshold``
+        (0.30 — the ``capacity_status='fail'`` boundary) OR pool
         reaches ``max_pool_size``. Establishes a coarse bracket for
-        the failure knee.
+        the failure knee. (A separate 0.50 stop used to be documented
+        here; it sat behind the 0.30 check and could never fire.)
 
     Phase 1b (DOWNWARD_SEARCH):
         Triggered if the initial pool size already fails (violation
@@ -138,6 +140,10 @@ class TwoKneeStepper:
         # can be reported instead of None for cohorts whose curve
         # plateaus in the marginal band (5–30% violation).
         fail_threshold: float = 0.30,
+        # Accepted for config compatibility (runner passes
+        # simulation.stop_violation_threshold) but NOT a doubling
+        # stop: any value above fail_threshold is unreachable behind
+        # it, and the fixed-grid stepper is where that knob acts.
         stop_violation_threshold: float = 0.50,
         infill_skip_pct: float = 0.10,
         downward_floor: int = 2,
@@ -240,9 +246,8 @@ class TwoKneeStepper:
 
     def _next_doubling(self) -> Optional[int]:
         """Phase 1 — double until violation crosses ``fail_threshold``
-        (or stop_violation_threshold or max_pool_size). If the initial
-        pool ALREADY fails (≥ knee_threshold), transition to downward
-        search.
+        (or max_pool_size). If the initial pool ALREADY fails
+        (≥ knee_threshold), transition to downward search.
 
         Threshold checks use Wilson CI lower bound, not the raw point
         estimate. This prevents small-sample noise (e.g. 1/5 = 20%
@@ -269,14 +274,9 @@ class TwoKneeStepper:
             self.phase = PHASE_DOWNWARD_SEARCH
             return None
 
-        # Crossed the stop threshold (50%) — bracket established, bisect.
-        # Use Wilson lower CI for the same reason as above.
-        if last_lower >= self.stop_violation_threshold:
-            self.phase = PHASE_BISECT_FAIL
-            return None
-
         # Crossed the fail threshold (30% violation) — bracket the
-        # sustained-fail point, then proceed to bisect knee 2.
+        # sustained-fail point, then proceed to bisect knee 2. Use
+        # Wilson lower CI for the same reason as above.
         if last_lower >= self.fail_threshold:
             self.phase = PHASE_BISECT_FAIL
             return None

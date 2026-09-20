@@ -442,3 +442,60 @@ def test_mean_session_duration_counts_natural_ends_only(monkeypatch):
     assert done == 6
     assert len(durations) == 3                 # only the natural ends
     assert all(d >= 0.29 for d in durations)
+
+
+def test_pre_first_token_failures_do_not_zero_the_tpot_percentiles():
+    """A turn that failed before its first token has no decode rate;
+    its placeholder tpot_ms=0 must not enter the TPOT percentiles
+    (it still counts in TTFT and the violation rates)."""
+    from simulator.measurement import _tpot_measured
+
+    ok = [dict(_turn(), tpot_ms=10.0, error=None) for _ in range(10)]
+    stalled = [
+        dict(_turn(ok=False), tpot_ms=0.0, error="ttft_stalled")
+        for _ in range(12)
+    ]
+    partial = [dict(_turn(ok=False), tpot_ms=40.0, error="hard_timeout")]
+    s = _summarize_turns(ok + stalled + partial)
+    assert s["sample_size"] == 23
+    assert s["tpot_p50_ms"] == 10.0          # the zeros dragged it to 0
+    assert s["tpot_p95_ms"] > 10.0           # partial-stream TPOT stays in the tail
+    assert s["combined_violation_rate"] == 13 / 23
+    assert s["ttft_p95_ms"] == 12000.0       # failures still in TTFT
+    assert _tpot_measured(None, 0.0)         # 1-token success is fine
+    assert not _tpot_measured("ttft_stalled", 0.0)
+    assert _tpot_measured("hard_timeout", 40.0)
+
+
+def test_adaptive_doubling_stops_at_the_fail_threshold_not_50_percent():
+    """Doubling brackets the fail knee once the Wilson lower bound of
+    the violation rate reaches fail_threshold (0.30) — there is no
+    separate 0.50 stop (it was unreachable and is gone)."""
+    from simulator.adaptive import PHASE_BISECT_FAIL, StepResult, TwoKneeStepper
+
+    st = TwoKneeStepper(initial_pool_size=8, max_pool_size=256)
+    assert st.next_pool_size() == 8
+    st.record(StepResult(pool_size=8, violation_rate=0.0, sample_size=200))
+    assert st.next_pool_size() == 16
+    # 35 % with n=200: Wilson lower bound ≈ 0.28 < 0.30 → keep doubling.
+    st.record(StepResult(pool_size=16, violation_rate=0.35, sample_size=200))
+    assert st.next_pool_size() == 32
+    # 45 % with n=200: lower bound ≈ 0.38 ≥ 0.30 → bisect, well below 0.50.
+    st.record(StepResult(pool_size=32, violation_rate=0.45, sample_size=200))
+    nxt = st.next_pool_size()
+    # Bisects between the last clean pass (8) and the failing side.
+    assert st.phase == PHASE_BISECT_FAIL and 8 < nxt < 32
+
+
+def test_prefix_hit_rate_is_a_fraction():
+    from simulator.measurement import _estimate_prefix_hit_rate
+
+    rows = [
+        {"prefix_cache_hits": 100, "prefix_cache_misses": 200},
+        {"prefix_cache_hits": 160, "prefix_cache_misses": 240},
+    ]
+    assert abs(_estimate_prefix_hit_rate(rows) - 0.6) < 1e-9
+    # Hits only (no miss counter): no rate can be formed.
+    assert _estimate_prefix_hit_rate(
+        [{"prefix_cache_hits": 100}, {"prefix_cache_hits": 160}]) is None
+    assert _estimate_prefix_hit_rate(rows[:1]) is None

@@ -40,7 +40,12 @@ from .config import Config
 from .cpu_binding import expand_thread_binding
 from .database import AGGREGATE_COLUMN_NAMES, Database
 from .engines import Engine, make_engine
-from .measurement import _classify_status, _percentile, _wilson_ci
+from .measurement import (
+    _classify_status,
+    _percentile,
+    _tpot_measured,
+    _wilson_ci,
+)
 from .personas import Cohort, get_cohort
 from .preflight import preflight_check
 from .rate_search import (
@@ -526,7 +531,12 @@ def _summarize_turns(turns: list[dict]) -> dict:
     if n == 0:
         return {"sample_size": 0}
     ttft = [t["ttft_ms"] for t in turns]
-    tpot = [t["tpot_ms"] for t in turns]
+    # Failed-before-first-token turns carry no decode rate (see
+    # measurement._tpot_measured); they stay in TTFT and the rates.
+    tpot = [
+        t["tpot_ms"] for t in turns
+        if _tpot_measured(t.get("error"), t["tpot_ms"])
+    ]
     ttfct = [t.get("ttfct_ms") or t["ttft_ms"] for t in turns]
     ttft_v = sum(1 for t in turns if t["ttft_violation"])
     tpot_v = sum(1 for t in turns if t["tpot_violation"])

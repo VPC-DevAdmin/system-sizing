@@ -73,7 +73,7 @@ from .prefix_cache import (
 # the document's structure needs a version bump there and here, plus a
 # green run of the schema-validation tests. Patch = additive optional
 # fields; minor = additive required fields; major = anything breaking.
-EXPORT_SCHEMA_VERSION = "1.2.0"
+EXPORT_SCHEMA_VERSION = "1.2.1"
 
 EXPORT_SCHEMA_PATH = Path(__file__).parent / "export_schema" / "buyer_page_data.schema.json"
 

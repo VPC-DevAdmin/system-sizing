@@ -296,3 +296,59 @@ def test_ramp_interval_scales_with_pool() -> None:
     assert interval(1.0, 120.0, 10) == 1.0          # small adds unchanged
     assert interval(1.0, 120.0, 4096) == pytest.approx(120.0 / 4096)
     assert interval(1.0, 120.0, 100000) == 0.02     # floor holds
+
+
+def _open_loop_measurement(step: int, rate: float, stability: str | None) -> dict:
+    return {
+        "cohort_run_id": "crid", "step_index": step,
+        "target_pool_size": 10 + step,
+        "measured_avg_pool_size": float(10 + step),
+        "measured_avg_in_flight": 3.0,
+        "measurement_started_at": "2026-01-01T00:00:00Z",
+        "measurement_duration_s": 120, "sample_size": 80,
+        "ttft_violation_rate": 0.0, "tpot_violation_rate": 0.0,
+        "combined_violation_rate": 0.0,
+        "ttft_target_miss_rate": 0.0, "tpot_target_miss_rate": 0.0,
+        "combined_target_miss_rate": 0.0,
+        "violation_rate_ci_lower": 0.0, "violation_rate_ci_upper": 0.04,
+        "ttft_p50_ms": 300.0, "ttft_p95_ms": 500.0,
+        "tpot_p50_ms": 12.0, "tpot_p95_ms": 15.0,
+        "capacity_status": "pass", "target_status": "pass",
+        "arrival_rate_per_min": rate,
+        "stability": stability,
+        "queue_depth_mean": 1.0, "queue_depth_slope_per_min": 0.0,
+        "arrival_tardiness_p99_ms": 5.0, "load_workers": 2,
+        "active_sessions_mean": float(10 + step),
+        "mean_session_duration_s": 60.0,
+    }
+
+
+def test_superseded_window_validates(tmp_path) -> None:
+    """A window re-measured after the load generator scaled out is
+    written as ``superseded``; it must validate against the contract
+    (this is the ``capsim smoke`` export gate) and be excluded from the
+    capacity figures."""
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="mock", model_id="mock-model", cohort_id="quick_lookup",
+        cohort_definition={"name": "Quick lookup", "description": "t",
+                           "category": "persona", "persona_weights": {"q": 1.0}},
+        config={"engine": {"type": "mock", "model_id": "mock-model"}},
+    )
+    db.update_cohort_run("crid", {"mode": "open_loop"})
+    for step, (rate, stab) in enumerate(
+        [(60.0, "stable"), (120.0, "superseded"), (120.0, "stable"),
+         (240.0, "divergent")]
+    ):
+        db.insert_measurement(_open_loop_measurement(step, rate, stab))
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+    doc, _ = export_dir(run_dir)
+    _validate(doc)
+    c = doc["cohorts"][0]
+    assert c["methodology"] == "open_loop"
+    assert c["open_loop"]["rate_max_per_min"] == 120.0
+    assert c["open_loop"]["rate_ceiling_per_min"] == 240.0

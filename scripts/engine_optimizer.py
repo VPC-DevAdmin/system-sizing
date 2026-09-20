@@ -1299,12 +1299,10 @@ def _trtllm_tail(cfg: EngineConfig, replica: ReplicaSpec) -> list[str]:
     the benchmark path and the arena.
     """
     try:
-        from simulator.engines.trtllm import (
-            DEFAULT_IMAGE, OPTIONS_IN_CONTAINER, serve_argv)
+        from simulator.engines.trtllm import DEFAULT_IMAGE, OPTIONS_IN_CONTAINER, serve_argv
     except ImportError:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from simulator.engines.trtllm import (
-            DEFAULT_IMAGE, OPTIONS_IN_CONTAINER, serve_argv)
+        from simulator.engines.trtllm import DEFAULT_IMAGE, OPTIONS_IN_CONTAINER, serve_argv
     import yaml as _yaml
 
     opts: dict = {"return_perf_metrics": True}

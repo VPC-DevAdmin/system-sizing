@@ -12,8 +12,8 @@
 #
 # After install:
 #   capsim doctor            # validate the host, get a config recommendation
-#   capsim smoke --config …  # ~10 min end-to-end pipeline proof (tiny model)
-#   capsim ready --config …  # full model download + image pull
+#   capsim smoke --profile …  # ~10 min end-to-end pipeline proof (tiny model)
+#   capsim ready --profile …  # full model download + image pull
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,5 +63,5 @@ fi
 
 say "Installed. Next steps (run from $REPO_DIR so the config/ dir is available):"
 echo "    capsim doctor                                  # validate this host"
-echo "    capsim smoke --config <config/…yaml>           # ~10 min pipeline proof"
-echo "    capsim ready --config <config/…yaml>           # full model + image prep"
+echo "    capsim smoke --profile <name>                  # ~10 min pipeline proof (capsim list-profiles)"
+echo "    capsim ready --profile <name>                  # full model + image prep"

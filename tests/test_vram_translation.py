@@ -168,8 +168,7 @@ def test_sglang_holds_back_room_for_activations():
     through is not a slightly different allocation, it is an OOM:
     measured on this box, 0.95 left 105 MiB free of 94.97 GiB and the
     server died allocating a 448 MiB workspace."""
-    from simulator.engines.vram import (
-        SGLANG_ACTIVATION_RESERVE, to_engine_fraction)
+    from simulator.engines.vram import SGLANG_ACTIVATION_RESERVE, to_engine_fraction
 
     value, why = to_engine_fraction("sglang_cuda", 0.95,
                                     total_vram_gb=T, weights_gb=W)

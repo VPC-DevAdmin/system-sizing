@@ -221,8 +221,7 @@ def test_candidate_summary_emits_the_right_dialect():
     """The arena's dimensions are engine-neutral; the args it produces
     must not be. A vLLM flag handed to trtllm-serve is a launch
     failure, and vice versa."""
-    from simulator.search import (
-        Objective, SearchParams, SearchSpace, candidate_summary)
+    from simulator.search import Objective, SearchParams, SearchSpace, candidate_summary
 
     space = SearchSpace(
         name="t",
@@ -313,9 +312,8 @@ def test_pull_refuses_when_the_disk_cannot_take_it(monkeypatch):
 
 
 def test_benchmark_config_builds_for_either_engine(monkeypatch):
-    from simulator.service import _build_custom_config
-
     import simulator.arena as arena
+    from simulator.service import _build_custom_config
     monkeypatch.setattr(arena, "hardware", lambda: {
         "count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
         "vram_per_gpu_gb": 96.0})

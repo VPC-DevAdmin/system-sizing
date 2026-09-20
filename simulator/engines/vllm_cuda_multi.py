@@ -29,7 +29,6 @@ engine; only the argv below is vLLM-specific.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from .docker_replica import (
     DockerReplicaEngine,

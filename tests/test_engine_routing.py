@@ -91,6 +91,7 @@ def test_an_unknown_engine_is_refused_not_defaulted():
     """Falling back to vLLM is exactly how the original defect
     produced confident, wrong numbers."""
     from fastapi import HTTPException
+
     from simulator.service import _build_custom_config
 
     with pytest.raises(HTTPException) as e:

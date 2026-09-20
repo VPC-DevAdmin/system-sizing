@@ -20,3 +20,4 @@ dist/
 
 # Per-host model additions (UI "Add model" writes here)
 config/models/local.yaml
+doctor.json

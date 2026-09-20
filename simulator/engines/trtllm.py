@@ -37,10 +37,8 @@ report them rather than quietly reporting a low number.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional

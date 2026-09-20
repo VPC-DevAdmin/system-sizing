@@ -460,9 +460,10 @@
             "stable",
             "divergent",
             "client_limited",
+            "superseded",
             null
           ],
-          "description": "Open-loop window verdict: stationary queue, unbounded growth, or the load generator saturated (even after scaling out workers)."
+          "description": "Open-loop window verdict: stationary queue, unbounded growth, the load generator saturated (even after scaling out workers), or a window superseded by a re-measurement at the same rate after workers scaled out (excluded from capacity figures)."
         },
         "queue_depth_mean": {
           "$ref": "#/$defs/nullableNumber"

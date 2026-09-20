@@ -678,8 +678,9 @@ def serve_cmd(
 @app.command("doctor")
 def doctor_cmd(
     output: Path = typer.Option(
-        Path("doctor.json"), "--output", "-o",
-        help="Where to write the machine-readable report.",
+        Path("runs/doctor.json"), "--output", "-o",
+        help="Where to write the machine-readable report (default: runs/doctor.json, "
+             "next to the run artifacts and outside version control).",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
@@ -689,7 +690,7 @@ def doctor_cmd(
     container toolkit), disk space, telemetry permissions (PMU, RAPL —
     warn-only, collectors degrade gracefully), and Hugging Face
     reachability. Prints a pass/warn/fail table, recommends candidate
-    configs for the detected hardware, writes ``doctor.json``, and
+    configs for the detected hardware, writes ``runs/doctor.json``, and
     exits non-zero when any check fails.
 
     Landing flow on a new host: install → ``capsim doctor`` →

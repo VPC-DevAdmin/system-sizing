@@ -18,7 +18,7 @@ but it is off by default and says why.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -196,8 +196,8 @@ def as_dicts(engine: str | None = None) -> list[dict]:
     """JSON view for the API and the arena cards."""
     rows = LEVERS if engine is None else levers_for(engine)
     return [{
-        "key": l.key, "engine": l.engine, "title": l.title,
-        "values": l.values, "default": l.default, "text": l.text,
-        "measured": l.measured, "searchable": l.searchable,
-        "verdict": l.verdict,
-    } for l in rows]
+        "key": lv.key, "engine": lv.engine, "title": lv.title,
+        "values": lv.values, "default": lv.default, "text": lv.text,
+        "measured": lv.measured, "searchable": lv.searchable,
+        "verdict": lv.verdict,
+    } for lv in rows]

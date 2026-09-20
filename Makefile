@@ -1,8 +1,8 @@
 # Persona Capacity Simulator — Make targets
 #
 # Headline workflow:
-#   make ready CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml
-#   make run-cohort CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml \
+#   make ready CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml
+#   make run-cohort CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml \
 #                   COHORT=chat_heavy
 #   make dashboard
 #   make export

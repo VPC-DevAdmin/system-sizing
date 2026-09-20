@@ -36,8 +36,8 @@ A **profile** is a curated named config for one host class. `capsim list-profile
 
 ```bash
 # Two commands to first measurement.
-make ready CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml
-make run-cohort CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml \
+make ready CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml
+make run-cohort CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml \
                 COHORT=chat_heavy
 # In a second terminal:
 make dashboard
@@ -186,7 +186,7 @@ There's no published Docker Hub tag for the CPU build; build from SGLang source.
 ### One-shot setup
 
 ```bash
-make ready CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml
+make ready CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml
 ```
 
 That handles everything: pip install, clone SGLang source if missing, build `sglang-cpu:xeon` (~15-20 min first run only), build the layered `sglang-cpu:xeon-fixed`, download the model with `HF_HUB_ENABLE_HF_TRANSFER=1`, and run the hardware preflight. Re-running is idempotent — already-built images and already-downloaded models are detected and skipped.
@@ -201,7 +201,7 @@ The `-2507` suffix is part of the actual published HF repo name, not a separate 
 # BF16 baseline
 make launch-engine ENGINE=sglang \
                    MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507 \
-                   CONFIG=config/r7735_sglang_qwen3_30b_a3b.yaml
+                   CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml
 
 # FP8 on Intel Xeon (AMX) — preflight blocks AMD hosts
 make launch-engine ENGINE=sglang \

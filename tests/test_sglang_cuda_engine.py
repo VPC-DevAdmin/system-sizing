@@ -82,8 +82,8 @@ def test_a_precision_sglang_cannot_express_is_refused():
 
 
 def test_benchmark_refuses_an_inexpressible_shape(monkeypatch, tmp_path):
-    from fastapi import HTTPException
     import pytest
+    from fastapi import HTTPException
 
     import simulator.arena as arena
     from simulator.service import _build_custom_config
@@ -174,7 +174,7 @@ def test_each_replica_gets_its_own_rendezvous_port():
         ports.append(int(cmd[cmd.index("--nccl-port") + 1]))
     assert len(set(ports)) == 8                    # all distinct
     # Spaced, because a replica may open a few consecutive ports.
-    assert min(b - a for a, b in zip(ports, ports[1:])) == NCCL_PORT_STRIDE
+    assert min(b - a for a, b in zip(ports, ports[1:], strict=False)) == NCCL_PORT_STRIDE
     # And distinct from the HTTP ports the replicas serve on.
     http = {eng._port(i) for i in range(8)}
     assert not (set(ports) & http)
@@ -200,8 +200,7 @@ def test_every_possible_rendezvous_port_is_a_legal_port():
     """The first version of this scheme needed 184,000 ports. SGLang
     said so plainly -- "Port out of range 0-65535" -- one cell into a
     roofline, which is a long way to travel for an arithmetic slip."""
-    from simulator.engines.sglang_cuda import (
-        NCCL_PORT_BASE, NCCL_PORT_CEILING, nccl_port)
+    from simulator.engines.sglang_cuda import NCCL_PORT_BASE, NCCL_PORT_CEILING, nccl_port
 
     seen = set()
     for w in range(2000):                      # far more launches than real

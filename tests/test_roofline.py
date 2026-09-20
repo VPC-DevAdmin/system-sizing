@@ -10,10 +10,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from simulator.roofline import (
-    Candidate,
     State,
     cell_key,
     cells,

@@ -45,6 +45,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from . import __version__
 from .bus import BUS
 
 log = logging.getLogger(__name__)
@@ -545,7 +546,7 @@ def create_app(
     _finalise_orphan_runs(runs_base)
     catalog_dir = Path(catalog_dir) if catalog_dir is not None else None
     optimizer_script = Path(optimizer_script)
-    app = FastAPI(title="capsim", version="0.2.0")
+    app = FastAPI(title="capsim", version=__version__)
     app.state.active: Optional[ActiveRun] = None
     app.state.optimizer: Optional[dict] = None       # {proc, profile, started_at, log}
     app.state.optimizer_catalog: Optional[dict] = None

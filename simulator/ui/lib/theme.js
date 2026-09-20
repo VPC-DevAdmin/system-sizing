@@ -1,3 +1,5 @@
+import { $ } from "./api.js";
+
 /* ── Chart.js theming ─────────────────────────────────────────── */
 
 const css = getComputedStyle(document.documentElement);
@@ -55,3 +57,38 @@ export const zoneLinesPlugin = {
   },
 };
 Chart.register(zoneLinesPlugin);
+
+/* The one chart factory. Every chart on the page shares the same
+ * frame -- a canvas that fills its card (maintainAspectRatio off), a
+ * bottom legend and a y axis that starts at zero -- and differs only
+ * in what it plots and how its axes are labelled.
+ *   canvas     a selector or the element
+ *   x, y       scale options merged over the frame's defaults
+ *   y2         adds a right-hand axis (grid off); datasets pick it
+ *              with yAxisID: "y2"
+ *   legend     merged over { position: "bottom" }
+ *   animation  Chart.js animation config; omitted = the global
+ *              default (off)
+ *   options    anything else at the top level of the chart options
+ *              (zoneLines, onClick, indexAxis) */
+export function makeChart(canvas, { type = "line", labels = [], datasets = [],
+                                    x = {}, y = {}, y2 = null, legend = {},
+                                    animation, options = {} } = {}) {
+  const scales = { x, y: { beginAtZero: true, ...y } };
+  if (y2) {
+    scales.y2 = { beginAtZero: true, position: "right",
+                  grid: { drawOnChartArea: false }, ...y2 };
+  }
+  const opts = { maintainAspectRatio: false };
+  if (animation !== undefined) opts.animation = animation;
+  return new Chart(typeof canvas === "string" ? $(canvas) : canvas, {
+    type,
+    data: { labels, datasets },
+    options: {
+      ...opts,
+      scales,
+      plugins: { legend: { position: "bottom", ...legend } },
+      ...options,
+    },
+  });
+}

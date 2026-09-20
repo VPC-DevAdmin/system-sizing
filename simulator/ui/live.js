@@ -1,5 +1,5 @@
 import { $, api, fmt, percentile, STATUS_CLASS } from "./lib/api.js";
-import { C, fill } from "./lib/theme.js";
+import { C, fill, makeChart } from "./lib/theme.js";
 import { on, emit } from "./lib/events.js";
 import { Headline } from "./headline.js";
 
@@ -9,18 +9,10 @@ const WINDOW = 300;           // chart points (~5 min at 1 Hz)
 const TURN_WINDOW = 40;       // rolling-percentile turn window
 
 function makeLiveChart(canvas, datasets, yOpts = {}) {
-  return new Chart($(canvas), {
-    type: "line",
-    data: { labels: [], datasets },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {
-        x: { ticks: { maxTicksLimit: 8, maxRotation: 0 } },
-        y: { beginAtZero: true, ...yOpts },
-      },
-      plugins: { legend: { position: "bottom" } },
-    },
+  return makeChart(canvas, {
+    datasets,
+    x: { ticks: { maxTicksLimit: 8, maxRotation: 0 } },
+    y: yOpts,
   });
 }
 

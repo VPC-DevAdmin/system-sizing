@@ -1,5 +1,5 @@
 import { $, api, fmt, STATUS_CLASS, keyActivate } from "./lib/api.js";
-import { C, fill, PALETTE } from "./lib/theme.js";
+import { C, fill, PALETTE, makeChart } from "./lib/theme.js";
 import { on } from "./lib/events.js";
 import { onShow } from "./lib/tabs.js";
 
@@ -509,25 +509,16 @@ export const Results = {
     this.charts[id]?.destroy();
     const el = $("#" + id);
     if (!el) return;
-    const scales = {
+    this.charts[id] = makeChart(el, {
+      type, labels, datasets, animation: { duration: 300 },
       x: { ticks: { font: { size: 10 } } },
-      y: { beginAtZero: true, stacked: !!stacked,
-           ticks: { font: { size: 10 } },
+      y: { stacked: !!stacked, ticks: { font: { size: 10 } },
            title: { display: !!ytitle, text: ytitle, font: { size: 10 } } },
-    };
-    if (y2title) {
-      scales.y2 = { beginAtZero: true, position: "right",
-        grid: { drawOnChartArea: false }, ticks: { font: { size: 10 } },
-        title: { display: true, text: y2title, font: { size: 10 } } };
-    }
-    this.charts[id] = new Chart(el, {
-      type, data: { labels, datasets },
-      options: {
-        maintainAspectRatio: false, animation: { duration: 300 },
-        scales,
-        plugins: { legend: { position: "bottom",
-          labels: { boxWidth: 9, font: { size: 10 } } } },
-      },
+      y2: y2title
+        ? { ticks: { font: { size: 10 } },
+            title: { display: true, text: y2title, font: { size: 10 } } }
+        : null,
+      legend: { labels: { boxWidth: 9, font: { size: 10 } } },
     });
   },
 
@@ -800,23 +791,22 @@ export const Results = {
       borderColor: color, pointRadius: 3, pointBackgroundColor: color, ...extra,
     });
     this.charts.knee?.destroy();
-    this.charts.knee = new Chart($("#chart-knee"), {
-      type: "line",
-      data: {
-        labels: x,
-        datasets: [
-          { label: "CI upper", data: curve.map(p => p.ci_upper * 100),
-            borderColor: "transparent", pointRadius: 0 },
-          { label: "CI lower", data: curve.map(p => p.ci_lower * 100),
-            borderColor: "transparent", pointRadius: 0,
-            fill: "-1", backgroundColor: C.fail + "1f" },
-          mk("SLA violation %", "violation_rate", C.fail),
-          mk("target miss %", "target_miss_rate", C.warn, { borderDash: [6, 4] }),
-        ],
-      },
+    this.charts.knee = makeChart("#chart-knee", {
+      labels: x,
+      datasets: [
+        { label: "CI upper", data: curve.map(p => p.ci_upper * 100),
+          borderColor: "transparent", pointRadius: 0 },
+        { label: "CI lower", data: curve.map(p => p.ci_lower * 100),
+          borderColor: "transparent", pointRadius: 0,
+          fill: "-1", backgroundColor: C.fail + "1f" },
+        mk("SLA violation %", "violation_rate", C.fail),
+        mk("target miss %", "target_miss_rate", C.warn, { borderDash: [6, 4] }),
+      ],
+      animation: { duration: 450, easing: "easeOutQuart" },
+      x: { title: { display: true, text: ax.label } },
+      y: { title: { display: true, text: "% of turns" } },
+      legend: { labels: { filter: (item) => !item.text.startsWith("CI") } },
       options: {
-        maintainAspectRatio: false,
-        animation: { duration: 450, easing: "easeOutQuart" },
         zoneLines: c.open_loop
           ? [
               { value: c.open_loop.rate_sla_per_min, color: C.ok, label: "SLA rate" },
@@ -828,14 +818,6 @@ export const Results = {
               { value: c.soft_capacity_pool_size, color: C.warn, label: "soft cap" },
               { value: c.fail_pool_size, color: C.fail, label: "fail" },
             ],
-        scales: {
-          x: { title: { display: true, text: ax.label } },
-          y: { beginAtZero: true, title: { display: true, text: "% of turns" } },
-        },
-        plugins: {
-          legend: { position: "bottom",
-            labels: { filter: (item) => !item.text.startsWith("CI") } },
-        },
         onClick: (_e, els) => {
           const el = els.find(e => e.datasetIndex >= 2);
           if (el) this.showStepDetail(curve[el.index]);
@@ -849,32 +831,21 @@ export const Results = {
     const curve = ctx?.pts
       ?? [...c.curve].sort((a, b) => (a[ax.key] ?? 0) - (b[ax.key] ?? 0));
     this.charts.latency?.destroy();
-    this.charts.latency = new Chart($("#chart-latency"), {
-      type: "line",
-      data: {
-        labels: curve.map(p => p[ax.key]),
-        datasets: [
-          { label: "TTFT p50 (ms)", data: curve.map(p => p.ttft_p50_ms),
-            borderColor: C.blue, pointRadius: 3, fill: true,
-            backgroundColor: fill(C.blue, "1c") },
-          { label: "TTFT p95 (ms)", data: curve.map(p => p.ttft_p95_ms),
-            borderColor: C.blue, borderDash: [6, 4], pointRadius: 3 },
-          { label: "TPOT p95 (ms)", data: curve.map(p => p.tpot_p95_ms),
-            borderColor: C.warn, yAxisID: "y2", pointRadius: 3 },
-        ],
-      },
-      options: {
-        maintainAspectRatio: false,
-        animation: { duration: 450, easing: "easeOutQuart" },
-        scales: {
-          x: { title: { display: true, text: ax.label } },
-          y: { beginAtZero: true, title: { display: true, text: "TTFT ms" } },
-          y2: { beginAtZero: true, position: "right",
-                grid: { drawOnChartArea: false },
-                title: { display: true, text: "TPOT ms" } },
-        },
-        plugins: { legend: { position: "bottom" } },
-      },
+    this.charts.latency = makeChart("#chart-latency", {
+      labels: curve.map(p => p[ax.key]),
+      datasets: [
+        { label: "TTFT p50 (ms)", data: curve.map(p => p.ttft_p50_ms),
+          borderColor: C.blue, pointRadius: 3, fill: true,
+          backgroundColor: fill(C.blue, "1c") },
+        { label: "TTFT p95 (ms)", data: curve.map(p => p.ttft_p95_ms),
+          borderColor: C.blue, borderDash: [6, 4], pointRadius: 3 },
+        { label: "TPOT p95 (ms)", data: curve.map(p => p.tpot_p95_ms),
+          borderColor: C.warn, yAxisID: "y2", pointRadius: 3 },
+      ],
+      animation: { duration: 450, easing: "easeOutQuart" },
+      x: { title: { display: true, text: ax.label } },
+      y: { title: { display: true, text: "TTFT ms" } },
+      y2: { title: { display: true, text: "TPOT ms" } },
     });
   },
 
@@ -969,30 +940,21 @@ export const Results = {
     const xs = [...new Set(
       this.compare.flatMap(c => c.curve.map(p => p[key]).filter(v => v != null))
     )].sort((a, b) => a - b);
-    this.charts.compare = new Chart($("#chart-compare"), {
-      type: "line",
-      data: {
-        labels: xs,
-        datasets: this.compare.map((c, i) => ({
-          label: c.label,
-          data: xs.map(x => {
-            const p = c.curve.find(q => q[key] === x);
-            return p ? p.violation_rate * 100 : null;
-          }),
-          borderColor: PALETTE[i % PALETTE.length],
-          pointRadius: 3, spanGaps: true,
-        })),
-      },
-      options: {
-        maintainAspectRatio: false,
-        scales: {
-          x: { title: { display: true,
-                        text: allOpen ? "session arrivals / min"
-                                      : "pool size" } },
-          y: { beginAtZero: true, title: { display: true, text: "SLA violation %" } },
-        },
-        plugins: { legend: { position: "bottom" } },
-      },
+    this.charts.compare = makeChart("#chart-compare", {
+      labels: xs,
+      datasets: this.compare.map((c, i) => ({
+        label: c.label,
+        data: xs.map(x => {
+          const p = c.curve.find(q => q[key] === x);
+          return p ? p.violation_rate * 100 : null;
+        }),
+        borderColor: PALETTE[i % PALETTE.length],
+        pointRadius: 3, spanGaps: true,
+      })),
+      x: { title: { display: true,
+                    text: allOpen ? "session arrivals / min"
+                                  : "pool size" } },
+      y: { title: { display: true, text: "SLA violation %" } },
     });
   },
 };

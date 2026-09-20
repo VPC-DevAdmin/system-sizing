@@ -1,5 +1,5 @@
 import { $, fmt, fmtCompact } from "./lib/api.js";
-import { C, fill } from "./lib/theme.js";
+import { C, fill, makeChart } from "./lib/theme.js";
 import { on } from "./lib/events.js";
 import { Engines } from "./engines.js";
 
@@ -242,56 +242,32 @@ export const Headline = {
     if (!rungs.length) return;
     const labels = rungs.map(r => r.concurrency.toLocaleString());
     if (!this.charts.curve) {
-      this.charts.curve = new Chart($("#chart-hl-curve"), {
-        type: "line",
-        data: { labels: [], datasets: [
+      this.charts.curve = makeChart("#chart-hl-curve", {
+        datasets: [
           { label: "output tok/s", data: [], borderColor: C.gold,
             backgroundColor: fill(C.gold), tension: .3, fill: true },
-        ] },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          scales: { y: { beginAtZero: true },
-                    x: { title: { display: true,
-                                  text: "streams offered" } } },
-          plugins: { legend: { position: "bottom" } },
-        },
+        ],
+        x: { title: { display: true, text: "streams offered" } },
       });
-      this.charts.lat = new Chart($("#chart-hl-lat"), {
-        type: "line",
-        data: { labels: [], datasets: [
+      this.charts.lat = makeChart("#chart-hl-lat", {
+        datasets: [
           { label: "TTFT p95 (ms)", data: [], borderColor: C.purple,
             tension: .3, yAxisID: "y" },
           { label: "TPOT p95 (ms)", data: [], borderColor: C.accent,
-            tension: .3, yAxisID: "y1" },
-        ] },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          scales: {
-            y: { beginAtZero: true, position: "left",
-                 title: { display: true, text: "TTFT ms" } },
-            y1: { beginAtZero: true, position: "right",
-                  grid: { drawOnChartArea: false },
-                  title: { display: true, text: "TPOT ms" } },
-            x: { title: { display: true, text: "streams offered" } },
-          },
-          plugins: { legend: { position: "bottom" } },
-        },
+            tension: .3, yAxisID: "y2" },
+        ],
+        x: { title: { display: true, text: "streams offered" } },
+        y: { position: "left", title: { display: true, text: "TTFT ms" } },
+        y2: { title: { display: true, text: "TPOT ms" } },
       });
-      this.charts.held = new Chart($("#chart-hl-held"), {
-        type: "line",
-        data: { labels: [], datasets: [
+      this.charts.held = makeChart("#chart-hl-held", {
+        datasets: [
           { label: "offered", data: [], borderColor: C.muted || C.blue,
             borderDash: [5, 4], tension: 0 },
           { label: "held by the engine", data: [], borderColor: C.teal,
             backgroundColor: fill(C.teal), tension: .3, fill: true },
-        ] },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          scales: { y: { beginAtZero: true },
-                    x: { title: { display: true,
-                                  text: "streams offered" } } },
-          plugins: { legend: { position: "bottom" } },
-        },
+        ],
+        x: { title: { display: true, text: "streams offered" } },
       });
     }
     const c = this.charts.curve;
@@ -325,17 +301,12 @@ export const Headline = {
     return [avg(this._tok.pre, pre), avg(this._tok.dec, dec)];
   },
 
-  sysChart(key, canvas, datasets, yOpts) {
+  sysChart(key, canvas, datasets, { y, y2 } = {}) {
     if (!this.charts[key]) {
-      this.charts[key] = new Chart($(canvas), {
-        type: "line", data: { labels: [], datasets },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          animation: false,
-          scales: { x: { ticks: { maxTicksLimit: 8, maxRotation: 0 } },
-                    ...(yOpts || { y: { beginAtZero: true } }) },
-          plugins: { legend: { position: "bottom" } },
-        },
+      this.charts[key] = makeChart(canvas, {
+        datasets, animation: false,
+        x: { ticks: { maxTicksLimit: 8, maxRotation: 0 } },
+        y, y2,
       });
     }
     return this.charts[key];
@@ -354,12 +325,9 @@ export const Headline = {
       { label: "chassis W", data: [], borderColor: C.muted,
         borderDash: [5, 4], tension: .3, pointRadius: 0, yAxisID: "y" },
       { label: "tokens/watt", data: [], borderColor: C.teal,
-        tension: .3, pointRadius: 0, yAxisID: "y1" },
-    ], { y: { beginAtZero: true, position: "left",
-              title: { display: true, text: "watts" } },
-         y1: { beginAtZero: true, position: "right",
-               grid: { drawOnChartArea: false },
-               title: { display: true, text: "tok/W" } } });
+        tension: .3, pointRadius: 0, yAxisID: "y2" },
+    ], { y: { position: "left", title: { display: true, text: "watts" } },
+         y2: { title: { display: true, text: "tok/W" } } });
     power.data.labels = S.labels;
     power.data.datasets[0].data = S.power;
     power.data.datasets[1].data = S.syspower;
@@ -372,7 +340,7 @@ export const Headline = {
       { label: "memory-controller busy %", data: [], borderColor: C.accent,
         backgroundColor: fill(C.accent), fill: true, tension: .3,
         pointRadius: 0 },
-    ], { y: { beginAtZero: true, max: 100 } });
+    ], { y: { max: 100 } });
     gpu.data.labels = S.labels;
     gpu.data.datasets[0].data = S.sm;
     gpu.data.datasets[1].data = S.mem;
@@ -398,10 +366,8 @@ export const Headline = {
         backgroundColor: fill(C.blue), fill: true, tension: .3,
         pointRadius: 0, yAxisID: "y" },
       { label: "core GHz", data: [], borderColor: C.gold,
-        tension: .3, pointRadius: 0, yAxisID: "y1" },
-    ], { y: { beginAtZero: true, max: 100, position: "left" },
-         y1: { beginAtZero: true, position: "right",
-               grid: { drawOnChartArea: false } } });
+        tension: .3, pointRadius: 0, yAxisID: "y2" },
+    ], { y: { max: 100, position: "left" }, y2: {} });
     cpu.data.labels = S.labels;
     cpu.data.datasets[0].data = S.cpu;
     cpu.data.datasets[1].data = S.ghz;

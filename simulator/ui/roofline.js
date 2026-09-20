@@ -1,5 +1,5 @@
 import { $, api } from "./lib/api.js";
-import { C, fill } from "./lib/theme.js";
+import { C, fill, makeChart } from "./lib/theme.js";
 import { onShow } from "./lib/tabs.js";
 import { Engines } from "./engines.js";
 
@@ -352,15 +352,15 @@ export const Roofline = {
       const labels = Object.keys(entries).map(labelOf);
       const data = Object.values(entries).map(r => Math.round(r.out_tok_s));
       if (!this.charts[key]) {
-        this.charts[key] = new Chart($(canvas), {
+        this.charts[key] = makeChart(canvas, {
           type: "bar",
-          data: { labels: [], datasets: [{ label: "output tok/s", data: [],
+          datasets: [{ label: "output tok/s", data: [],
             backgroundColor: fill(C.gold, "88"), borderColor: C.gold,
-            borderWidth: 1 }] },
-          options: { responsive: true, maintainAspectRatio: false,
-            indexAxis: "y", animation: false,
-            scales: { x: { beginAtZero: true } },
-            plugins: { legend: { display: false } } },
+            borderWidth: 1 }],
+          animation: false,
+          x: { beginAtZero: true },
+          legend: { display: false },
+          options: { indexAxis: "y" },
         });
       }
       const c = this.charts[key];

@@ -2122,6 +2122,13 @@ def create_app(
 
     @app.post("/api/optimizer/start", status_code=202)
     async def optimizer_start(req: OptimizerStartRequest) -> dict:
+        # Same lock as run start: without it a run and an optimizer
+        # could both clear their guards and start together, and each
+        # engine launch sweeps the other's containers.
+        async with app.state.start_lock:
+            return await _optimizer_start_locked(req)
+
+    def _refuse_if_busy() -> None:
         active = app.state.active
         if active is not None and not active.task.done():
             raise HTTPException(
@@ -2130,6 +2137,9 @@ def create_app(
             )
         if _optimizer_running():
             raise HTTPException(409, "optimizer already running")
+
+    async def _optimizer_start_locked(req: OptimizerStartRequest) -> dict:
+        _refuse_if_busy()
         import sys
         _opt_out.parent.mkdir(parents=True, exist_ok=True)
         log_path = _opt_out.parent / (
@@ -2193,6 +2203,10 @@ def create_app(
                 cmd.extend(["--only", *req.only])
         else:
             raise HTTPException(422, "mode must be arena | search | registry")
+        # Re-checked after every await above: the lock keeps runs out,
+        # but an optimizer started from the CLI takes the flock without
+        # asking this process.
+        _refuse_if_busy()
         log_file = open(log_path, "w")
         proc = subprocess.Popen(
             cmd, stdout=log_file, stderr=subprocess.STDOUT,
@@ -2285,17 +2299,22 @@ def create_app(
                     time.sleep(0.5)
             await asyncio.to_thread(_wait_released)
         # The optimizer cleans containers between configs, not on
-        # SIGTERM — sweep up any vllm-* container it left running.
+        # SIGTERM — sweep up any capsim engine container it left
+        # running (a search may launch any engine, not just vLLM).
+        # Anchored to capsim's prefixes: ``name=vllm-`` also matched
+        # a user's my-vllm-dev.
         def _cleanup() -> None:
-            with contextlib.suppress(Exception):
-                res = subprocess.run(
-                    ["docker", "ps", "-aq", "--filter", "name=vllm-"],
-                    capture_output=True, text=True, timeout=20,
-                )
-                cids = res.stdout.split()
-                if cids:
-                    subprocess.run(["docker", "rm", "-f", *cids],
-                                   capture_output=True, timeout=60)
+            from .engines.docker_replica import container_name_filter
+            for flt in container_name_filter():
+                with contextlib.suppress(Exception):
+                    res = subprocess.run(
+                        ["docker", "ps", "-aq", "--filter", flt],
+                        capture_output=True, text=True, timeout=20,
+                    )
+                    cids = res.stdout.split()
+                    if cids:
+                        subprocess.run(["docker", "rm", "-f", *cids],
+                                       capture_output=True, timeout=60)
         await asyncio.to_thread(_cleanup)
         return {"stopped": True}
 

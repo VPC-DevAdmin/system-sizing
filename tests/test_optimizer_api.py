@@ -143,6 +143,51 @@ def test_optimizer_excludes_capacity_runs(tmp_path, monkeypatch) -> None:
         app.state.active = None
 
 
+def test_optimizer_start_rechecks_after_its_awaits(tmp_path, monkeypatch) -> None:
+    """optimizer_start awaits (space doc, seed file, catalog) between
+    its guard and Popen. An optimizer that appears during those awaits
+    -- a CLI launch taking the flock -- must be seen before anything
+    is spawned."""
+    import fcntl
+    import json
+    import os
+
+    from simulator import arena as arena_mod
+    from simulator import service as svc
+
+    runs = tmp_path / "runs"
+    held: list = []
+
+    def take_the_lock(selection, catalog, budget):
+        p = runs / "engine_optimizer" / ".optimizer.lock"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(p, "w")
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fh.write(json.dumps({"pid": os.getpid(), "started_at": 0,
+                             "argv": ["--search", "x"]}))
+        fh.flush()
+        held.append(fh)
+        return {"name": "arena", "engine": "vllm_cuda",
+                "device_groups": [[0]], "model_variants": {},
+                "dimensions": {"tp": [1]}}
+    monkeypatch.setattr(arena_mod, "build_space_doc", take_the_lock)
+
+    def no_spawn(*a, **kw):
+        raise AssertionError("Popen must not run once another optimizer holds the lock")
+    monkeypatch.setattr(svc.subprocess, "Popen", no_spawn)
+    try:
+        with TestClient(_make_app(tmp_path)) as client:
+            r = client.post("/api/optimizer/start",
+                            json={"mode": "arena", "arena": {}})
+            assert r.status_code == 409, r.text
+            assert "already running" in r.json()["detail"]
+            assert held                          # the await did happen
+            assert client.app.state.optimizer is None
+    finally:
+        for fh in held:
+            fh.close()
+
+
 def test_optimizer_search_mode(tmp_path) -> None:
     """Search mode resolves a space by name, launches the driver with
     --search, and surfaces search.json through the status endpoint."""

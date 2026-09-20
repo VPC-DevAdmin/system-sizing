@@ -42,7 +42,7 @@ simulator = "simulator.cli:app"
 include = ["simulator*"]
 
 [tool.setuptools.package-data]
-simulator = ["export_schema/*.json", "ui/*", "ui/vendor/*", "personas_data/*.yaml", "models_data/*.yaml"]
+simulator = ["export_schema/*.json", "ui/*", "ui/lib/*", "ui/vendor/*", "personas_data/*.yaml", "models_data/*.yaml"]
 
 [tool.ruff]
 line-length = 100

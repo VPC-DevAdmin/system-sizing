@@ -88,7 +88,9 @@
         <span id="mf-count" class="msg" style="align-self:end"></span>
       </div>
       <table id="models-table">
-        <thead><tr><th>Model</th><th>Quant</th><th>Referenced by</th><th>Status</th><th>Size</th>
+        <thead><tr><th>Model</th><th>Quant</th><th>Referenced by</th>
+          <th title="a model marked KTransformers-only is staged config-only: config + tokenizer from the HF repo, weights from its GGUF companion">Status</th>
+          <th title="on-disk size of what is staged; a KTransformers-only row shows the host RAM its GGUF needs instead of a VRAM footprint">Size</th>
           <th title="KTransformers loads weights from GGUF only — a staged companion is what makes the row eligible for it">GGUF</th><th></th></tr></thead>
         <tbody></tbody>
       </table>

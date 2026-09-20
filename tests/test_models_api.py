@@ -47,7 +47,7 @@ def test_gguf_status_points_at_the_snapshot_directory(tmp_path) -> None:
     spec = {"repo": "org/M-GGUF", "file": "Q4/M-Q4.gguf", "size_gb": 1.5}
     st = gguf_status({"id": "org/M", "gguf": spec}, cache)
     assert st == {"repo": "org/M-GGUF", "file": "Q4/M-Q4.gguf",
-                  "size_gb": 1.5, "cached": False, "path": None}
+                  "size_gb": 1.5, "sharded": False, "cached": False, "path": None}
     assert gguf_status({"id": "org/M", "gguf": None}, cache) is None
 
     rev = cache / "hub" / "models--org--M-GGUF" / "snapshots" / "r1"
@@ -113,7 +113,7 @@ def test_models_api_gguf_companion_download(tmp_path, monkeypatch) -> None:
 
     with TestClient(create_app(tmp_path / "runs")) as client:
         rows = {m["model"]: m for m in client.get("/api/models").json()["models"]}
-        assert rows["org/tiny"]["gguf"] == {**spec, "cached": False,
+        assert rows["org/tiny"]["gguf"] == {**spec, "sharded": False, "cached": False,
                                             "path": None, "downloading": False}
         assert rows["org/plain"]["gguf"] is None
 
@@ -245,3 +245,109 @@ def test_storage_api(tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path / "env"))
         r = client.post("/api/storage", json={"hf_cache": str(target)})
         assert r.status_code == 422 and "OPTIMIZER_HF_CACHE" in r.json()["detail"]
+
+
+def _fake_config_only(cache: Path, model_id: str, arch: str = "deepseek_v3",
+                      tokenizer: str | None = "tokenizer.json") -> Path:
+    rev = cache / "hub" / ("models--" + model_id.replace("/", "--")) \
+        / "snapshots" / "cfg1"
+    rev.mkdir(parents=True, exist_ok=True)
+    (rev / "config.json").write_text(f'{{"model_type": "{arch}"}}')
+    if tokenizer:
+        (rev / tokenizer).write_text("{}")
+    return rev
+
+
+def test_sharded_gguf_directory_is_staged_only_when_every_shard_is(tmp_path) -> None:
+    """A companion whose ``file`` is a directory: --gguf_path is that
+    directory, and it counts as staged only once all -0000i-of-0000N
+    shards are present -- a download killed at five of eight would
+    otherwise read as ready and fail at load."""
+    from simulator.models import gguf_status
+    cache = tmp_path / "hf"
+    spec = {"repo": "org/Big-GGUF", "file": "UD-Q4_K_XL", "size_gb": 386.9}
+    st = gguf_status(spec, cache)
+    assert st["sharded"] is True and st["cached"] is False and st["path"] is None
+
+    d = cache / "hub" / "models--org--Big-GGUF" / "snapshots" / "r1" / "UD-Q4_K_XL"
+    d.mkdir(parents=True)
+    assert gguf_status(spec, cache)["cached"] is False       # empty dir
+    (d / "Big-UD-Q4_K_XL-00001-of-00003.gguf").write_bytes(b"g")
+    (d / "Big-UD-Q4_K_XL-00003-of-00003.gguf").write_bytes(b"g")
+    assert gguf_status(spec, cache)["cached"] is False       # shard 2 missing
+    (d / "Big-UD-Q4_K_XL-00002-of-00003.gguf").write_bytes(b"")
+    assert gguf_status(spec, cache)["cached"] is False       # shard 2 empty
+    (d / "Big-UD-Q4_K_XL-00002-of-00003.gguf").write_bytes(b"g")
+    st = gguf_status(spec, cache)
+    assert st["cached"] is True and st["path"] == str(d)
+    # A single-file companion reports sharded=False as before.
+    assert gguf_status({"repo": "org/S", "file": "s.gguf"}, cache)["sharded"] is False
+
+
+def test_model_status_config_only(tmp_path, monkeypatch) -> None:
+    """A kt_only model is cached once config.json and a tokenizer are
+    staged (KTransformers takes the weights from the GGUF); the row
+    carries the architecture the launcher keys its optimize rule on."""
+    cache = tmp_path / "hf"
+    st = model_status("org/Big", cache, config_only=True)
+    assert st["cached"] is False and st["config_only"] is True and st["arch"] is None
+
+    rev = _fake_config_only(cache, "org/Big", tokenizer=None)
+    st = model_status("org/Big", cache, config_only=True)
+    assert st["cached"] is False and st["partial"] is True    # no tokenizer
+    assert st["arch"] == "deepseek_v3"
+    (rev / "tokenizer.model").write_text("spm")
+    st = model_status("org/Big", cache, config_only=True)
+    assert st["cached"] is True and st["partial"] is False
+    # A regular (weights) model reports its arch too.
+    _fake_config_only(cache, "org/Small", arch="qwen3_moe")
+    assert model_status("org/Small", cache, config_only=False)["arch"] == "qwen3_moe"
+
+    # config_only=None consults the catalog, so callers that only know
+    # the id (HF_HUB_OFFLINE gating, the roofline) agree with Prepare.
+    monkeypatch.setattr(models_mod, "catalog_entry",
+                        lambda mid: {"id": mid, "kt_only": mid == "org/Big"})
+    assert model_status("org/Big", cache)["config_only"] is True
+    assert model_status("org/Small", cache)["config_only"] is False
+
+
+def test_download_command_config_only_and_sharded(tmp_path, monkeypatch) -> None:
+    """A kt_only entry downloads config + tokenizer only -- never the
+    687 GB of safetensors nobody will load -- and a shard-directory
+    companion downloads the whole directory."""
+    from simulator.models import CONFIG_ONLY_INCLUDE, download_command
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path / "hf"))
+    argv, env = download_command("deepseek-ai/DeepSeek-V3.1")
+    # One --include per pattern: hf 1.x's typer CLI repeats the flag,
+    # and a bare second pattern would be read as a positional filename.
+    assert argv[1:] == ["download", "deepseek-ai/DeepSeek-V3.1"] + [
+        a for pat in CONFIG_ONLY_INCLUDE for a in ("--include", pat)]
+    assert "*.json" in CONFIG_ONLY_INCLUDE and "tokenizer*" in CONFIG_ONLY_INCLUDE
+    assert not any(p.endswith("safetensors") for p in CONFIG_ONLY_INCLUDE)
+    argv, _ = download_command("deepseek-ai/DeepSeek-V3.1", companion="gguf")
+    assert argv[1:] == ["download", "unsloth/DeepSeek-V3.1-GGUF",
+                        "--include", "UD-Q4_K_XL/*.gguf"]
+    # GPU-fitting entries keep the plain full download.
+    argv, _ = download_command("Qwen/Qwen3-235B-A22B-Instruct-2507")
+    assert argv[1:] == ["download", "Qwen/Qwen3-235B-A22B-Instruct-2507"]
+    argv, _ = download_command("Qwen/Qwen3-235B-A22B-Instruct-2507", companion="gguf")
+    assert argv[1:] == ["download", "unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
+                        "--include", "Q4_K_M/*.gguf"]
+
+
+def test_referenced_models_rows_carry_kt_fields(tmp_path, monkeypatch) -> None:
+    """Prepare's rows (and Track I's roofline) read kt_only,
+    host_ram_gb and arch straight off referenced_models."""
+    cache = tmp_path / "hf"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(cache))
+    _fake_config_only(cache, "deepseek-ai/DeepSeek-V3.1")
+    by_id = {e["model"]: e for e in referenced_models()}
+    v31 = by_id["deepseek-ai/DeepSeek-V3.1"]
+    assert v31["kt_only"] is True and v31["host_ram_gb"] == 450.0
+    assert v31["cached"] is True and v31["config_only"] is True
+    assert v31["arch"] == "deepseek_v3"
+    assert v31["gguf"]["sharded"] is True and v31["gguf"]["cached"] is False
+    small = by_id["Qwen/Qwen3-32B"]
+    assert small["kt_only"] is False and small["host_ram_gb"] is None
+    assert small["arch"] is None and small["config_only"] is False

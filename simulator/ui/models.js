@@ -241,12 +241,24 @@ export const Models = {
         status = `<span class="status-pass">cached</span>`;
       } else if (m.partial) {
         status = `<span class="status-marginal">partial</span>`;
-        action = `<button class="small" data-model="${m.model}">Resume download</button>`;
+        action = `<button class="small" data-model="${m.model}">${
+          m.kt_only ? "Resume config download" : "Resume download"}</button>`;
       } else {
         status = `<span class="msg">not downloaded</span>`;
-        action = `<button class="small primary" data-model="${m.model}">Download</button>`;
+        action = `<button class="small primary" data-model="${m.model}">${
+          m.kt_only ? "Download config" : "Download"}</button>`;
       }
-      const size = m.size_gb ? m.size_gb.toFixed(1) + " GB"
+      // A kt_only model's HF directory only supplies config + tokenizer:
+      // KTransformers takes the weights from the GGUF, and the
+      // safetensors are the part that does not fit the box.
+      if (m.kt_only) {
+        status += `<div class="msg" title="the HF repo is staged config-only (config + tokenizer, no safetensors); the weights are the GGUF companion, which KTransformers runs from host RAM">config only (KTransformers)</div>`;
+      }
+      if (m.arch) status += `<div class="msg">${m.arch}</div>`;
+      const size = m.kt_only
+        ? `${m.size_gb ? m.size_gb.toFixed(1) + " GB config" : "—"}
+           <div class="msg">${m.host_ram_gb ? `${m.host_ram_gb} GB host RAM` : ""}</div>`
+        : m.size_gb ? m.size_gb.toFixed(1) + " GB"
         : m.approx_size_gb ? `~${m.approx_size_gb} GB` : "—";
       // The GGUF companion: KTransformers' weights. Same download
       // plumbing as the safetensors button, keyed "<model>#gguf".
@@ -255,7 +267,8 @@ export const Models = {
         const gdl = doc.downloads[`${m.model}#gguf`];
         const gRunning = !!(gdl && gdl.running);
         anyRunning ||= gRunning;
-        const where = `${m.gguf.repo} · ${m.gguf.file}`;
+        const where = `${m.gguf.repo} · ${m.gguf.file}${
+          m.gguf.sharded ? "/ (sharded)" : ""}`;
         const sizeTxt = m.gguf.size_gb ? ` (${m.gguf.size_gb} GB)` : "";
         if (gRunning) {
           const tail = (gdl.log_tail || "").trim().split("\n").pop() || "";

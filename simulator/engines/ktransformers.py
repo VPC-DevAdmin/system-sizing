@@ -27,6 +27,9 @@ catastrophic engine rather than the wrong launch flag.
 from __future__ import annotations
 
 import logging
+import os
+import sys
+from pathlib import Path
 
 from .docker_replica import DockerReplicaEngine, gpus_arg_for
 
@@ -58,6 +61,86 @@ DEFAULT_BACKEND = "balance_serve"
 # GPU engines hold thousands of streams; asking this one for 1,024 is
 # asking the wrong question, so the roofline clamps its cells here.
 DOCUMENTED_MAX_BATCH = 4
+
+# Injection rules the v0.3.2 image ships, by the HF config's
+# model_type. KTransformers needs one to know which tensors go to the
+# CPU and which stay on the GPU, and it cannot infer the rule from the
+# model id -- but capsim can read model_type from the staged
+# config.json. File names verified against the v0.3.2 tag of
+# kvcache-ai/ktransformers (ktransformers/optimize/optimize_rules/).
+# The ``*-serve.yaml`` rules are the balance_serve variants; the
+# ``*-serve-amx.yaml`` siblings exist for the AMX kernel path but
+# constrain the GGUF's quant types, so they stay an explicit choice
+# (ktransformers_optimize_config). deepseek_v32 (DeepSeek V3.2's
+# sparse-attention indexer) has no rule in this image at all.
+OPTIMIZE_RULES_DIR = f"{WORKDIR}/ktransformers/optimize/optimize_rules"
+OPTIMIZE_RULES = {
+    "deepseek_v3": "DeepSeek-V3-Chat-serve.yaml",
+    "qwen3_moe": "Qwen3Moe-serve.yaml",
+}
+
+
+def optimize_config_for(arch: str | None) -> str | None:
+    """Container path of the optimize rule for an architecture, or
+    None when this image has no rule for it (the server then falls
+    back to its own default, which loads every tensor on the GPU --
+    for a kt_only model that is an OOM, not a slower run)."""
+    if not arch:
+        return None
+    name = OPTIMIZE_RULES.get(str(arch).lower())
+    return f"{OPTIMIZE_RULES_DIR}/{name}" if name else None
+
+
+def parse_cpuinfo_cores(text: str) -> int:
+    """Distinct (physical id, core id) pairs in a /proc/cpuinfo dump --
+    physical cores across sockets. 0 when the fields are absent (ARM
+    hosts, containers with a trimmed cpuinfo)."""
+    cores: set[tuple[str, str]] = set()
+    phys = core = None
+    for line in text.splitlines() + [""]:
+        key, _, val = line.partition(":")
+        key = key.strip()
+        if key == "physical id":
+            phys = val.strip()
+        elif key == "core id":
+            core = val.strip()
+        elif not key:
+            if phys is not None and core is not None:
+                cores.add((phys, core))
+            phys = core = None
+    return len(cores)
+
+
+def physical_cores() -> int | None:
+    """Physical CPU cores on a Linux host: distinct (physical id,
+    core id) pairs from /proc/cpuinfo, falling back to half the
+    logical count. None elsewhere -- the launch runs docker on the
+    host it sizes for, and a Mac's core count says nothing about the
+    Xeon that will run the experts."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        text = Path("/proc/cpuinfo").read_text()
+    except OSError:
+        text = ""
+    n = parse_cpuinfo_cores(text)
+    if n:
+        return n
+    logical = os.cpu_count()
+    return max(1, logical // 2) if logical else None
+
+
+def default_cpu_infer(cores: int | None = None) -> int | None:
+    """``--cpu_infer`` when the operator set nothing: physical cores
+    minus two, leaving the GPU driver threads and the server's own
+    scheduler a core each. Every core beyond that helps -- the expert
+    path is memory-bandwidth bound and wants the whole box -- and
+    hyperthreads do not, so the count is physical, not logical. None
+    when the host's cores are unknown (the server then picks)."""
+    cores = physical_cores() if cores is None else cores
+    if not cores:
+        return None
+    return max(1, int(cores) - 2)
 
 
 def serve_argv(model: str, *, port: int,
@@ -144,18 +227,46 @@ class KTransformersEngine(DockerReplicaEngine):
         cmd += list(cfg.docker_extra_args or [])
         cmd.append(getattr(cfg, "ktransformers_image", None) or DEFAULT_IMAGE)
 
+        optimize = getattr(cfg, "ktransformers_optimize_config", None)
+        if not optimize:
+            optimize = optimize_config_for(self._model_arch())
+        cpu_threads = getattr(cfg, "ktransformers_cpu_threads", None)
+        if not cpu_threads:
+            cpu_threads = default_cpu_infer()
+
         return cmd + serve_argv(
             cfg.model_local_path or cfg.model_id,
             port=self._port(index),
             gguf_path="/gguf",
-            optimize_config_path=getattr(
-                cfg, "ktransformers_optimize_config", None),
+            optimize_config_path=optimize,
             max_batch_size=getattr(cfg, "max_num_seqs", None),
             chunk_size=getattr(cfg, "max_num_batched_tokens", None),
             cache_lens=cfg.max_model_len,
-            cpu_threads=getattr(cfg, "ktransformers_cpu_threads", None),
+            cpu_threads=cpu_threads,
             extra=list(getattr(cfg, "ktransformers_extra_flags", None) or []),
         )
+
+    def _model_arch(self) -> str | None:
+        """``model_type`` from the staged config.json -- the HF cache
+        snapshot for a hub id, or the directory itself for a local
+        path. None when nothing is staged (the launch will fail on
+        the missing config anyway, with the server's own message)."""
+        cfg = self.cfg
+        local = getattr(cfg, "model_local_path", None)
+        if local and Path(local).is_dir():
+            try:
+                import json
+                doc = json.loads((Path(local) / "config.json").read_text())
+                return str(doc.get("model_type") or "") or None
+            except (OSError, ValueError):
+                return None
+        if cfg.model_id and "/" in cfg.model_id:
+            from ..models import model_arch
+            try:
+                return model_arch(cfg.model_id)
+            except OSError:
+                return None
+        return None
 
     def _ready_url(self, port: int) -> str:
         return f"http://{self.cfg.host}:{port}/v1/models"

@@ -124,6 +124,18 @@ def cpu_engine(custom: dict) -> dict:
     }
 
 
+def _kt_only(model_id: str, catalog: Optional[list[dict]]) -> bool:
+    """Does the catalog mark ``model_id`` as KTransformers-only?"""
+    try:
+        if catalog is None:
+            from ..model_catalog import load_model_catalog
+            catalog = load_model_catalog()
+        return any(e.get("id") == model_id and e.get("kt_only")
+                   for e in catalog)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def ktransformers_gguf_missing(gguf_path: object) -> Optional[str]:
     """Why a KTransformers launch cannot proceed, or None when it can.
 
@@ -219,6 +231,13 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
         # Refuse rather than approximate: measuring "close enough" here
         # answers a different question than the one asked.
         raise ShapeError(f"{engine_type} cannot run this shape — {why}")
+    if engine_type != "ktransformers" and _kt_only(model_id, catalog):
+        # The catalog says the weights exceed the GPUs outright; a
+        # vLLM launch would spend the 30-minute health timeout
+        # discovering that. Only the CPU-expert engine runs it.
+        raise ShapeError(
+            f"{engine_type} cannot run {model_id} — the catalog marks it "
+            f"kt_only (weights beyond the GPUs); only ktransformers serves it")
     if engine_type == "ktransformers":
         gguf_path = custom.get("ktransformers_gguf_path")
         if not gguf_path:

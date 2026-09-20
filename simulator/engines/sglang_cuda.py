@@ -26,8 +26,10 @@ others, both encoded rather than glossed:
 
 from __future__ import annotations
 
-import hashlib
+import itertools
 import logging
+import threading
+import time
 from typing import Optional
 
 from .docker_replica import DockerReplicaEngine, gpus_arg_for
@@ -56,22 +58,53 @@ DEFAULT_IMAGE = "lmsysorg/sglang:latest"
 # did not: 360 windows of 8 replicas at a 64-port stride needs 184k
 # ports and SGLang rejected it with "Port out of range". The arithmetic
 # below is asserted by a test rather than trusted.
+#
+# The window is chosen by a MONOTONIC COUNTER, not a hash of the run
+# id. A hash spreads launches but does not separate them: with 64
+# windows two consecutive launches shared one 1/64 of the time, which
+# over a 48-cell roofline is a coin flip. Consecutive launches now
+# take consecutive windows, so a window is reused only after every
+# other window has been, hours later, long after its sockets closed.
+#
+# Per process rather than persisted: the collision that actually bit
+# is two launches seconds apart inside ONE serve process (a sweep's
+# teardown and the next cell's start), and a counter in memory settles
+# that with nothing on disk for two processes to race over. Across a
+# process restart the counter starts from the clock, so a serve
+# restarted within a window's lifetime lands elsewhere; the run lock
+# already guarantees two processes never launch at once.
 NCCL_PORT_BASE = 20000
 NCCL_PORT_STRIDE = 64
-NCCL_PORT_WINDOWS = 64           # 64 x 8 x 64 = 32,768 ports
 NCCL_PORT_CEILING = 60000
 
+_launch_counter = itertools.count(int(time.time()))
+_launch_lock = threading.Lock()
 
-def nccl_port(index: int, run_id: str = "") -> int:
-    """Rendezvous port for one replica of one launch."""
-    window = 0
-    if run_id:
-        # Stable, cheap, and spread: consecutive launches get unrelated
-        # windows rather than adjacent ones.
-        window = int(hashlib.sha1(run_id.encode()).hexdigest()[:8], 16) \
-            % NCCL_PORT_WINDOWS
-    port = (NCCL_PORT_BASE + window * NCCL_PORT_STRIDE * 8
-            + index * NCCL_PORT_STRIDE)
+
+def next_launch_number() -> int:
+    """A number no other launch in this process has had."""
+    with _launch_lock:
+        return next(_launch_counter)
+
+
+def port_windows(n_replicas: int) -> int:
+    """How many launches fit side by side. The window is sized by the
+    launch's OWN replica count, so a launch of more than eight (the
+    old fixed window) cannot spill into its neighbour."""
+    span = NCCL_PORT_STRIDE * max(1, int(n_replicas))
+    return max(1, (NCCL_PORT_CEILING - NCCL_PORT_BASE) // span)
+
+
+def nccl_port(index: int, launch: int, n_replicas: int = 8) -> int:
+    """Rendezvous port for replica ``index`` of launch number
+    ``launch`` (from ``next_launch_number``) among ``n_replicas``."""
+    n = max(1, int(n_replicas))
+    if not 0 <= index < n:
+        raise ValueError(
+            f"replica index {index} outside this launch's {n} replicas")
+    span = NCCL_PORT_STRIDE * n
+    window = int(launch) % port_windows(n)
+    port = NCCL_PORT_BASE + window * span + index * NCCL_PORT_STRIDE
     assert NCCL_PORT_BASE <= port <= NCCL_PORT_CEILING, port
     return port
 
@@ -180,6 +213,16 @@ class SGLangCudaEngine(DockerReplicaEngine):
 
     ENGINE_NAME = "sglang_cuda"
 
+    def __init__(self, engine_config):
+        super().__init__(engine_config)
+        # Every engine object is a launch of its own; a relaunch of the
+        # same object takes a fresh number too (see launch()).
+        self._launch_no = next_launch_number()
+
+    def launch(self, log_dir="runs") -> None:
+        self._launch_no = next_launch_number()
+        super().launch(log_dir)
+
     def build_replica_command(self, index: int, devices: list[int],
                               container_name: str) -> list[str]:
         cfg = self.cfg
@@ -216,7 +259,8 @@ class SGLangCudaEngine(DockerReplicaEngine):
             quantization=sglang_quantization(
                 getattr(cfg, "model_quant", None),
                 cfg.quantization_kind or cfg.quantization),
-            nccl_port=nccl_port(index, self._run_id),
+            nccl_port=nccl_port(index, self._launch_no,
+                                len(self._device_groups())),
             expert_parallel=bool(getattr(cfg, "expert_parallel", False)),
             trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),
             extra=list(cfg.sglang_extra_flags or []),

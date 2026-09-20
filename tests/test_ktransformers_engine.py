@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+
 import pytest
 
 from simulator.config import EngineConfig
@@ -13,11 +15,15 @@ from simulator.engines.ktransformers import (
     serve_argv,
 )
 
+# A staged GGUF directory: the server loads weights from GGUF only, and
+# the launcher refuses to start without one (see the test below).
+GGUF_DIR = tempfile.mkdtemp(prefix="kt-gguf-")
+
 
 def _cfg(**kw) -> EngineConfig:
     base = dict(type="ktransformers", model_id="deepseek-ai/DeepSeek-V3",
                 port=9100, replica_devices=[[0, 1, 2, 3]],
-                max_model_len=32768)
+                max_model_len=32768, ktransformers_gguf_path=GGUF_DIR)
     base.update(kw)
     return EngineConfig(**base)
 
@@ -115,3 +121,33 @@ def test_shm_size_is_not_passed_beside_ipc_host():
     cmd = eng.build_replica_command(0, [0], "ktransformers-r0-x")
     assert "--ipc=host" in cmd
     assert "--shm-size" not in cmd
+
+
+def test_launch_without_staged_gguf_is_refused_up_front(tmp_path):
+    """Observed on the XE7740: with no GGUF configured the server fell
+    back to './DeepSeek-V2-Lite-Chat-GGUF', raised FileNotFoundError,
+    and its scheduler lingered -- every roofline cell burned the full
+    30-minute health timeout. The launcher and the shape gate now
+    refuse in milliseconds and say what to stage."""
+    from simulator.engines.custom import ShapeError, custom_engine
+
+    eng = KTransformersEngine(_cfg(ktransformers_gguf_path=None))
+    with pytest.raises(RuntimeError, match="GGUF"):
+        eng.build_replica_command(0, [0], "ktransformers-r0-x")
+    eng = KTransformersEngine(_cfg(ktransformers_gguf_path=str(tmp_path / "nope")))
+    with pytest.raises(RuntimeError, match="does not exist"):
+        eng.build_replica_command(0, [0], "ktransformers-r0-x")
+
+    hw = {"count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+          "vram_per_gpu_gb": 96.0}
+    base = {"model_id": "org/M", "device": "gpu", "engine": "ktransformers",
+            "replicas": 1, "tp": 1, "kv_cache_dtype": "auto"}
+    with pytest.raises(ShapeError, match="ktransformers_gguf_path"):
+        custom_engine(base, hw=hw)
+    staged = tmp_path / "gguf"
+    staged.mkdir()
+    eng_doc = custom_engine({**base, "ktransformers_gguf_path": str(staged)}, hw=hw)
+    assert eng_doc["ktransformers_gguf_path"] == str(staged)
+    cmd = KTransformersEngine(_cfg(ktransformers_gguf_path=str(staged))
+                              ).build_replica_command(0, [0], "ktransformers-r0-x")
+    assert f"{staged}:/gguf:ro" in cmd and "--gguf_path" in cmd

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from simulator.roofline import (
     State,
     cell_key,
@@ -413,12 +415,21 @@ def test_ktransformers_cells_get_their_own_defaults():
     assert len(trt) == 2
     assert all(c["replicas"] == 8 and c["kv_cache_dtype"] == "fp8"
                for c in trt)
-    # And the KTransformers cell passes the builder's refusal gate.
-    from simulator.engines.custom import custom_engine
+    # And the KTransformers cell passes the builder's refusal gate once
+    # GGUF weights are staged (without them it is refused in
+    # milliseconds rather than after a 30-minute health timeout).
+    import tempfile
+
+    from simulator.engines.custom import ShapeError, custom_engine
+    hw = {"count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+          "vram_per_gpu_gb": 96.0}
+    with pytest.raises(ShapeError, match="GGUF"):
+        custom_engine({**ov, "model_id": "org/M", "device": "gpu", "tp": 1},
+                      hw=hw)
     eng = custom_engine(
-        {**ov, "model_id": "org/M", "device": "gpu", "tp": 1},
-        hw={"count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
-            "vram_per_gpu_gb": 96.0})
+        {**ov, "model_id": "org/M", "device": "gpu", "tp": 1,
+         "ktransformers_gguf_path": tempfile.mkdtemp(prefix="kt-gguf-")},
+        hw=hw)
     assert eng["type"] == "ktransformers"
     assert eng["replica_devices"] == [[0]]
     assert eng["max_num_seqs"] == DOCUMENTED_MAX_BATCH

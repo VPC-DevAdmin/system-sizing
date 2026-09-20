@@ -19,6 +19,7 @@ driver records the candidate as unreachable without launching.
 from __future__ import annotations
 
 from dataclasses import fields as _fields
+from pathlib import Path
 from typing import Optional
 
 from ..config import EngineConfig
@@ -123,6 +124,28 @@ def cpu_engine(custom: dict) -> dict:
     }
 
 
+def ktransformers_gguf_missing(gguf_path: object) -> Optional[str]:
+    """Why a KTransformers launch cannot proceed, or None when it can.
+
+    The v0.3.2 server loads weights from GGUF only (the HF directory
+    supplies config and tokenizer). Without ``--gguf_path`` it falls
+    back to a hard-coded ``./DeepSeek-V2-Lite-Chat-GGUF``, raises
+    FileNotFoundError, and its scheduler process then LINGERS instead
+    of exiting -- so an unstaged launch used to burn the whole
+    30-minute health timeout per roofline cell (observed on the
+    XE7740, 2026-09-20). Refuse up front instead.
+    """
+    if not gguf_path:
+        return ("KTransformers loads weights from GGUF, and no "
+                "ktransformers_gguf_path is configured; stage a GGUF of the "
+                "model (e.g. the unsloth/*-GGUF repo) and point "
+                "ktransformers_gguf_path at its directory")
+    if not Path(str(gguf_path)).exists():
+        return (f"ktransformers_gguf_path {gguf_path!r} does not exist on "
+                "this host")
+    return None
+
+
 def custom_engine(custom: dict, *, hw: Optional[dict] = None,
                   catalog: Optional[list[dict]] = None) -> dict:
     """The ``engine`` section for a custom shape.
@@ -168,6 +191,10 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
         # Refuse rather than approximate: measuring "close enough" here
         # answers a different question than the one asked.
         raise ShapeError(f"{engine_type} cannot run this shape — {why}")
+    if engine_type == "ktransformers":
+        why = ktransformers_gguf_missing(custom.get("ktransformers_gguf_path"))
+        if why:
+            raise ShapeError(f"ktransformers cannot run {model_id} — {why}")
 
     engine: dict = {
         "model_id": model_id,

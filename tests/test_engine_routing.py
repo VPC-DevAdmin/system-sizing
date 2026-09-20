@@ -34,6 +34,11 @@ def _build(engine: str, tmp_path: Path, **extra) -> dict:
     custom = {"model_id": "nvidia/Llama-3.3-70B-Instruct-NVFP4",
               "device": "gpu", "engine": engine, "replicas": 8, "tp": 1,
               "gpu_memory_utilization": 0.95, "max_model_len": 8192}
+    if engine == "ktransformers" and "ktransformers_gguf_path" not in extra:
+        # KTransformers refuses to launch without staged GGUF weights.
+        gguf = tmp_path / "gguf"
+        gguf.mkdir(exist_ok=True)
+        custom["ktransformers_gguf_path"] = str(gguf)
     custom.update(extra)
     path = _build_custom_config(custom, tmp_path)
     return yaml.safe_load(path.read_text())["engine"]

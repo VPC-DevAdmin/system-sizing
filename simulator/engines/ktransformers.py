@@ -27,7 +27,6 @@ catastrophic engine rather than the wrong launch flag.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from .docker_replica import DockerReplicaEngine, gpus_arg_for
 
@@ -135,16 +134,20 @@ class KTransformersEngine(DockerReplicaEngine):
         ]
         cmd += self._mount_args()
         gguf = getattr(cfg, "ktransformers_gguf_path", None)
-        has_gguf = bool(gguf) and Path(gguf).exists()
-        if has_gguf:
-            cmd += ["-v", f"{gguf}:/gguf:ro"]
+        from .custom import ktransformers_gguf_missing
+        why = ktransformers_gguf_missing(gguf)
+        if why:
+            # Fail in milliseconds with the reason, not in 30 minutes
+            # with a health timeout (see ktransformers_gguf_missing).
+            raise RuntimeError(f"ktransformers cannot launch: {why}")
+        cmd += ["-v", f"{gguf}:/gguf:ro"]
         cmd += list(cfg.docker_extra_args or [])
         cmd.append(getattr(cfg, "ktransformers_image", None) or DEFAULT_IMAGE)
 
         return cmd + serve_argv(
             cfg.model_local_path or cfg.model_id,
             port=self._port(index),
-            gguf_path="/gguf" if has_gguf else None,
+            gguf_path="/gguf",
             optimize_config_path=getattr(
                 cfg, "ktransformers_optimize_config", None),
             max_batch_size=getattr(cfg, "max_num_seqs", None),

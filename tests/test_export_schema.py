@@ -352,3 +352,50 @@ def test_superseded_window_validates(tmp_path) -> None:
     assert c["methodology"] == "open_loop"
     assert c["open_loop"]["rate_max_per_min"] == 120.0
     assert c["open_loop"]["rate_ceiling_per_min"] == 240.0
+
+
+def test_open_loop_zones_follow_arrival_rate_not_session_count(tmp_path) -> None:
+    """A divergent window whose measured session count is LOWER than a
+    stable window's (it reverted early / was measured from a trimmed
+    population) must still be the fail point and yield a bottleneck.
+    Ordered by target_pool_size it vanished behind the stable windows
+    and the export said none_observed."""
+    run_dir = tmp_path / "run_01"
+    run_dir.mkdir()
+    db = Database(run_dir / "run.db")
+    db.insert_run(
+        cohort_run_id="crid", started_at="2026-01-01T00:00:00Z",
+        engine_type="mock", model_id="mock-model", cohort_id="quick_lookup",
+        cohort_definition={"name": "Quick lookup", "description": "t",
+                           "category": "persona", "persona_weights": {"q": 1.0}},
+        config={"engine": {"type": "mock", "model_id": "mock-model"}},
+    )
+    db.update_cohort_run("crid", {"mode": "open_loop"})
+    rows = [
+        (60.0, "stable", 40, "pass"),
+        (120.0, "stable", 85, "pass"),
+        (240.0, "divergent", 30, "fail"),   # fewer sessions than 120/min
+    ]
+    for step, (rate, stab, sessions, status) in enumerate(rows):
+        m = _open_loop_measurement(step, rate, stab)
+        m.update({
+            "target_pool_size": sessions, "measured_avg_pool_size": float(sessions),
+            "active_sessions_mean": float(sessions),
+            "capacity_status": status, "target_status": status,
+            "combined_violation_rate": 0.0 if status == "pass" else 0.6,
+            "ttft_violation_rate": 0.0 if status == "pass" else 0.6,
+        })
+        db.insert_measurement(m)
+    db.finalise_run("crid", "2026-01-01T00:30:00Z", "ok")
+    db.close()
+    doc, _ = export_dir(run_dir)
+    _validate(doc)
+    c = doc["cohorts"][0]
+    assert c["methodology"] == "open_loop"
+    assert c["capacity_pool_size"] == 85          # the 120/min window
+    assert c["soft_capacity_pool_size"] == 85
+    assert c["fail_pool_size"] == 30              # the 240/min window
+    assert c["measurement_coverage"] == "full_curve"
+    assert c["bottleneck"] != "none_observed"
+    assert c["capacity_throughput"]["pool_size"] == 85
+    assert c["open_loop"]["rate_ceiling_per_min"] == 240.0

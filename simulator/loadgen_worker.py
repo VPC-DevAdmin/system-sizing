@@ -13,6 +13,8 @@ Protocol (line-delimited JSON):
 
   stdin  ← {"cmd": "rate", "per_s": 2.5}     set this worker's λ share
            {"cmd": "drain"}                   rate→0 + abort sessions
+           {"cmd": "mark"}                    a window opened: scope the
+                                              tardiness p99 from here
            {"cmd": "stop"}                    clean shutdown
   stdout → {"t": "ready"}                     init done (tokenizer loaded)
            {"t": "turn", ...}                 one completed/failed turn,
@@ -120,6 +122,8 @@ async def _amain(config: dict) -> bool:
                 launcher.cancel_active_sessions()
             elif cmd == "trim":
                 launcher.trim_active(int(msg.get("target") or 0))
+            elif cmd == "mark":
+                launcher.mark_window()
             elif cmd == "outstanding":
                 launcher.set_outstanding(int(msg.get("n") or 0))
             elif cmd == "restart":

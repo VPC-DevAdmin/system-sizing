@@ -499,3 +499,27 @@ def test_prefix_hit_rate_is_a_fraction():
     assert _estimate_prefix_hit_rate(
         [{"prefix_cache_hits": 100}, {"prefix_cache_hits": 160}]) is None
     assert _estimate_prefix_hit_rate(rows[:1]) is None
+
+
+def test_tardiness_p99_is_window_scoped():
+    """A burst of late arrivals before a window opens must not show up
+    in that window's arrival_tardiness_p99_ms."""
+    from simulator.arrivals import SessionArrivalLauncher
+    from simulator.virtual_user import SharedState
+
+    async def main():
+        launcher = SessionArrivalLauncher(
+            persona_weights={"quick_lookup": 1.0},
+            clients=[object()], model_id="m", corpus=None,
+            state=SharedState(), request_timeout_s=5,
+        )
+        launcher.stats.tardiness_ms.extend([900.0] * 50)   # pre-window burst
+        launcher.stats.tardy_total = 50
+        assert launcher.stats.tardiness_p99_ms() == 900.0
+        launcher.mark_window()                             # the 'mark' cmd
+        assert launcher.stats.tardiness_p99_ms() == 0.0
+        assert launcher.stats.tardy_total == 50            # cumulative stays
+        launcher.stats.tardiness_ms.extend([5.0] * 50)
+        return launcher.stats.tardiness_p99_ms()
+
+    assert asyncio.run(main()) == 5.0

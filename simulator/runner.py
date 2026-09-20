@@ -411,12 +411,11 @@ async def run_cohort(
                 stepper.next_pool_size() if stepper is not None
                 else next(override_iter, None)
             )
-    except KeyboardInterrupt:
-        final_status = "interrupted"
-        raise
-    except asyncio.CancelledError:
-        # Service-initiated stop (or loop teardown). Mark the run so
-        # resume logic re-measures it instead of skipping a half-run
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # A user stop — Ctrl-C / SSH disconnect, or the service's stop
+        # button (loop teardown) — is 'cancelled' in every path (the
+        # open-loop runner and the export/UI use the same word). Marked
+        # so resume logic re-measures it instead of skipping a half-run
         # stamped 'ok'.
         final_status = "cancelled"
         raise
@@ -585,9 +584,10 @@ def find_completed_runs(
     ``runs_dir/run.db``.
 
     A run counts as completed iff ``cohort_run.final_status == 'ok'``.
-    Other statuses — ``interrupted`` (Ctrl-C / SSH disconnect),
-    ``time_limit`` (max duration hit), ``no_samples`` / ``unstable``
-    (didn't capture useful data) — are deliberately NOT skipped: those
+    Other statuses — ``cancelled`` (Ctrl-C / SSH disconnect / service
+    stop; older DBs may say ``interrupted``), ``time_limit`` (max
+    duration hit), ``no_samples`` / ``unstable`` (didn't capture useful
+    data) — are deliberately NOT skipped: those
     are exactly the runs the user probably wants to retry. Their
     leftover rows aren't deleted; they're available for inspection
     inside the same DB, just not counted as "done."

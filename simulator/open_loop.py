@@ -410,6 +410,12 @@ class WorkerPool:
         for w in self._workers:
             await self._send(w, {"cmd": "drain"})
 
+    async def mark_window(self) -> None:
+        """A measurement window opened: every worker's tardiness p99
+        is scoped to arrivals from here on."""
+        for w in self._workers:
+            await self._send(w, {"cmd": "mark"})
+
     async def trim(self, target_total: int) -> None:
         """Cancel newest sessions across workers down to
         ``target_total`` active (evenly split)."""
@@ -872,6 +878,7 @@ class OpenLoopRunner:
                      rate_per_s, warmup_s, drift * 100, settle_n)
 
         self.phase = "measuring"
+        await self.pool.mark_window()
         measurement_started_at = datetime.now(timezone.utc).isoformat()
         start_mono = time.monotonic()
         pre_row = {
@@ -900,7 +907,9 @@ class OpenLoopRunner:
         inflight_series: list[float] = []
         running_series: list[float] = []   # engine num_running gauge
         active_series: list[float] = []
-        max_tardiness = 0.0
+        # The workers' p99 is over THIS window's arrivals (mark_window
+        # above); the last tick's value is the window figure.
+        tardiness_p99 = 0.0
         max_lag = 0.0
         extended = False
         verdict = None
@@ -925,8 +934,7 @@ class OpenLoopRunner:
                 if agg:
                     inflight_series.append(float(agg.get("in_flight", 0)))
                     active_series.append(float(agg.get("sessions_active", 0)))
-                    max_tardiness = max(
-                        max_tardiness, agg.get("tardiness_p99_ms", 0.0))
+                    tardiness_p99 = agg.get("tardiness_p99_ms", 0.0)
                     max_lag = max(max_lag, agg.get("loop_lag_ms", 0.0))
                 fresh = self.pool.drain_turn_queue()
                 _check_fuse(fresh)
@@ -1108,7 +1116,7 @@ class OpenLoopRunner:
             "stability_detail": json.dumps(verdict_dict),
             "queue_depth_mean": round(verdict.mean_depth, 2),
             "queue_depth_slope_per_min": round(verdict.slope_per_min, 3),
-            "arrival_tardiness_p99_ms": round(max_tardiness, 1),
+            "arrival_tardiness_p99_ms": round(tardiness_p99, 1),
             "load_workers": self.pool.size,
             "active_sessions_mean": round(active_mean, 2),
             "mean_session_duration_s": pool_agg.get("mean_session_s"),
@@ -1155,7 +1163,7 @@ class OpenLoopRunner:
             rate_per_s, stability, verdict_dict.get("reason", ""),
             summary.get("sample_size", 0),
             (summary.get("combined_violation_rate", 0.0) or 0.0) * 100,
-            verdict.mean_depth, verdict.slope_per_min, max_tardiness,
+            verdict.mean_depth, verdict.slope_per_min, tardiness_p99,
         )
         self.step_index += 1
         return _WindowResult(

@@ -147,6 +147,10 @@ class SearchSpace:
     # GPU image. Part of the fingerprint: a different image is a
     # different engine.
     gpu_image: Optional[str] = None
+    # Values pinned for every candidate (``fixed:`` in the YAML) --
+    # the arena's gpu_memory_utilization, say. Consulted after the
+    # dimensions and before the built-in defaults.
+    fixed: dict = field(default_factory=dict)
 
     @property
     def total_devices(self) -> int:
@@ -169,6 +173,10 @@ class SearchSpace:
             "measurement": dataclasses.asdict(self.measurement),
             "gpu_image": self.gpu_image,
         }
+        if self.fixed:
+            # Only when present, so the hash of every existing space
+            # (and every saved search state) is unchanged.
+            doc["fixed"] = self.fixed
         return hashlib.sha256(
             json.dumps(doc, sort_keys=True).encode()
         ).hexdigest()[:16]
@@ -283,6 +291,19 @@ def load_space(path: str | Path) -> SearchSpace:
             f"concurrency list"
         )
 
+    fixed = raw.get("fixed") or {}
+    if not isinstance(fixed, dict):
+        raise SearchSpaceError(f"{path}: fixed must be a mapping")
+    clash = set(fixed) & set(dims)
+    if clash:
+        raise SearchSpaceError(
+            f"{path}: {sorted(clash)} listed both as a dimension and as "
+            f"fixed")
+    unknown_fixed = set(fixed) - set(KNOWN_DIMENSIONS)
+    if unknown_fixed:
+        raise SearchSpaceError(
+            f"{path}: unknown fixed values {sorted(unknown_fixed)}")
+
     vram = raw.get("vram_per_gpu_gb")
     return SearchSpace(
         name=str(raw.get("name", path.stem)),
@@ -296,6 +317,7 @@ def load_space(path: str | Path) -> SearchSpace:
         vram_per_gpu_gb=float(vram) if vram is not None else None,
         measurement=measurement,
         gpu_image=raw.get("gpu_image") or None,
+        fixed=dict(fixed),
     )
 
 
@@ -310,12 +332,19 @@ def _dim_value(params: dict, dim: str, space: SearchSpace):
         return params[dim]
     if dim in space.dimensions:
         return space.dimensions[dim][0]
+    if dim in space.fixed:
+        return space.fixed[dim]
     if dim == "engine":
         # No engine dimension: the space's own engine field decides,
         # so a single-runtime host behaves exactly as it always did.
         return ("trtllm" if space.engine == "trtllm"
                 else "vllm_cuda_multi")
-    return {"tp": 1, "dp": 1, "gpu_memory_utilization": 0.90,
+    if dim == "gpu_memory_utilization":
+        # The arena shows FIXED_GMU as the value every candidate runs
+        # with; it must BE the value, not a second constant kept here.
+        from .arena import FIXED_GMU
+        return FIXED_GMU
+    return {"tp": 1, "dp": 1,
             "max_num_seqs": DEFAULT, "max_num_batched_tokens": DEFAULT,
             "placement": "pack", "kv_cache_dtype": "auto",
             "expert_parallel": "off",
@@ -326,12 +355,39 @@ def _dim_value(params: dict, dim: str, space: SearchSpace):
             "engine": "vllm_cuda_multi"}.get(dim)
 
 
+def lever_default(dim: str, space: SearchSpace):
+    """The value a lever takes when it does not apply: the engine's
+    own default (engine_notes) when the space lists it, else the
+    first listed value."""
+    from .engine_notes import LEVERS
+    listed = space.dimensions.get(dim) or []
+    for lv in LEVERS:
+        if lv.key == dim:
+            # Match on the string form: a hand-written space may spell
+            # "on"/"off" unquoted, which YAML reads as booleans.
+            for v in listed:
+                if str(v) == lv.default:
+                    return v
+            if not listed:
+                return lv.default
+    return listed[0] if listed else _dim_value({}, dim, space)
+
+
 def normalize(params: dict, space: SearchSpace) -> dict:
     """Canonical form so equivalent candidates dedupe: placement is
     meaningless (forced to the first placement value) when the
-    candidate uses a single device, and expert_parallel is meaningless
+    candidate uses a single device, expert_parallel is meaningless
     (forced "off") unless the variant is MoE with tp>1 — vLLM's EP
-    splits experts across the TP group."""
+    splits experts across the TP group — and an engine-specific lever
+    is meaningless on any other engine (forced to its default).
+
+    The last rule is what keeps a multi-engine arena honest: without
+    it every vLLM candidate came in four copies that differed only in
+    a TensorRT-LLM setting nothing would read, the coverage sampler
+    counted each copy as new territory, and the budget went on
+    measuring the same launch again."""
+    from .engines.custom import lever_owner
+
     out = {d: _dim_value(params, d, space) for d in KNOWN_DIMENSIONS
            if d in space.dimensions or d in params}
     tp, dp = int(_dim_value(out, "tp", space)), int(_dim_value(out, "dp", space))
@@ -342,6 +398,11 @@ def normalize(params: dict, space: SearchSpace) -> dict:
             str(_dim_value(out, "model_variant", space))) or {}
         if not variant.get("moe") or tp <= 1:
             out["expert_parallel"] = "off"
+    engine = str(_dim_value(out, "engine", space))
+    for dim in list(out):
+        owner = lever_owner(dim)
+        if owner is not None and owner != engine:
+            out[dim] = lever_default(dim, space)
     return out
 
 

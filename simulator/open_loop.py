@@ -98,6 +98,36 @@ def _engine_broken(errors: int, completions: int,
            (errors >= 100 and errors > 4 * completions)
 
 
+class _ErrorFuse:
+    """Runaway-error fuse armed at window start.
+
+    Deltas of the workers' cumulative error / completion counters and
+    the engine's ``generation_tokens_total`` since arming feed
+    ``_engine_broken``. The token side is read from the LAST GOOD
+    scrape, not the latest attempt: a single failed /metrics scrape
+    used to hand ``None`` to the fuse, which then fell back to the
+    completions-only test and could abort a healthy-but-slow run —
+    the exact false abort the token counter was added to prevent.
+    """
+
+    def __init__(self, errors: int, completions: int,
+                 tokens_last_good: int | None):
+        self.errors0 = int(errors)
+        self.completions0 = int(completions)
+        self.tokens0 = tokens_last_good
+
+    def tripped(self, errors: int, completions: int,
+                tokens_last_good: int | None) -> bool:
+        err_d = int(errors) - self.errors0
+        comp_d = int(completions) - self.completions0
+        tok_d = (
+            int(tokens_last_good) - int(self.tokens0)
+            if tokens_last_good is not None and self.tokens0 is not None
+            else None
+        )
+        return _engine_broken(err_d, comp_d, tok_d)
+
+
 REQUEST_TIMEOUT_CEILING_S = 1800
 
 
@@ -600,6 +630,10 @@ class OpenLoopRunner:
         self.step_index = 0
         self.client_max_lag_ms = 0.0
         self._last_engine_metrics: dict = {}
+        # generation_tokens_total from the last SUCCESSFUL scrape —
+        # survives failed scrapes so the error fuse keeps its token
+        # evidence (see _ErrorFuse).
+        self._tokens_last_good: int | None = None
         self._snapshot_task: asyncio.Task | None = None
         self._last_inflight_mean: float | None = None
         self._last_stable: dict | None = None  # {rate, sessions}
@@ -615,6 +649,8 @@ class OpenLoopRunner:
         self._last_engine_metrics = m
         if m.get("queue_depth") is not None:
             self._queue_gauge_seen = True
+        if m.get("generation_tokens_total") is not None:
+            self._tokens_last_good = int(m["generation_tokens_total"])
         return m
 
     # ── Live snapshots (1 Hz, whole run) ────────────────────────────
@@ -680,9 +716,11 @@ class OpenLoopRunner:
         # Runaway-error fuse state: cumulative counters at phase
         # start; checked every tick in warmup AND measurement.
         fuse_agg = self.pool.aggregate()
-        fuse_err0 = fuse_agg.get("errors", 0) if fuse_agg else 0
-        fuse_comp0 = fuse_agg.get("completed", 0) if fuse_agg else 0
-        fuse_tok0 = self._last_engine_metrics.get("generation_tokens_total")
+        fuse = _ErrorFuse(
+            fuse_agg.get("errors", 0) if fuse_agg else 0,
+            fuse_agg.get("completed", 0) if fuse_agg else 0,
+            self._tokens_last_good,
+        )
         last_error: list[str] = []
 
         def _check_fuse(fresh_turns: list[dict]) -> None:
@@ -693,18 +731,15 @@ class OpenLoopRunner:
             agg_now = self.pool.aggregate()
             if not agg_now:
                 return
-            err_d = agg_now.get("errors", 0) - fuse_err0
-            comp_d = agg_now.get("completed", 0) - fuse_comp0
-            tok_now = self._last_engine_metrics.get("generation_tokens_total")
-            tok_d = (int(tok_now) - int(fuse_tok0)
-                     if tok_now is not None and fuse_tok0 is not None
-                     else None)
-            if _engine_broken(err_d, comp_d, tok_d):
+            errors = agg_now.get("errors", 0)
+            completions = agg_now.get("completed", 0)
+            if fuse.tripped(errors, completions, self._tokens_last_good):
                 raise EngineBrokenError(
-                    f"aborting run: {err_d} failed requests against "
-                    f"{comp_d} completions at {rate_per_s * 60:.0f}/min — "
-                    f"the engine is rejecting the load, not serving it "
-                    f"(recent errors: {', '.join(last_error) or 'unknown'}). "
+                    f"aborting run: {errors - fuse.errors0} failed requests "
+                    f"against {completions - fuse.completions0} completions "
+                    f"at {rate_per_s * 60:.0f}/min — the engine is rejecting "
+                    f"the load, not serving it (recent errors: "
+                    f"{', '.join(last_error) or 'unknown'}). "
                     f"Check the engine log in the run directory."
                 )
 

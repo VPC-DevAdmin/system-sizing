@@ -260,3 +260,49 @@ def test_request_timeout_scales_with_pinned_output_length():
         cohort_from_persona("headline_generation"), sim)
     assert headline > sim.request_timeout_s
     assert headline <= REQUEST_TIMEOUT_CEILING_S
+
+
+def test_fuse_keeps_token_baseline_across_failed_scrapes():
+    """One failed /metrics scrape must not re-arm the completions-only
+    fuse: the token evidence from the last good scrape stands (A6)."""
+    from simulator.open_loop import OpenLoopRunner, _ErrorFuse
+
+    class FlakyEngine:
+        def __init__(self, values):
+            self._values = list(values)
+
+        def get_metrics(self):
+            v = self._values.pop(0)
+            if v is None:
+                raise ConnectionError("scrape failed")
+            return {"generation_tokens_total": v}
+
+    runner = OpenLoopRunner.__new__(OpenLoopRunner)
+    runner._last_engine_metrics = {}
+    runner._queue_gauge_seen = False
+    runner._tokens_last_good = None
+
+    # Baseline scrape fails at window start: the fuse still arms on
+    # the last good value from before the window.
+    runner.engine = FlakyEngine([1000, None, 1500, None, 2000])
+    asyncio.run(runner._sample_engine())            # 1000 (good)
+    asyncio.run(runner._sample_engine())            # failed scrape
+    assert runner._tokens_last_good == 1000
+    fuse = _ErrorFuse(0, 0, runner._tokens_last_good)
+    assert fuse.tokens0 == 1000
+
+    asyncio.run(runner._sample_engine())            # 1500
+    assert not fuse.tripped(30, 0, runner._tokens_last_good)
+    asyncio.run(runner._sample_engine())            # failed scrape
+    # 30 client timeouts, zero completions, tokens still flowing per
+    # the last good scrape: NOT broken. (Old code: tok_now None ->
+    # completions-only test -> abort.)
+    assert runner._tokens_last_good == 1500
+    assert not fuse.tripped(30, 0, runner._tokens_last_good)
+    asyncio.run(runner._sample_engine())            # 2000
+    assert not fuse.tripped(200, 10, runner._tokens_last_good)
+
+    # A counter that never existed still falls back to the strict test.
+    assert _ErrorFuse(0, 0, None).tripped(30, 0, None)
+    # A counter that stopped moving does not shield a broken engine.
+    assert _ErrorFuse(0, 0, 2000).tripped(30, 0, 2000)

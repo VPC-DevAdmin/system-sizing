@@ -198,7 +198,9 @@ export const Models = {
     const q = $("#mf-search").value.trim().toLowerCase();
     const active = m => {
       const dl = doc.downloads[m.model];
-      return m.cached || m.partial || !!(dl && dl.running);
+      const gdl = doc.downloads[`${m.model}#gguf`];
+      return m.cached || m.partial || !!(dl && dl.running)
+        || !!(gdl && gdl.running);
     };
     const rows = doc.models.filter(m =>
       (fam === "all" || (m.series || m.family) === fam)
@@ -215,7 +217,7 @@ export const Models = {
     const tbody = $("#models-table tbody");
     tbody.innerHTML = "";
     if (!rows.length) {
-      tbody.innerHTML = `<tr><td colspan="6" class="msg"
+      tbody.innerHTML = `<tr><td colspan="7" class="msg"
         style="padding:16px 8px;text-align:center">${doc.models.length
           ? "No models match these filters — clear the family, precision "
             + "or status filter, or the search box."
@@ -246,6 +248,30 @@ export const Models = {
       }
       const size = m.size_gb ? m.size_gb.toFixed(1) + " GB"
         : m.approx_size_gb ? `~${m.approx_size_gb} GB` : "—";
+      // The GGUF companion: KTransformers' weights. Same download
+      // plumbing as the safetensors button, keyed "<model>#gguf".
+      let gguf = '<span class="msg">—</span>';
+      if (m.gguf) {
+        const gdl = doc.downloads[`${m.model}#gguf`];
+        const gRunning = !!(gdl && gdl.running);
+        anyRunning ||= gRunning;
+        const where = `${m.gguf.repo} · ${m.gguf.file}`;
+        const sizeTxt = m.gguf.size_gb ? ` (${m.gguf.size_gb} GB)` : "";
+        if (gRunning) {
+          const tail = (gdl.log_tail || "").trim().split("\n").pop() || "";
+          gguf = `<span class="status-marginal">downloading…</span>
+                  <div class="msg dl-tail">${tail.slice(-70)}</div>`;
+        } else if (m.gguf.cached) {
+          gguf = `<span class="status-pass" title="${where}">staged</span>
+                  <div class="msg">KTransformers-ready</div>`;
+        } else if (gdl && gdl.exit_code !== 0 && gdl.exit_code !== null) {
+          gguf = `<span class="status-fail">failed (${gdl.exit_code})</span>
+            <button class="small" data-model="${m.model}" data-companion="gguf">Retry</button>`;
+        } else {
+          gguf = `<button class="small" data-model="${m.model}" data-companion="gguf"
+            title="${where} — needed before KTransformers can run this model">Download GGUF${sizeTxt}</button>`;
+        }
+      }
       tbody.insertAdjacentHTML("beforeend", `<tr>
         <td>${m.model}${m.gated
           ? ' <span class="status-marginal" title="accept the license on the Hub and set HF_TOKEN">gated</span>' : ""}
@@ -254,10 +280,12 @@ export const Models = {
         <td class="msg">${m.referenced_by.join(", ")}</td>
         <td>${status}</td>
         <td>${size}</td>
+        <td>${gguf}</td>
         <td>${action}</td></tr>`);
     }
     tbody.querySelectorAll("button[data-model]").forEach(btn =>
-      btn.addEventListener("click", () => this.download(btn.dataset.model)));
+      btn.addEventListener("click", () =>
+        this.download(btn.dataset.model, btn.dataset.companion)));
     if (anyRunning && !this.polling) {
       this.polling = setInterval(() => this.refresh(), 3000);
     } else if (!anyRunning && this.polling) {
@@ -266,17 +294,19 @@ export const Models = {
     }
   },
 
-  async download(model) {
+  async download(model, companion) {
+    const body = companion ? { model, companion } : { model };
+    const what = companion ? `${model} (${companion} companion)` : model;
     try {
       await api("/api/models/download", {
-        method: "POST", body: JSON.stringify({ model }),
+        method: "POST", body: JSON.stringify(body),
       });
     } catch (e) {
-      this.msg(`${model}: ${e.message}`, "error");
+      this.msg(`${what}: ${e.message}`, "error");
       this.refresh();
       return;
     }
-    this.msg(`downloading ${model} — progress shows in the table`, "ok");
+    this.msg(`downloading ${what} — progress shows in the table`, "ok");
     this.refresh();
   },
 };

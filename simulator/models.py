@@ -102,9 +102,12 @@ def _dir_size_gb(path: Path) -> float:
     return total / 1e9
 
 
-def model_status(model_id: str, cache: Path | None = None) -> dict:
+def model_status(model_id: str, cache: Path | None = None,
+                 gguf: dict | None = None) -> dict:
     """Cache status for one HF model id. ``cached`` means a snapshot
-    revision with files exists and no blob is mid-download."""
+    revision with files exists and no blob is mid-download. ``gguf``
+    is the catalog's companion spec (``{repo, file, size_gb}``) when
+    the entry has one; the row then carries its staging status too."""
     cache = cache or hf_cache_dir()
     d = _model_dir(model_id, cache)
     snapshots = d / "snapshots"
@@ -118,6 +121,68 @@ def model_status(model_id: str, cache: Path | None = None) -> dict:
         "partial": bool(incomplete or (d.exists() and not has_snapshot)),
         "size_gb": round(_dir_size_gb(d), 1) if d.exists() else 0.0,
         "path": str(d),
+        "gguf": gguf_status(gguf, cache) if gguf else None,
+    }
+
+
+def catalog_entry(model_id: str) -> dict | None:
+    """The merged catalog entry for ``model_id``, or None."""
+    from .model_catalog import CatalogError, load_model_catalog
+    try:
+        for e in load_model_catalog():
+            if e["id"] == model_id:
+                return e
+    except CatalogError:
+        pass
+    return None
+
+
+def gguf_status(entry_or_model_id: dict | str,
+                cache: Path | None = None) -> dict | None:
+    """Staging status of a model's GGUF companion: ``{repo, file,
+    size_gb, cached, path}``, or None when the model has no companion.
+
+    Accepts a catalog entry, a bare companion spec ``{repo, file}``,
+    or a model id (looked up in the catalog). ``path`` is the
+    DIRECTORY holding the .gguf inside the HF cache snapshot -- what
+    KTransformers' ``--gguf_path`` takes -- and is None until the file
+    is fully staged. ``hf download <repo> <file>`` only links the
+    file into a snapshot once its blob is complete, so a present,
+    non-dangling file with bytes in it is the staged signal.
+
+    KTransformers loads EVERY .gguf under that directory, so the
+    catalog names exactly one file per companion; hand-staging a
+    second quant of the same repo into the same snapshot would make
+    the server read both."""
+    if isinstance(entry_or_model_id, str):
+        entry = catalog_entry(entry_or_model_id)
+        spec = entry.get("gguf") if entry else None
+    elif "repo" in entry_or_model_id and "file" in entry_or_model_id:
+        spec = entry_or_model_id
+    else:
+        spec = entry_or_model_id.get("gguf")
+    if not spec:
+        return None
+    cache = cache or hf_cache_dir()
+    repo, file = str(spec["repo"]), str(spec["file"])
+    snapshots = _model_dir(repo, cache) / "snapshots"
+    path = None
+    if snapshots.is_dir():
+        for rev in sorted(snapshots.iterdir(), key=lambda r: r.stat().st_mtime,
+                          reverse=True):
+            f = rev / file
+            try:
+                if f.is_file() and f.stat().st_size > 0:
+                    path = f.parent
+                    break
+            except OSError:
+                continue
+    return {
+        "repo": repo,
+        "file": file,
+        "size_gb": spec.get("size_gb"),
+        "cached": path is not None,
+        "path": str(path) if path else None,
     }
 
 
@@ -169,24 +234,40 @@ def referenced_models(
                           "notes")
                 if k in entry
             }
+            if entry.get("gguf"):
+                meta[entry["id"]]["gguf"] = entry["gguf"]
     except CatalogError:
         pass          # a broken local overlay must not hide the rest
 
     cache = hf_cache_dir()
     return [
-        {**model_status(m, cache), "referenced_by": sorted(srcs),
-         **meta.get(m, {})}
+        {**model_status(m, cache, gguf=meta.get(m, {}).get("gguf")),
+         "referenced_by": sorted(srcs),
+         **{k: v for k, v in meta.get(m, {}).items() if k != "gguf"}}
         for m, srcs in sorted(out.items())
     ]
 
 
-def download_command(model_id: str) -> tuple[list[str], dict]:
+def download_command(model_id: str,
+                     companion: str | None = None) -> tuple[list[str], dict]:
     """(argv, extra_env) for a cache-pinned weight download. Prefers
     the ``hf`` CLI sitting next to this interpreter (the tool venv),
-    falling back to PATH."""
+    falling back to PATH.
+
+    ``companion="gguf"`` downloads the model's GGUF companion instead
+    (``hf download <repo> <file>``, same cache) -- ValueError when the
+    catalog entry has none."""
     hf_bin = Path(sys.executable).parent / "hf"
-    argv = [str(hf_bin) if hf_bin.exists() else (shutil.which("hf") or "hf"),
-            "download", model_id]
+    hf = str(hf_bin) if hf_bin.exists() else (shutil.which("hf") or "hf")
+    if companion is None:
+        argv = [hf, "download", model_id]
+    elif companion == "gguf":
+        spec = gguf_status(model_id)
+        if spec is None:
+            raise ValueError(f"{model_id} has no GGUF companion in the catalog")
+        argv = [hf, "download", spec["repo"], spec["file"]]
+    else:
+        raise ValueError(f"unknown companion {companion!r}")
     env = {"HF_HOME": str(hf_cache_dir())}
     for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
         if os.environ.get(var):

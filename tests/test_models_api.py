@@ -6,6 +6,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from simulator import models as models_mod
@@ -35,6 +36,113 @@ def test_model_status(tmp_path) -> None:
     (d / "xyz.incomplete").write_bytes(b"y")
     st = model_status("org/present", cache)
     assert st["cached"] is False and st["partial"] is True
+
+
+def test_gguf_status_points_at_the_snapshot_directory(tmp_path) -> None:
+    """``path`` is the DIRECTORY holding the .gguf -- KTransformers'
+    --gguf_path takes a directory -- and a file in a subfolder of a
+    sharded repo resolves to that subfolder."""
+    from simulator.models import gguf_status
+    cache = tmp_path / "hf"
+    spec = {"repo": "org/M-GGUF", "file": "Q4/M-Q4.gguf", "size_gb": 1.5}
+    st = gguf_status({"id": "org/M", "gguf": spec}, cache)
+    assert st == {"repo": "org/M-GGUF", "file": "Q4/M-Q4.gguf",
+                  "size_gb": 1.5, "cached": False, "path": None}
+    assert gguf_status({"id": "org/M", "gguf": None}, cache) is None
+
+    rev = cache / "hub" / "models--org--M-GGUF" / "snapshots" / "r1"
+    (rev / "Q4").mkdir(parents=True)
+    (rev / "Q4" / "M-Q4.gguf").write_bytes(b"")     # zero bytes: not staged
+    assert gguf_status(spec, cache)["cached"] is False
+    (rev / "Q4" / "M-Q4.gguf").write_bytes(b"gguf")
+    st = gguf_status(spec, cache)
+    assert st["cached"] is True and st["path"] == str(rev / "Q4")
+
+    # model_status carries the companion when handed the spec.
+    row = model_status("org/M", cache, gguf=spec)
+    assert row["gguf"]["cached"] is True
+    assert model_status("org/M", cache)["gguf"] is None
+
+
+def test_download_command_companion(tmp_path, monkeypatch) -> None:
+    from simulator.models import download_command
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path / "hf"))
+    argv, env = download_command("Qwen/Qwen3-30B-A3B-Instruct-2507",
+                                 companion="gguf")
+    assert argv[1:] == ["download", "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",
+                        "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"]
+    assert env["HF_HOME"] == str(tmp_path / "hf")
+    with pytest.raises(ValueError, match="no GGUF companion"):
+        download_command("Qwen/Qwen3-32B", companion="gguf")
+    with pytest.raises(ValueError, match="unknown companion"):
+        download_command("Qwen/Qwen3-32B", companion="onnx")
+
+
+def test_models_api_gguf_companion_download(tmp_path, monkeypatch) -> None:
+    """The companion is staged under its own key ("<model>#gguf"), the
+    row reports it, and a model with no companion is refused (422)."""
+    cache = tmp_path / "hf"
+    cache.mkdir()
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(cache))
+    spec = {"repo": "org/tiny-GGUF", "file": "tiny-Q4.gguf", "size_gb": 0.1}
+
+    stub = tmp_path / "hf-stub"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'REPO_DIR="$HF_HOME/hub/models--$(echo "$2" | sed s#/#--#g)"\n'
+        'mkdir -p "$REPO_DIR/snapshots/rev1"\n'
+        'echo gguf > "$REPO_DIR/snapshots/rev1/$3"\n'
+        'echo "done $2 $3"\n'
+    )
+    stub.chmod(0o755)
+    monkeypatch.setattr(
+        models_mod, "download_command",
+        lambda model, companion=None: (
+            [str(stub), "download", spec["repo"], spec["file"]],
+            {"HF_HOME": str(cache)}),
+    )
+    monkeypatch.setattr(
+        models_mod, "referenced_models",
+        lambda **kw: [
+            {**model_status("org/tiny", cache, gguf=spec),
+             "referenced_by": ["catalog:tiny"]},
+            {**model_status("org/plain", cache),
+             "referenced_by": ["catalog:plain"]},
+        ],
+    )
+
+    with TestClient(create_app(tmp_path / "runs")) as client:
+        rows = {m["model"]: m for m in client.get("/api/models").json()["models"]}
+        assert rows["org/tiny"]["gguf"] == {**spec, "cached": False,
+                                            "path": None, "downloading": False}
+        assert rows["org/plain"]["gguf"] is None
+
+        r = client.post("/api/models/download",
+                        json={"model": "org/plain", "companion": "gguf"})
+        assert r.status_code == 422 and "no GGUF companion" in r.json()["detail"]
+        r = client.post("/api/models/download",
+                        json={"model": "org/tiny", "companion": "onnx"})
+        assert r.status_code == 422
+
+        r = client.post("/api/models/download",
+                        json={"model": "org/tiny", "companion": "gguf"})
+        assert r.status_code == 202, r.text
+        assert r.json()["key"] == "org/tiny#gguf"
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            doc = client.get("/api/models").json()
+            dl = doc["downloads"].get("org/tiny#gguf")
+            if dl and not dl["running"]:
+                break
+            time.sleep(0.1)
+        assert dl["exit_code"] == 0
+        assert "done org/tiny-GGUF tiny-Q4.gguf" in dl["log_tail"]
+        row = next(m for m in doc["models"] if m["model"] == "org/tiny")
+        assert row["gguf"]["cached"] is True and row["gguf"]["downloading"] is False
+        assert row["gguf"]["path"] == str(
+            cache / "hub" / "models--org--tiny-GGUF" / "snapshots" / "rev1")
+        # The safetensors weights are a separate key, untouched.
+        assert row["cached"] is False and "org/tiny" not in doc["downloads"]
 
 
 def test_referenced_models_finds_profiles_and_spaces(monkeypatch) -> None:
@@ -69,8 +177,8 @@ def test_models_api_download_flow(tmp_path, monkeypatch) -> None:
     stub.chmod(0o755)
     monkeypatch.setattr(
         models_mod, "download_command",
-        lambda model: ([str(stub), "download", model],
-                       {"HF_HOME": str(cache)}),
+        lambda model, companion=None: ([str(stub), "download", model],
+                                       {"HF_HOME": str(cache)}),
     )
     monkeypatch.setattr(
         models_mod, "referenced_models",

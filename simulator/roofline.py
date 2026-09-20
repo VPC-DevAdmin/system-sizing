@@ -108,16 +108,65 @@ class Candidate:
     size_gb: Optional[float] = None
     kv_bytes: Optional[int] = None
     cached: bool = False
+    # Three ways to fit, and the search treats them differently.
+    # ``fits_gpu``: the weights load across the box's cards (a GPU
+    # engine at some tp). ``fits_ram``: the weights fit host RAM, the
+    # KTransformers budget. ``kt_eligible``: a GGUF companion is
+    # catalogued, which is what KTransformers actually loads. ``fits``
+    # is what the roofline can measure at all: fits_gpu, or
+    # KTransformers can carry it.
+    fits_gpu: bool = True
+    fits_ram: bool = True
+    kt_eligible: bool = False
     fits: bool = True
+    # Smallest power-of-two tensor parallel that holds a replica, and
+    # the replica count that leaves (gpu_count // tp). None when the
+    # model does not fit the GPUs at all.
+    tp: Optional[int] = None
+    replicas: Optional[int] = None
     score: float = 0.0
     measured_kv: bool = False
     why: str = ""
     # Which pass of the series round-robin chose it (1 = best of its
     # series); 0 when it was not picked, or picking was not diverse.
     pick_round: int = 0
+    # "fast" | "large" | "beyond_vram" once picked; "" otherwise.
+    tier: str = ""
+
+    def info(self) -> dict:
+        """The part of a candidate a plan carries per model: enough
+        for ``cells`` to choose engines and shape, and for
+        ``summarize`` to draw the spectrum."""
+        return {"tier": self.tier, "fits_gpu": self.fits_gpu,
+                "fits_ram": self.fits_ram, "kt_eligible": self.kt_eligible,
+                "tp": self.tp, "replicas": self.replicas,
+                "approx_size_gb": self.size_gb, "params_b": self.params_b,
+                "vendor": vendor_of(self.series or self.family or self.id),
+                "series": self.series, "quant": self.quant}
+
+
+TIERS = ("fast", "large", "beyond_vram")
+
+# How much of host RAM the CPU-resident experts may take. The rest is
+# the OS, the KV cache KTransformers keeps on the CPU side, and the
+# page cache the GGUF is read through.
+RAM_SHARE = 0.85
+
+
+def tp_for(need_gb: float, vram_per_gpu_gb: float, gpu_count: int = 8
+           ) -> Optional[int]:
+    """Smallest power-of-two tensor parallel with tp x VRAM >= need,
+    up to the box; None when even every card is not enough."""
+    tp = 1
+    while tp <= gpu_count:
+        if tp * float(vram_per_gpu_gb) >= float(need_gb):
+            return tp
+        tp *= 2
+    return None
 
 
 def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
+                 host_ram_gb: float | None = None, gpu_count: int = 8,
                  cache: Path | None = None) -> list[Candidate]:
     """Rank catalog models by how fast they could plausibly go here.
 
@@ -142,12 +191,22 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
         st = model_status(mid, cache) if cache else model_status(mid)
         size = e.get("approx_size_gb")
         need = e.get("min_vram_gb") or size
-        fits = True
+        gpus = max(1, int(gpu_count or 8))
+        fits_gpu, tp = True, 1
         if vram_per_gpu_gb and need:
-            # Whole-box: eight cards. A model needing more than one
-            # card can still run at tp>1, so this only excludes what
-            # will not fit the box at all.
-            fits = float(need) <= float(vram_per_gpu_gb) * 8
+            # Whole-box: a model needing more than one card can still
+            # run at tp>1, so this only excludes what will not fit the
+            # box at all -- and records the tp that does fit it.
+            tp = tp_for(float(need), float(vram_per_gpu_gb), gpus)
+            fits_gpu = tp is not None
+        # KTransformers keeps the experts in host RAM and reads them
+        # from GGUF, so a model beyond VRAM is in reach only when both
+        # the companion is catalogued and the weights fit the RAM.
+        kt_eligible = bool(e.get("gguf"))
+        fits_ram = True
+        if size:
+            fits_ram = (host_ram_gb is not None
+                        and float(size) <= float(host_ram_gb) * RAM_SHARE)
         family = str(e.get("family") or infer_family(mid))
         c = Candidate(
             id=mid, quant=str(e.get("quant") or ""),
@@ -155,7 +214,11 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             series=str(e.get("series") or family.split("-")[0]),
             params_b=e.get("params_b"), moe=bool(e.get("moe")),
             size_gb=size, cached=bool(st.get("cached")),
-            kv_bytes=kv_bytes_per_token(mid, cache), fits=fits,
+            kv_bytes=kv_bytes_per_token(mid, cache),
+            fits_gpu=fits_gpu, fits_ram=fits_ram, kt_eligible=kt_eligible,
+            fits=fits_gpu or (kt_eligible and fits_ram),
+            tp=tp if fits_gpu else None,
+            replicas=(gpus // tp) if fits_gpu else None,
         )
         bits = []
         # Primary: KV bytes per token, when we can read it.
@@ -183,9 +246,21 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
         if size and vram_per_gpu_gb and float(size) <= float(vram_per_gpu_gb):
             c.score *= 1.15
             bits.append("fits one GPU — no tensor-parallel all-reduce")
-        if not c.fits:
+        if not c.fits_gpu:
+            # Out of the FAST race either way; the beyond-VRAM tier
+            # may still pick it when KTransformers can carry it.
             c.score = 0.0
-            bits = ["does not fit this box"]
+            if c.fits:
+                bits = ["beyond VRAM — KTransformers only (GGUF companion "
+                        "catalogued, weights fit host RAM)"]
+            elif c.kt_eligible and host_ram_gb is None:
+                bits = ["beyond VRAM and host RAM is unknown here"]
+            elif c.kt_eligible:
+                bits = [f"does not fit this box — {size:g} GB of weights "
+                        f"exceed {RAM_SHARE:.0%} of {host_ram_gb:g} GB of RAM"]
+            else:
+                bits = ["does not fit this box (no GGUF companion for "
+                        "KTransformers)"]
         c.why = "; ".join(bits)
         out.append(c)
     # Measured beats estimated, always. A staged model whose KV cost
@@ -215,10 +290,32 @@ def vendor_of(series: str) -> str:
 
 
 def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
-                limit: int = 5, cached_only: bool = False,
+                host_ram_gb: float | None = None, gpu_count: int = 8,
+                limit: int = 8, cached_only: bool = False,
                 cache: Path | None = None,
-                diverse: bool = True) -> list[Candidate]:
+                diverse: bool = True, spectrum: bool = True,
+                large_limit: int = 3, beyond_limit: int = 2
+                ) -> list[Candidate]:
     """The shortlist a roofline runs when the operator names no model.
+
+    ``spectrum`` (the default) fills three tiers, in order, until
+    ``limit``:
+
+    * FAST -- the vendor round-robin below, over models that fit the
+      GPUs. It gets ``limit - large_limit - beyond_limit`` slots first
+      (never fewer than one) and whatever the other tiers leave.
+    * LARGE -- the largest ``fits_gpu`` models by weight not already
+      picked, one per vendor before any vendor's second, at most
+      ``large_limit``. The fastest model on a box is rarely the most
+      capable one; the operator wants to know what the biggest thing
+      the cards can hold does, too.
+    * BEYOND_VRAM -- models the GPUs cannot hold but KTransformers can
+      (GGUF companion catalogued, weights within host RAM), largest
+      first, at most ``beyond_limit``. These are a different kind of
+      measurement (CPU-bound experts) and are labelled as such.
+
+    Each pick's ``tier`` and ``why`` say which tier chose it and what
+    it will cost (tp, RAM). ``spectrum=False`` is the FAST tier alone.
 
     ``diverse`` (the default) round-robins over VENDOR (``vendor_of``
     the series): the best candidate of every vendor in score order,
@@ -239,13 +336,85 @@ def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
     ``diverse=False`` is the old behaviour: the top ``limit`` of the
     global ranking, precision twins and all.
     """
-    ranked = [c for c in score_models(
-        catalog, vram_per_gpu_gb=vram_per_gpu_gb, cache=cache) if c.fits]
+    scored = score_models(catalog, vram_per_gpu_gb=vram_per_gpu_gb,
+                          host_ram_gb=host_ram_gb, gpu_count=gpu_count,
+                          cache=cache)
     if cached_only:
-        ranked = [c for c in ranked if c.cached]
+        scored = [c for c in scored if c.cached]
+    ranked = [c for c in scored if c.fits_gpu]
     limit = max(1, limit)
+    large_limit = max(0, large_limit) if spectrum else 0
+    beyond_limit = max(0, beyond_limit) if spectrum else 0
+    fast_budget = max(1, limit - large_limit - beyond_limit)
+
+    picks = _pick_fast(ranked, fast_budget, diverse)
+    if not spectrum:
+        return picks
+    chosen = {c.id for c in picks}
+
+    # LARGE: biggest weights the cards hold, one per vendor first.
+    large_pool = sorted((c for c in ranked if c.id not in chosen and c.size_gb),
+                        key=lambda c: -float(c.size_gb))
+    large: list[Candidate] = []
+    seen_vendors: set[str] = set()
+    for pass_no in (1, 2):
+        for c in large_pool:
+            if len(large) >= large_limit or len(picks) + len(large) >= limit:
+                break
+            v = vendor_of(c.series or c.family or c.id)
+            if c in large or (pass_no == 1 and v in seen_vendors):
+                continue
+            seen_vendors.add(v)
+            c.tier = "large"
+            note = (f"largest that fits the GPUs: {float(c.size_gb):g} GB "
+                    f"at tp{c.tp}")
+            c.why = f"{note}; {c.why}" if c.why else note
+            large.append(c)
+    picks += large
+    chosen = {c.id for c in picks}
+
+    # BEYOND VRAM: what only KTransformers can serve, largest first.
+    beyond_pool = sorted(
+        (c for c in scored if not c.fits_gpu and c.kt_eligible and c.fits_ram
+         and c.id not in chosen and c.size_gb),
+        key=lambda c: -float(c.size_gb))
+    for c in beyond_pool[:beyond_limit]:
+        if len(picks) >= limit:
+            break
+        c.tier = "beyond_vram"
+        c.why = (f"beyond VRAM — KTransformers only, {float(c.size_gb):g} GB "
+                 f"of weights in {_ram_label(host_ram_gb)} of RAM")
+        picks.append(c)
+
+    # Whatever LARGE and BEYOND could not fill goes back to FAST.
+    if len(picks) < limit:
+        chosen = {c.id for c in picks}
+        more = _pick_fast([c for c in ranked if c.id not in chosen],
+                          limit - len(picks), diverse,
+                          already=[c for c in picks if c.tier == "fast"])
+        picks += more
+    return picks
+
+
+def _ram_label(gb: float | None) -> str:
+    if not gb:
+        return "unknown"
+    return f"{gb / 1000:g} TB" if gb >= 1000 else f"{gb:g} GB"
+
+
+def _pick_fast(ranked: list[Candidate], limit: int, diverse: bool,
+               already: list[Candidate] | None = None) -> list[Candidate]:
+    """The FAST tier: ``limit`` more picks from ``ranked`` (score
+    order, fits_gpu only). ``already`` are FAST picks from an earlier
+    call, so a second pass keeps the vendor/series/family accounting
+    of the first instead of restarting it."""
+    if limit <= 0:
+        return []
     if not diverse:
-        return ranked[:limit]
+        out = ranked[:limit]
+        for c in out:
+            c.tier = "fast"
+        return out
 
     # Vendors in order of their best candidate; score_models already
     # sorted with measured-first, so first-seen order is that order.
@@ -257,8 +426,9 @@ def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
     for c in ranked:
         by_vendor.setdefault(vendor_of(c.series or c.family or c.id), []).append(c)
 
+    prior = list(already or [])
     picks: list[Candidate] = []
-    rnd = 0
+    rnd = max((p.pick_round for p in prior), default=0)
     while len(picks) < limit and any(by_vendor.values()):
         rnd += 1
         for vendor, pool in by_vendor.items():
@@ -266,7 +436,8 @@ def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
                 continue
             if len(picks) >= limit:
                 break
-            mine = [p for p in picks if vendor_of(p.series or p.family or p.id) == vendor]
+            mine = [p for p in prior + picks
+                    if vendor_of(p.series or p.family or p.id) == vendor]
             taken_series = {p.series for p in mine}
             taken_families = {p.family for p in mine}
             # Prefer a series nobody measured, then weights nobody
@@ -276,6 +447,7 @@ def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             choice = (fresh_series or fresh_family or pool)[0]
             pool.remove(choice)
             choice.pick_round = rnd
+            choice.tier = "fast"
             note = _round_label(rnd, vendor)
             if not fresh_series and not fresh_family:
                 note += f" (another precision of {choice.family})"
@@ -318,14 +490,47 @@ def engine_defaults(engine: str) -> dict:
     than VRAM should be.
     """
     if engine == "ktransformers":
-        return {"replicas": 1, "kv_cache_dtype": "auto"}
+        return {"replicas": 1, "kv_cache_dtype": "auto",
+                "max_model_len": KT_MAX_MODEL_LEN}
     return {}
+
+
+# KTransformers' CPU-side KV cache is sized by max_model_len and its
+# whole point is a model that barely fits; 4k is the documented
+# serving context and enough for the roofline's short shapes.
+KT_MAX_MODEL_LEN = 4096
+
+
+def engines_for(engine: str, info: dict | None) -> bool:
+    """Whether a model with plan ``info`` (Candidate.info()) gets a
+    cell on ``engine``. No info means the old behaviour: every engine.
+
+    GPU engines need the weights on the cards; KTransformers needs the
+    GGUF companion it loads from. A beyond-VRAM model therefore gets
+    KTransformers cells only, and a model without a companion gets no
+    KTransformers cell at all -- rather than a cell that fails at
+    config time and leaves a blank nobody can read.
+    """
+    if not info:
+        return True
+    if engine == "ktransformers":
+        return bool(info.get("kt_eligible"))
+    return bool(info.get("fits_gpu", True))
 
 
 def cells(models: list[str], engines: list[str], shapes: dict, *,
           input_tokens: int = DEFAULT_INPUT_TOKENS,
-          engine_shape: dict | None = None) -> list[dict]:
+          engine_shape: dict | None = None,
+          model_info: dict[str, dict] | None = None,
+          notes: list[str] | None = None) -> list[dict]:
     """Every (model, engine, shape) the run will measure, model-major.
+
+    ``model_info`` (model id -> Candidate.info()) decides which engines
+    each model gets (``engines_for``) and the tensor-parallel shape a
+    GPU cell launches with: a model whose weights exceed one card runs
+    at the smallest power-of-two tp that holds it, with ``gpu_count //
+    tp`` replicas, instead of the eight-by-tp1 default. Skipped
+    engines are explained in ``notes`` when a list is passed.
 
     Model-major because switching model costs a full weight load while
     switching engine does not, and because a partial run then holds a
@@ -345,8 +550,17 @@ def cells(models: list[str], engines: list[str], shapes: dict, *,
     out: list[dict] = []
     seen: set[str] = set()
     for m in models:
+        info = (model_info or {}).get(m)
         for e in engines:
+            if not engines_for(e, info):
+                if notes is not None:
+                    notes.append(_skip_note(m, e, info))
+                continue
             shape = {**shape_of(engine_shape or {}), **engine_defaults(e)}
+            if (info and e != "ktransformers" and info.get("tp")
+                    and int(info["tp"]) > 1):
+                shape["tp"] = int(info["tp"])
+                shape["replicas"] = int(info.get("replicas") or 1)
             for n in mns:
                 if e == "ktransformers":
                     n = min(n, DOCUMENTED_MAX_BATCH)
@@ -360,6 +574,13 @@ def cells(models: list[str], engines: list[str], shapes: dict, *,
                     seen.add(key)
                     out.append(cell)
     return out
+
+
+def _skip_note(model: str, engine: str, info: dict) -> str:
+    if engine == "ktransformers":
+        return f"{model}: no ktransformers cells — no GGUF companion staged"
+    return (f"{model}: no {engine} cells — {info.get('approx_size_gb') or '?'}"
+            f" GB of weights exceed the GPUs (KTransformers only)")
 
 
 def estimate_minutes(n_cells: int, *, launch_min: float = 6.0,
@@ -491,17 +712,34 @@ class State:
         d = asdict(self)
         d["kind"] = "roofline"
         d["done"] = self.status in ("finished", "failed", "stopped")
-        d["summary"] = summarize(self.results)
+        d["summary"] = summarize(
+            self.results, model_info=self.plan.get("model_info"),
+            models=self.plan.get("models"),
+            staging={m.get("id"): m.get("status") for m in self.models})
         d["written_off"] = permanently_failed(self.results)
         return d
 
 
-def summarize(results: list[dict]) -> dict:
-    """The matrix, plus the cell that won it.
+def _total(r: dict) -> float:
+    return float(r.get("total_tok_s") or r.get("out_tok_s") or 0)
+
+
+def summarize(results: list[dict], model_info: dict | None = None,
+              models: list[str] | None = None,
+              staging: dict | None = None) -> dict:
+    """The matrix, plus the cells that won it -- in two directions.
 
     Deliberately reports best-per-model and best-per-engine alongside
     the overall winner: a single number tells you what to publish,
     while the matrix tells you what to do with the next model you try.
+
+    A spectrum search has two winners, not one: ``fastest`` (the cell
+    with the highest total token rate) and ``largest_served`` (the
+    biggest model any engine actually produced a peak for), and the
+    ``spectrum`` in between -- one row per planned model, by weight,
+    with its best cell or the reason it has none. ``model_info`` is
+    the plan's per-model record (weights, params, tier); without it
+    the spectrum rows carry only what the results say.
     """
     usable = [r for r in results
               if r.get("out_tok_s") and r.get("steady_state", True)]
@@ -511,8 +749,66 @@ def summarize(results: list[dict]) -> dict:
         by_model.setdefault(r["model"], r)
         by_engine.setdefault(r["engine"], r)
     best = max(usable, key=lambda r: r["out_tok_s"], default=None)
+    fastest = max(usable, key=_total, default=None)
+
+    info = model_info or {}
+    order: list[str] = list(models or [])
+    for r in results:
+        if r.get("model") and r["model"] not in order:
+            order.append(r["model"])
+    failed_models = {r["model"] for r in results if r.get("error")}
+    best_total: dict[str, dict] = {}
+    for r in sorted(usable, key=_total, reverse=True):
+        best_total.setdefault(r["model"], r)
+
+    def size_key(m: str) -> tuple[float, float]:
+        i = info.get(m) or {}
+        return (float(i.get("approx_size_gb") or 0),
+                float(i.get("params_b") or 0))
+
+    spectrum = []
+    for m in order:
+        i = info.get(m) or {}
+        b = best_total.get(m)
+        if b:
+            status = "served"
+        elif (staging or {}).get(m) == "unavailable":
+            status = "unavailable"
+        elif m in failed_models:
+            status = "failed"
+        else:
+            status = "pending"
+        spectrum.append({
+            "model": m, "vendor": i.get("vendor"),
+            "params_b": i.get("params_b"),
+            "approx_size_gb": i.get("approx_size_gb"),
+            "tier": i.get("tier") or "",
+            "best_engine": b.get("engine") if b else None,
+            "out_tok_s": b.get("out_tok_s") if b else None,
+            "total_tok_s": (b.get("total_tok_s") or b.get("out_tok_s"))
+            if b else None,
+            "concurrency": (b.get("concurrency") or b.get("in_flight"))
+            if b else None,
+            "kv_capacity_tokens": b.get("kv_cache_tokens") if b else None,
+            "ttft_p95_ms": b.get("ttft_p95_ms") if b else None,
+            "status": status,
+        })
+    spectrum.sort(key=lambda row: size_key(row["model"]))
+
+    def largest(among: list[str]) -> dict | None:
+        if not among:
+            return None
+        m = max(among, key=size_key)
+        row = next((s for s in spectrum if s["model"] == m), None)
+        return dict(row) if row else {"model": m}
+
     return {
         "best": best,
+        "fastest": fastest,
+        "largest_served": largest(list(best_total)),
+        "largest_attempted": largest(
+            [m for m in order if m in best_total or m in failed_models]),
+        "spectrum": spectrum,
         "best_per_model": by_model,
         "best_per_engine": by_engine,
         "measured": len(usable),
@@ -613,12 +909,18 @@ async def run_roofline(
     resume: bool = True,
     confirm_winners: bool = True,
     engine_shape: dict | None = None,
+    model_info: dict[str, dict] | None = None,
 ) -> Path:
     """Stage, search the product, confirm each model's winner, report.
 
     ``engine_shape`` is the launch shape shared by every cell (memory
     share, KV precision, replica count, levers); it is recorded on
     each cell and is part of the cell's resume identity.
+
+    ``model_info`` (model id -> Candidate.info()) is the plan's record
+    of each model: its tier, whether it fits the GPUs or only
+    KTransformers, and the tp that holds it. It decides which engines
+    each model gets (``cells``) and is what the spectrum is drawn from.
 
     ``build_config`` is injected exactly as the joint search does it:
     it takes engine overrides and returns a config path, so this module
@@ -641,12 +943,15 @@ async def run_roofline(
     else:
         st = State()
 
+    notes: list[str] = []
     plan_cells = cells(models, engines, shapes, input_tokens=input_tokens,
-                       engine_shape=engine_shape)
+                       engine_shape=engine_shape, model_info=model_info,
+                       notes=notes)
     st.status = "staging"
     st.input_tokens = input_tokens
     st.plan = {"models": models, "engines": engines, "shapes": shapes,
-               "cells": plan_cells}
+               "cells": plan_cells, "model_info": model_info or {},
+               "notes": notes}
     st.estimate_min = estimate_minutes(len(plan_cells) - len(done),
                                        n_models=len(models))
     if not st.models:

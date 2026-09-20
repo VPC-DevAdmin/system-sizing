@@ -272,33 +272,71 @@ async def start_run(req: StartRunRequest, request: Request) -> dict:
         return await _start_run_locked(request.app, req)
 
 
-async def _plan_roofline(spec: dict) -> tuple[list[str], list[str]]:
-    """(engines, models) a roofline will search: the spec's lists,
-    else every staged engine and the ranker's top picks."""
+def _candidate_info(c) -> dict:
+    """Candidate.info() when the pick is a real Candidate; a bare
+    record otherwise (tests stub the picker with an id-only object)."""
+    info = getattr(c, "info", None)
+    return info() if callable(info) else {}
+
+
+async def _plan_roofline(spec: dict
+                         ) -> tuple[list[str], list[str], dict[str, dict]]:
+    """(engines, models, model_info) a roofline will search: the spec's
+    lists, else every staged engine and the ranker's spectrum picks.
+
+    ``model_info`` (model id -> Candidate.info()) is filled for every
+    model, named or picked, so the run knows which engines each one
+    gets and what tp holds it. A named model the catalog does not
+    know gets no record and therefore every engine, as before.
+    """
+    from ..arena import hardware as _hw
     from ..engine_runtimes import available_engines
+    from ..model_catalog import load_model_catalog
+    from ..roofline import pick_models, score_models
 
     engines = list(spec.get("engines") or available_engines())
     if not engines:
         raise HTTPException(
             422, "no engine runtime is staged — pull one in "
                  "Prepare before starting a roofline")
+    hw = await asyncio.to_thread(_hw)
+    cat = await asyncio.to_thread(load_model_catalog)
+    vram = hw.get("vram_per_gpu_gb")
+    ram = hw.get("host_ram_gb")
+    gpus = int(hw.get("count") or 8)
     models = list(spec.get("models") or [])
-    if not models:
-        from ..arena import hardware as _hw
-        from ..model_catalog import load_model_catalog
-        from ..roofline import pick_models
-        hw = await asyncio.to_thread(_hw)
-        cat = await asyncio.to_thread(load_model_catalog)
+    info: dict[str, dict] = {}
+    if models:
+        scored = await asyncio.to_thread(
+            score_models, cat, vram_per_gpu_gb=vram, host_ram_gb=ram,
+            gpu_count=gpus)
+        by_id = {c.id: c for c in scored}
+        for m in models:
+            c = by_id.get(m)
+            if c is not None:
+                c.tier = ("beyond_vram" if not c.fits_gpu
+                          else "large" if (c.tp or 1) > 1 else "fast")
+                info[m] = c.info()
+    else:
+        # A beyond-VRAM pick is only worth its download when the one
+        # engine that can serve it is in the run.
+        beyond = (int(spec.get("beyond_limit", 2))
+                  if "ktransformers" in engines else 0)
         picked = await asyncio.to_thread(
             pick_models, cat,
-            vram_per_gpu_gb=hw.get("vram_per_gpu_gb"),
-            limit=int(spec.get("model_limit") or 5),
+            vram_per_gpu_gb=vram, host_ram_gb=ram, gpu_count=gpus,
+            limit=int(spec.get("model_limit") or 8),
             cached_only=bool(spec.get("cached_only")),
-            diverse=bool(spec.get("diverse", True)))
+            diverse=bool(spec.get("diverse", True)),
+            spectrum=bool(spec.get("spectrum", True)),
+            large_limit=int(spec.get("large_limit", 3)),
+            beyond_limit=beyond)
         models = [c.id for c in picked]
+        info = {c.id: _candidate_info(c) for c in picked}
+        info = {k: v for k, v in info.items() if v}
     if not models:
         raise HTTPException(422, "no model fits this host")
-    return engines, models
+    return engines, models, info
 
 
 async def _start_run_locked(app, req: StartRunRequest) -> dict:
@@ -315,7 +353,8 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             409, "the engine optimizer is running — it owns the "
                  "engines/GPUs; stop it first (POST /api/optimizer/stop)",
         )
-    roofline_plan: Optional[tuple[list[str], list[str]]] = None
+    roofline_plan: Optional[tuple[list[str], list[str], dict]] = None
+    preflight_shape: dict = {}
     if (req.workload or {}).get("kind") == "roofline":
         # A roofline varies the model AND the engine per cell, so
         # its `custom` is a TEMPLATE. The UI sends none; default it
@@ -326,15 +365,30 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
         # that does not fit the box.
         roofline_plan = await _plan_roofline(
             dict((req.workload or {}).get("spec") or {}))
-        engines, models = roofline_plan
+        engines, models, model_info = roofline_plan
         if req.custom is None:
             req.custom = {"engine": engines[0]}
         if not req.custom.get("model_id"):
-            req.custom = {**req.custom, "model_id": models[0]}
+            # The pre-flight template must be a launchable pairing:
+            # a GPU engine with a model that fits the GPUs, or
+            # KTransformers with a model that has a GGUF companion.
+            from ..roofline import engines_for
+            eng = req.custom.get("engine") or engines[0]
+            first = next((m for m in models
+                          if engines_for(eng, model_info.get(m))), models[0])
+            req.custom = {**req.custom, "model_id": first}
+            fi = model_info.get(first) or {}
+            if (eng != "ktransformers" and (fi.get("tp") or 1) > 1
+                    and not req.custom.get("tp")):
+                # Validate at the tp the cell will run, but keep it
+                # out of the SHARED shape: the cells set their own.
+                preflight_shape = {"tp": int(fi["tp"]),
+                                   "replicas": int(fi.get("replicas") or 1)}
     if req.custom is not None:
         _validate_custom_ints(req.custom)
         config_path = await asyncio.to_thread(
-            _pkg()._build_custom_config, dict(req.custom), runs_base)
+            _pkg()._build_custom_config,
+            {**req.custom, **preflight_shape}, runs_base)
     else:
         config_path = _resolve_config_path(req)
 
@@ -395,7 +449,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
 
         spec = dict(req.workload.get("spec") or {})
         assert roofline_plan is not None
-        engines, models = roofline_plan
+        engines, models, model_info = roofline_plan
 
         # GPU-engine defaults. Engines that are not GPU-resident
         # servers (KTransformers: one replica, no KV precision
@@ -428,6 +482,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             resume=resume,
             confirm_winners=bool(spec.get("confirm_winners", True)),
             engine_shape=shape_of(base_custom),
+            model_info=model_info,
         )
     elif kind == "headline_optimize":
         # Engine shape and request shape are coupled, so they are

@@ -6,13 +6,38 @@ import { Engines } from "./engines.js";
 /* ── Roofline autopilot ────────────────────────────────────────────
  * The Workload tab asks how many users a deployment holds. This asks
  * what the largest sustained token rate this hardware can produce is,
- * across every model, engine and shape worth trying.
+ * across every model, engine and shape worth trying -- and, since a
+ * box is not only its fastest model, what the LARGEST model it can
+ * hold does, and what only KTransformers (experts in host RAM) can
+ * serve at all. The picks come in three tiers and the results are a
+ * spectrum: speed across size, with the fastest and the largest named.
  *
  * It runs for hours and nobody watches it. So this view is driven
  * ENTIRELY by polling a state document the server writes to disk after
  * every step -- no event replay, no WebSocket dependency, nothing that
  * a closed laptop or a dropped VPN can desynchronise. Reconnecting is
  * a GET. */
+
+const TIER = {
+  fast: { label: "fast", color: () => C.gold,
+    title: "fastest per vendor — the vendor round-robin" },
+  large: { label: "largest on GPU", color: () => C.teal,
+    title: "the largest weights the GPUs hold" },
+  beyond_vram: { label: "beyond VRAM", color: () => C.purple,
+    title: "only KTransformers can serve it — experts in host RAM" },
+};
+const tierTag = (t) => TIER[t]
+  ? `<span class="tier tier-${t}" title="${TIER[t].title}">${TIER[t].label}</span>`
+  : "";
+const short = (id) => (id || "").split("/").pop();
+const num = (v, d = 0) => (v == null || !Number.isFinite(+v)) ? "—"
+  : (+v).toLocaleString(undefined, { maximumFractionDigits: d });
+
+/* Which engines a candidate gets: GPU engines when the weights fit the
+ * cards, KTransformers when a GGUF companion is catalogued -- the
+ * same rule as roofline.engines_for on the server. */
+const enginesFor = (c, engines) => engines.filter(e =>
+  e === "ktransformers" ? c.kt_eligible : c.fits_gpu !== false);
 
 export const Roofline = {
   doc: null,
@@ -25,10 +50,13 @@ export const Roofline = {
   init() {
     $("#rf-start").addEventListener("click", () => this.start());
     $("#rf-stop").addEventListener("click", () => this.stop());
-    // Mode changes refetch: "only downloaded" is a different pick on
-    // the server (round-robin over the cached models), not a filter.
-    $("#rf-model-mode").addEventListener("change", () => this.refresh(true));
-    $("#rf-model-limit").addEventListener("input", () => this.renderPlan());
+    // Mode and tier-size changes refetch: the pick is made on the
+    // server (round-robin, then largest, then beyond VRAM), so the
+    // list for eight models is not the first eight of a longer one.
+    for (const id of ["#rf-model-mode", "#rf-model-limit",
+                      "#rf-large-limit", "#rf-beyond-limit"]) {
+      $(id).addEventListener("change", () => this.refresh(true));
+    }
     $("#rf-confirm").addEventListener("change", () => this.renderPlan());
     onShow("roofline", () => this.refresh(true));
     // Poll regardless of which tab is showing: a run started here keeps
@@ -43,14 +71,26 @@ export const Roofline = {
     el.className = `msg ${cls}`;
   },
 
+  limits() {
+    return {
+      model_limit: +$("#rf-model-limit").value || 8,
+      large_limit: Math.max(0, +$("#rf-large-limit").value || 0),
+      beyond_limit: Math.max(0, +$("#rf-beyond-limit").value || 0),
+    };
+  },
+
   async refresh(withPlan = false) {
     if (withPlan || !this.candidates.length) {
       try {
-        // Pick order, not raw rank: the server round-robins over
-        // vendor series, and auto mode plans the first N of what
-        // comes back, so this must be the list the run would use.
-        const cached = $("#rf-model-mode").value === "cached";
-        const d = await api(`/api/roofline/candidates?limit=14&cached_only=${cached}`);
+        // Pick order, not raw rank: the server fills the tiers, and
+        // auto mode plans exactly what comes back tagged with a tier,
+        // so this must be the list the run would use. A few unpicked
+        // models follow (tier "") so the table can say why they are out.
+        const mode = $("#rf-model-mode").value;
+        const l = this.limits();
+        const d = await api(`/api/roofline/candidates?limit=${l.model_limit}`
+          + `&large_limit=${l.large_limit}&beyond_limit=${l.beyond_limit}`
+          + `&extra=${mode === "manual" ? 40 : 6}&cached_only=${mode === "cached"}`);
         this.candidates = d.candidates || [];
         this.hardware = d.hardware;
       } catch { /* keep whatever we had */ }
@@ -69,20 +109,44 @@ export const Roofline = {
 
   /* ── plan ─────────────────────────────────────────────────────── */
 
-  plannedModels() {
+  plannedCandidates() {
     const mode = $("#rf-model-mode").value;
-    const limit = +$("#rf-model-limit").value || 5;
-    if (mode === "manual") return [...this.chosen];
-    const pool = this.candidates.filter(c => c.fits
+    if (mode === "manual") {
+      // Every chosen id, whether or not the shortlist fetched it (a
+      // live run's plan can name models the table does not show);
+      // an unknown one is assumed to be a plain GPU model.
+      const known = new Map(this.candidates.map(c => [c.id, c]));
+      return [...this.chosen].map(id => known.get(id)
+        || { id, fits: true, fits_gpu: true, kt_eligible: false });
+    }
+    return this.candidates.filter(c => c.tier
       && (mode !== "cached" || c.cached));
-    return pool.slice(0, limit).map(c => c.id);
+  },
+
+  plannedModels() {
+    return this.plannedCandidates().map(c => c.id);
+  },
+
+  /* Cells per model: the GPU engines take the whole shape grid, while
+   * KTransformers clamps to one batch width (its documented four) so
+   * only the output lengths vary. */
+  cellCount(cands, engines) {
+    const mns = this.shapes.max_num_seqs.length;
+    const outs = this.shapes.output_tokens.length;
+    let n = 0;
+    for (const c of cands) {
+      for (const e of enginesFor(c, engines)) {
+        n += e === "ktransformers" ? outs : mns * outs;
+      }
+    }
+    return n;
   },
 
   renderPlan() {
-    const models = this.plannedModels();
+    const cands = this.plannedCandidates();
+    const models = cands.map(c => c.id);
     const engines = [...this.engines];
-    const nCells = models.length * engines.length
-      * this.shapes.max_num_seqs.length * this.shapes.output_tokens.length;
+    const nCells = this.cellCount(cands, engines);
     const confirm = $("#rf-confirm").checked ? models.length : 0;
     const mins = Math.round(nCells * (6 + 4 * 1.5) + confirm * 18);
 
@@ -110,6 +174,20 @@ export const Roofline = {
         this.renderPlan();
       }));
 
+    const hw = this.hardware || {};
+    const box = hw.count
+      ? `${hw.count} × ${num(hw.vram_per_gpu_gb)} GB VRAM, ${
+          hw.host_ram_gb ? num(hw.host_ram_gb) + " GB host RAM" : "host RAM unknown"}`
+      : "no GPUs detected";
+    const tiers = { fast: 0, large: 0, beyond_vram: 0 };
+    for (const c of cands) if (c.tier in tiers) tiers[c.tier]++;
+    const tierLine = models.length && $("#rf-model-mode").value !== "manual"
+      ? ` <span class="msg">(${tiers.fast} fast, ${tiers.large} largest on GPU,
+          ${tiers.beyond_vram} beyond VRAM${
+          !this.engines.has("ktransformers") && tiers.beyond_vram === 0
+            ? " — beyond-VRAM models need the KTransformers engine ticked" : ""})</span>`
+      : "";
+
     const live = !!this.doc?.live;
     const hrs = mins >= 90 ? ` (about ${(mins / 60).toFixed(1)} hours)` : "";
     if (live) {
@@ -123,29 +201,42 @@ export const Roofline = {
     }
     $("#rf-cost").innerHTML = nCells
       ? `<b>${nCells}</b> cells &mdash; ${models.length} model${
-          models.length === 1 ? "" : "s"} &times; ${engines.length} engine${
-          engines.length === 1 ? "" : "s"} &times; ${
+          models.length === 1 ? "" : "s"}${tierLine} &times; the engine${
+          engines.length === 1 ? "" : "s"} each can run &times; ${
           this.shapes.max_num_seqs.length * this.shapes.output_tokens.length
         } shapes${confirm ? `, plus ${confirm} confirmation sweep${
           confirm === 1 ? "" : "s"}` : ""}. Roughly <b>${mins} minutes</b>${hrs}.
-        <span class="msg">Every cell is an engine launch, which is where
-        the time goes. Nothing is lost if this is interrupted.</span>`
+        <span class="msg">Box: ${box}. Every cell is an engine launch,
+        which is where the time goes. Nothing is lost if this is
+        interrupted.</span>`
       : '<span class="status-fail">nothing to run — pick at least one model and engine</span>';
 
     const manual = $("#rf-model-mode").value === "manual";
     $("#rf-candidates").innerHTML = `<table><thead><tr>
-      ${manual ? "<th></th>" : ""}<th>Model</th><th>Series</th><th>Precision</th>
-      <th>KV / token</th><th>Weights</th><th>Staged</th>
+      ${manual ? "<th></th>" : ""}<th>Model</th><th>Tier</th><th>Series</th>
+      <th>Precision</th><th>Weights</th><th>Fits</th><th>Engines</th>
+      <th>KV / token</th><th>Staged</th>
       <th>Why it ranks here</th></tr></thead><tbody>
       ${this.candidates.map(c => {
         const planned = models.includes(c.id);
+        const eng = enginesFor(c, engines);
+        const fitsHow = !hw.vram_per_gpu_gb ? '<span class="msg">unknown here</span>'
+          : c.fits_gpu !== false
+            ? (c.tp > 1 ? `GPU · tp${c.tp} × ${c.replicas}` : "GPU · tp1 × 8")
+            : c.fits ? "host RAM" : "no";
         return `<tr class="${planned ? "peak" : ""}" style="${
           c.fits ? "" : "opacity:.45"}">
           ${manual ? `<td><input type="checkbox" data-rf-model="${c.id}"
-            ${this.chosen.has(c.id) ? "checked" : ""}></td>` : ""}
-          <td>${c.id}</td><td>${c.series || "—"}</td><td>${c.quant || "—"}</td>
-          <td>${c.kv_bytes ? (c.kv_bytes / 1024).toFixed(0) + " KiB" : "—"}</td>
+            ${this.chosen.has(c.id) ? "checked" : ""}
+            ${c.fits ? "" : "disabled"}></td>` : ""}
+          <td>${c.id}</td>
+          <td>${tierTag(c.tier)}</td>
+          <td>${c.series || "—"}</td><td>${c.quant || "—"}</td>
           <td>${c.size_gb ? c.size_gb + " GB" : "—"}</td>
+          <td>${fitsHow}</td>
+          <td>${eng.length ? eng.map(e => Engines.label(e)).join(", ")
+            : '<span class="status-fail">none</span>'}</td>
+          <td>${c.kv_bytes ? (c.kv_bytes / 1024).toFixed(0) + " KiB" : "—"}</td>
           <td>${c.cached ? '<span class="status-pass">yes</span>'
             : '<span class="msg">will download</span>'}</td>
           <td class="msg">${c.why}</td></tr>`;
@@ -163,10 +254,11 @@ export const Roofline = {
     if (!models.length || !this.engines.size) {
       this.msg("pick at least one model and one engine", "error"); return;
     }
+    const l = this.limits();
     const body = {
       workload: { kind: "roofline", spec: {
         models: $("#rf-model-mode").value === "manual" ? models : null,
-        model_limit: +$("#rf-model-limit").value || 5,
+        ...l,
         cached_only: $("#rf-model-mode").value === "cached",
         engines: [...this.engines],
         max_num_seqs: this.shapes.max_num_seqs,
@@ -232,41 +324,84 @@ export const Roofline = {
          : ""}
        ${cur ? `<br><span class="msg">now: ${cur.model || ""}
          ${cur.engine ? "· " + Engines.label(cur.engine) : ""}
+         ${cur.tp > 1 ? `· tp${cur.tp} × ${cur.replicas}` : ""}
          ${cur.max_num_seqs ? "· mns " + cur.max_num_seqs : ""}
          ${cur.output_tokens ? "· " + d.input_tokens + "→" + cur.output_tokens : ""}
          ${cur.phase ? "· " + cur.phase : ""}</span>` : ""}
        ${!running && !d.done
          ? `<br><span class="status-marginal">not running — this service
             is not driving it. Start again to resume from cell
-            ${(sum.attempted || 0) + 1}.</span>` : ""}`;
+            ${(sum.attempted || 0) + 1}.</span>` : ""}
+       ${(d.plan?.notes || []).length
+         ? `<details class="rf-notes"><summary class="msg">${
+             d.plan.notes.length} plan note${d.plan.notes.length === 1 ? "" : "s"}
+             — engines a model does not get</summary>
+             <ul class="msg">${d.plan.notes.map(n => `<li>${n}</li>`).join("")}</ul>
+           </details>` : ""}`;
 
+    const info = d.plan?.model_info || {};
     $("#rf-staging").innerHTML = (d.models || []).map(m => `<div class="e">
-      <div class="n">${m.status}</div>
-      <div class="s">${m.id.split("/").pop()}</div>
+      <div class="n">${m.status} ${tierTag(info[m.id]?.tier)}</div>
+      <div class="s">${short(m.id)}</div>
       ${m.error ? `<div class="s status-fail">${m.error}</div>` : ""}
       </div>`).join("");
 
-    const best = sum.best;
-    $("#rf-best-panel").hidden = !best;
-    if (best) {
-      $("#rf-best").textContent = Math.round(best.out_tok_s).toLocaleString();
-      $("#rf-best-detail").innerHTML =
-        `<b>${best.model.split("/").pop()}</b> on
-         <b>${Engines.label(best.engine)}</b> · mns ${best.max_num_seqs}
-         · ${d.input_tokens}→${best.output_tokens}
-         ${best.confirmed ? '· <span class="status-pass">confirmed</span>'
-           : '· <span class="msg">search rung — not yet confirmed</span>'}`;
-      $("#rf-best-streams").textContent = best.in_flight
-        ? Math.round(best.in_flight).toLocaleString() : "—";
-      $("#rf-best-eff").textContent = best.tokens_per_watt ?? "—";
-      $("#rf-best-kv").textContent = best.kv_cache_pct != null
-        ? `${best.kv_cache_pct.toFixed(0)}%` : "—";
-      $("#rf-best-count").textContent = `${sum.measured} of ${sum.attempted}`;
-    }
-
+    this.renderBest(d, sum);
     this.renderMatrix(d, sum);
+    this.renderSpectrum(d, sum);
     this.renderTable(d);
     this.renderCharts(sum);
+  },
+
+  /* Two winners, not one. The fastest cell is what to publish as a
+   * rate; the largest model that actually served is what to publish
+   * as a capability. On a box with 2 TB of RAM beside the GPUs they
+   * are rarely the same model. */
+  renderBest(d, sum) {
+    const fast = sum.fastest || sum.best;
+    const large = sum.largest_served;
+    $("#rf-best-panel").hidden = !(fast || large);
+    if ($("#rf-best-panel").hidden) return;
+    const info = d.plan?.model_info || {};
+    const fi = fast ? info[fast.model] || {} : {};
+    $("#rf-fastest").innerHTML = fast ? `
+      <div class="hl-label">fastest · total tokens / sec</div>
+      <div class="hl-now">${num(fast.total_tok_s || fast.out_tok_s)}</div>
+      <div class="hl-sub"><b>${short(fast.model)}</b> ${tierTag(fi.tier)}
+        on <b>${Engines.label(fast.engine)}</b>
+        ${fast.tp > 1 ? `· tp${fast.tp} × ${fast.replicas}` : ""}
+        · mns ${fast.max_num_seqs} · ${d.input_tokens}→${fast.output_tokens}
+        ${fast.confirmed ? '· <span class="status-pass">confirmed</span>'
+          : '· <span class="msg">search rung — not yet confirmed</span>'}</div>
+      <div class="rf-kvs">
+        <div class="hl-kv"><span>output tok/s</span><b>${num(fast.out_tok_s)}</b></div>
+        <div class="hl-kv"><span>concurrency</span><b>${
+          num(fast.concurrency ?? fast.in_flight)}</b></div>
+        <div class="hl-kv"><span>tok / W</span><b>${fast.tokens_per_watt ?? "—"}</b></div>
+        <div class="hl-kv"><span>KV cache</span><b>${
+          fast.kv_cache_pct != null ? fast.kv_cache_pct.toFixed(0) + "%" : "—"}</b></div>
+      </div>`
+      : '<div class="msg">no cell has settled yet</div>';
+    $("#rf-largest").innerHTML = large ? `
+      <div class="hl-label">largest served · weights</div>
+      <div class="hl-now">${num(large.approx_size_gb)}<small> GB</small></div>
+      <div class="hl-sub"><b>${short(large.model)}</b> ${tierTag(large.tier)}
+        ${large.params_b ? `· ${num(large.params_b)}B params` : ""}
+        on <b>${Engines.label(large.best_engine)}</b></div>
+      <div class="rf-kvs">
+        <div class="hl-kv"><span>total tok/s</span><b>${num(large.total_tok_s)}</b></div>
+        <div class="hl-kv"><span>output tok/s</span><b>${num(large.out_tok_s)}</b></div>
+        <div class="hl-kv"><span>concurrency</span><b>${num(large.concurrency)}</b></div>
+        <div class="hl-kv"><span>TTFT p95</span><b>${
+          large.ttft_p95_ms != null ? num(large.ttft_p95_ms) + " ms" : "—"}</b></div>
+      </div>
+      ${sum.largest_attempted && sum.largest_attempted.model !== large.model
+        ? `<div class="msg" style="margin-top:6px">largest attempted:
+            <b>${short(sum.largest_attempted.model)}</b>
+            (${num(sum.largest_attempted.approx_size_gb)} GB) —
+            ${sum.largest_attempted.status}</div>` : ""}`
+      : '<div class="msg">nothing has served yet</div>';
+    $("#rf-best-count").textContent = `${sum.measured} of ${sum.attempted} cells settled`;
   },
 
   /* The matrix is the finding. A single winner tells you what to
@@ -277,6 +412,7 @@ export const Roofline = {
     const engines = d.plan?.engines || [];
     $("#rf-matrix-panel").hidden = !(models.length && engines.length);
     if ($("#rf-matrix-panel").hidden) return;
+    const info = d.plan?.model_info || {};
     const bestOf = {};
     for (const r of d.results || []) {
       if (!r.out_tok_s || r.steady_state === false) continue;
@@ -285,6 +421,10 @@ export const Roofline = {
     }
     const failed = new Set((d.results || []).filter(r => r.error)
       .map(r => `${r.model}|${r.engine}`));
+    // Pairings the plan never made (a GPU engine for a beyond-VRAM
+    // model, KTransformers without a GGUF) are not blanks waiting to
+    // be measured; they are not on the plan.
+    const planned = new Set((d.plan?.cells || []).map(c => `${c.model}|${c.engine}`));
     const top = Math.max(...Object.values(bestOf).map(r => r.out_tok_s), 0);
     const rowBest = {}, colBest = {};
     for (const [k, r] of Object.entries(bestOf)) {
@@ -295,12 +435,15 @@ export const Roofline = {
     $("#rf-heatmap").innerHTML = `<table class="heatmap"><thead><tr><th></th>
       ${engines.map(e => `<th>${Engines.label(e)}</th>`).join("")}
       <th class="best">best</th></tr></thead><tbody>
-      ${models.map(m => `<tr><th>${m.split("/").pop()}</th>
+      ${models.map(m => `<tr><th>${short(m)} ${tierTag(info[m]?.tier)}</th>
         ${engines.map(e => {
           const r = bestOf[`${m}|${e}`];
           if (!r) {
-            return failed.has(`${m}|${e}`)
-              ? '<td class="hm-fail" title="attempted and failed">—</td>'
+            if (failed.has(`${m}|${e}`)) {
+              return '<td class="hm-fail" title="attempted and failed">—</td>';
+            }
+            return planned.size && !planned.has(`${m}|${e}`)
+              ? '<td class="hm-none msg" title="not planned: this engine cannot load this model here">n/a</td>'
               : '<td class="hm-none"></td>';
           }
           const frac = top ? r.out_tok_s / top : 0;
@@ -309,6 +452,7 @@ export const Roofline = {
             style="--f:${frac.toFixed(3)}"
             title="mns ${r.max_num_seqs} · ${d.input_tokens}→${r.output_tokens}
               · ${Math.round(r.in_flight || 0)} streams${
+              r.tp > 1 ? ` · tp${r.tp} × ${r.replicas}` : ""}${
               r.confirmed ? " · confirmed" : ""}">
             ${Math.round(r.out_tok_s).toLocaleString()}</td>`;
         }).join("")}
@@ -319,6 +463,79 @@ export const Roofline = {
           ? Math.round(colBest[e]).toLocaleString() : "—"}</td>`).join("")}
         <td class="best">${top ? Math.round(top).toLocaleString() : "—"}</td></tr>
       </tbody></table>`;
+  },
+
+  /* Speed across size: one point per model that served, weights on a
+   * log axis because the spectrum runs from 14 GB to 700 GB, coloured
+   * by tier. The table beneath carries every planned model, including
+   * the ones that failed or never got there, with their status. */
+  renderSpectrum(d, sum) {
+    const rows = sum.spectrum || [];
+    $("#rf-spectrum-panel").hidden = !rows.length;
+    if ($("#rf-spectrum-panel").hidden) return;
+
+    const points = rows.filter(r => r.total_tok_s && r.approx_size_gb);
+    if (!this.charts.spectrum) {
+      this.charts.spectrum = makeChart("#chart-rf-spectrum", {
+        type: "bubble",
+        datasets: Object.keys(TIER).map(t => ({
+          label: TIER[t].label, data: [], tier: t,
+          backgroundColor: fill(TIER[t].color(), "99"),
+          borderColor: TIER[t].color(), borderWidth: 1.5,
+        })),
+        x: { type: "logarithmic", title: { display: true, text: "weights (GB)" },
+          ticks: { callback: v => [10, 20, 50, 100, 200, 500, 1000, 2000]
+            .includes(v) ? num(v) : "" } },
+        y: { title: { display: true, text: "total tokens / sec" } },
+        options: { plugins: {
+          legend: { position: "bottom" },
+          tooltip: { callbacks: {
+            title: items => items.map(i => i.raw.label),
+            label: i => [
+              `${num(i.raw.y)} total tok/s (${num(i.raw.out)} output) on ${i.raw.engine}`,
+              `${num(i.raw.x)} GB${i.raw.params ? ` · ${num(i.raw.params)}B params` : ""}`
+                + ` · ${TIER[i.raw.tier]?.label || i.raw.tier}`,
+              `concurrency ${num(i.raw.conc)}${
+                i.raw.ttft != null ? ` · TTFT p95 ${num(i.raw.ttft)} ms` : ""}`,
+            ],
+          } },
+        } },
+      });
+    }
+    const c = this.charts.spectrum;
+    for (const ds of c.data.datasets) {
+      ds.data = points.filter(r => (r.tier || "fast") === ds.tier).map(r => ({
+        x: r.approx_size_gb, y: r.total_tok_s, r: 7,
+        label: short(r.model), engine: Engines.label(r.best_engine),
+        out: r.out_tok_s, params: r.params_b, tier: r.tier || "fast",
+        conc: r.concurrency, ttft: r.ttft_p95_ms,
+      }));
+    }
+    c.update("none");
+
+    const status = (r) => ({
+      served: '<span class="status-pass">served</span>',
+      failed: '<span class="status-fail">failed</span>',
+      unavailable: '<span class="status-fail">could not stage</span>',
+      pending: '<span class="msg">pending</span>',
+    })[r.status] || r.status;
+    const fastest = sum.fastest?.model;
+    const largest = sum.largest_served?.model;
+    $("#rf-spectrum tbody").innerHTML = rows.map(r => `
+      <tr class="${r.model === fastest || r.model === largest ? "peak" : ""}">
+        <td>${short(r.model)}${r.model === fastest ? " <b>· fastest</b>" : ""}${
+          r.model === largest ? " <b>· largest served</b>" : ""}</td>
+        <td>${tierTag(r.tier)}</td>
+        <td>${r.vendor || "—"}</td>
+        <td>${r.params_b ? num(r.params_b, 1) + "B" : "—"}</td>
+        <td>${r.approx_size_gb ? num(r.approx_size_gb) + " GB" : "—"}</td>
+        <td>${r.best_engine ? Engines.label(r.best_engine) : "—"}</td>
+        <td><b>${num(r.total_tok_s)}</b></td>
+        <td>${num(r.out_tok_s)}</td>
+        <td>${num(r.concurrency)}</td>
+        <td>${r.kv_capacity_tokens ? num(r.kv_capacity_tokens) : "—"}</td>
+        <td>${r.ttft_p95_ms != null ? num(r.ttft_p95_ms) + " ms" : "—"}</td>
+        <td>${status(r)}</td></tr>`).join("");
   },
 
   renderTable(d) {
@@ -333,8 +550,8 @@ export const Roofline = {
         r.error ? `<span class="status-fail" title="${r.error}">failed</span>` : "",
       ].filter(Boolean).join(" ");
       return `<tr class="${r.confirmed ? "peak" : ""}">
-        <td>${r.model.split("/").pop()}</td>
-        <td>${Engines.label(r.engine)}</td>
+        <td>${short(r.model)}</td>
+        <td>${Engines.label(r.engine)}${r.tp > 1 ? ` <span class="msg">tp${r.tp} × ${r.replicas}</span>` : ""}</td>
         <td>${r.max_num_seqs}</td>
         <td>${d.input_tokens}→${r.output_tokens}</td>
         <td><b>${r.out_tok_s ? Math.round(r.out_tok_s).toLocaleString() : "—"}</b></td>
@@ -374,7 +591,7 @@ export const Roofline = {
       c.data.datasets[0].data = data;
       c.update("none");
     };
-    bar("models", "#chart-rf-models", byModel, m => m.split("/").pop());
+    bar("models", "#chart-rf-models", byModel, m => short(m));
     bar("engines", "#chart-rf-engines", byEngine, e => Engines.label(e));
   },
 };

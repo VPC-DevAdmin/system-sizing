@@ -973,6 +973,33 @@ def create_app(
         async with app.state.start_lock:
             return await _start_run_locked(req)
 
+    async def _plan_roofline(spec: dict) -> tuple[list[str], list[str]]:
+        """(engines, models) a roofline will search: the spec's lists,
+        else every staged engine and the ranker's top picks."""
+        from .engine_runtimes import available_engines
+
+        engines = list(spec.get("engines") or available_engines())
+        if not engines:
+            raise HTTPException(
+                422, "no engine runtime is staged — pull one in "
+                     "Prepare before starting a roofline")
+        models = list(spec.get("models") or [])
+        if not models:
+            from .arena import hardware as _hw
+            from .model_catalog import load_model_catalog
+            from .roofline import pick_models
+            hw = await asyncio.to_thread(_hw)
+            cat = await asyncio.to_thread(load_model_catalog)
+            picked = await asyncio.to_thread(
+                pick_models, cat,
+                vram_per_gpu_gb=hw.get("vram_per_gpu_gb"),
+                limit=int(spec.get("model_limit") or 3),
+                cached_only=bool(spec.get("cached_only")))
+            models = [c.id for c in picked]
+        if not models:
+            raise HTTPException(422, "no model fits this host")
+        return engines, models
+
     async def _start_run_locked(req: StartRunRequest) -> dict:
         active = app.state.active
         if active is not None and not active.task.done():
@@ -986,21 +1013,26 @@ def create_app(
                 409, "the engine optimizer is running — it owns the "
                      "engines/GPUs; stop it first (POST /api/optimizer/stop)",
             )
-        if req.custom is not None:
-            # A roofline varies the model per cell, so its `custom` is
-            # a TEMPLATE with no model_id. Borrow the first planned
-            # model just to satisfy this pre-flight build -- the run
-            # rebuilds a config for every cell anyway, and validating
-            # the template here still catches a bad engine or a shape
+        roofline_plan: Optional[tuple[list[str], list[str]]] = None
+        if (req.workload or {}).get("kind") == "roofline":
+            # A roofline varies the model AND the engine per cell, so
+            # its `custom` is a TEMPLATE. The UI sends none; default it
+            # to the first planned engine, and borrow the first planned
+            # (or auto-picked) model just to satisfy the pre-flight
+            # build -- the run rebuilds a config for every cell anyway,
+            # and validating the template here still catches a shape
             # that does not fit the box.
+            roofline_plan = await _plan_roofline(
+                dict((req.workload or {}).get("spec") or {}))
+            engines, models = roofline_plan
+            if req.custom is None:
+                req.custom = {"engine": engines[0]}
+            if not req.custom.get("model_id"):
+                req.custom = {**req.custom, "model_id": models[0]}
+        if req.custom is not None:
             _validate_custom_ints(req.custom)
-            pre = dict(req.custom)
-            if not pre.get("model_id"):
-                planned = ((req.workload or {}).get("spec") or {}).get("models")
-                if planned:
-                    pre["model_id"] = planned[0]
             config_path = await asyncio.to_thread(
-                _build_custom_config, pre, runs_base)
+                _build_custom_config, dict(req.custom), runs_base)
         else:
             config_path = _resolve_config_path(req)
 
@@ -1057,30 +1089,11 @@ def create_app(
             # Autopilot: stage models, search models x engines x shapes,
             # confirm each model's winner. Hours long by design, and
             # every step is persisted -- see simulator/roofline.py.
-            from .engine_runtimes import available_engines
             from .roofline import run_roofline
 
             spec = dict(req.workload.get("spec") or {})
-            engines = spec.get("engines") or available_engines()
-            if not engines:
-                raise HTTPException(
-                    422, "no engine runtime is staged — pull one in "
-                         "Prepare before starting a roofline")
-            models = spec.get("models")
-            if not models:
-                from .arena import hardware as _hw
-                from .model_catalog import load_model_catalog
-                from .roofline import pick_models
-                hw = await asyncio.to_thread(_hw)
-                cat = await asyncio.to_thread(load_model_catalog)
-                picked = await asyncio.to_thread(
-                    pick_models, cat,
-                    vram_per_gpu_gb=hw.get("vram_per_gpu_gb"),
-                    limit=int(spec.get("model_limit") or 3),
-                    cached_only=bool(spec.get("cached_only")))
-                models = [c.id for c in picked]
-            if not models:
-                raise HTTPException(422, "no model fits this host")
+            assert roofline_plan is not None
+            engines, models = roofline_plan
 
             # GPU-engine defaults. Engines that are not GPU-resident
             # servers (KTransformers: one replica, no KV precision

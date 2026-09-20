@@ -484,3 +484,53 @@ def test_start_honours_new_run_and_records_the_shape(tmp_path, monkeypatch):
             time.sleep(0.05)
         c.post("/api/runs/stop")
     assert captured and captured[0]["resume"] is False
+
+
+def test_start_without_a_template_defaults_engine_and_model(tmp_path, monkeypatch):
+    """The Roofline tab sends no `custom` and lets the ranker pick the
+    models; the service used to answer 422 'pass profile or config'
+    (and, with a template but no model, 'custom.model_id must be an
+    org/name id'). The template now defaults to the first planned
+    engine and borrows the first picked model for the pre-flight."""
+    from fastapi.testclient import TestClient
+
+    import simulator.arena as arena
+    import simulator.engine_runtimes as runtimes
+    import simulator.roofline as rf
+    from simulator.service import create_app
+
+    monkeypatch.setattr(arena, "hardware", lambda: {
+        "count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+        "vram_per_gpu_gb": 96.0})
+    monkeypatch.setattr(runtimes, "available_engines",
+                        lambda: ["vllm_cuda_multi", "trtllm"])
+
+    class _Pick:
+        id = "org/Auto"
+    monkeypatch.setattr(rf, "pick_models", lambda *a, **kw: [_Pick()])
+    captured: list[dict] = []
+
+    async def fake_run_roofline(**kw):
+        captured.append(kw)
+        return tmp_path / "roofline.json"
+    monkeypatch.setattr(rf, "run_roofline", fake_run_roofline)
+
+    body = {"workload": {"kind": "roofline",
+                         "spec": {"models": None, "engines": None,
+                                  "max_num_seqs": [1024], "output_tokens": [128],
+                                  "input_tokens": 128}},
+            "new_run": True}
+    with TestClient(create_app(tmp_path / "runs")) as c:
+        r = c.post("/api/runs", json=body)
+        assert r.status_code == 202, r.text
+        import time
+        for _ in range(50):
+            if captured:
+                break
+            time.sleep(0.05)
+        c.post("/api/runs/stop")
+    assert captured, "run_roofline was never reached"
+    assert captured[0]["models"] == ["org/Auto"]
+    assert captured[0]["engines"] == ["vllm_cuda_multi", "trtllm"]
+    assert captured[0]["resume"] is False
+    assert "model_id" not in captured[0]["engine_shape"]

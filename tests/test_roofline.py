@@ -18,6 +18,7 @@ from simulator.roofline import (
     cells,
     estimate_minutes,
     load_state,
+    pick_models,
     save_state,
     score_models,
     summarize,
@@ -31,6 +32,86 @@ CATALOG = [
     {"id": "org/huge", "quant": "fp8", "params_b": 685.0, "moe": True,
      "approx_size_gb": 687, "min_vram_gb": 5000},
 ]
+
+
+# Four Qwen entries (two precisions of one family, two families) plus
+# one each of three other vendor lines. The pure ranking puts every
+# Qwen ahead of everything else: exactly the shortlist the XE7740 got.
+VENDORS = [
+    {"id": "Qwen/Qwen3-30B-A3B-FP8", "family": "qwen3-30b-a3b", "series": "Qwen3",
+     "quant": "fp8", "params_b": 30.5, "moe": True, "approx_size_gb": 32,
+     "min_vram_gb": 40},
+    {"id": "Qwen/Qwen3-30B-A3B", "family": "qwen3-30b-a3b", "series": "Qwen3",
+     "quant": "bf16", "params_b": 30.5, "moe": True, "approx_size_gb": 61,
+     "min_vram_gb": 80},
+    {"id": "Qwen/Qwen3.6-35B-NVFP4", "family": "qwen3.6-35b", "series": "Qwen3",
+     "quant": "nvfp4", "params_b": 35.0, "moe": True, "approx_size_gb": 21,
+     "min_vram_gb": 24},
+    {"id": "Qwen/Qwen3-32B-FP8", "family": "qwen3-32b", "series": "Qwen3",
+     "quant": "fp8", "params_b": 32.8, "moe": False, "approx_size_gb": 34,
+     "min_vram_gb": 40},
+    {"id": "openai/gpt-oss-120b", "family": "gpt-oss-120b", "series": "gpt-oss",
+     "quant": "mxfp4", "params_b": 117.0, "moe": True, "approx_size_gb": 65,
+     "min_vram_gb": 80},
+    {"id": "zai-org/GLM-4.7-FP8", "family": "glm-4.7", "series": "GLM-4.7",
+     "quant": "fp8", "params_b": 355.0, "moe": True, "approx_size_gb": 360,
+     "min_vram_gb": 400},
+    {"id": "meta-llama/Llama-3.3-70B-FP8", "family": "llama-3.3-70b",
+     "series": "Llama-3.3", "quant": "fp8", "params_b": 70.6, "moe": False,
+     "approx_size_gb": 70, "min_vram_gb": 80},
+]
+
+
+def test_candidates_carry_family_and_series():
+    by_id = {c.id: c for c in score_models(VENDORS, vram_per_gpu_gb=96)}
+    assert by_id["Qwen/Qwen3-30B-A3B-FP8"].series == "Qwen3"
+    assert by_id["Qwen/Qwen3-30B-A3B-FP8"].family == "qwen3-30b-a3b"
+    # Inferred when the catalog entry has neither.
+    inferred = score_models([{"id": "org/Foo-9B-FP8", "params_b": 9}],
+                            vram_per_gpu_gb=96)[0]
+    assert inferred.family == "foo-9b" and inferred.series == "foo"
+
+
+def test_pure_ranking_fills_the_shortlist_with_one_vendor():
+    old = pick_models(VENDORS, vram_per_gpu_gb=96, limit=4, diverse=False)
+    assert {c.series for c in old} == {"Qwen3"}
+    assert [c.id for c in old] == [
+        c.id for c in score_models(VENDORS, vram_per_gpu_gb=96)[:4]]
+    assert all(c.pick_round == 0 for c in old)
+
+
+def test_diverse_pick_takes_the_best_of_every_series_first():
+    picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=4)
+    assert [c.series for c in picks] == ["Qwen3", "gpt-oss", "Llama-3.3", "GLM-4.7"]
+    # The Qwen pick is still the ranker's favourite, and its round is
+    # written into the reason the operator reads.
+    assert picks[0].id == "Qwen/Qwen3.6-35B-NVFP4"
+    assert picks[0].pick_round == 1
+    assert picks[0].why.startswith("best of the Qwen3 line;")
+    assert picks[3].why.startswith("best of the GLM-4.7 line;")
+
+
+def test_diverse_pick_returns_to_a_series_only_after_every_series_has_one():
+    picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=6)
+    assert [c.series for c in picks[:4]] == [
+        "Qwen3", "gpt-oss", "Llama-3.3", "GLM-4.7"]
+    assert [c.series for c in picks[4:]] == ["Qwen3", "Qwen3"]
+    # Second and third Qwen picks are different weights before a
+    # second precision of weights already on the list.
+    assert picks[4].family != picks[0].family
+    assert picks[5].family not in {picks[0].family, picks[4].family}
+    assert picks[4].pick_round == 2 and picks[5].pick_round == 3
+    assert picks[4].why.startswith("second pick from Qwen3;")
+    assert picks[5].why.startswith("third pick from Qwen3;")
+
+
+def test_diverse_pick_falls_back_to_a_precision_twin_last():
+    picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=7)
+    last = picks[-1]
+    assert last.series == "Qwen3" and last.pick_round == 4
+    assert last.family == "qwen3-30b-a3b"
+    assert "another precision of qwen3-30b-a3b" in last.why
+    assert len({c.id for c in picks}) == 7
 
 
 def test_ranking_prefers_cheap_kv_and_says_why():
@@ -174,6 +255,14 @@ def test_candidates_endpoint_ranks_and_explains():
     d = c.get("/api/roofline/candidates?limit=3").json()
     assert len(d["candidates"]) <= 3
     assert all(x["why"] for x in d["candidates"])
+    # Pick order: the tab's auto mode plans the first N of this list,
+    # so each row says which round of the series round-robin chose it.
+    assert d["diverse"] is True
+    assert all(x["pick_round"] >= 1 for x in d["candidates"])
+    assert all(x["series"] and x["family"] for x in d["candidates"])
+    plain = c.get("/api/roofline/candidates?limit=3&diverse=false").json()
+    assert plain["diverse"] is False
+    assert all(x["pick_round"] == 0 for x in plain["candidates"])
 
 
 def test_measured_kv_outranks_a_guess(monkeypatch):

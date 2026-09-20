@@ -25,7 +25,9 @@ export const Roofline = {
   init() {
     $("#rf-start").addEventListener("click", () => this.start());
     $("#rf-stop").addEventListener("click", () => this.stop());
-    $("#rf-model-mode").addEventListener("change", () => this.renderPlan());
+    // Mode changes refetch: "only downloaded" is a different pick on
+    // the server (round-robin over the cached models), not a filter.
+    $("#rf-model-mode").addEventListener("change", () => this.refresh(true));
     $("#rf-model-limit").addEventListener("input", () => this.renderPlan());
     $("#rf-confirm").addEventListener("change", () => this.renderPlan());
     onShow("roofline", () => this.refresh(true));
@@ -44,7 +46,11 @@ export const Roofline = {
   async refresh(withPlan = false) {
     if (withPlan || !this.candidates.length) {
       try {
-        const d = await api("/api/roofline/candidates?limit=14");
+        // Pick order, not raw rank: the server round-robins over
+        // vendor series, and auto mode plans the first N of what
+        // comes back, so this must be the list the run would use.
+        const cached = $("#rf-model-mode").value === "cached";
+        const d = await api(`/api/roofline/candidates?limit=14&cached_only=${cached}`);
         this.candidates = d.candidates || [];
         this.hardware = d.hardware;
       } catch { /* keep whatever we had */ }
@@ -65,7 +71,7 @@ export const Roofline = {
 
   plannedModels() {
     const mode = $("#rf-model-mode").value;
-    const limit = +$("#rf-model-limit").value || 3;
+    const limit = +$("#rf-model-limit").value || 5;
     if (mode === "manual") return [...this.chosen];
     const pool = this.candidates.filter(c => c.fits
       && (mode !== "cached" || c.cached));
@@ -128,7 +134,7 @@ export const Roofline = {
 
     const manual = $("#rf-model-mode").value === "manual";
     $("#rf-candidates").innerHTML = `<table><thead><tr>
-      ${manual ? "<th></th>" : ""}<th>Model</th><th>Precision</th>
+      ${manual ? "<th></th>" : ""}<th>Model</th><th>Series</th><th>Precision</th>
       <th>KV / token</th><th>Weights</th><th>Staged</th>
       <th>Why it ranks here</th></tr></thead><tbody>
       ${this.candidates.map(c => {
@@ -137,7 +143,7 @@ export const Roofline = {
           c.fits ? "" : "opacity:.45"}">
           ${manual ? `<td><input type="checkbox" data-rf-model="${c.id}"
             ${this.chosen.has(c.id) ? "checked" : ""}></td>` : ""}
-          <td>${c.id}</td><td>${c.quant || "—"}</td>
+          <td>${c.id}</td><td>${c.series || "—"}</td><td>${c.quant || "—"}</td>
           <td>${c.kv_bytes ? (c.kv_bytes / 1024).toFixed(0) + " KiB" : "—"}</td>
           <td>${c.size_gb ? c.size_gb + " GB" : "—"}</td>
           <td>${c.cached ? '<span class="status-pass">yes</span>'
@@ -160,7 +166,7 @@ export const Roofline = {
     const body = {
       workload: { kind: "roofline", spec: {
         models: $("#rf-model-mode").value === "manual" ? models : null,
-        model_limit: +$("#rf-model-limit").value || 3,
+        model_limit: +$("#rf-model-limit").value || 5,
         cached_only: $("#rf-model-mode").value === "cached",
         engines: [...this.engines],
         max_num_seqs: this.shapes.max_num_seqs,

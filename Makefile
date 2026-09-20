@@ -1,4 +1,4 @@
-# Persona Capacity Simulator — Make targets
+# capsim — Make targets (thin wrappers over the `capsim` CLI)
 #
 # Headline workflow:
 #   make ready CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml
@@ -7,6 +7,11 @@
 #   make dashboard
 #   make export
 #   capsim serve      # web UI at http://localhost:8321
+#
+# Zero hardware: `capsim run --cohort chat_heavy --profile mock`.
+# `capsim run` / `run-persona` take `--mode open|closed` (default open:
+# open-loop arrival-rate capacity, see docs/algorithm.md); sweeps stay
+# closed-loop. README.md documents every target and variable.
 
 # Engine + model are read from CONFIG by default. Set ENGINE=... or
 # MODEL=... on the command line ONLY when you want to override what the
@@ -57,7 +62,7 @@ LOCAL_MODEL_DIR     ?= $(notdir $(MODEL))
 
 .PHONY: help
 help:
-	@echo "Persona Capacity Simulator"
+	@echo "capsim — AI sizing and capacity engine (see README.md for every target)"
 	@echo ""
 	@echo "Setup:"
 	@echo "  make ready CONFIG=...        Install deps, build engine image, download model, preflight"
@@ -67,6 +72,8 @@ help:
 	@echo "Run:"
 	@echo "  make run-persona CONFIG=... PERSONA=... Run one persona (a single user archetype)"
 	@echo "  make run-cohort  CONFIG=... COHORT=...  Run one cohort (a team mix of personas)"
+	@echo "                                          (capsim run --mode open|closed picks the"
+	@echo "                                          methodology; default open. Sweeps: closed.)"
 	@echo "  make run-sweep   CONFIG=... [SWEEP_TYPE=] [POOL_SIZES=] [ADAPTIVE=true]"
 	@echo "                                          Sweep multiple workloads."
 	@echo "                                          SWEEP_TYPE=all|personas|cohorts|a,b,c"
@@ -89,12 +96,18 @@ help:
 	@echo "  make export                             Build buyer_page_data.json"
 	@echo "  capsim serve                            Web UI + control-plane service (http://localhost:8321)"
 	@echo "  make analyze-prefix-cache               Prefix-cache hit-rate report"
+	@echo "  make audit                              Audit the latest run for curve-quality anomalies"
+	@echo "                                          (writes run_NN/audit_report.json)"
+	@echo "  make spot-check                         Re-measure the points audit flagged (nohup'd)"
 	@echo ""
 	@echo "Tuning:"
 	@echo "  make optimize-engine [ONLY=...] [RUN_NEW=true]"
 	@echo "                                          A/B vLLM launch shapes, pick the best for this host."
 	@echo "                                          Always nohup'd + auto-tailed; resumes existing"
 	@echo "                                          runs/engine_optimizer/run.json by default."
+	@echo "  make optimize-search [SPACE=config/search/<space>.yaml]"
+	@echo "                                          Guided coarse-to-fine search over a parameter space"
+	@echo "                                          (models, engine, TP/DP, placement, memory, batch)."
 	@echo "  make optimize-dashboard                 Read-only dashboard against the running optimizer"
 	@echo "                                          (use from a second SSH session)."
 	@echo ""
@@ -105,7 +118,9 @@ help:
 	@echo "  make test                               Run pytest"
 	@echo "  make clean / clean-runs / clean-venv    Tidy"
 	@echo ""
-	@echo "Variables: CONFIG=$(CONFIG)  COHORT=$(COHORT)  MODEL=$(MODEL)"
+	@echo "Variables: CONFIG=$(CONFIG)  COHORT=$(COHORT)  PERSONA=$(PERSONA)  RUN_DIR=$(RUN_DIR)"
+	@echo "           ENGINE / MODEL override the YAML (rare); SWEEP_TYPE, ADAPTIVE, POOL_SIZES,"
+	@echo "           RUN_NEW, VENV, PY, SGLANG_*, MODELS_DIR, HF_CACHE_DIR — see README.md"
 
 # ── Headline target ───────────────────────────────────────────────────
 # `ready` is idempotent. First run: creates a project-local venv if

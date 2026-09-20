@@ -6,6 +6,10 @@ why. Collectors self-report status (`ok / no_data / not_available /
 disabled / skipped_remote_target`) into `cohort_run.collectors_json`,
 so every export states which evidence backs its conclusions.
 
+Where each of these lands in `run.db`: [database_schema.md](database_schema.md).
+How the measurement uses them to place the capacity knee:
+[algorithm.md](algorithm.md).
+
 ## Simulator truth (closed-loop session state)
 
 The virtual-user pool is ground truth for session behavior — no

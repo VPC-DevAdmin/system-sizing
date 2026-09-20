@@ -1,10 +1,17 @@
-# capsim — Persona Capacity Simulator
+# capsim — AI sizing and capacity engine
 
-Drives a single, long-running LLM inference engine (vLLM or SGLang) with realistic persona-based workloads to find the per-cohort capacity knee, with telemetry-attributed bottleneck analysis. Roadmap to a general AI sizing & capacity engine with its own UI: [docs/roadmap.md](docs/roadmap.md).
+Finds how much LLM traffic one box can carry, and says why it stops there. capsim launches an inference engine (vLLM, SGLang, TensorRT-LLM, KTransformers — CPU or GPU — or an endpoint you don't own), drives it with persona-based multi-turn sessions, and reports capacity with telemetry-attributed bottleneck evidence and a versioned JSON export.
+
+capsim finds capacity two ways:
+
+- **Open-loop (primary).** Sessions arrive as a Poisson process at a controlled rate λ; within a session the user behaves closed-loop (turn N+1 waits for turn N plus think time). Capacity is the arrival rate at which the engine's waiting queue turns divergent — below it the queue is stationary, above it the backlog grows without bound. Two knees come out: **λ_max** (highest stable rate) and **λ_sla** (highest stable rate whose steady-state turns also pass the persona SLAs). Concurrent-session capacity is derived from λ_sla and the measured mean session length, never assumed. This is the default for `capsim run`, `run-persona` and every run started from the UI.
+- **Closed-loop pool ramp.** A fixed pool of virtual users stepped up a grid (4, 8, … 256) until the SLA pass rate drops; a Wilson-CI two-knee stepper is opt-in. A closed pool throttles its own offered load and never exhibits the collapse that defines capacity, so this path remains for sweeps, spot-checks and A/B comparisons against older runs.
+
+The methodology is spelled out in [docs/algorithm.md](docs/algorithm.md). Roadmap and what shipped per phase: [docs/roadmap.md](docs/roadmap.md). Open findings from the 2026-09-19 review: [docs/improvement_plan.md](docs/improvement_plan.md).
 
 ## Landing on a fresh host
 
-Three commands from bare box to verified pipeline — prerequisites are just Python 3.10+, Docker, and git:
+Three commands from bare box to verified pipeline — prerequisites are just Python 3.10+, Docker, and git ([docs/deploy.md](docs/deploy.md) has the per-host-class detail, including the sudo-only driver stage):
 
 ```bash
 git clone <repo> && cd system-sizing && ./install.sh   # installs uv + capsim (isolated, no sudo)
@@ -12,30 +19,43 @@ capsim doctor                                          # validate host: CPU/GPU/
 capsim smoke --profile <recommended>                   # ~10 min end-to-end proof with a tiny model
 ```
 
-`capsim doctor` prints a pass/warn/fail table (and `doctor.json` for scripting), including GPU stack checks (nvidia-smi + container toolkit) on Xeon+NVIDIA boxes, and recommends candidate **profiles** for the detected hardware. `capsim smoke` launches the real engine with a ~1.5 GB stand-in model, runs 2 virtual users through a short measured window, exports, and validates the export against the schema contract — if smoke passes, the whole pipeline works on this host. Then commit to the full model:
+`capsim doctor` prints a pass/warn/fail table (and writes `runs/doctor.json` for scripting), including GPU stack checks (nvidia-smi + container toolkit) on Xeon+NVIDIA boxes, and recommends candidate **profiles** for the detected hardware. `capsim smoke` launches the real engine with a ~1.5 GB stand-in model, runs 2 virtual users through a short measured window, exports, and validates the export against the schema contract — if smoke passes, the whole pipeline works on this host. Then commit to the full model:
 
 ```bash
 capsim ready --profile <recommended>                   # full model download + image build/pull
+capsim serve                                           # web UI: http://localhost:8321
 ```
 
 `capsim` and `python -m simulator.cli` are the same CLI (the `simulator` entry point remains as a deprecated alias); the Make targets below wrap it.
 
 ## Targets and profiles
 
-The same persona/knee methodology runs against three target kinds, selected by `engine.type` in the config:
+The same persona/knee methodology runs against every engine type registered in [simulator/engines/\_\_init\_\_.py](simulator/engines/__init__.py), selected by `engine.type` in the config:
 
-- **CPU local-docker** (`vllm`, `sglang`, `vllm_dual_socket`) — the original path, full host telemetry (PMU, IMC bandwidth, RAPL power, frequency, AMX).
-- **GPU local-docker** (`vllm_cuda`) — upstream `vllm/vllm-openai` CUDA image with `--gpus`, for Xeon+NVIDIA hosts. The GPU collector (NVML, nvidia-smi fallback) samples SM util / VRAM / power / clocks / throttle state at 1 Hz alongside the host CPU collectors, and bottleneck attribution gains `gpu_compute` and `gpu_throttled` labels.
-- **Remote endpoint** (`remote`) — benchmark an OpenAI-compatible endpoint you don't own; host telemetry is skipped (it would measure the client box, and the export records that), the endpoint's `/metrics` is scraped when configured. See the [remote-endpoint template](config/profiles/remote-endpoint.yaml).
+| `engine.type` | What it launches |
+|---|---|
+| `vllm` | vLLM-CPU in Docker with the Xeon CPU tuning recipe (thread binding, KV pool sizing). |
+| `vllm_cuda` | vLLM CUDA in Docker — upstream `vllm/vllm-openai` image with `--gpus`, for Xeon+NVIDIA hosts. |
+| `vllm_cuda_multi` | Multi-replica CUDA vLLM — the whole box as N independent replicas. |
+| `sglang` | SGLang-CPU in Docker (Intel only; image built from source, see below). |
+| `sglang_cuda` | SGLang on GPUs — the whole box as N independent replicas. |
+| `trtllm` | TensorRT-LLM — `trtllm-serve` as a whole-box, N-replica target, measured on the same footing as vLLM. |
+| `ktransformers` | KTransformers — MoE experts on the CPU, attention on the GPU. |
+| `vllm_dual_socket` | vLLM-CPU dual-replica engine for dual-socket NUMA boxes (one container per socket, sticky user routing). |
+| `remote` | An OpenAI-compatible endpoint you don't own; host telemetry is skipped and recorded as such, the endpoint's `/metrics` is scraped when configured. See the [remote-endpoint template](config/profiles/remote-endpoint.yaml). |
+| `mock` | A real in-process OpenAI-compatible SSE server with a synthetic, tunable capacity knee — the whole pipeline on a laptop with zero hardware. Powers CI and UI development (`--profile mock`). |
 
-There's also a **mock target** (`--profile mock`) — a real in-process OpenAI-compatible SSE server with a synthetic, tunable capacity knee. The whole pipeline (virtual users, measurement, telemetry, DB, export) runs on a laptop with zero hardware; it powers CI integration tests and UI development.
+Local CPU engines get the full host telemetry set (PMU, IMC bandwidth, RAPL power, frequency, AMX); GPU engines add the GPU collector (NVML, nvidia-smi fallback: SM util / VRAM / power / clocks / throttle state at 1 Hz) and bottleneck attribution gains `gpu_compute` and `gpu_throttled` labels. Every engine reads one memory knob (`engines/vram.py`) and one launch-lever vocabulary (`engines/knobs.py`), translated per engine, so a profile or an Optimize search means the same thing whichever server is under test.
 
-A **profile** is a curated named config for one host class. `capsim list-profiles` shows what's available; every command accepts `--profile <name>` in place of `--config <path>`. Curated profiles live in [config/profiles/](config/profiles/) (e.g. `xeon-gpu-qwen3-30b`); the pre-existing `config/*.yaml` files are addressable by stem too. The export's per-cohort `collectors` block records which telemetry sources actually ran, so downstream consumers know what evidence backs each bottleneck claim.
+A **profile** is a curated named config for one host class. `capsim list-profiles` shows what's available; every command accepts `--profile <name>` in place of `--config <path>`. Curated profiles live in [config/profiles/](config/profiles/) (`xeon-gpu-qwen3-30b`, `mock`, and the `remote-endpoint` template); the CPU configs at `config/xeon_*.yaml` and `config/r7735_*.yaml` are addressable by stem too (`--profile r7735_vllm_dual_socket_qwen3_30b_a3b`). The export's per-cohort `collectors` block records which telemetry sources actually ran, so downstream consumers know what evidence backs each bottleneck claim.
 
 ## Quick start
 
 ```bash
-# Two commands to first measurement.
+# Zero hardware: the whole pipeline against the mock engine.
+capsim run --cohort chat_heavy --profile mock
+
+# A real box, headless. Two commands to first measurement.
 make ready CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml
 make run-cohort CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml \
                 COHORT=chat_heavy
@@ -47,85 +67,213 @@ make export
 capsim serve                                        # web UI: http://localhost:8321
 ```
 
+`capsim run` and `capsim run-persona` take `--mode open|closed` (default `open`); the same knob is `simulation.mode` in YAML. Sweeps (`make run-sweep`, `capsim sweep`) stay closed-loop.
+
+## The web UI
+
+`capsim serve` starts the control-plane service and the UI on `127.0.0.1:8321`: run lifecycle over HTTP (`/api/runs`, `/api/status`, `/api/export`, `/api/doctor`, catalogs, the optimizer and roofline endpoints) and live telemetry over WebSocket (`/ws/telemetry` — run/snapshot/telemetry/turn/step events). One run at a time, in-process; `run.db` stays the source of truth. The service has no auth: binding `--host` to anything other than loopback requires `--insecure`. Over SSH, tunnel it (`ssh -L 8321:localhost:8321 <host>`).
+
+The UI has no build step (Chart.js is vendored so offline benchmark boxes work) and six tabs, in the order a new box goes through them:
+
+| Tab | What it is for |
+|---|---|
+| **Prepare** | The landing checklist. *Validate the host* (runs doctor, ends with a profile recommendation), *Choose where models live* (pick the disk and directory weights download to — doctor, downloads, engines and the optimizer all follow it), *Stage model weights* (the catalog, what is cached, add or discover Hugging Face models), *Stage engine runtimes* (which server images are on the box — an engine only appears downstream once its image is here), then *Find the best launch shape* → Open Optimize. |
+| **Optimize** | *Build the test arena* — every launch shape this installation can run (detected GPUs and PCIe domains, optionally hinted by `config/arena.yaml`, copied from [config/arena.example.yaml](config/arena.example.yaml); the tab warns when the file claims more GPUs than are detected) — then *Guided search* over it and *Results* with the mean-rank composite that names the winner. The winner is promoted into the launch the Workload tab benchmarks with. |
+| **Roofline** | The *Roofline autopilot*: "what is the most this box can do?" across models × engines × shapes. Stages what it needs, searches, confirms the best cell, and reports a model × engine matrix plus every measured cell. Resumable. |
+| **Workload** | *Start a capacity benchmark*: model, CPU-only vs CPU+GPU, workload (a persona or cohort, or a headline saturation benchmark that steps fixed concurrency the way vendor numbers are made), and the advanced engine settings (replicas, TP, placement, memory fraction, batch width, KV precision, expert parallel, trust-remote-code). Live telemetry lives here while a run is in flight: sessions / in-flight / queue, rolling TTFT and TPOT percentiles, engine and host utilization, prefill vs decode token rates, session states, system detail, and completed steps. |
+| **Results** | The run list (newest first; click one, check several to compare). One run renders as a narrative capacity report — headline verdict, user experience (SLA violations and latency vs load), GPUs, CPU and host memory, power and efficiency — with step drill-down. *Comparison* overlays the checked runs on shared axes. *Download JSON* fetches the versioned export. |
+| **Edit workloads** | The *Workload designer*: personas (how much a user asks, gets back, reads and thinks; SLA floors) and cohorts (the persona mix a deployment sees), edited graphically and saved through validating endpoints. The next run picks edits up. |
+
+## CLI
+
+Every subcommand, from `capsim --help`:
+
+| Command | What it does |
+|---|---|
+| `capsim run --cohort <id>` | Run a single cohort (team mix) end-to-end. `--mode open\|closed`, default open. |
+| `capsim run-persona --persona <id>` | Run a single persona end-to-end (one user archetype, no team mix). `--mode open\|closed`, default open. |
+| `capsim sweep` | Run multiple personas + cohorts back-to-back against one engine (closed-loop; resumes the latest `run_NN/`, `--new-run` cuts a fresh one). |
+| `capsim spot-check --plan … --run-dir …` | Re-measure specific (cohort, pool_size) points from an audit plan, appending them to the existing cohort_run rows. |
+| `capsim launch-engine` | Launch the engine without running simulations (manual testing). |
+| `capsim dashboard` | Live progress view of the most recent run. |
+| `capsim export` | Export simplified JSON for the buyer-facing webpage. |
+| `capsim list-profiles` | List available hardware profiles (curated `config/profiles/` plus plain `config/` stems). |
+| `capsim list-cohorts` | List available team-mix cohorts. |
+| `capsim list-personas` | List available user-archetype personas. |
+| `capsim ready` | Prepare engine + model + host for a config. |
+| `capsim serve` | Run the control-plane service: run lifecycle over HTTP + live telemetry over WebSocket, and the web UI. |
+| `capsim doctor` | Full host validation for a fresh benchmark box; writes `runs/doctor.json` (`--output` to move it). |
+| `capsim smoke` | End-to-end micro-benchmark: real engine, tiny model, 2 virtual users, export validated against the schema. |
+| `capsim preflight --config …` | Validate the host satisfies a config's `hardware_requirements`. |
+| `capsim current-run-dir` | Print the `run_NN` directory the next invocation would use. |
+| `capsim analyze-prefix-cache <db>` | Compute prefix-cache hit rate from captured turn events. |
+
+Every run/sweep/ready/smoke command accepts `--profile <name>` or `--config <path>`, and `--engine` / `--model` overrides of what the YAML says.
+
 ## Make targets
 
-The headline workflow is `ready` → `run-cohort` → `dashboard` → `export`. Everything else is either a downstream analysis step or a diagnostic.
+The headline workflow is `ready` → `run-cohort` → `dashboard` → `export`. Everything else is either a downstream analysis step or a diagnostic. `make` with no target (or `make help`) prints the short form of this table.
 
 | Target | What it does |
 |---|---|
-| `make ready CONFIG=...` | Idempotent: pip install, build engine docker image (SGLang only) if missing, download model if missing, validate hardware. |
-| `make doctor` | Full host validation — CPU/NUMA/docker/GPU stack/disk/telemetry permissions/HF reachability as a pass/warn/fail table plus `doctor.json`. Run first on any fresh box. |
+| `make ready CONFIG=...` | Idempotent: create the project venv if missing, `pip install -e .`, then `capsim ready` — build the engine docker image (SGLang only) if missing, download the model if missing, validate hardware. |
+| `make setup` | Back-compat alias for `ready`. |
+| `make doctor` | Full host validation — CPU/NUMA/docker/GPU stack/disk/telemetry permissions/HF reachability as a pass/warn/fail table plus `runs/doctor.json`. Run first on any fresh box. |
 | `make smoke CONFIG=...` | End-to-end pipeline proof: real engine + tiny model (~1.5 GB), 2 virtual users, short measured window, export validated against the schema contract. ~10 min on a fresh box. |
-| `capsim serve` | Control-plane service + web UI on `127.0.0.1:8321`: run lifecycle over HTTP (`/api/runs`, `/api/status`, `/api/export`, `/api/doctor`, catalogs) and live telemetry over WebSocket (`/ws/telemetry` — run/snapshot/turn/step events). One run at a time, in-process; `run.db` stays the source of truth. The UI (no build step, Chart.js vendored so offline benchmark boxes work) has three views: **Run control** (profile + workload pickers, doctor, run history), **Live telemetry** (pool/in-flight, rolling TTFT/TPOT percentiles, KV/CPU/GPU, step progress), and **Results** (landing zones, knee chart with CI band, bottleneck evidence, step drill-down, cross-run comparison, export download). |
 | `make run-persona CONFIG=... PERSONA=...` | Run one **persona** (a single user archetype) end-to-end. |
 | `make run-cohort CONFIG=... COHORT=...` | Run one **cohort** (a team mix of personas) end-to-end. |
-| `make run-sweep CONFIG=... [SWEEP_TYPE=...] [RUN_NEW=true]` | Sweep multiple workloads. **Always nohup'd, log-teed, and auto-tailed** — the sweep + its engine containers survive SSH disconnect; Ctrl-C only exits the tail. The terminal prints the run dir + log path on launch and starts following the log live; reattach later with `make tail-log`, stop with `make stop-bg`. `SWEEP_TYPE` accepts `all` (default — every persona + every cohort), `personas`, `cohorts`, or a comma-separated list of persona/cohort ids. **Resumes the latest `runs/run_NN/` by default** — workloads with `final_status='ok'` are skipped, so an interrupted sweep auto-continues. Pass `RUN_NEW=true` to cut a fresh `run_NN+1` dir (use this when config or hardware has changed and the prior run's data should NOT be merged with the new one). |
-| `make run-cohort-bg ...` / `make run-persona-bg ...` | Background single-workload variants for cohorts and personas. Same nohup pattern; non-blocking (no auto-tail). |
+| `make run-sweep CONFIG=... [SWEEP_TYPE=...] [RUN_NEW=true]` | Sweep multiple workloads (closed-loop). **Always nohup'd, log-teed, and auto-tailed** — the sweep + its engine containers survive SSH disconnect; Ctrl-C only exits the tail. Prints the run dir + log path on launch and follows the log live; reattach with `make tail-log`, stop with `make stop-bg`. `SWEEP_TYPE` accepts `all` (default — every persona + every cohort), `personas`, `cohorts`, or a comma-separated list of ids. **Resumes the latest `runs/run_NN/` by default** — workloads with `final_status='ok'` are skipped. `RUN_NEW=true` cuts a fresh `run_NN+1` (use it when config or hardware changed). |
+| `make run-cohort-bg ...` / `make run-persona-bg ...` | Background single-workload variants. Same nohup pattern; non-blocking (no auto-tail). |
 | `make tail-log` | Tail the most-recent background-run log (auto-picks the latest). |
 | `make stop-bg` | Kill any running simulator background process and its engine containers. |
+| `make audit` | Audit the latest run for curve-quality anomalies (no marginal band, no fail observed, single-point rescue, boundary status) with `scripts/audit_run.py`; writes `runs/run_NN/audit_report.json`. |
+| `make spot-check` | Re-measure the (cohort, pool_size) points `audit` flagged, appending them to the existing cohort_run rows so a re-run `make export` picks up the enriched curve. nohup'd + auto-tailed; stops any other engine first. |
 | `make list-personas` | Show available user archetypes (each with its SLA floors). |
 | `make list-cohorts` | Show available team mixes with persona weights. |
 | `make list-runs` | List `run_NN/` directories under `runs/` with their DB counts. |
 | `make dashboard` | Live `rich`-based progress view of the latest run. |
-| `make export [SLIM=true]` | Build `buyer_page_data.json` from `runs/run_NN/run.db`, **landing the JSON inside the same `runs/run_NN/` directory** so all per-run artifacts (DB, engine logs, perf CSVs, exported JSON) stay grouped. Includes per-step rollups (`curve[]`), per-step time series (`curve[i].telemetry_samples`, `curve[i].turns`), and the 1 Hz whole-run heartbeat (`cohort.snapshots`) so a downstream website can drill from the knee chart into the underlying turn-by-turn data without a second round-trip. **`SLIM=true`** produces `buyer_page_data_slim.json` instead — same headline summary, capacity landing zones, per-step rollup, and bottleneck attribution, but without the per-step time-series or whole-run heartbeat. ~99% smaller (35 MB → 100-200 KB) — use for buyer-facing summary distribution. Override the destination with `--output <path>` if needed. |
+| `make export [SLIM=true]` | Build `buyer_page_data.json` from `runs/run_NN/run.db`, **landing the JSON inside the same `runs/run_NN/` directory** so all per-run artifacts (DB, engine logs, perf CSVs, exported JSON) stay grouped. Includes per-step rollups (`curve[]`), per-step time series (`curve[i].telemetry_samples`, `curve[i].turns`), and the 1 Hz whole-run heartbeat (`cohort.snapshots`). **`SLIM=true`** produces `buyer_page_data_slim.json` — same headline, landing zones, per-step rollup and bottleneck attribution, without the time series (~99% smaller). |
 | `make analyze-prefix-cache` | Prefix-cache hit-rate report on the latest `.db`. |
-| `make optimize-engine [PROFILE=...] [ONLY=...] [RUN_NEW=true]` | Iterate a registry of vLLM-CPU launch shapes (dual-replica, chunked prefill, larger KV pool, single-replica, TP=2, …), measure TTFT / TPOT / throughput across representative input/output/concurrency cells (incl. the long-context pain point at c=8 / c=16). **Always nohup'd + auto-tailed** — survives SSH disconnect; Ctrl-C exits the tail without killing the run. Resumes the existing `runs/engine_optimizer/run.json` by default (skips configs already marked `ok` / `launch_failed`), persists after every cell so a crash mid-config loses at most one cell. Pass `RUN_NEW=true` to wipe and start fresh. `ONLY=baseline,kv_xl` runs a subset; `LIST=1` prints the registered configs; `PROFILE=` selects the registry — CPU profiles (`amd_*`, `intel_*`) sweep cpuset/NUMA/OMP shapes, **`nvidia_qwen3` sweeps CUDA-vLLM shapes** (KV-pool sizing, batch width, chunked prefill, TP=2 vs two data-parallel replicas) for GPU hosts. Also drivable from the UI's **Optimizer** tab (`capsim serve`): pick profile + configs, start/stop, watch per-cell results land live, and read the mean-rank composite that names the winner. Beyond the fixed registry, **`make optimize-search SPACE=config/search/<space>.yaml`** (or the tab's *Guided search* mode) runs a coarse-to-fine search over a full parameter space — model variants/precision (each precision is its own HF artifact), TP, DP, GPU placement across PCIe domains, gpu-memory-utilization, batch width, chunked prefill — with a coverage sample first, an SLA-aware objective (throughput with p95-latency caps), then one-dimension neighborhood refinement around the leaders until the budget is spent or improvement flattens. Deterministic under a seed, deduped, resumable; the pure search logic is unit-tested in [simulator/search.py](simulator/search.py). Use this on a new host to find the best engine config before kicking off a full sweep, then encode the winner in the profile you sweep with. |
-| `make optimize-dashboard` | Read-only live dashboard against the running optimizer. Polls `runs/engine_optimizer/run.json` plus the latest `optimizer_*.log` in the same dir, renders the same layout as the foreground run (current config, phase, log tail, results-so-far). Use from a second SSH session to watch a backgrounded `make optimize-engine` without touching it. |
+| `make optimize-engine [PROFILE=...] [ONLY=...] [RUN_NEW=true]` | Iterate a registry of engine launch shapes, measure TTFT / TPOT / throughput across representative input/output/concurrency cells. **Always nohup'd + auto-tailed**. Resumes `runs/engine_optimizer/run.json` by default (skips configs already `ok` / `launch_failed`), persists after every cell. `ONLY=baseline,kv_xl` runs a subset; `LIST=1` prints the registered configs; `PROFILE=` selects the registry — CPU profiles (`amd_*`, `intel_*`) sweep cpuset/NUMA/OMP shapes, `nvidia_qwen3` sweeps CUDA-vLLM shapes. The UI's **Optimize** tab is the interactive front end to the same driver. |
+| `make optimize-search [SPACE=config/search/<space>.yaml]` | Guided coarse-to-fine search over a full parameter space (model variants/precision, engine, TP, DP, GPU placement across PCIe domains, memory fraction, batch width, chunked prefill): a coverage sample, an SLA-aware objective (throughput with p95-latency caps), then one-dimension neighborhood refinement around the leaders until the budget is spent. Deterministic under a seed, deduped, resumable; the pure search logic is unit-tested in [simulator/search.py](simulator/search.py). Same as the Optimize tab's *Guided search*. |
+| `make optimize-dashboard` | Read-only live dashboard against the running optimizer (polls `runs/engine_optimizer/run.json` + the latest `optimizer_*.log`). Use from a second SSH session. |
 | `make preflight CONFIG=...` | Hardware-only check (no install / build). |
 | `make launch-engine CONFIG=...` | Manually launch the engine without running a cohort (curl-poking). |
 | `make sglang-shell` | Interactive `bash` inside `sglang-cpu:xeon-fixed` with the model dir mounted. |
+| `make sglang-build` | Build the SGLang CPU image pipeline end-to-end: clone source, build `sglang-cpu:xeon`, layer `sglang-cpu:xeon-fixed`, verify the imports. |
+| `make models-dirs` | Create `MODELS_DIR` and `HF_CACHE_DIR` (sudo, once) and chown them to the current user. |
+| `make download-model MODEL=...` | `hf download` the model into `MODELS_DIR` with `HF_HUB_ENABLE_HF_TRANSFER=1`. |
 | `make test` | Run pytest. |
-| `make clean` / `clean-runs` | Tidy. |
+| `make clean` / `clean-runs` / `clean-venv` | Remove caches / `runs/run_*` and stray DBs / the project venv. |
 
-Variables: `CONFIG` (path to yaml), `COHORT` (cohort id), `ENGINE`, `MODEL`, `RUN_DIR`.
+Variables (Makefile lines 14–46): `ENGINE`, `MODEL` (override what the YAML says — rare), `COHORT`, `PERSONA`, `SWEEP_TYPE`, `ADAPTIVE` (opt into the two-knee stepper in closed-loop runs), `POOL_SIZES` (override the fixed grid), `CONFIG`, `RUN_DIR`, `RUN_NEW`, `VENV`, `PY`, `SGLANG_REPO`, `SGLANG_SRC`, `SGLANG_BASE_IMAGE`, `SGLANG_FIXED_IMAGE`, `SGLANG_DOCKERFILE`, `MODELS_DIR`, `HF_CACHE_DIR`, `LOCAL_MODEL_DIR`. The optimizer targets add `PROFILE`, `ONLY`, `LIST`, `SPACE`.
 
-Power-user / debugging escape hatches: `make sglang-clone`, `make sglang-base`, `make sglang-fixed`, `make sglang-verify`, `make download-model MODEL=...`. These are what `make ready` invokes internally; call them by hand if the orchestration mis-detects state.
+Power-user / debugging escape hatches: `make sglang-clone`, `make sglang-base`, `make sglang-fixed`, `make sglang-verify`. These are what `make sglang-build` (and `make ready`, via the Python equivalents) invoke internally; call them by hand if the orchestration mis-detects state.
 
 ## Layout
 
 ```
 simulator/
-  cli.py              # typer entry point used by Make targets
-  runner.py           # cohort run orchestration
-  config.py           # YAML + CLI config
-  personas.py         # 6 personas, 5 cohorts
-  distributions.py    # LogNormal / Discrete samplers
-  tokenizer_corpus.py # filler text targeted at token counts
+  # core loop — how a measurement is made
+  open_loop.py        # open-loop cohort orchestration: arrival-rate capacity search (primary)
+  rate_search.py      # arrival-rate search: λ_max and λ_sla, doubling then log-space bisection
+  stability.py        # queue-stability statistics: Mann-Kendall × Theil-Sen verdict per window
+  arrivals.py         # open-loop session arrival generation (Poisson, cancel-newest on revert)
+  loadgen_worker.py   # load-generator worker process (sharded Poisson, tardiness signal)
+  virtual_user.py     # virtual user runtime: one async task per simulated user
+  streaming.py        # tiered-timeout SSE stream consumer
+  pool_manager.py     # closed-loop pool manager: keeps the active user set at target size
+  measurement.py      # closed-loop measurement controller: ramp → stabilize → measure
+  adaptive.py         # two-knee adaptive stepper (closed-loop, opt-in)
+  timeline.py         # per-measurement phase-distribution timeline
+  runner.py           # top-level closed-loop cohort-run orchestration
+  # control plane
+  service.py          # control-plane HTTP service + UI host (FastAPI, /api + /ws/telemetry)
+  bus.py              # in-process telemetry event bus
+  runs.py             # run-directory layout helpers (run_NN, resume-by-default)
+  cli.py              # `capsim` command-line interface (typer)
+  config.py           # configuration loading and validation (YAML + profiles + overrides)
+  # optimize — finding the launch shape before measuring with it
+  search.py           # guided launch-shape search: coarse-to-fine over a parameter space
+  arena.py            # the test arena: every launch shape this installation can run
+  roofline.py         # roofline autopilot: what is the most this hardware can do?
+  headline_sweep.py   # headline (saturation) sweep — the marketing number, measured honestly
+  headline_search.py  # headline shape search: which (input, output) shape jointly maximises
+  headline_optimize.py# joint engine + shape search for the headline number
+  headline_shapes.py  # per-model-family store of optimal headline shapes
+  promote.py          # promote an optimizer winner into a benchmark profile
+  engine_runtimes.py  # which engine runtimes this host can actually launch
+  engine_notes.py     # measured tuning levers, and what they actually did on this box
+  model_catalog.py    # model catalog: models as data, additions as one line of YAML
+  models.py           # model weight staging: HF cache inspection + download commands
+  discovery.py        # live model discovery: the Hub, filtered through this box
   engines/
-    base.py           # subprocess + Prometheus metric parser
-    vllm.py           # Xeon CPU tuning recipe
-    sglang.py         # CPU launcher
-  virtual_user.py     # one async task per simulated user
-  pool_manager.py     # spawn/replace virtual users at target pool size
-  adaptive.py         # next-pool-size selection logic
-  measurement.py      # ramp -> stabilize -> measure
-  telemetry.py        # snapshots, perf-stat PMU, engine metrics
-  database.py         # SQLite schema + capture
-  dashboard.py        # rich live view
-  export.py           # buyer-page JSON
-  prefix_cache.py     # post-hoc prefix-cache hit-rate analysis
-  bandwidth.py        # IMC-uncore memory bandwidth (per-controller on GNR)
-  perf_collector.py   # PMU events with AMX raw fallback for GNR
-  power_probe.py      # RAPL package power
-  frequency.py        # bound-CPU effective frequency, three-tier read
-  amx_utilization.py  # oneDNN verbose log -> AMX dispatch fraction
-  cpu_binding.py      # parse VLLM_CPU_OMP_THREADS_BIND
-tests/                # pytest suites
-config/default.yaml
+    __init__.py       # engine registry (make_engine)
+    base.py           # engine abstraction: subprocess + Prometheus metric parser
+    docker_replica.py # shared machinery for whole-box, N-replica Docker engines
+    knobs.py          # one vocabulary of launch knobs, two engine dialects
+    vram.py           # one memory knob, translated per engine
+    vllm.py           # vLLM-CPU with the Xeon tuning recipe
+    vllm_cuda.py      # vLLM CUDA (Docker)
+    vllm_cuda_multi.py# multi-replica CUDA vLLM
+    vllm_dual_socket.py # vLLM-CPU, one replica per NUMA node
+    sglang.py         # SGLang-CPU (Docker)
+    sglang_cuda.py    # SGLang on GPUs, N replicas
+    trtllm.py         # TensorRT-LLM (trtllm-serve), N replicas
+    ktransformers.py  # KTransformers: MoE experts on CPU, attention on GPU
+    remote.py         # remote OpenAI-compatible endpoint
+    mock.py           # in-process mock engine with a synthetic knee
+  # telemetry
+  collectors/
+    __init__.py       # telemetry collector plugins (registry)
+    gpu.py            # NVIDIA GPU collector (NVML, nvidia-smi fallback)
+    host.py           # host-detail collector: CPUs, memory, disks, NICs
+  telemetry.py        # telemetry orchestration: snapshots, PMU, engine metrics
+  perf_collector.py   # perf-stat PMU counters with GNR-aware AMX probe
+  bandwidth.py        # memory bandwidth via Intel IMC uncore events
+  power_probe.py      # package power via Intel RAPL
+  frequency.py        # effective CPU frequency over the engine's bound CPU set
+  amx_utilization.py  # oneDNN verbose log → AMX dispatch fraction
+  # data
+  database.py         # SQLite schema (PRAGMA user_version = 7) + capture helpers
+  export.py           # the buyer-facing JSON document (validated against export_schema/)
+  export_schema/      # buyer_page_data.schema.json — the export contract
+  prefix_cache.py     # prefix-cache hit analysis from captured turn events
+  persona_loader.py   # persona/cohort YAML loading and serialization
+  personas.py         # persona and cohort dataclasses + the loaded catalog
+  personas_data/      # default.yaml — 8 personas, 5 cohorts
+  models_data/        # model catalog YAML
+  distributions.py    # LogNormal / Discrete / Constant samplers
+  tokenizer_corpus.py # filler text targeted at token counts
+  # host
+  doctor.py           # host validation for the one-command landing flow
+  preflight.py        # hardware-compatibility preflight against a config
+  cpu_binding.py      # expand a vLLM-style thread-binding string into a CPU id set
+  dashboard.py        # rich live progress view
+  ui/                 # index.html, app.js, app.css, vendored Chart.js — no build step
+scripts/
+  audit_run.py        # curve-quality audit → audit_report.json (make audit)
+  engine_optimizer.py # the optimizer / guided-search driver (make optimize-*)
+  gen_schema_doc.py   # regenerates docs/database_schema.md from the DDL
+tests/                # pytest suites (unit, contract, mock-engine integration)
+config/
+  default.yaml        # base config every profile overlays
+  profiles/           # curated profiles: xeon-gpu-qwen3-30b, mock, remote-endpoint (template)
+  search/             # guided-search spaces (xe7740-qwen3, xe7740-multimodel)
+  arena.example.yaml  # copy to config/arena.yaml to hint PCIe/NUMA GPU groups
+  xeon_*.yaml, r7735_*.yaml  # CPU host configs, addressable by stem with --profile
+docs/                 # algorithm, metrics, database_schema, deploy, roadmap, improvement_plan
 Makefile
 ```
+
+### Documentation
+
+| Doc | What it covers |
+|---|---|
+| [docs/algorithm.md](docs/algorithm.md) | The methodology: open-loop arrival-rate search, the closed-loop ramp, distributions, personas, virtual-user lifecycle, measurement windows, steppers, Wilson CI, reasoning-model handling, phase timeline. |
+| [docs/metrics.md](docs/metrics.md) | Every telemetry metric, its source, and what the stack cannot honestly measure. |
+| [docs/database_schema.md](docs/database_schema.md) | `run.db` tables and columns at the current schema version — generated from the DDL. |
+| [docs/deploy.md](docs/deploy.md) | Landing flow per host class, from bare OS to first benchmark; driver field notes. |
+| [docs/roadmap.md](docs/roadmap.md) | Phases 0–5: what was planned, what shipped, and the open items. |
+| [docs/improvement_plan.md](docs/improvement_plan.md) | The 2026-09-19 review: accuracy, completeness, UX and robustness findings, with the ordered fix plan. |
 
 ### Run directory layout
 
 ```
 runs/
+  doctor.json                             # latest `capsim doctor` report
   run_01/
-    run.db                              # one DB per run_NN
+    run.db                                # one DB per run_NN
     engine_sglang_1714851402.log
     perf_m0_8.csv
     sweep_20260504T231642.log
+    audit_report.json                     # from `make audit`, read by `make spot-check`
+    buyer_page_data.json                  # from `make export`
   run_02/
     ...
+  engine_optimizer/
+    run.json, search.json, optimizer_*.log
+  smoke/                                  # isolated `capsim smoke` run
 ```
 
 Every invocation writes into a numbered `run_NN/` subdirectory and
@@ -186,10 +334,10 @@ There's no published Docker Hub tag for the CPU build; build from SGLang source.
 ### One-shot setup
 
 ```bash
-make ready CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml
+make ready CONFIG=config/xeon_sglang_qwen3_30b_a3b_fp8.yaml
 ```
 
-That handles everything: pip install, clone SGLang source if missing, build `sglang-cpu:xeon` (~15-20 min first run only), build the layered `sglang-cpu:xeon-fixed`, download the model with `HF_HUB_ENABLE_HF_TRANSFER=1`, and run the hardware preflight. Re-running is idempotent — already-built images and already-downloaded models are detected and skipped.
+That handles everything: pip install, clone SGLang source if missing, build `sglang-cpu:xeon` (~15-20 min first run only), build the layered `sglang-cpu:xeon-fixed`, download the model with `HF_HUB_ENABLE_HF_TRANSFER=1`, and run the hardware preflight. Re-running is idempotent — already-built images and already-downloaded models are detected and skipped. `make sglang-build` runs just the image pipeline.
 
 For an SSH-resilient first run on a fresh box, wrap in `tmux`.
 
@@ -198,15 +346,12 @@ The `-2507` suffix is part of the actual published HF repo name, not a separate 
 ### Run
 
 ```bash
-# BF16 baseline
-make launch-engine ENGINE=sglang \
-                   MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507 \
-                   CONFIG=config/r7735_vllm_dual_socket_qwen3_30b_a3b.yaml
-
 # FP8 on Intel Xeon (AMX) — preflight blocks AMD hosts
-make launch-engine ENGINE=sglang \
-                   MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 \
-                   CONFIG=config/xeon_sglang_qwen3_30b_a3b_fp8.yaml
+make launch-engine CONFIG=config/xeon_sglang_qwen3_30b_a3b_fp8.yaml
+
+# BF16 variant of the same config (portable; override the model id)
+make launch-engine CONFIG=config/xeon_sglang_qwen3_30b_a3b_fp8.yaml \
+                   MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507
 ```
 
 The container streams its stdout/stderr to `runs/engine_sglang_*.log`. Wait for the simulator's `SGLang ready after Xs` message — this only fires once `/v1/models` returns 200, which means the model is fully loaded. Expected times:

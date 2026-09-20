@@ -6,6 +6,16 @@ cases. Prerequisites on the target: Python 3.10+, Docker, git.
 Everything else (uv, the capsim tool, models, engine images) is
 installed by the flow itself, without sudo.
 
+A note on profiles: the curated `config/profiles/` directory holds
+the GPU profile (`xeon-gpu-qwen3-30b`), the `mock` profile and the
+`remote-endpoint` template. There is no curated CPU-only profile yet;
+CPU hosts use the host-specific configs at `config/xeon_*.yaml`
+(Granite Rapids, single socket) and `config/r7735_*.yaml` (dual-socket
+EPYC), which every command accepts by stem — for example
+`--profile xeon_vllm_gemma4_26b_a4b`. `capsim list-profiles` prints
+both kinds. The README's [Targets and profiles](../README.md#targets-and-profiles)
+section lists every engine type.
+
 ## 0. Bare OS → prerequisites (one-time, needs sudo)
 
 Fresh box with nothing but the OS (Ubuntu 22.04/24.04 shown; RHEL
@@ -109,8 +119,8 @@ so `config/` profiles resolve.
 capsim doctor
 ```
 
-Prints a pass/warn/fail table and writes `doctor.json` (exit code 1 on
-any fail — fit for scripting):
+Prints a pass/warn/fail table and writes `runs/doctor.json` (exit code
+1 on any fail — fit for scripting; `--output` moves the file):
 
 | Check | Fail means | Warn means |
 |---|---|---|
@@ -122,7 +132,10 @@ any fail — fit for scripting):
 | `hf_reachability` / `hf_token` | — | downloads need network or pre-staged weights |
 
 Doctor ends by recommending candidate **profiles** for the detected
-hardware (`capsim list-profiles` shows all of them).
+hardware (`capsim list-profiles` shows all of them). The UI's
+**Prepare** tab runs the same check from its first panel, so on a box
+where you go straight to `capsim serve` this step is the "Run doctor"
+button.
 
 ## 3. Prove the pipeline (before any big download)
 
@@ -140,35 +153,77 @@ re-run. If smoke passes, the whole pipeline works on this host.
 
 ## 4. Full preparation and first benchmark
 
-Find the best engine launch shape BEFORE the first sweep — capacity
-numbers are only as good as the launch config they were measured on.
-From the UI's **Optimizer** tab (or `make optimize-engine
-PROFILE=nvidia_qwen3` headless): it sweeps KV-pool sizing, batch
-width, chunked prefill, and TP=2 vs data-parallel replicas against
-representative latency/throughput cells, ranks the outcomes, and
-persists/resumes at `runs/engine_optimizer/run.json`. For the wider
-question — best shape across models, precision, TP, DP and placement —
-use the tab's **Guided search** mode (or `make optimize-search
-SPACE=config/search/xe7740-qwen3.yaml`): coverage sample, SLA-aware
-scoring, neighborhood refinement, budget-capped and resumable. Either
-way, encode the winner in the profile you sweep with (e.g. add the
-winning `--max-num-seqs` to `vllm_extra_flags`, switch to FP8's model
-id, or set `tensor_parallel_size`).
+### From the UI (the normal path)
+
+```bash
+capsim serve                               # web UI on 127.0.0.1:8321
+```
+
+The **Prepare** tab is the entry point and walks the box through the
+same stages as the CLI flow above, in order:
+
+1. **Validate the host** — runs doctor; ends with a profile
+   recommendation and the exact fix for anything that fails.
+2. **Choose where models live** — pick the filesystem and directory
+   model weights download to. Doctor, downloads, the engines and the
+   optimizer all follow this choice.
+3. **Stage model weights** — the model catalog with cache status per
+   model; download before optimizing so launch timeouts measure
+   engines, not the network. Add a Hugging Face id or discover new
+   models from the Hub, filtered to what this box can hold.
+4. **Stage engine runtimes** — which server images (vLLM, SGLang,
+   TensorRT-LLM, KTransformers) are on the box. An engine only appears
+   in Optimize and Workload once its image is here.
+5. **Find the best launch shape** → opens **Optimize**.
+
+Then find the best engine launch shape BEFORE the first benchmark —
+capacity numbers are only as good as the launch config they were
+measured on. The **Optimize** tab builds the test arena (every launch
+shape this installation can run, from detected GPUs and PCIe domains;
+`config/arena.yaml`, copied from `config/arena.example.yaml`, can hint
+the domain grouping, and the tab warns when that file claims more GPUs
+than are detected), runs a **Guided search** over it, and names the
+winner, which becomes the optimized launch the **Workload** tab
+benchmarks with. **Roofline** is the autopilot version of the same
+question across models × engines × shapes. Start the capacity run from
+**Workload** (open-loop by default), watch it there, and read the
+report in **Results**.
+
+For the UI over SSH, tunnel the port: `ssh -L 8321:localhost:8321 <host>`
+— the service deliberately binds localhost and has no auth. Binding
+`--host` to anything other than loopback is refused unless you also
+pass `--insecure`, because the API accepts arbitrary container images
+and host paths.
+
+### Headless
 
 ```bash
 capsim ready --profile <recommended>       # engine image + full model
-capsim serve                               # web UI on 127.0.0.1:8321
-# or headless:
-make run-sweep CONFIG=<profile path>       # nohup'd, SSH-safe
+make optimize-engine PROFILE=nvidia_qwen3  # registry A/B of launch shapes
+make optimize-search SPACE=config/search/xe7740-qwen3.yaml   # guided search
+capsim run --cohort chat_heavy --profile <recommended>       # open-loop capacity run
+make run-sweep CONFIG=<config path>        # closed-loop sweep; nohup'd, SSH-safe
 ```
 
-For the UI over SSH, tunnel the port: `ssh -L 8321:localhost:8321 <host>`
-— the service deliberately binds localhost and has no auth.
+`make optimize-engine` sweeps KV-pool sizing, batch width, chunked
+prefill, and TP=2 vs data-parallel replicas against representative
+latency/throughput cells, ranks the outcomes, and persists/resumes at
+`runs/engine_optimizer/run.json`. `make optimize-search` answers the
+wider question — best shape across models, precision, engine, TP, DP
+and placement — with a coverage sample, SLA-aware scoring and
+neighborhood refinement, budget-capped and resumable. Either way,
+encode the winner in the profile you benchmark with (e.g. add the
+winning `--max-num-seqs` to `vllm_extra_flags`, switch to FP8's model
+id, or set `tensor_parallel_size`). `capsim run` and `run-persona`
+take `--mode open|closed` (default open); sweeps stay closed-loop.
 
 ## Host-class notes
 
-**Xeon CPU-only** — the SGLang path builds a Docker image from source
-on first `ready` (~15-20 min); the vLLM-CPU path pulls the upstream
+**Xeon CPU-only** — no curated profile yet; use the `config/xeon_*`
+configs by stem (`xeon_vllm_gemma4_26b_a4b`, `xeon_vllm_gpt_oss`,
+`xeon_sglang_qwen3_30b_a3b_fp8`), or the `config/r7735_*` ones on
+dual-socket EPYC. The SGLang path builds a Docker image from source on
+first `ready` (~15-20 min); the vLLM-CPU path pulls the upstream
 image. Telemetry wants `kernel.perf_event_paranoid=-1` and readable
 RAPL for the full evidence set (doctor prints the exact commands).
 
@@ -193,7 +248,8 @@ No Docker, no models, real pipeline.
 git pull && ./install.sh
 ```
 
-Run DBs migrate forward automatically on next open (schema version is
-stamped in each `run.db`; newer-than-code DBs are refused rather than
-corrupted). Export JSON carries `schema_version` — downstream
-consumers should pin against it.
+Run DBs migrate forward automatically on next open (the schema
+version is stamped in each `run.db` as `PRAGMA user_version`;
+newer-than-code DBs are refused rather than corrupted — see
+[database_schema.md](database_schema.md)). Export JSON carries
+`schema_version` — downstream consumers should pin against it.

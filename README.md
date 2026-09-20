@@ -230,7 +230,7 @@ simulator/
   preflight.py        # hardware-compatibility preflight against a config
   cpu_binding.py      # expand a vLLM-style thread-binding string into a CPU id set
   dashboard.py        # rich live progress view
-  ui/                 # index.html, app.js, app.css, vendored Chart.js — no build step
+  ui/                 # index.html, app.js + one module per tab, lib/, app.css, vendored Chart.js — no build step
 scripts/
   audit_run.py        # curve-quality audit → audit_report.json (make audit)
   engine_optimizer.py # the optimizer / guided-search driver (make optimize-*)

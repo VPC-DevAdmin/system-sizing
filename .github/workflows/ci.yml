@@ -49,7 +49,7 @@ jobs:
           from pathlib import Path
           import simulator
           root = Path(simulator.__file__).parent
-          for p in ("ui/index.html", "ui/vendor/chart.umd.min.js",
+          for p in ("ui/index.html", "ui/lib/api.js", "ui/vendor/chart.umd.min.js",
                     "export_schema/buyer_page_data.schema.json",
                     "personas_data/default.yaml"):
               assert (root / p).exists(), f"missing package data: {p}"

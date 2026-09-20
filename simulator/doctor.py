@@ -194,9 +194,15 @@ def _check_gpu(report: DoctorReport, docker_ok: bool) -> bool:
         report.add("gpu", SKIP, "no nvidia-smi — CPU-only host")
         return False
     if rc != 0:
+        # A host that HAS nvidia-smi and cannot run it is a broken GPU
+        # stack (driver/library mismatch, a module not loaded), not a
+        # CPU-only host. Every GPU engine will fail the same way, so
+        # this is a hard failure and the CLI exits non-zero.
         report.add(
-            "gpu", WARN,
-            f"nvidia-smi present but failed: {out.splitlines()[-1] if out else rc}",
+            "gpu", FAIL,
+            f"nvidia-smi present but failed: {out.splitlines()[-1] if out else rc}"
+            " — the driver is installed but not working; fix it before "
+            "any GPU engine can launch",
         )
         return False
     for line in out.splitlines():
@@ -416,11 +422,32 @@ def _check_hf(report: DoctorReport) -> None:
             f"huggingface.co unreachable ({type(e).__name__}) — model "
             f"downloads need network or a pre-staged model dir",
         )
-    token_file = Path.home() / ".cache" / "huggingface" / "token"
-    if os.environ.get("HF_TOKEN") or token_file.exists():
-        report.add("hf_token", OK, "HF token present (gated models downloadable)")
+    where = hf_token_source()
+    if where:
+        report.add("hf_token", OK,
+                   f"HF token present ({where}; gated models downloadable)")
     else:
         report.add("hf_token", SKIP, "no HF token — fine unless the model is gated")
+
+
+def hf_token_source() -> str | None:
+    """Where an HF token would be read from, in huggingface_hub's own
+    order: HF_TOKEN, HUGGING_FACE_HUB_TOKEN, HF_TOKEN_PATH, then the
+    token file under HF_HOME (default ~/.cache/huggingface). None when
+    there is none. The old check looked only at HF_TOKEN and the
+    default file, so a host with HF_HOME on the data disk reported no
+    token while every download used one."""
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(var):
+            return f"${var}"
+    token_path = os.environ.get("HF_TOKEN_PATH")
+    if token_path and Path(token_path).is_file():
+        return token_path
+    home = os.environ.get("HF_HOME")
+    token_file = (Path(home) if home else Path.home() / ".cache" / "huggingface") / "token"
+    if token_file.is_file():
+        return str(token_file)
+    return None
 
 
 def _recommend_configs(

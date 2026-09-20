@@ -9,6 +9,7 @@ report must serialize.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from simulator.doctor import FAIL, OK, SKIP, WARN, DoctorReport, run_doctor
 
@@ -105,3 +106,52 @@ def test_disk_check_reports_real_consumers(tmp_path, monkeypatch) -> None:
     row = next(c for c in report.checks if c.name == "disk")
     assert "hf-cache" in row.detail
     assert str(cache) in row.detail
+
+
+def test_a_broken_nvidia_smi_is_a_failure_not_a_warning(monkeypatch) -> None:
+    """A host that has nvidia-smi and cannot run it has a broken GPU
+    stack; every GPU engine will fail the same way, so the CLI must
+    exit non-zero rather than warn and carry on."""
+    import simulator.doctor as doc
+
+    def fake_run(cmd, timeout=15):
+        if cmd[0] == "nvidia-smi":
+            return 1, "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver."
+        return 127, f"{cmd[0]}: not found"
+    monkeypatch.setattr(doc, "_run", fake_run)
+    report = DoctorReport()
+    assert doc._check_gpu(report, docker_ok=False) is False
+    row = next(c for c in report.checks if c.name == "gpu")
+    assert row.status == FAIL
+    assert "couldn't communicate" in row.detail
+    assert report.failed
+
+    # Absent entirely is still a CPU-only host, not a failure.
+    monkeypatch.setattr(doc, "_run", lambda cmd, timeout=15: (127, "x"))
+    report = DoctorReport()
+    doc._check_gpu(report, docker_ok=False)
+    assert next(c for c in report.checks if c.name == "gpu").status == SKIP
+
+
+def test_hf_token_detection_honours_the_hub_env(tmp_path, monkeypatch) -> None:
+    """The check looked only at HF_TOKEN and ~/.cache/huggingface, so a
+    host with HF_HOME on the data disk reported no token while every
+    download used one."""
+    from simulator.doctor import hf_token_source
+
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH",
+                "HF_HOME"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "nohome"))
+    assert hf_token_source() is None
+
+    hf_home = tmp_path / "data" / "hf"
+    hf_home.mkdir(parents=True)
+    (hf_home / "token").write_text("hf_x")
+    monkeypatch.setenv("HF_HOME", str(hf_home))
+    assert hf_token_source() == str(hf_home / "token")
+
+    monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "hf_y")
+    assert hf_token_source() == "$HUGGING_FACE_HUB_TOKEN"
+    monkeypatch.setenv("HF_TOKEN", "hf_z")
+    assert hf_token_source() == "$HF_TOKEN"

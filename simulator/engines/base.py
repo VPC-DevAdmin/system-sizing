@@ -8,15 +8,55 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import httpx
 
 log = logging.getLogger(__name__)
+
+# Environment variable names whose VALUES must never reach a log line,
+# an exception message or a persisted failure reason. Matched as a
+# case-insensitive substring of the name, so HF_TOKEN,
+# HUGGING_FACE_HUB_TOKEN, OPENAI_API_KEY and AWS_SECRET_ACCESS_KEY are
+# all covered without enumerating them.
+SECRET_ENV_PATTERN = re.compile(r"TOKEN|SECRET|KEY|PASSWORD", re.I)
+_ENV_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+
+
+def _mask_assignment(token: str) -> str:
+    m = _ENV_ASSIGNMENT.match(token)
+    if m and m.group(2) and SECRET_ENV_PATTERN.search(m.group(1)):
+        return f"{m.group(1)}=***"
+    return token
+
+
+def redact_argv(cmd: Sequence[str]) -> str:
+    """``" ".join(cmd)`` with secret env values masked.
+
+    Every launcher passes the HF token to its container as
+    ``-e HF_TOKEN=<value>`` and then logs the whole argv, which put the
+    token in every engine log and -- via the optimizer's failure
+    reason -- in ``run.json``. The NAME is kept (that a token was passed
+    is diagnostic); the value is replaced by ``***``. Handles
+    ``-e NAME=VALUE`` / ``--env NAME=VALUE``, the joined forms
+    ``-eNAME=VALUE`` / ``--env=NAME=VALUE``, and a bare ``NAME=VALUE``
+    token anywhere in the command (``env HF_TOKEN=... cmd``).
+    """
+    out: list[str] = []
+    for tok in cmd:
+        tok = str(tok)
+        if tok.startswith("--env="):
+            out.append("--env=" + _mask_assignment(tok[len("--env="):]))
+        elif tok.startswith("-e") and not tok.startswith("--") and "=" in tok:
+            out.append("-e" + _mask_assignment(tok[2:]))
+        else:
+            out.append(_mask_assignment(tok))
+    return " ".join(out)
 
 
 class Engine:
@@ -108,7 +148,7 @@ class Engine:
 
         cmd = self._build_command()
         env = self._build_env()
-        log.info("Launching %s: %s", self.cfg.type, " ".join(cmd))
+        log.info("Launching %s: %s", self.cfg.type, redact_argv(cmd))
         log.info("Engine logs -> %s", log_path)
 
         self._proc = subprocess.Popen(

@@ -30,7 +30,7 @@ from typing import Optional
 
 import httpx
 
-from .base import Engine
+from .base import Engine, redact_argv
 
 # Stale-container sweep is shared: a leftover trtllm-* container would
 # hold port 9100 and answer health checks for the WRONG engine, so it
@@ -65,7 +65,7 @@ class VllmCudaEngine(Engine):
         self._log_path = log_path
 
         cmd = self._build_docker_command()
-        log.info("Launching vllm_cuda (docker): %s", " ".join(cmd))
+        log.info("Launching vllm_cuda (docker): %s", redact_argv(cmd))
         log.info("Engine logs -> %s", log_path)
 
         try:

@@ -35,7 +35,7 @@ from typing import Optional
 
 import httpx
 
-from .base import Engine
+from .base import Engine, redact_argv
 
 log = logging.getLogger(__name__)
 
@@ -258,7 +258,7 @@ class DockerReplicaEngine(Engine):
                         run_id: str) -> None:
         name = f"{self.ENGINE_NAME.split('_')[0]}-r{index}-{run_id}"
         cmd = self.build_replica_command(index, devices, name)
-        log.info("docker run r%d: %s", index, " ".join(cmd))
+        log.info("docker run r%d: %s", index, redact_argv(cmd))
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, check=True, timeout=120,

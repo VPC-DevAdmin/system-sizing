@@ -68,6 +68,17 @@ except ImportError as e:
     raise SystemExit(
         "openai package required: pip install openai (or activate the project venv)"
     ) from e
+
+# The script is run both as ``python scripts/engine_optimizer.py`` (no
+# package on sys.path) and imported by the tests (package installed).
+# One shim here, so every ``from simulator...`` below is unconditional.
+try:
+    import simulator  # noqa: F401
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from simulator.engines.base import redact_argv  # noqa: E402
+
 try:
     from rich.console import Console, Group
     from rich.layout import Layout
@@ -1455,9 +1466,12 @@ def docker_launch(cfg: EngineConfig, replica: ReplicaSpec) -> str:
         args.extend(cfg.replica_args)
     res = subprocess.run(args, capture_output=True, text=True)
     if res.returncode != 0:
+        # This message is persisted verbatim as the config's
+        # failure_reason, so the argv MUST be redacted: it carries the
+        # HF token as -e HF_TOKEN=<value>.
         raise RuntimeError(
             f"docker run for {replica.name} failed:\n"
-            f"  cmd: {' '.join(args)}\n"
+            f"  cmd: {redact_argv(args)}\n"
             f"  stderr: {res.stderr.strip()}"
         )
     return res.stdout.strip()

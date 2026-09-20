@@ -22,6 +22,7 @@ from simulator.roofline import (
     save_state,
     score_models,
     summarize,
+    vendor_of,
 )
 
 CATALOG = [
@@ -44,7 +45,7 @@ VENDORS = [
     {"id": "Qwen/Qwen3-30B-A3B", "family": "qwen3-30b-a3b", "series": "Qwen3",
      "quant": "bf16", "params_b": 30.5, "moe": True, "approx_size_gb": 61,
      "min_vram_gb": 80},
-    {"id": "Qwen/Qwen3.6-35B-NVFP4", "family": "qwen3.6-35b", "series": "Qwen3",
+    {"id": "Qwen/Qwen3.6-35B-NVFP4", "family": "qwen3.6-35b", "series": "Qwen3.6",
      "quant": "nvfp4", "params_b": 35.0, "moe": True, "approx_size_gb": 21,
      "min_vram_gb": 24},
     {"id": "Qwen/Qwen3-32B-FP8", "family": "qwen3-32b", "series": "Qwen3",
@@ -74,7 +75,7 @@ def test_candidates_carry_family_and_series():
 
 def test_pure_ranking_fills_the_shortlist_with_one_vendor():
     old = pick_models(VENDORS, vram_per_gpu_gb=96, limit=4, diverse=False)
-    assert {c.series for c in old} == {"Qwen3"}
+    assert {vendor_of(c.series) for c in old} == {"Qwen"}
     assert [c.id for c in old] == [
         c.id for c in score_models(VENDORS, vram_per_gpu_gb=96)[:4]]
     assert all(c.pick_round == 0 for c in old)
@@ -82,27 +83,30 @@ def test_pure_ranking_fills_the_shortlist_with_one_vendor():
 
 def test_diverse_pick_takes_the_best_of_every_series_first():
     picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=4)
-    assert [c.series for c in picks] == ["Qwen3", "gpt-oss", "Llama-3.3", "GLM-4.7"]
+    # Qwen3 and Qwen3.6 are separate series but ONE vendor: Qwen gets
+    # one round-one slot, not two.
+    assert [c.series for c in picks] == ["Qwen3.6", "gpt-oss", "Llama-3.3", "GLM-4.7"]
     # The Qwen pick is still the ranker's favourite, and its round is
     # written into the reason the operator reads.
     assert picks[0].id == "Qwen/Qwen3.6-35B-NVFP4"
     assert picks[0].pick_round == 1
-    assert picks[0].why.startswith("best of the Qwen3 line;")
-    assert picks[3].why.startswith("best of the GLM-4.7 line;")
+    assert picks[0].why.startswith("best of the Qwen line;")
+    assert picks[3].why.startswith("best of the GLM line;")
 
 
 def test_diverse_pick_returns_to_a_series_only_after_every_series_has_one():
     picks = pick_models(VENDORS, vram_per_gpu_gb=96, limit=6)
     assert [c.series for c in picks[:4]] == [
-        "Qwen3", "gpt-oss", "Llama-3.3", "GLM-4.7"]
+        "Qwen3.6", "gpt-oss", "Llama-3.3", "GLM-4.7"]
     assert [c.series for c in picks[4:]] == ["Qwen3", "Qwen3"]
-    # Second and third Qwen picks are different weights before a
-    # second precision of weights already on the list.
+    # Second and third Qwen picks are an unmeasured series first, then
+    # different weights, before a second precision of weights already
+    # on the list.
     assert picks[4].family != picks[0].family
     assert picks[5].family not in {picks[0].family, picks[4].family}
     assert picks[4].pick_round == 2 and picks[5].pick_round == 3
-    assert picks[4].why.startswith("second pick from Qwen3;")
-    assert picks[5].why.startswith("third pick from Qwen3;")
+    assert picks[4].why.startswith("second pick from Qwen;")
+    assert picks[5].why.startswith("third pick from Qwen;")
 
 
 def test_diverse_pick_falls_back_to_a_precision_twin_last():

@@ -206,24 +206,32 @@ def _round_label(n: int, series: str) -> str:
     return f"{word} the {series} line" if n == 1 else f"{word} {series}"
 
 
+def vendor_of(series: str) -> str:
+    """The vendor line behind a catalog ``series``: the leading word
+    before any version -- "Qwen3" / "Qwen3.6" / "Qwen3 Next" -> "Qwen",
+    "GLM-4.7" -> "GLM", "gpt-oss" -> "gpt-oss", "Llama 3.3" -> "Llama"."""
+    m = re.match(r"[A-Za-z]+(?:-[A-Za-z]+)*", str(series or ""))
+    return m.group(0) if m else str(series or "")
+
+
 def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
                 limit: int = 5, cached_only: bool = False,
                 cache: Path | None = None,
                 diverse: bool = True) -> list[Candidate]:
     """The shortlist a roofline runs when the operator names no model.
 
-    ``diverse`` (the default) round-robins over ``series``: the best
-    candidate of every series in score order, then every series'
-    second-best, and so on until ``limit``. The pure ranking had a
+    ``diverse`` (the default) round-robins over VENDOR (``vendor_of``
+    the series): the best candidate of every vendor in score order,
+    then every vendor's second-best, and so on until ``limit``. The pure ranking had a
     failure mode the XE7740 hit on its first run: three quantisations
     of Qwen filled the shortlist and the roofline never looked at
     gpt-oss, GLM, Llama or the rest. A roofline is a search over what
     the box can do, and a search that only ever tries one vendor's
     weights has not searched.
 
-    Within a series a different ``family`` (different weights) is
-    taken before a second precision variant of weights already on
-    the list -- the FP8 twin of a model already measured teaches
+    Within a vendor an unmeasured series is taken first, then a
+    different ``family`` (different weights), and only last a second
+    precision variant of weights already on the list -- the FP8 twin of a model already measured teaches
     less than a model nobody measured. "Measured beats estimated"
     stays the primary sort inside every series, and orders the
     series themselves in the first round.
@@ -239,28 +247,37 @@ def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
     if not diverse:
         return ranked[:limit]
 
-    # Series in order of their best candidate; score_models already
+    # Vendors in order of their best candidate; score_models already
     # sorted with measured-first, so first-seen order is that order.
-    by_series: dict[str, list[Candidate]] = {}
+    # The catalog labels Qwen3, Qwen3.6 and Qwen3.8 as separate
+    # series (they are different generations), but they are one
+    # vendor's weights, and the operator's question -- "what can this
+    # box do?" -- is not answered by three of them before one gpt-oss.
+    by_vendor: dict[str, list[Candidate]] = {}
     for c in ranked:
-        by_series.setdefault(c.series or c.family or c.id, []).append(c)
+        by_vendor.setdefault(vendor_of(c.series or c.family or c.id), []).append(c)
 
     picks: list[Candidate] = []
     rnd = 0
-    while len(picks) < limit and any(by_series.values()):
+    while len(picks) < limit and any(by_vendor.values()):
         rnd += 1
-        for series, pool in by_series.items():
+        for vendor, pool in by_vendor.items():
             if not pool:
                 continue
             if len(picks) >= limit:
                 break
-            taken_families = {p.family for p in picks if p.series == series}
-            fresh = [c for c in pool if c.family not in taken_families]
-            choice = fresh[0] if fresh else pool[0]
+            mine = [p for p in picks if vendor_of(p.series or p.family or p.id) == vendor]
+            taken_series = {p.series for p in mine}
+            taken_families = {p.family for p in mine}
+            # Prefer a series nobody measured, then weights nobody
+            # measured, then (last) a precision twin.
+            fresh_series = [c for c in pool if c.series not in taken_series]
+            fresh_family = [c for c in pool if c.family not in taken_families]
+            choice = (fresh_series or fresh_family or pool)[0]
             pool.remove(choice)
             choice.pick_round = rnd
-            note = _round_label(rnd, series)
-            if not fresh:
+            note = _round_label(rnd, vendor)
+            if not fresh_series and not fresh_family:
                 note += f" (another precision of {choice.family})"
             choice.why = f"{note}; {choice.why}" if choice.why else note
             picks.append(choice)

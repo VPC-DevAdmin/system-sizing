@@ -734,7 +734,9 @@ def _open_loop_summary(measurements: list[dict]) -> dict | None:
 
     The capacity story in rate space: **rate_max** (highest stable
     arrival rate — the stability boundary from below), **rate_sla**
-    (highest stable rate whose steady-state turns also pass SLA) and
+    (highest stable rate whose steady-state turns also pass the SLA
+    gate — ``capacity_status == "pass"``, the Wilson upper bound of the
+    violation rate below 5 %; ``marginal`` does not qualify) and
     **rate_ceiling** (lowest rate observed to diverge — the boundary
     from above; rate_max and rate_ceiling bracket the true limit).
     Concurrency is *derived*, not assumed: Little's law at the SLA

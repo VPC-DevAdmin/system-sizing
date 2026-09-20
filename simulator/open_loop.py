@@ -567,6 +567,29 @@ def _summarize_turns(turns: list[dict]) -> dict:
     }
 
 
+def _served_mean(
+    running_series: list[float], inflight_series: list[float],
+) -> tuple[float | None, str]:
+    """Mean number of requests actually being served during the
+    window — the practical-significance basis for the stability
+    verdict (growing the backlog by half the active batch in one
+    window is collapse). The engine's own ``num_running`` gauge is
+    the honest number: the client's in-flight count also includes
+    requests still WAITING in the engine's queue, which inflates the
+    basis exactly when the queue is growing. Falls back to client
+    in-flight when the engine exposes no running gauge (or fewer
+    than half the ticks scraped one).
+
+    Returns ``(mean, basis)`` with basis ``"engine_running"`` or
+    ``"client_in_flight"``; ``(None, ...)`` with no samples at all.
+    """
+    if running_series and len(running_series) >= len(inflight_series) // 2:
+        return statistics.fmean(running_series), "engine_running"
+    if inflight_series:
+        return statistics.fmean(inflight_series), "client_in_flight"
+    return None, "none"
+
+
 def _turn_row(t: dict, measurement_id: int) -> dict:
     return {
         "measurement_id": measurement_id,
@@ -865,6 +888,7 @@ class OpenLoopRunner:
         turns: list[dict] = []
         queue_series: list[float] = []
         inflight_series: list[float] = []
+        running_series: list[float] = []   # engine num_running gauge
         active_series: list[float] = []
         max_tardiness = 0.0
         max_lag = 0.0
@@ -885,6 +909,9 @@ class OpenLoopRunner:
                 qd = m.get("queue_depth")
                 if qd is not None:
                     queue_series.append(float(qd))
+                nr = m.get("num_running")
+                if nr is not None:
+                    running_series.append(float(nr))
                 if agg:
                     inflight_series.append(float(agg.get("in_flight", 0)))
                     active_series.append(float(agg.get("sessions_active", 0)))
@@ -920,10 +947,8 @@ class OpenLoopRunner:
                     remaining = 0  # discard: measure no further
 
                 if remaining <= 0:
-                    served_mean = (
-                        statistics.fmean(inflight_series)
-                        if inflight_series else None
-                    )
+                    served_mean, served_basis = _served_mean(
+                        running_series, inflight_series)
                     basis = "engine_queue"
                     series = queue_series
                     # Engines without a queue gauge (or scrape
@@ -939,6 +964,7 @@ class OpenLoopRunner:
                     )
                     verdict_dict = verdict.to_dict()
                     verdict_dict["basis"] = basis
+                    verdict_dict["served_basis"] = served_basis
                     if worker_deaths:
                         break  # no extension: the window is void
                     if verdict.verdict == INCONCLUSIVE and not extended:
@@ -975,12 +1001,15 @@ class OpenLoopRunner:
             # A worker died before a single measuring tick: nothing
             # to assess, and the window is void anyway.
             verdict = assess_queue_stability(queue_series or inflight_series)
+        served_mean, served_basis = _served_mean(
+            running_series, inflight_series)
         verdict_dict = verdict.to_dict()
         verdict_dict["basis"] = (
             "engine_queue"
             if len(queue_series) >= len(inflight_series) // 2
             else "client_in_flight"
         )
+        verdict_dict["served_basis"] = served_basis
         verdict_dict["warmup_s"] = round(warmup_s, 1)
         verdict_dict["settled"] = settled
 
@@ -1015,11 +1044,7 @@ class OpenLoopRunner:
         # growth is divergence, marginal drift is stability — either
         # way the detail JSON records the ambiguity.
         if verdict.verdict == INCONCLUSIVE:
-            floor = max(
-                10.0,
-                0.5 * (statistics.fmean(inflight_series)
-                       if inflight_series else 0.0),
-            )
+            floor = max(10.0, 0.5 * (served_mean or 0.0))
             stability = (
                 DIVERGENT
                 if verdict.growth_over_window >= 0.5 * floor else STABLE
@@ -1031,6 +1056,10 @@ class OpenLoopRunner:
             stability = CLIENT_LIMITED
 
         summary = _summarize_turns(turns)
+        # The SLA gate (one rule, stated in rate_search.py and
+        # docs/algorithm.md §0): pass iff the Wilson 95 % upper bound
+        # of the combined violation rate is below 5 % — a "marginal"
+        # window is an SLA fail for the search.
         sla_pass: bool | None = None
         if stability == STABLE and summary["sample_size"] > 0:
             sla_pass = summary["capacity_status"] == "pass"

@@ -6,8 +6,15 @@ Searches over λ (session arrivals per second) for two knees:
     queue is stationary; above it the backlog grows without bound.
     This is the box's capacity, independent of any client pool.
   * **λ_sla** — the quality boundary: highest *stable* rate whose
-    steady-state turns also meet the SLA (violation rate < 5%).
-    λ_sla ≤ λ_max; the band between them is "surviving but degraded".
+    steady-state turns also pass the SLA gate. The gate is the
+    window's ``capacity_status == "pass"``, i.e. the Wilson 95 %
+    UPPER bound of the combined violation rate is below 5 % — so a
+    ``marginal`` window (point estimate under 5 % but the upper
+    bound not) counts as an SLA FAIL and bounds the bisection from
+    above. λ_sla is therefore conservative by construction: it is
+    the highest rate at which the SLA is demonstrably met, not the
+    highest at which it was not demonstrably missed. λ_sla ≤ λ_max;
+    the band between them is "surviving but degraded".
 
 Search shape mirrors the coarse-to-fine philosophy used elsewhere in
 this repo: geometric doubling to bracket the stability boundary,
@@ -39,7 +46,11 @@ PHASE_DONE = "done"
 class RateStep:
     rate_per_s: float
     stability: str                 # stable | divergent | client_limited
-    sla_pass: Optional[bool] = None  # None: divergent/limited or no samples
+    # The SLA gate verdict for a stable window: True iff the window's
+    # capacity_status is "pass" (Wilson upper bound of the violation
+    # rate < 5 %); "marginal" is False. None: divergent / limited /
+    # no samples. Resolved by the orchestrator, not re-derived here.
+    sla_pass: Optional[bool] = None
     violation_rate: float = 0.0
     target_miss_rate: float = 0.0
     sample_size: int = 0
@@ -71,13 +82,11 @@ class RateStepper:
         # Each bisection halves the bracket in log space, so tightening
         # from 30% to 5% costs ~3 extra windows.
         resolution_ratio: float = 1.05,
-        sla_threshold: float = 0.05,
     ):
         self.initial_rate = _round_rate(initial_rate_per_s)
         self.max_rate = max_rate_per_s
         self.min_rate = min_rate_per_s
         self.resolution_ratio = resolution_ratio
-        self.sla_threshold = sla_threshold
         self.history: list[RateStep] = []
         self.phase = PHASE_DOUBLING
 
@@ -190,9 +199,10 @@ class RateStepper:
     def _next_bisect_sla(self) -> Optional[float]:
         stable = self._stable()
         passes = [s.rate_per_s for s in stable if s.sla_pass]
-        # The SLA ceiling: a stable-but-violating rate, or any
-        # stability ceiling (a divergent queue means unbounded
-        # latency — SLA fails there by construction).
+        # The SLA ceiling: a stable rate that did not pass the gate
+        # (marginal or fail), or any stability ceiling (a divergent
+        # queue means unbounded latency — SLA fails there by
+        # construction).
         fails = [s.rate_per_s for s in stable if s.sla_pass is False]
         fails += [s.rate_per_s for s in self._ceilings()]
         mid = self._bracket(passes, fails)

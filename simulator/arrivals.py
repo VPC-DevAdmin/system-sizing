@@ -53,7 +53,11 @@ class ArrivalStats:
     # Recent arrival-lateness samples (ms): actual spawn − scheduled.
     tardiness_ms: deque = field(default_factory=lambda: deque(maxlen=2000))
     # Durations (s) of recently completed sessions — feeds the
-    # Little's-law concurrency derivation and warmup sizing.
+    # Little's-law concurrency derivation and warmup sizing. Only
+    # sessions that ran their full turn count count: one ended by a
+    # trim / drain / cancel or by a failed turn is not a session
+    # length, and mixing those in shortened W and inflated the
+    # derived concurrency (L = λ·W).
     session_durations_s: deque = field(default_factory=lambda: deque(maxlen=500))
 
     def tardiness_p99_ms(self) -> float:
@@ -268,9 +272,11 @@ class SessionArrivalLauncher:
                 )
             finally:
                 self.stats.sessions_done += 1
-                self.stats.session_durations_s.append(
-                    time.monotonic() - started,
-                )
+                if stats.sessions_completed > 0:
+                    # Natural end only — see ArrivalStats.
+                    self.stats.session_durations_s.append(
+                        time.monotonic() - started,
+                    )
                 self._sessions.pop(user_id, None)
                 self._cancel_events.pop(user_id, None)
                 self.stats.sessions_active = len(self._sessions)

@@ -370,3 +370,75 @@ def test_warmup_plan_scales_with_session_length():
     # minimum warmup.
     assert plan(1000.0, cap=600) == (300.0, 600.0, 200)
     assert plan(1000.0, cap=10) == (300.0, 300.0, 200)
+
+
+# ── A6: smaller measurement biases ──────────────────────────────────
+
+
+def test_marginal_window_is_an_sla_fail_for_the_search():
+    """One rule everywhere: the SLA gate is capacity_status == 'pass'
+    (Wilson upper bound < 5 %), so a marginal window does not pass.
+    Also pins the summary's own classification of 5/100 as marginal,
+    which is what makes the rule bite."""
+    turns = [_turn() for _ in range(95)] + [_turn(ok=False) for _ in range(5)]
+    s = _summarize_turns(turns)
+    assert s["capacity_status"] == "marginal"
+    assert (s["capacity_status"] == "pass") is False
+    clean = _summarize_turns([_turn() for _ in range(200)])
+    assert clean["capacity_status"] == "pass"
+
+
+def test_served_mean_prefers_engine_running_batch():
+    """The practical-significance basis is the engine's running batch
+    (num_running), not the client's in-flight count, which also holds
+    the queued requests — the very thing that grows in overload."""
+    from simulator.open_loop import _served_mean
+
+    running = [8.0] * 60
+    inflight = [8.0 + t for t in range(60)]      # queue building up
+    mean, basis = _served_mean(running, inflight)
+    assert (mean, basis) == (8.0, "engine_running")
+    # No running gauge (or too few scrapes): client in-flight fallback.
+    assert _served_mean([], inflight)[1] == "client_in_flight"
+    assert _served_mean([8.0] * 10, inflight)[1] == "client_in_flight"
+    assert _served_mean([], []) == (None, "none")
+
+
+def test_mean_session_duration_counts_natural_ends_only(monkeypatch):
+    """Sessions cut short by a cancel (trim / drain) or a failed turn
+    must not feed the Little's-law session length."""
+    import simulator.arrivals as arrivals
+    from simulator.virtual_user import SharedState
+
+    async def fake_user(*, stats, cancel_event, **_kw):
+        # 'natural' sessions take 0.3 s and complete; the others are
+        # cancelled after 0.05 s (no sessions_completed increment).
+        try:
+            await asyncio.wait_for(cancel_event.wait(), timeout=0.3)
+            return
+        except asyncio.TimeoutError:
+            stats.sessions_completed += 1
+
+    monkeypatch.setattr(arrivals, "run_virtual_user", fake_user)
+
+    async def main():
+        launcher = arrivals.SessionArrivalLauncher(
+            persona_weights={"quick_lookup": 1.0},
+            clients=[object()], model_id="m", corpus=None,
+            state=SharedState(), request_timeout_s=5,
+        )
+        launcher.start()
+        launcher.set_outstanding(6)
+        await asyncio.sleep(0.05)
+        launcher.set_rate(0.0)                 # stop respawns
+        launcher.trim_active(3)                # cancel the 3 newest
+        await asyncio.sleep(0.5)
+        durations = list(launcher.stats.session_durations_s)
+        done = launcher.stats.sessions_done
+        await launcher.stop()
+        return durations, done
+
+    durations, done = asyncio.run(main())
+    assert done == 6
+    assert len(durations) == 3                 # only the natural ends
+    assert all(d >= 0.29 for d in durations)

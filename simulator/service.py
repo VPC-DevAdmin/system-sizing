@@ -107,7 +107,8 @@ class StartRunRequest(BaseModel):
     # turns divergent. "closed" — the legacy fixed-pool ramp (kept for
     # comparison runs and for the pool_sizes / adaptive knobs, which
     # only apply there). Sweeps always run closed-loop.
-    mode: str = "open"
+    # None = follow the profile's ``simulation.mode`` (default open).
+    mode: Optional[str] = None
     # Headline sweeps only: cap the concurrency ladder (the UI's
     # "max concurrent streams" control). None = the full ladder.
     max_concurrency: Optional[int] = None
@@ -1207,8 +1208,9 @@ def create_app(
     def _cohort_coro(cfg, cohort, req: StartRunRequest):
         # Explicit closed-loop knobs (pool grid / adaptive stepper)
         # imply the legacy methodology even if mode wasn't set.
+        mode = req.mode or getattr(cfg.simulation, "mode", "open")
         closed = (
-            req.mode == "closed" or req.adaptive or bool(req.pool_sizes)
+            mode == "closed" or req.adaptive or bool(req.pool_sizes)
         )
         if closed:
             from .runner import run_cohort

@@ -339,7 +339,7 @@ async def _plan_roofline(spec: dict
         info = {k: v for k, v in info.items() if v}
     if not models:
         raise HTTPException(422, "no model fits this host")
-    return engines, models, info
+    return engines, models, info, {"gpu_count": gpus, "max_tp": tp_cap}
 
 
 async def _start_run_locked(app, req: StartRunRequest) -> dict:
@@ -356,7 +356,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             409, "the engine optimizer is running — it owns the "
                  "engines/GPUs; stop it first (POST /api/optimizer/stop)",
         )
-    roofline_plan: Optional[tuple[list[str], list[str], dict]] = None
+    roofline_plan: Optional[tuple[list[str], list[str], dict, dict]] = None
     preflight_shape: dict = {}
     if (req.workload or {}).get("kind") == "roofline":
         # A roofline varies the model AND the engine per cell, so
@@ -368,7 +368,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
         # that does not fit the box.
         roofline_plan = await _plan_roofline(
             dict((req.workload or {}).get("spec") or {}))
-        engines, models, model_info = roofline_plan
+        engines, models, model_info, _ = roofline_plan
         if req.custom is None:
             req.custom = {"engine": engines[0]}
         if not req.custom.get("model_id"):
@@ -452,7 +452,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
 
         spec = dict(req.workload.get("spec") or {})
         assert roofline_plan is not None
-        engines, models, model_info = roofline_plan
+        engines, models, model_info, hw_bounds = roofline_plan
 
         # GPU-engine defaults. Engines that are not GPU-resident
         # servers (KTransformers: one replica, no KV precision
@@ -484,9 +484,11 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             build_config=_build_rf, runs_base=runs_base,
             resume=resume,
             confirm_winners=bool(spec.get("confirm_winners", True)),
-                retry_engines=list(spec.get("retry_engines") or []),
+            retry_engines=list(spec.get("retry_engines") or []),
             engine_shape=shape_of(base_custom),
             model_info=model_info,
+            gpu_count=int(hw_bounds.get("gpu_count") or 8),
+            max_tp=hw_bounds.get("max_tp"),
         )
     elif kind == "headline_optimize":
         # Engine shape and request shape are coupled, so they are

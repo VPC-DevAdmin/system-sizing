@@ -704,6 +704,77 @@ def error_signature(err: str) -> str:
     return " ".join(s.split())[:160]
 
 
+# A cell that dies for GPU memory at a fixed shape is not a dead
+# model, it is a model that needs more cards per replica. The engine
+# said so; the lever is tensor parallelism, and the run pulls it
+# itself: the same cell is planned again at twice the tp (half the
+# replicas), and again, up to the device group or the box. The model
+# card's size is a guess about how an engine holds the weights;
+# TensorRT-LLM loading a 63 GB NVFP4 checkpoint to 93 GB on the way
+# to the GPU is the case that taught this. Triton's OutOfResources is
+# NOT here: that is shared memory per SM, which no tp can buy.
+MEMORY_FAILURE = re.compile(
+    r"CUDA out of memory|OutOfMemoryError|"
+    r"insufficient GPU memory|"
+    r"exceeds available|"                    # vLLM: max_num_seqs vs KV blocks
+    r"not enough (?:GPU )?memory|"
+    r"No available memory for the cache blocks|"
+    r"free memory .* less than desired",
+    re.I)
+
+
+def is_memory_failure(err: str) -> bool:
+    """A failure the engine attributes to GPU memory at this shape."""
+    return bool(err) and bool(MEMORY_FAILURE.search(err))
+
+
+def escalate_cell(cell: dict, *, gpu_count: int,
+                  max_tp: Optional[int] = None) -> Optional[dict]:
+    """The same cell at twice the tensor parallelism, or None when the
+    cap (the largest device group unless cross-domain tp is allowed,
+    then the box) is already reached. GGUF engines have no tp lever.
+    ``replicas`` shrinks so the cell still uses the whole box."""
+    if cell.get("engine") in GGUF_ENGINES:
+        return None
+    tp = int(cell.get("tp") or 1) * 2
+    cap = min(int(gpu_count), int(max_tp)) if max_tp else int(gpu_count)
+    if tp > cap:
+        return None
+    out = dict(cell)
+    out.pop("error", None)
+    out.pop("escalated_from", None)
+    out["tp"] = tp
+    out["replicas"] = max(1, int(gpu_count) // tp)
+    out["escalated_from"] = int(cell.get("tp") or 1)
+    return out
+
+
+def escalations(plan_cells: list[dict], results: list[dict], *,
+                gpu_count: int, max_tp: Optional[int] = None) -> list[dict]:
+    """Cells the plan owes to memory failures already recorded: for
+    every failed row that asks for more cards, the next tp step, unless
+    the plan already has it. Called on resume so escalations survive a
+    restart -- the plan is recomputed from the model list, the results
+    are what remember which cells ran out of memory."""
+    have = {cell_key(c) for c in plan_cells}
+    out: list[dict] = []
+    for r in results:
+        if not is_memory_failure(r.get("error") or ""):
+            continue
+        nxt = escalate_cell(r, gpu_count=gpu_count, max_tp=max_tp)
+        if nxt is None:
+            continue
+        k = cell_key(nxt)
+        if k in have:
+            continue
+        have.add(k)
+        out.append({k2: v for k2, v in nxt.items()
+                    if k2 in ("model", "engine", "max_num_seqs",
+                              "output_tokens", "escalated_from")
+                    or _is_shape_key(k2)})
+    return out
+
+
 def permanently_failed(results: list[dict]) -> dict[str, str]:
     """Cells that have failed identically at least GIVE_UP_AFTER times
     for a reason that is not transient, mapped to the reason.
@@ -717,7 +788,11 @@ def permanently_failed(results: list[dict]) -> dict[str, str]:
     out = {}
     for key, sigs in seen.items():
         for sig in set(sigs):
-            if sigs.count(sig) >= GIVE_UP_AFTER:
+            # Out of memory at a fixed shape is deterministic, and the
+            # run has already planned the same cell wider; a second
+            # launch at this shape would only spend the launch.
+            need = 1 if is_memory_failure(sig) else GIVE_UP_AFTER
+            if sigs.count(sig) >= need:
                 out[key] = sig
                 break
     return out
@@ -979,8 +1054,15 @@ async def run_roofline(
     engine_shape: dict | None = None,
     model_info: dict[str, dict] | None = None,
     retry_engines: list[str] | None = None,
+    gpu_count: int = 8,
+    max_tp: Optional[int] = None,
 ) -> Path:
     """Stage, search the product, confirm each model's winner, report.
+
+    ``gpu_count`` and ``max_tp`` bound the tp escalation: a cell that
+    runs out of GPU memory is planned again at twice its tp (see
+    ``escalate_cell``) until the largest device group, or the box when
+    cross-domain tp is allowed, is reached.
 
     ``engine_shape`` is the launch shape shared by every cell (memory
     share, KV precision, replica count, levers); it is recorded on
@@ -1025,6 +1107,12 @@ async def run_roofline(
     plan_cells = cells(models, engines, shapes, input_tokens=input_tokens,
                        engine_shape=engine_shape, model_info=model_info,
                        notes=notes)
+    owed = escalations(plan_cells, st.results, gpu_count=gpu_count,
+                       max_tp=max_tp)
+    if owed:
+        log.info("roofline: %d tp escalations owed to earlier memory "
+                 "failures", len(owed))
+        plan_cells = plan_cells + owed
     st.status = "staging"
     st.input_tokens = input_tokens
     st.plan = {"models": models, "engines": engines, "shapes": shapes,
@@ -1056,7 +1144,14 @@ async def run_roofline(
     st.note = ""
     save_state(path, st)
 
-    for cell in plan_cells:
+    # A worklist rather than a plain loop: a memory failure appends
+    # the same cell one tp step wider, right behind the failed one so
+    # the model's answer is still complete before the next model.
+    work = list(plan_cells)
+    i = 0
+    while i < len(work):
+        cell = work[i]
+        i += 1
         if cell["model"] not in staged:
             continue
         key = cell_key(cell)
@@ -1091,6 +1186,20 @@ async def run_roofline(
             # One dead cell must not end a six-hour run.
             row["error"] = f"{type(e).__name__}: {e}"
             log.warning("roofline cell failed: %s", e)
+            if is_memory_failure(row["error"]):
+                nxt = escalate_cell(cell, gpu_count=gpu_count, max_tp=max_tp)
+                if nxt is not None and cell_key(nxt) not in {
+                        cell_key(c) for c in work}:
+                    log.info("roofline: %s / %s out of memory at tp%d, "
+                             "planning tp%d x %d replicas",
+                             cell["model"], cell["engine"],
+                             int(cell.get("tp") or 1), nxt["tp"],
+                             nxt["replicas"])
+                    work.insert(i, nxt)
+                    st.plan["cells"] = list(st.plan.get("cells") or []) + [nxt]
+                elif nxt is None:
+                    row["note"] = (f"out of GPU memory at tp{int(cell.get('tp') or 1)}"
+                                   f"; no wider tp on this host")
         st.results.append(row)
         st.current = None
         save_state(path, st)

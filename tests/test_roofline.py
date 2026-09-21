@@ -8,6 +8,7 @@ anything happen.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -1069,3 +1070,189 @@ def test_resume_can_retry_an_engines_failed_cells(tmp_path):
     save_state(tmp_path / "roofline.json", st)
     kept = [r for r in st.results if not (r.get("error") and r["engine"] in ["trtllm"])]
     assert len(kept) == 2 and all(r["engine"] != "trtllm" or r.get("out_tok_s") for r in kept)
+
+
+# ── tp escalation on memory failures ─────────────────────────────────
+# The user's rule (2026-09-21): if a model needs tp=N, run it at N,
+# 2N, 4N... rather than eliminating it and reporting a blank. The model
+# card's size is a guess about how an engine holds the weights.
+
+
+def test_memory_failures_are_recognised_and_shared_memory_is_not():
+    from simulator.roofline import is_memory_failure
+    assert is_memory_failure(
+        "RuntimeError: replica 0 container exited during startup: "
+        "RuntimeError: Executor creation failed due to insufficient GPU memory.")
+    assert is_memory_failure(
+        "RuntimeError: replica 3 ...: torch.OutOfMemoryError: CUDA out of memory.")
+    assert is_memory_failure(
+        "ValueError: max_num_seqs (1024) exceeds available KV cache capacity")
+    # Triton's OutOfResources is shared memory per SM; no tp buys that.
+    assert not is_memory_failure(
+        "triton.runtime.errors.OutOfResources: out of resource: shared memory")
+    assert not is_memory_failure("ValueError: unknown architecture qwen3_5_moe")
+    assert not is_memory_failure("")
+
+
+def test_escalate_cell_doubles_tp_and_halves_replicas_up_to_the_cap():
+    from simulator.roofline import escalate_cell
+    cell = {"model": "m", "engine": "trtllm", "max_num_seqs": 1024,
+            "output_tokens": 128, "tp": 1, "replicas": 8,
+            "kv_cache_dtype": "fp8", "error": "CUDA out of memory"}
+    nxt = escalate_cell(cell, gpu_count=8, max_tp=4)
+    assert nxt["tp"] == 2 and nxt["replicas"] == 4
+    assert nxt["escalated_from"] == 1 and "error" not in nxt
+    assert nxt["kv_cache_dtype"] == "fp8"           # the rest of the shape stays
+    nxt2 = escalate_cell(nxt, gpu_count=8, max_tp=4)
+    assert nxt2["tp"] == 4 and nxt2["replicas"] == 2 and nxt2["escalated_from"] == 2
+    assert escalate_cell(nxt2, gpu_count=8, max_tp=4) is None      # domain cap
+    assert escalate_cell(nxt2, gpu_count=8, max_tp=None)["tp"] == 8  # cross-domain
+    assert escalate_cell({**nxt2, "tp": 8, "replicas": 1}, gpu_count=8) is None
+    # GGUF engines have no tp lever.
+    assert escalate_cell({**cell, "engine": "ktransformers"}, gpu_count=8) is None
+
+
+def test_escalated_cells_key_apart_from_their_origin():
+    from simulator.roofline import cell_key, escalate_cell
+    cell = {"model": "m", "engine": "vllm_cuda_multi", "max_num_seqs": 2048,
+            "output_tokens": 256, "tp": 1, "replicas": 8}
+    nxt = escalate_cell(cell, gpu_count=8)
+    assert cell_key(nxt) != cell_key(cell)
+    assert "escalated_from" not in cell_key(nxt)   # not a shape field
+
+
+def test_a_memory_failure_is_written_off_after_one_attempt():
+    """Out of memory at a fixed shape is deterministic and the run has
+    already planned the cell wider; a second launch would only spend
+    the launch. Other failures still need GIVE_UP_AFTER."""
+    from simulator.roofline import permanently_failed
+    oom = {"model": "m", "engine": "trtllm", "max_num_seqs": 1024,
+           "output_tokens": 128, "tp": 1, "replicas": 8,
+           "error": "RuntimeError: Executor creation failed due to insufficient GPU memory."}
+    arch = {**oom, "engine": "sglang_cuda", "error": "ValueError: unknown architecture"}
+    assert len(permanently_failed([oom])) == 1
+    assert len(permanently_failed([arch])) == 0
+    assert len(permanently_failed([arch, arch])) == 1
+
+
+def test_resume_owes_escalations_to_recorded_memory_failures():
+    """The plan is recomputed from the model list on resume; the results
+    remember which cells ran out of memory, so the wider cells come
+    back without the operator asking."""
+    from simulator.roofline import cell_key, escalations
+    plan = [{"model": "m", "engine": "trtllm", "max_num_seqs": 1024,
+             "output_tokens": 128, "tp": 1, "replicas": 8, "input_tokens": 128}]
+    results = [{**plan[0], "error": "torch.OutOfMemoryError: CUDA out of memory."},
+               {**plan[0], "output_tokens": 256, "out_tok_s": 10.0},
+               {**plan[0], "engine": "sglang_cuda", "error": "ValueError: arch"}]
+    owed = escalations(plan, results, gpu_count=8, max_tp=4)
+    assert len(owed) == 1
+    assert owed[0]["tp"] == 2 and owed[0]["replicas"] == 4
+    assert owed[0]["escalated_from"] == 1 and "error" not in owed[0]
+    # Already in the plan: nothing owed twice.
+    assert escalations(plan + owed, results, gpu_count=8, max_tp=4) == []
+    # The wider cell failing for memory again owes the next step.
+    results.append({**owed[0], "error": "CUDA out of memory"})
+    owed2 = escalations(plan + owed, results, gpu_count=8, max_tp=4)
+    assert [c["tp"] for c in owed2] == [4]
+    assert cell_key(owed2[0]) != cell_key(owed[0])
+
+
+def test_run_escalates_tp_in_place_until_the_model_fits(tmp_path, monkeypatch):
+    """End to end on a fake engine: tp1 and tp2 die for memory, tp4
+    measures. The tp4 cell runs right after the failures, before the
+    next model, and the plan records it."""
+    import simulator.roofline as rf
+
+    launched: list[tuple[str, int, int]] = []
+
+    def fake_build(overrides):
+        launched.append((overrides["model_id"], overrides.get("tp") or 1,
+                         overrides.get("replicas") or 8))
+        cfg = tmp_path / f"cfg_{len(launched)}.yaml"
+        cfg.write_text("x: 1")
+        return cfg
+
+    class _Out:
+        db_directory = ""
+
+    class _Cfg:
+        output = _Out()
+
+    async def fake_sweep(cfg, cohort, *, new_run, ladder_override=None):
+        model, tp, _ = launched[-1]
+        if model == "big" and tp < 4:
+            raise RuntimeError(
+                f"replica 0 container exited during startup: "
+                f"torch.OutOfMemoryError: CUDA out of memory at tp{tp}")
+        out = tmp_path / f"sweep_{len(launched)}.json"
+        out.write_text(json.dumps({"peak": {"out_tok_s": 1000.0 * tp,
+                                            "total_tok_s": 1500.0 * tp,
+                                            "concurrency": 64}}))
+        return out
+
+    async def fake_staged(models, st, path, **kw):
+        return set(models)
+
+    monkeypatch.setattr("simulator.config.load_config", lambda p: _Cfg())
+    monkeypatch.setattr("simulator.headline_sweep.run_headline_sweep", fake_sweep)
+    monkeypatch.setattr(rf, "ensure_staged", fake_staged)
+    monkeypatch.setattr("simulator.personas.cohort_from_persona", lambda name: object())
+    monkeypatch.setattr("simulator.headline_shapes.apply_shape_to_generation",
+                        lambda *a, **k: None)
+
+    path = asyncio.run(rf.run_roofline(
+        models=["big", "small"], engines=["trtllm"],
+        shapes={"max_num_seqs": [1024], "output_tokens": [128]},
+        build_config=fake_build, runs_base=tmp_path, resume=False,
+        confirm_winners=False,
+        engine_shape={"tp": 1, "replicas": 8, "gpu_memory_utilization": 0.95},
+        gpu_count=8, max_tp=4))
+    st = rf.load_state(path)
+    assert [(m, tp, r) for m, tp, r in launched] == [
+        ("big", 1, 8), ("big", 2, 4), ("big", 4, 2), ("small", 1, 8)]
+    rows = [(r["model"], r["tp"], bool(r.get("error"))) for r in st.results]
+    assert rows == [("big", 1, True), ("big", 2, True), ("big", 4, False),
+                    ("small", 1, False)]
+    winner = [r for r in st.results if r["model"] == "big" and not r.get("error")][0]
+    assert winner["replicas"] == 2 and winner["escalated_from"] == 2
+    assert winner["out_tok_s"] == 4000.0
+    planned = [(c["model"], c.get("tp") or 1) for c in st.plan["cells"]]
+    assert planned == [("big", 1), ("small", 1), ("big", 2), ("big", 4)]
+
+
+def test_run_notes_when_no_wider_tp_exists(tmp_path, monkeypatch):
+    import simulator.roofline as rf
+
+    class _Out:
+        db_directory = ""
+
+    class _Cfg:
+        output = _Out()
+
+    async def fake_sweep(cfg, cohort, *, new_run, ladder_override=None):
+        raise RuntimeError("Executor creation failed due to insufficient GPU memory.")
+
+    async def fake_staged(models, st, path, **kw):
+        return set(models)
+
+    def fake_build(overrides):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("x: 1")
+        return cfg
+
+    monkeypatch.setattr("simulator.config.load_config", lambda p: _Cfg())
+    monkeypatch.setattr("simulator.headline_sweep.run_headline_sweep", fake_sweep)
+    monkeypatch.setattr(rf, "ensure_staged", fake_staged)
+    monkeypatch.setattr("simulator.personas.cohort_from_persona", lambda name: object())
+    monkeypatch.setattr("simulator.headline_shapes.apply_shape_to_generation",
+                        lambda *a, **k: None)
+    path = asyncio.run(rf.run_roofline(
+        models=["big"], engines=["vllm_cuda_multi"],
+        shapes={"max_num_seqs": [1024], "output_tokens": [128]},
+        build_config=fake_build, runs_base=tmp_path, resume=False,
+        confirm_winners=False, engine_shape={"tp": 4, "replicas": 2},
+        gpu_count=8, max_tp=4))
+    st = rf.load_state(path)
+    assert len(st.results) == 1
+    assert "no wider tp" in st.results[0]["note"]

@@ -470,3 +470,16 @@ roofline started 2026-09-20 exercises the offline launch, the
 transient-failure rule and the KTransformers defaults); the registry
 mode of `scripts/engine_optimizer.py` still uses its own vLLM argv
 builder for CPU cpuset/NUMA shapes.
+
+**2026-09-21, from the first spectrum pass.** A cell that dies for
+GPU memory is no longer a blank: the roofline plans the same cell at
+twice its tensor parallelism (half the replicas) and keeps doubling
+until the largest device group, or the box under `allow_cross_domain_tp`,
+is reached (`escalate_cell`, `escalations`). The model card's size is
+a guess about how an engine holds the weights — TensorRT-LLM took a
+63 GB NVFP4 Nemotron checkpoint to 93 GB on the way to the GPU at tp1.
+Escalations are re-derived from the recorded failures on resume, and a
+memory failure at a fixed shape is written off after one attempt (it
+is deterministic; the wider cell is the retry). Also from that pass:
+`retry_engines` on resume, the 8 GB TensorRT-LLM executor reserve, and
+HTTP ports that rotate per launch.

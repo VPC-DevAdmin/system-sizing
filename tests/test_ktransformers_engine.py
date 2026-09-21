@@ -51,7 +51,7 @@ def test_gguf_path_resolves_from_a_staged_catalog_companion(tmp_path, monkeypatc
     assert eng["ktransformers_gguf_path"] == str(rev)
     cmd = KTransformersEngine(_cfg(ktransformers_gguf_path=eng["ktransformers_gguf_path"])
                               ).build_replica_command(0, [0], "ktransformers-r0-x")
-    assert f"{rev}:/gguf:ro" in cmd
+    assert ":/gguf:ro" not in " ".join(cmd)  # reached through the cache mount
 
     # An explicit path still wins over the companion.
     explicit = tmp_path / "mine"
@@ -288,3 +288,26 @@ def test_kt_only_models_are_refused_by_gpu_engines(tmp_path):
                          "ktransformers_gguf_path": str(staged)},
                         hw=hw, catalog=catalog)
     assert eng["type"] == "ktransformers"
+
+
+def test_gguf_inside_the_cache_is_reached_through_the_cache_mount(tmp_path, monkeypatch):
+    """Same fault as llama.cpp: the Qwen3-235B and DeepSeek cells on the
+    XE7740 died with 'No such file' because the snapshot's shard
+    symlinks pointed outside a private /gguf mount."""
+    from simulator.models import container_cache_path
+
+    cache = tmp_path / "cache"
+    snap = cache / "hub" / "models--u--M-GGUF" / "snapshots" / "abc" / "Q4_K_M"
+    snap.mkdir(parents=True)
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(cache))
+    eng = KTransformersEngine(_cfg(ktransformers_gguf_path=str(snap)))
+    cmd = eng.build_replica_command(0, [0], "ktransformers-r0-x")
+    joined = " ".join(cmd)
+    assert ":/gguf:ro" not in joined
+    assert "--gguf_path " + container_cache_path(snap) in joined
+    # Outside the cache a private mount is still the only way.
+    ext = tmp_path / "ext"
+    ext.mkdir()
+    cmd = KTransformersEngine(_cfg(ktransformers_gguf_path=str(ext))
+                              ).build_replica_command(0, [0], "ktransformers-r0-x")
+    assert f"{ext}:/gguf:ro" in " ".join(cmd) and "--gguf_path /gguf" in " ".join(cmd)

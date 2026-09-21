@@ -227,6 +227,11 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
         gguf_spec = e.get("gguf") or {}
         kt_eligible = bool(gguf_spec)
         gguf_engines = list(gguf_spec.get("engines") or GGUF_ENGINES)
+        if kt_eligible and not e.get("moe") and "ktransformers" in gguf_engines:
+            # The KTransformers serving image is an MoE engine (CPU
+            # experts, GPU attention); a dense Llama dies at load with
+            # KeyError: 'LlamaForCausalLM'. llama.cpp still serves it.
+            gguf_engines = [g for g in gguf_engines if g != "ktransformers"]
         fits_ram = True
         if size:
             fits_ram = (host_ram_gb is not None
@@ -666,7 +671,8 @@ TRANSIENT_FAILURE = re.compile(
     r"EADDRINUSE|address already in use|"
     r"smoke request|cannot serve requests|"
     r"produced no peak|unreadable sweep summary|"
-    r"launch cancelled|timed out|Connect(ion|Error|Timeout)",
+    r"launch cancelled|timed out|Connect(ion|Error|Timeout)|"
+    r"No such file or directory",          # staging/mount fault, not the model
     re.I)
 
 

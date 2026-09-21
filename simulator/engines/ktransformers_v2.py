@@ -393,8 +393,11 @@ def build_replica_command(engine, index: int, devices: list[int],
         cmd += ["-v", f"{amx}:/kt-weights:ro"]
         weight_path = "/kt-weights"
     elif method == GGUF_METHOD:
-        cmd += ["-v", f"{gguf}:/gguf:ro"]
-        weight_path = "/gguf"
+        from ..models import container_cache_path
+        weight_path = container_cache_path(gguf)
+        if weight_path is None:
+            cmd += ["-v", f"{gguf}:/gguf:ro"]
+            weight_path = "/gguf"
     else:
         weight_path = model_in_container
     cmd += list(cfg.docker_extra_args or [])

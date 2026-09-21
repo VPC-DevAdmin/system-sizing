@@ -299,7 +299,13 @@ class KTransformersEngine(DockerReplicaEngine):
             # Fail in milliseconds with the reason, not in 30 minutes
             # with a health timeout (see ktransformers_gguf_missing).
             raise RuntimeError(f"ktransformers cannot launch: {why}")
-        cmd += ["-v", f"{gguf}:/gguf:ro"]
+        from ..models import container_cache_path
+        gguf_in_container = container_cache_path(gguf)
+        if gguf_in_container is None:
+            # Outside the cache and its overflow roots: a mount of its
+            # own (its shards must then be real files, not links).
+            cmd += ["-v", f"{gguf}:/gguf:ro"]
+            gguf_in_container = "/gguf"
         cmd += list(cfg.docker_extra_args or [])
         cmd.append(getattr(cfg, "ktransformers_image", None) or DEFAULT_IMAGE)
 
@@ -313,7 +319,7 @@ class KTransformersEngine(DockerReplicaEngine):
         return cmd + serve_argv(
             cfg.model_local_path or cfg.model_id,
             port=self._port(index),
-            gguf_path="/gguf",
+            gguf_path=gguf_in_container,
             optimize_config_path=optimize,
             max_batch_size=getattr(cfg, "max_num_seqs", None),
             chunk_size=getattr(cfg, "max_num_batched_tokens", None),

@@ -169,7 +169,7 @@ def context_tokens(max_model_len: int, slots: int) -> int:
     return int(max_model_len) * max(1, int(slots))
 
 
-def serve_argv(gguf_file: str, *, port: int,
+def serve_argv(gguf_file: str, *, port: int, gguf_mount: str = GGUF_MOUNT,
                max_model_len: int,
                slots: int | None = None,
                threads: int | None = None,
@@ -187,7 +187,7 @@ def serve_argv(gguf_file: str, *, port: int,
     """
     slots = int(slots or DOCUMENTED_MAX_BATCH)
     argv = [
-        "-m", f"{GGUF_MOUNT}/{gguf_file}",
+        "-m", f"{gguf_mount}/{gguf_file}",
         "--host", "0.0.0.0",
         "--port", str(int(port)),
         # Every layer on the GPUs, split by layer across all of them.
@@ -306,7 +306,11 @@ class LlamaCppEngine(DockerReplicaEngine):
             "--network", "host",
         ]
         cmd += self._mount_args()
-        cmd += ["-v", f"{gguf_dir}:{GGUF_MOUNT}:ro"]
+        from ..models import container_cache_path
+        gguf_mount = container_cache_path(gguf_dir)
+        if gguf_mount is None:
+            cmd += ["-v", f"{gguf_dir}:{GGUF_MOUNT}:ro"]
+            gguf_mount = GGUF_MOUNT
         cmd += list(cfg.docker_extra_args or [])
         cmd.append(getattr(cfg, "llamacpp_image", None) or DEFAULT_IMAGE)
 
@@ -322,6 +326,7 @@ class LlamaCppEngine(DockerReplicaEngine):
         return cmd + serve_argv(
             gguf_entry_file(gguf_dir),
             port=self._port(index),
+            gguf_mount=gguf_mount,
             max_model_len=cfg.max_model_len,
             slots=getattr(cfg, "max_num_seqs", None),
             threads=threads,

@@ -1034,3 +1034,17 @@ def test_cross_domain_tp_is_an_explicit_opt_in():
     lifted = score_models(giants, vram_per_gpu_gb=96, gpu_count=8, max_tp=None)[0]
     assert lifted.fits_gpu is True and lifted.tp == 8 and lifted.replicas == 1
     assert "spans both PCIe domains" in lifted.why
+
+
+def test_ktransformers_is_never_scheduled_for_a_dense_model():
+    """KeyError: 'LlamaForCausalLM' on the XE7740: the v0.3 image is an
+    MoE engine. A dense model with a GGUF keeps llama.cpp only."""
+    dense = [{"id": "m/Llama-70B", "family": "llama-70b", "series": "Llama",
+              "quant": "fp8", "params_b": 70, "moe": False, "approx_size_gb": 70,
+              "min_vram_gb": 80, "gguf": {"repo": "u/L-GGUF", "file": "L.gguf"}}]
+    c = score_models(dense, vram_per_gpu_gb=96, gpu_count=8, host_ram_gb=2048)[0]
+    assert c.kt_eligible is True
+    assert "ktransformers" not in c.gguf_engines and "llamacpp" in c.gguf_engines
+    from simulator.roofline import is_transient
+    assert is_transient("RuntimeError: replica 0 container exited during startup: "
+                        "FileNotFoundError: [Errno 2] No such file or directory: '/gguf/x'")

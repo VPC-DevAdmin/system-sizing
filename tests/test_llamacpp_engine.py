@@ -315,8 +315,12 @@ def test_custom_engine_resolves_the_companion_and_refuses_without(tmp_path,
                          )["replica_devices"] == [[0], [1]]
     cmd = LlamaCppEngine(EngineConfig(**eng)).build_replica_command(
         0, eng["replica_devices"][0], "llamacpp-r0-x")
-    assert f"{shard}:/gguf:ro" in cmd
-    assert _flag(_argv(cmd), "-m") == "/gguf/K-UD-Q4_K_XL-00001-of-00002.gguf"
+    assert ":/gguf:ro" not in " ".join(cmd)  # reached through the cache mount
+    # Inside the cache the shard is reached through the cache mount, so
+    # its relative symlink into blobs/ still resolves in the container.
+    assert _flag(_argv(cmd), "-m").endswith(
+        "/hub/models--unsloth--K-GGUF/snapshots/abc/UD-Q4_K_XL/K-UD-Q4_K_XL-00001-of-00002.gguf")
+    assert _flag(_argv(cmd), "-m").startswith("/root/.cache/huggingface/")
 
     # An explicit directory wins, and is not bound by the allow-list.
     mine = _gguf_dir(tmp_path / "mine", "m.gguf")
@@ -552,3 +556,29 @@ def test_packaged_catalog_carries_the_giants(tmp_path):
     assert engines_for("ktransformers", v31.info())
     mm = by["MiniMaxAI/MiniMax-M2.7"]
     assert mm.fits_gpu and engines_for("llamacpp", mm.info())
+
+
+def test_gguf_inside_the_cache_is_reached_through_the_cache_mount(tmp_path, monkeypatch):
+    """A Hub snapshot's shards are relative symlinks into blobs/; a
+    private /gguf bind-mount of the snapshot directory left them
+    dangling ('No such file' on the XE7740). Inside the cache the
+    launcher references the directory through the cache mount instead."""
+    from simulator.config import EngineConfig
+    from simulator.engines.llamacpp import LlamaCppEngine
+    from simulator.models import container_cache_path
+
+    cache = tmp_path / "cache"
+    snap = cache / "hub" / "models--u--M-GGUF" / "snapshots" / "abc" / "UD-Q4_K_XL"
+    snap.mkdir(parents=True)
+    (snap / "M-UD-Q4_K_XL-00001-of-00002.gguf").write_bytes(b"x")
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(cache))
+    assert container_cache_path(snap) == (
+        "/root/.cache/huggingface/hub/models--u--M-GGUF/snapshots/abc/UD-Q4_K_XL")
+    assert container_cache_path("/elsewhere/gguf") is None
+    cfg = EngineConfig(type="llamacpp", model_id="u/M", port=9100,
+                       replica_devices=[[0, 1, 2, 3, 4, 5, 6, 7]],
+                       llamacpp_gguf_path=str(snap), max_model_len=4096)
+    cmd = LlamaCppEngine(cfg).build_replica_command(0, list(range(8)), "llamacpp-r0-x")
+    joined = " ".join(cmd)
+    assert ":/gguf:ro" not in joined
+    assert "-m /root/.cache/huggingface/hub/models--u--M-GGUF/snapshots/abc/UD-Q4_K_XL/M-UD-Q4_K_XL-00001-of-00002.gguf" in joined

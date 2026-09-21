@@ -20,6 +20,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -67,6 +68,33 @@ def cache_overflow_roots(cache: Path | None = None) -> list[Path]:
         if root not in roots:
             roots.append(root)
     return roots
+
+
+CONTAINER_HF_CACHE = "/root/.cache/huggingface"
+
+
+def container_cache_path(host_path: str | Path) -> Optional[str]:
+    """Where ``host_path`` appears inside an engine container WITHOUT a
+    mount of its own: under the HF cache mount when it lives in the
+    cache, at its own path when it lives in a symlinked overflow root
+    (mounted at that path by ``cache_mount_args``), else None.
+
+    Why this exists: a Hub snapshot's files are RELATIVE symlinks into
+    the cache's ``blobs/`` directory. Bind-mounting the snapshot's
+    GGUF directory alone at ``/gguf`` put every shard outside the
+    mount and the server saw "No such file" (XE7740, Qwen3-235B and
+    every DeepSeek KTransformers cell). Referencing the same directory
+    through the cache mount keeps the links intact.
+    """
+    host = str(host_path).rstrip("/")
+    cache = str(hf_cache_dir()).rstrip("/")
+    if host == cache or host.startswith(cache + "/"):
+        return CONTAINER_HF_CACHE + host[len(cache):]
+    for root in cache_overflow_roots():
+        r = str(root).rstrip("/")
+        if host == r or host.startswith(r + "/"):
+            return host
+    return None
 
 
 def cache_mount_args(container_cache: str = "/root/.cache/huggingface") -> list[str]:

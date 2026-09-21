@@ -52,7 +52,7 @@ async def profiles() -> dict:
                 detail = (f"tp{tp} per replica"
                           if tp > 1 else "one GPU per replica")
             elif engine_type in ("trtllm", "sglang_cuda",
-                                 "ktransformers"):
+                                 "ktransformers", "llamacpp"):
                 from ..engines.knobs import ENGINE_LABELS
                 reps = eng.get("replica_devices") or []
                 tp = max((len(g) for g in reps), default=1)

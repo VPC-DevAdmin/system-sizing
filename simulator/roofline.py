@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from .bus import BUS
+from .engines.knobs import GGUF_ENGINES
 
 log = logging.getLogger(__name__)
 
@@ -111,13 +112,15 @@ class Candidate:
     # Three ways to fit, and the search treats them differently.
     # ``fits_gpu``: the weights load across the box's cards (a GPU
     # engine at some tp). ``fits_ram``: the weights fit host RAM, the
-    # KTransformers budget. ``kt_eligible``: a GGUF companion is
-    # catalogued, which is what KTransformers actually loads. ``fits``
-    # is what the roofline can measure at all: fits_gpu, or
-    # KTransformers can carry it.
+    # CPU-expert budget. ``kt_eligible``: a GGUF companion is
+    # catalogued, which is what the GGUF engines (KTransformers,
+    # llama.cpp) actually load; ``gguf_engines`` is the companion's
+    # allow-list among them. ``fits`` is what the roofline can measure
+    # at all: fits_gpu, or a GGUF engine can carry it.
     fits_gpu: bool = True
     fits_ram: bool = True
     kt_eligible: bool = False
+    gguf_engines: Optional[list] = None
     fits: bool = True
     # Smallest power-of-two tensor parallel that holds a replica, and
     # the replica count that leaves (gpu_count // tp). None when the
@@ -139,6 +142,7 @@ class Candidate:
         ``summarize`` to draw the spectrum."""
         return {"tier": self.tier, "fits_gpu": self.fits_gpu,
                 "fits_ram": self.fits_ram, "kt_eligible": self.kt_eligible,
+                "gguf_engines": list(self.gguf_engines or GGUF_ENGINES),
                 "tp": self.tp, "replicas": self.replicas,
                 "approx_size_gb": self.size_gb, "params_b": self.params_b,
                 "vendor": vendor_of(self.series or self.family or self.id),
@@ -213,14 +217,16 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             if tp and max_tp is None and tp > 4 and gpus > 4:
                 cross_domain = True
         if e.get("kt_only"):
-            # Staged config-only for KTransformers: its min_vram_gb is
-            # the GPU share attention needs, not a weights footprint.
-            # No GPU engine ever runs it.
+            # Staged config-only for the GGUF engines: its min_vram_gb
+            # is the GPU share attention needs, not a weights
+            # footprint. No GPU engine ever runs it.
             fits_gpu, tp = False, None
-        # KTransformers keeps the experts in host RAM and reads them
+        # The GGUF engines keep the experts in host RAM and read them
         # from GGUF, so a model beyond VRAM is in reach only when both
         # the companion is catalogued and the weights fit the RAM.
-        kt_eligible = bool(e.get("gguf"))
+        gguf_spec = e.get("gguf") or {}
+        kt_eligible = bool(gguf_spec)
+        gguf_engines = list(gguf_spec.get("engines") or GGUF_ENGINES)
         fits_ram = True
         if size:
             fits_ram = (host_ram_gb is not None
@@ -234,6 +240,7 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             size_gb=size, cached=bool(st.get("cached")),
             kv_bytes=kv_bytes_per_token(mid, cache),
             fits_gpu=fits_gpu, fits_ram=fits_ram, kt_eligible=kt_eligible,
+            gguf_engines=gguf_engines,
             fits=fits_gpu or (kt_eligible and fits_ram),
             tp=tp if fits_gpu else None,
             replicas=(gpus // tp) if fits_gpu else None,
@@ -272,8 +279,9 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             # may still pick it when KTransformers can carry it.
             c.score = 0.0
             if c.fits:
-                bits = ["beyond VRAM — KTransformers only (GGUF companion "
-                        "catalogued, weights fit host RAM)"]
+                bits = [f"beyond VRAM — {_gguf_engines_label(c.gguf_engines)} "
+                        "only (GGUF companion catalogued, weights fit host "
+                        "RAM)"]
             elif c.kt_eligible and host_ram_gb is None:
                 bits = ["beyond VRAM and host RAM is unknown here"]
             elif c.kt_eligible:
@@ -281,7 +289,7 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
                         f"exceed {RAM_SHARE:.0%} of {host_ram_gb:g} GB of RAM"]
             else:
                 bits = ["does not fit this box (no GGUF companion for "
-                        "KTransformers)"]
+                        "KTransformers or llama.cpp)"]
         c.why = "; ".join(bits)
         out.append(c)
     # Measured beats estimated, always. A staged model whose KV cost
@@ -396,7 +404,7 @@ def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             large.append(c)
     picks += large
 
-    # BEYOND VRAM: what only KTransformers can serve, largest first.
+    # BEYOND VRAM: what only the GGUF engines can serve, largest first.
     beyond_pool = sorted(
         (c for c in scored if not c.fits_gpu and c.kt_eligible and c.fits_ram
          and c.size_gb),
@@ -405,8 +413,9 @@ def pick_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
         if len(picks) >= limit - 1:
             break
         c.tier = "beyond_vram"
-        c.why = (f"beyond VRAM — KTransformers only, {float(c.size_gb):g} GB "
-                 f"of weights in {_ram_label(host_ram_gb)} of RAM")
+        c.why = (f"beyond VRAM — {_gguf_engines_label(c.gguf_engines)} only, "
+                 f"{float(c.size_gb):g} GB of weights in "
+                 f"{_ram_label(host_ram_gb)} of RAM")
         picks.append(c)
 
     # FAST: the vendor round-robin over what is left, filling the rest.
@@ -484,7 +493,15 @@ def _pick_fast(ranked: list[Candidate], limit: int, diverse: bool,
 # KV precision measures NEW cells instead of reusing old ones.
 SHAPE_KEYS = ("input_tokens", "gpu_memory_utilization", "kv_cache_dtype",
               "replicas", "tp", "max_model_len")
-LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_")
+LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_", "llamacpp_")
+
+
+def _gguf_engines_label(engines: Optional[list]) -> str:
+    """"KTransformers / llama.cpp" or whichever of them the companion
+    allows -- for the plan's per-model reasons."""
+    from .engines.knobs import ENGINE_LABELS
+    names = list(engines or GGUF_ENGINES)
+    return " / ".join(ENGINE_LABELS.get(e, e) for e in names)
 
 
 def _is_shape_key(k: str) -> bool:
@@ -508,8 +525,15 @@ def engine_defaults(engine: str) -> dict:
     this every KTransformers cell failed at config time and the matrix
     showed a blank where the only engine able to serve a model larger
     than VRAM should be.
+
+    llama.cpp gets the same shape for the same reasons: one replica
+    spread by layer over its whole device group (with the experts
+    offloaded, a second replica contends for the same memory
+    bandwidth), and ``kv_cache_dtype`` auto because its q8_0 cache is
+    a different quantity from the GPU engines' fp8 -- an operator who
+    wants it names it.
     """
-    if engine == "ktransformers":
+    if engine in GGUF_ENGINES:
         return {"replicas": 1, "kv_cache_dtype": "auto",
                 "max_model_len": KT_MAX_MODEL_LEN}
     return {}
@@ -518,6 +542,8 @@ def engine_defaults(engine: str) -> dict:
 # KTransformers' CPU-side KV cache is sized by max_model_len and its
 # whole point is a model that barely fits; 4k is the documented
 # serving context and enough for the roofline's short shapes.
+# llama-server's pool is max_model_len x slots (engines/llamacpp.py),
+# so the same 4k keeps 32 slots to a 128k-token cache.
 KT_MAX_MODEL_LEN = 4096
 
 
@@ -525,16 +551,19 @@ def engines_for(engine: str, info: dict | None) -> bool:
     """Whether a model with plan ``info`` (Candidate.info()) gets a
     cell on ``engine``. No info means the old behaviour: every engine.
 
-    GPU engines need the weights on the cards; KTransformers needs the
-    GGUF companion it loads from. A beyond-VRAM model therefore gets
-    KTransformers cells only, and a model without a companion gets no
-    KTransformers cell at all -- rather than a cell that fails at
-    config time and leaves a blank nobody can read.
+    GPU engines need the weights on the cards; the GGUF engines
+    (KTransformers, llama.cpp) need the GGUF companion they load from,
+    and the companion's ``engines`` allow-list may name only one of
+    them. A beyond-VRAM model therefore gets GGUF-engine cells only,
+    and a model without a companion gets none of those at all --
+    rather than a cell that fails at config time and leaves a blank
+    nobody can read.
     """
     if not info:
         return True
-    if engine == "ktransformers":
-        return bool(info.get("kt_eligible"))
+    if engine in GGUF_ENGINES:
+        return (bool(info.get("kt_eligible"))
+                and engine in (info.get("gguf_engines") or GGUF_ENGINES))
     return bool(info.get("fits_gpu", True))
 
 
@@ -559,12 +588,14 @@ def cells(models: list[str], engines: list[str], shapes: dict, *,
 
     Each cell carries its full launch shape (``engine_shape`` plus the
     engine's own defaults), so the cell IS the record of what was
-    measured. KTransformers cells are clamped to its documented batch
-    width and deduplicated: two cells that would launch identically
-    are one cell.
+    measured. GGUF-engine cells are clamped to each engine's documented
+    batch width (KTransformers 4, llama.cpp 32 slots) and deduplicated:
+    two cells that would launch identically are one cell.
     """
-    from .engines.ktransformers import DOCUMENTED_MAX_BATCH
+    from .engines import ktransformers, llamacpp
 
+    max_batch = {"ktransformers": ktransformers.DOCUMENTED_MAX_BATCH,
+                 "llamacpp": llamacpp.DOCUMENTED_MAX_BATCH}
     mns = sorted(shapes.get("max_num_seqs") or DEFAULT_SHAPES["max_num_seqs"])
     outs = sorted(shapes.get("output_tokens") or DEFAULT_SHAPES["output_tokens"])
     out: list[dict] = []
@@ -577,13 +608,13 @@ def cells(models: list[str], engines: list[str], shapes: dict, *,
                     notes.append(_skip_note(m, e, info))
                 continue
             shape = {**shape_of(engine_shape or {}), **engine_defaults(e)}
-            if (info and e != "ktransformers" and info.get("tp")
+            if (info and e not in GGUF_ENGINES and info.get("tp")
                     and int(info["tp"]) > 1):
                 shape["tp"] = int(info["tp"])
                 shape["replicas"] = int(info.get("replicas") or 1)
             for n in mns:
-                if e == "ktransformers":
-                    n = min(n, DOCUMENTED_MAX_BATCH)
+                if e in max_batch:
+                    n = min(n, max_batch[e])
                 for o in outs:
                     cell = {"model": m, "engine": e, "max_num_seqs": n,
                             "output_tokens": o, "input_tokens": input_tokens,
@@ -597,10 +628,15 @@ def cells(models: list[str], engines: list[str], shapes: dict, *,
 
 
 def _skip_note(model: str, engine: str, info: dict) -> str:
-    if engine == "ktransformers":
-        return f"{model}: no ktransformers cells — no GGUF companion staged"
+    if engine in GGUF_ENGINES:
+        if info.get("kt_eligible"):
+            allowed = info.get("gguf_engines") or GGUF_ENGINES
+            return (f"{model}: no {engine} cells — its GGUF companion is "
+                    f"marked for {', '.join(allowed)} only")
+        return f"{model}: no {engine} cells — no GGUF companion staged"
     return (f"{model}: no {engine} cells — {info.get('approx_size_gb') or '?'}"
-            f" GB of weights exceed the GPUs (KTransformers only)")
+            f" GB of weights exceed the GPUs "
+            f"({_gguf_engines_label(info.get('gguf_engines'))} only)")
 
 
 def estimate_minutes(n_cells: int, *, launch_min: float = 6.0,

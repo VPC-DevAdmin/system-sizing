@@ -52,6 +52,19 @@ RUNTIMES: dict[str, dict] = {
                  "the GPU. Serves models far larger than VRAM — the "
                  "reason this box has 2 TB of RAM and AMX.",
     },
+    "llamacpp": {
+        "label": "llama.cpp",
+        # The CUDA server build; floating tag, rebuilt on every upstream
+        # release (engines/llamacpp.py records the pinning options).
+        # ~2.6 GB compressed on GHCR; extracted it is about twice that.
+        "image": "ghcr.io/ggml-org/llama.cpp:server-cuda",
+        "approx_gb": 6,
+        "blurb": "llama-server on the model's GGUF. The widest path to "
+                 "the largest models: every frontier MoE has an unsloth "
+                 "quant, and with the experts kept in host RAM it "
+                 "serves weights far beyond VRAM on any architecture "
+                 "llama.cpp knows.",
+    },
     "trtllm": {
         "label": "TensorRT-LLM",
         "image": "nvcr.io/nvidia/tensorrt-llm/release:1.2.1",

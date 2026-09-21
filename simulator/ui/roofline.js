@@ -34,10 +34,14 @@ const num = (v, d = 0) => (v == null || !Number.isFinite(+v)) ? "—"
   : (+v).toLocaleString(undefined, { maximumFractionDigits: d });
 
 /* Which engines a candidate gets: GPU engines when the weights fit the
- * cards, KTransformers when a GGUF companion is catalogued -- the
- * same rule as roofline.engines_for on the server. */
+ * cards, the GGUF engines (KTransformers, llama.cpp) when a GGUF
+ * companion is catalogued and its allow-list names them -- the same
+ * rule as roofline.engines_for on the server. */
+const GGUF_ENGINES = ["ktransformers", "llamacpp"];
 const enginesFor = (c, engines) => engines.filter(e =>
-  e === "ktransformers" ? c.kt_eligible : c.fits_gpu !== false);
+  GGUF_ENGINES.includes(e)
+    ? c.kt_eligible && (c.gguf_engines || GGUF_ENGINES).includes(e)
+    : c.fits_gpu !== false);
 
 export const Roofline = {
   doc: null,
@@ -130,15 +134,15 @@ export const Roofline = {
   },
 
   /* Cells per model: the GPU engines take the whole shape grid, while
-   * KTransformers clamps to one batch width (its documented four) so
-   * only the output lengths vary. */
+   * the GGUF engines clamp to one batch width (KTransformers' documented
+   * four, llama.cpp's 32 slots) so only the output lengths vary. */
   cellCount(cands, engines) {
     const mns = this.shapes.max_num_seqs.length;
     const outs = this.shapes.output_tokens.length;
     let n = 0;
     for (const c of cands) {
       for (const e of enginesFor(c, engines)) {
-        n += e === "ktransformers" ? outs : mns * outs;
+        n += GGUF_ENGINES.includes(e) ? outs : mns * outs;
       }
     }
     return n;

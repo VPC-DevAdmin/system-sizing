@@ -16,26 +16,33 @@
 #   gated          true when the repo needs an accepted license + HF_TOKEN
 #   engine_args    extra vLLM flags this artifact needs, if any
 #   notes          one-liner for the UI
-#   gguf           optional GGUF companion for KTransformers, which loads
-#                  weights from GGUF only (the HF repo above supplies
+#   gguf           optional GGUF companion for the GGUF engines --
+#                  KTransformers and llama.cpp (llama-server) -- which
+#                  load weights from GGUF only (the HF repo above supplies
 #                  config + tokenizer). Prepare stages it next to the
-#                  weights and the launcher resolves --gguf_path from it.
-#                  Its presence is what makes the entry KTransformers-
-#                  eligible, so only name one for an architecture the
-#                  v0.3.2 image has an optimize rule for (deepseek_v3,
-#                  qwen3_moe, ...) -- engines/ktransformers.py maps them.
+#                  weights and each launcher resolves its GGUF path from
+#                  it. Its presence is what makes the entry eligible for
+#                  those engines.
 #                    repo     HF repo id holding the GGUF
 #                    file     one .gguf file in that repo (a path when the
 #                             repo shards quants into subdirectories), OR
 #                             a directory when the quant is split into
 #                             -00001-of-0000N shards (every shard is
-#                             staged; KTransformers reads the directory)
+#                             staged; KTransformers reads the directory,
+#                             llama-server opens the first shard)
 #                    size_gb  its size (all shards), for the download button
+#                    engines  optional allow-list, [ktransformers, llamacpp]
+#                             by default. Name [llamacpp] alone for an
+#                             architecture the KTransformers v0.3.2 image
+#                             has no optimize rule for (it has deepseek_v3
+#                             and qwen3_moe -- engines/ktransformers.py maps
+#                             them); the roofline then never schedules a
+#                             KTransformers cell that dies at load.
 #   kt_only        true when the weights exceed the GPUs outright: GPU
-#                  engines never run it, only KTransformers does (CPU
+#                  engines never run it, only the GGUF engines do (CPU
 #                  experts in host RAM). Prepare then stages the HF repo
 #                  config-only -- config + tokenizer, no safetensors.
-#   host_ram_gb    host RAM a KTransformers launch needs: the GGUF (its
+#   host_ram_gb    host RAM a CPU-expert launch needs: the GGUF (its
 #                  experts live in RAM) plus headroom for the runtime.
 
 models:
@@ -261,8 +268,9 @@ models:
   min_vram_gb: 350
   notes: GLM flagship-flash — native FP8, fits tp4
   # unsloth/GLM-5.3-Flash-GGUF exists, but the model_type (glm5_next) has
-  # no injection rule in the KTransformers v0.3.2 image -- no companion,
-  # or the roofline would schedule KT cells that die at load.
+  # no injection rule in the KTransformers v0.3.2 image -- no companion
+  # yet; a llamacpp-only one (gguf.engines: [llamacpp]) is the way to
+  # add it once its shard sizes are verified on the Hub.
 - id: zai-org/GLM-5.3
   family: glm-5.3
   series: GLM-5
@@ -270,8 +278,20 @@ models:
   moe: true
   quant: fp8
   approx_size_gb: 755
-  min_vram_gb: 800
-  notes: full GLM flagship — needs a bigger box than 4x96GB per domain
+  # 755 GB of FP8 exceeds the box's 8x96 GB outright: the GGUF engines
+  # keep attention + KV on the GPU and the experts in host RAM, so
+  # min_vram_gb is that GPU share, not the weights.
+  min_vram_gb: 32
+  kt_only: true
+  host_ram_gb: 540
+  notes: full GLM flagship — beyond 8x96GB; llama.cpp only (glm_moe_dsa
+    has no KTransformers v0.3.2 rule), experts in host RAM from the GGUF
+  # unsloth's dynamic 4-bit: 11 shards, 467.3 GB (verified on the Hub).
+  gguf:
+    repo: unsloth/GLM-5.3-GGUF
+    file: UD-Q4_K_XL
+    size_gb: 467.3
+    engines: [llamacpp]
 - id: zai-org/GLM-4.7-Flash
   family: glm-4.7-flash
   series: GLM-4.7
@@ -298,6 +318,30 @@ models:
   approx_size_gb: 99
   min_vram_gb: 112
   notes: linear-attention MoE — KV-cache economics outlier worth measuring
+- id: moonshotai/Kimi-K2-Thinking
+  family: kimi-k2-thinking
+  series: Kimi K2
+  params_b: 1026.0
+  moe: true
+  # Native INT4 (quantization-aware trained, compressed-tensors) -- none
+  # of the catalog's named schemes; the GGUF is what gets served here.
+  quant: other
+  approx_size_gb: 594
+  # 1T parameters, 384 experts: the largest model with a GGUF. The GGUF
+  # engines keep attention + KV on the GPU (min_vram_gb is that share)
+  # and the experts in host RAM -- 646 GB of them, hence host_ram_gb.
+  min_vram_gb: 40
+  kt_only: true
+  host_ram_gb: 720
+  notes: 1T-parameter frontier MoE — beyond 8x96GB; llama.cpp only
+    (kimi_k2 has no KTransformers v0.3.2 rule); Prepare stages config +
+    tokenizer, the weights come from the GGUF
+  # unsloth's dynamic 4-bit: 14 shards, 646.2 GB (verified on the Hub).
+  gguf:
+    repo: unsloth/Kimi-K2-Thinking-GGUF
+    file: UD-Q4_K_XL
+    size_gb: 646.2
+    engines: [llamacpp]
 - id: MiniMaxAI/MiniMax-M2.7
   family: minimax-m2.7
   series: MiniMax M2
@@ -306,9 +350,17 @@ models:
   quant: fp8
   approx_size_gb: 230
   min_vram_gb: 255
-  notes: native FP8 — fits tp4
-  # unsloth/MiniMax-M2.7-GGUF exists, but minimax_m2 has no KTransformers
-  # v0.3.2 optimize rule -- no companion (see GLM-5.3-Flash).
+  notes: native FP8 — fits tp4; llama.cpp can also serve its GGUF
+  host_ram_gb: 170
+  # minimax_m2 has no KTransformers v0.3.2 optimize rule, so the
+  # companion is llama.cpp-only. unsloth's dynamic 4-bit: 4 shards,
+  # 140.8 GB (verified on the Hub) -- fits the GPUs, so the expert
+  # offload stays off by default and it decodes GPU-resident.
+  gguf:
+    repo: unsloth/MiniMax-M2.7-GGUF
+    file: UD-Q4_K_XL
+    size_gb: 140.8
+    engines: [llamacpp]
 - id: deepseek-ai/DeepSeek-V3.2
   family: deepseek-v3.2
   series: DeepSeek V3.2
@@ -316,11 +368,21 @@ models:
   moe: true
   quant: fp8
   approx_size_gb: 687
-  min_vram_gb: 730
-  notes: frontier reference — needs a bigger box than 4x96GB per domain;
-    its sparse-attention architecture (deepseek_v32, DSA indexer) is NOT
-    served by the KTransformers v0.3.2 image, so no GGUF companion — use
-    DeepSeek-V3.1 for the CPU-expert path
+  # Beyond 8x96GB outright; min_vram_gb is the GPU share attention + KV
+  # need under the GGUF engines, not the weights.
+  min_vram_gb: 24
+  kt_only: true
+  host_ram_gb: 480
+  notes: frontier reference — beyond 8x96GB; llama.cpp only, since its
+    sparse-attention architecture (deepseek_v32, DSA indexer) is NOT served
+    by the KTransformers v0.3.2 image — DeepSeek-V3.1 is the KTransformers
+    path; Prepare stages config + tokenizer, weights come from the GGUF
+  # unsloth's dynamic 4-bit: 9 shards, 407.8 GB (verified on the Hub).
+  gguf:
+    repo: unsloth/DeepSeek-V3.2-GGUF
+    file: UD-Q4_K_XL
+    size_gb: 407.8
+    engines: [llamacpp]
 - id: deepseek-ai/DeepSeek-V3.1
   family: deepseek-v3.1
   series: DeepSeek V3.1
@@ -333,10 +395,12 @@ models:
   min_vram_gb: 24
   kt_only: true
   host_ram_gb: 450
-  notes: beyond 8x96GB — KTransformers only (deepseek_v3, CPU experts in
-    2 TB RAM); Prepare stages config + tokenizer, weights come from the GGUF
+  notes: beyond 8x96GB — GGUF engines only (KTransformers via its
+    deepseek_v3 rule, or llama.cpp; CPU experts in 2 TB RAM); Prepare
+    stages config + tokenizer, weights come from the GGUF
   # unsloth's dynamic 4-bit: 8 shards, 386.9 GB in all. The single-file
-  # UD-TQ1_0 (170 GB) is a ternary quant nobody should benchmark.
+  # UD-TQ1_0 (170 GB) is a ternary quant nobody should benchmark. Both
+  # GGUF engines serve it (the default allow-list).
   gguf:
     repo: unsloth/DeepSeek-V3.1-GGUF
     file: UD-Q4_K_XL

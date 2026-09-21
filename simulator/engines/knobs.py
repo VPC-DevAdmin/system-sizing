@@ -22,7 +22,14 @@ from __future__ import annotations
 
 # Engines the benchmark and optimizer may choose between, in the order
 # the UI offers them.
-GPU_ENGINES = ("vllm_cuda_multi", "trtllm", "sglang_cuda", "ktransformers")
+GPU_ENGINES = ("vllm_cuda_multi", "trtllm", "sglang_cuda", "ktransformers",
+               "llamacpp")
+
+# The engines that load weights from a GGUF companion rather than the
+# HF safetensors, and can keep MoE experts in host RAM. A ``kt_only``
+# catalog entry (weights beyond the GPUs) is served by these alone;
+# the entry's ``gguf.engines`` may narrow the pair further.
+GGUF_ENGINES = ("ktransformers", "llamacpp")
 
 ENGINE_LABELS = {
     "vllm_cuda_multi": "vLLM",
@@ -30,6 +37,7 @@ ENGINE_LABELS = {
     "trtllm": "TensorRT-LLM",
     "sglang_cuda": "SGLang",
     "ktransformers": "KTransformers",
+    "llamacpp": "llama.cpp",
 }
 
 ENGINE_CAVEATS = {
@@ -54,6 +62,27 @@ ENGINE_CAVEATS = {
         "streams. A tokens/sec ranking against them measures the wrong "
         "thing; what this engine answers is whether a model too large "
         "for VRAM can be served at all.",
+    ],
+    "llamacpp": [
+        "llama-server loads the model's GGUF companion, not its "
+        "safetensors, so it runs every architecture llama.cpp knows -- "
+        "the widest path to the largest models. With the experts "
+        "offloaded (llamacpp_offload_experts, on by default when the "
+        "GGUF exceeds 85% of the replica's VRAM) attention and KV stay "
+        "on the GPUs and the MoE experts live in host RAM, so its "
+        "decode rate is bounded by memory bandwidth, not by the GPUs: "
+        "it is not competing on the same axis as the GPU-resident "
+        "engines.",
+        "KV cache precision maps fp8 to its q8_0 cache; it has no 4-bit "
+        "float cache, so nvfp4 is refused. Expert parallelism is "
+        "refused (there is one process). GPU memory share has no "
+        "meaning -- llama-server allocates what the model and the "
+        "context need -- and is ignored, not translated.",
+        "Batch width is server slots: the context (max_model_len) is "
+        "one pool split evenly across them, so the roofline clamps to "
+        "32 slots and sizes the pool to slots x max_model_len. A "
+        "tokens/sec ranking against the GPU engines' thousands of "
+        "streams measures the wrong thing.",
     ],
     "trtllm": [
         "GPU memory fraction means something different here: vLLM's is "
@@ -93,6 +122,16 @@ def unsupported(engine_type: str, knobs: dict) -> str | None:
         if knobs.get("expert_parallel"):
             return ("expert parallelism is not applicable: KTransformers "
                     "already places every expert on the CPU")
+    if engine_type == "llamacpp":
+        from .llamacpp import KV_CACHE_TYPES
+        if kv and kv != "auto" and kv not in KV_CACHE_TYPES:
+            return (f"llama-server has no KV cache type for {kv!r}: its "
+                    f"quantised caches are 8-bit (q8_0, what fp8 maps to) "
+                    f"and integer 4-bit, neither of which is nvfp4")
+        if knobs.get("expert_parallel"):
+            return ("expert parallelism is not applicable: llama-server is "
+                    "one process, and its expert placement is the "
+                    "llamacpp_offload_experts lever")
     return None
 
 
@@ -161,7 +200,7 @@ def to_engine_config(engine_type: str, knobs: dict) -> dict:
         "expert_parallel": bool(k.get("expert_parallel")),
         "trust_remote_code": bool(k.get("trust_remote_code")),
     }
-    if engine_type in ("trtllm", "sglang_cuda", "ktransformers"):
+    if engine_type in ("trtllm", "sglang_cuda", "ktransformers", "llamacpp"):
         # These engines read the canonical fields off the config
         # object directly (see each build_replica_command), so no flag
         # translation is needed beyond what is already above.

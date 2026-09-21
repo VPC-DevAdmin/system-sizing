@@ -735,8 +735,8 @@ def test_spectrum_pick_fills_three_tiers():
     # The order is fast, large, beyond -- the tiers are labelled.
     assert [c.tier for c in picks] == ["fast"] * 5 + ["large"] * 2 + ["beyond_vram"]
     dsv4 = picks[-1]
-    assert dsv4.why == ("beyond VRAM — KTransformers only, 700 GB of weights "
-                        "in 2.048 TB of RAM")
+    assert dsv4.why == ("beyond VRAM — KTransformers / llama.cpp only, "
+                        "700 GB of weights in 2.048 TB of RAM")
     assert large[0].why.startswith("largest that fits the GPUs: 322 GB at tp4")
     big = large[1]
     assert big.why.startswith(f"largest that fits the GPUs: {big.size_gb} GB "

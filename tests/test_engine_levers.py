@@ -113,7 +113,8 @@ def test_api_view_is_serialisable():
     rows = as_dicts()
     assert rows and all(isinstance(r["values"], list) for r in rows)
     assert {r["engine"] for r in rows} <= {"trtllm", "sglang_cuda",
-                                           "vllm_cuda_multi", "ktransformers"}
+                                           "vllm_cuda_multi", "ktransformers",
+                                           "llamacpp"}
     assert levers_for("trtllm")
 
 

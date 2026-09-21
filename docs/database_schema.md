@@ -64,7 +64,7 @@ concurrency.
 | `cohort_run_id` | TEXT PRIMARY KEY | `uuid.uuid4().hex`, minted when the run starts. |
 | `started_at` | TEXT NOT NULL | ISO-8601 UTC. |
 | `completed_at` | TEXT | Set by `finalise_run`; NULL while in flight. |
-| `engine_type` | TEXT NOT NULL | One of the registry keys: `ktransformers`, `mock`, `remote`, `sglang`, `sglang_cuda`, `trtllm`, `vllm`, `vllm_cuda`, `vllm_cuda_multi`, `vllm_dual_socket`. |
+| `engine_type` | TEXT NOT NULL | One of the registry keys: `ktransformers`, `llamacpp`, `mock`, `remote`, `sglang`, `sglang_cuda`, `trtllm`, `vllm`, `vllm_cuda`, `vllm_cuda_multi`, `vllm_dual_socket`. |
 | `model_id` | TEXT NOT NULL | HF repo id (e.g. `Qwen/Qwen3-30B-A3B-Instruct-2507`). |
 | `cohort_id` | TEXT NOT NULL | Cohort id, or a persona id when the run is a single persona. |
 | `cohort_definition_json` | TEXT NOT NULL | JSON of `{id, name, description, category, persona_weights}`. |

@@ -218,6 +218,21 @@ class EngineConfig:
     # consumer/pro Blackwell (RTX PRO 6000, RTX 5090).
     ktransformers_cuda_arch: str = "12.0"
 
+    # ── llamacpp: llama-server, GGUF-fed, optional CPU experts ────────
+    # Floating CUDA server tag; pin server-cuda-v<release> to reproduce
+    # a run (engines/llamacpp.py records the policy).
+    llamacpp_image: str = "ghcr.io/ggml-org/llama.cpp:server-cuda"
+    llamacpp_extra_flags: list[str] = field(default_factory=list)
+    # Directory holding the GGUF (one file, or -0000i-of-0000N shards);
+    # resolved from the catalog's companion when unset by the operator.
+    llamacpp_gguf_path: str | None = None
+    # -t: CPU threads for generation. None -> physical cores minus two.
+    llamacpp_cpu_threads: int | None = None
+    # -ot '\.ffn_.*_exps\.=CPU': MoE experts in host RAM, attention on
+    # the GPUs. None -> automatic: on when the GGUF exceeds 85% of the
+    # replica's VRAM, off otherwise.
+    llamacpp_offload_experts: bool | None = None
+
     # ── trtllm: TensorRT-LLM via trtllm-serve ─────────────────────────
     # Launched through the image's OWN entrypoint — see engines/trtllm.py
     # for why overriding it breaks the TensorRT import.
@@ -270,7 +285,7 @@ class EngineConfig:
     @property
     def base_url(self) -> str:
         if self.type in ("vllm", "sglang", "vllm_cuda", "mock", "trtllm",
-                         "sglang_cuda", "ktransformers"):
+                         "sglang_cuda", "ktransformers", "llamacpp"):
             return f"http://{self.host}:{self.port}/v1"
         if self.type == "vllm_dual_socket":
             return f"http://{self.host}:{self.litellm_port}/v1"

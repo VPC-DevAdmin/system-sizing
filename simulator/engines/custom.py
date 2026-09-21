@@ -24,10 +24,16 @@ from typing import Optional
 
 from ..config import EngineConfig
 from ..search import assign_devices
-from .knobs import GPU_ENGINES, canonical, to_engine_config, unsupported
+from .knobs import (
+    GGUF_ENGINES,
+    GPU_ENGINES,
+    canonical,
+    to_engine_config,
+    unsupported,
+)
 from .vram import weights_per_gpu_gb
 
-LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_")
+LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_", "llamacpp_")
 
 # Which engine owns each lever family. A lever whose prefix belongs to
 # another engine is meaningless on this candidate: the search collapses
@@ -36,6 +42,7 @@ ENGINE_LEVER_PREFIX = {
     "trtllm": "trtllm_",
     "sglang_cuda": "sglang_",
     "ktransformers": "ktransformers_",
+    "llamacpp": "llamacpp_",
 }
 
 
@@ -69,6 +76,13 @@ def _coerce_lever(name: str, value):
     the lever ON -- coerce rather than trust.
     """
     kind = LEVER_FIELDS.get(name, "")
+    if kind == "bool | None":
+        # Tri-state: "auto" (or an empty value) leaves the engine to
+        # decide; everything else is the bool below.
+        if value is None or (isinstance(value, str)
+                             and value.strip().lower() in ("", "auto")):
+            return None
+        kind = "bool"
     if kind == "bool":
         if isinstance(value, str):
             return value.strip().lower() in ("on", "true", "1", "yes")
@@ -124,16 +138,59 @@ def cpu_engine(custom: dict) -> dict:
     }
 
 
-def _kt_only(model_id: str, catalog: Optional[list[dict]]) -> bool:
-    """Does the catalog mark ``model_id`` as KTransformers-only?"""
+def _catalog_entry(model_id: str, catalog: Optional[list[dict]]) -> dict:
     try:
         if catalog is None:
             from ..model_catalog import load_model_catalog
             catalog = load_model_catalog()
-        return any(e.get("id") == model_id and e.get("kt_only")
-                   for e in catalog)
+        return next((e for e in catalog if e.get("id") == model_id), None) or {}
     except Exception:  # noqa: BLE001
-        return False
+        return {}
+
+
+def _kt_only(model_id: str, catalog: Optional[list[dict]]) -> bool:
+    """Does the catalog mark ``model_id`` as beyond the GPUs (``kt_only``:
+    served by the GGUF engines alone)?"""
+    return bool(_catalog_entry(model_id, catalog).get("kt_only"))
+
+
+def gguf_engine_excluded(engine_type: str, model_id: str,
+                         catalog: Optional[list[dict]]) -> Optional[str]:
+    """Why a GGUF engine may not run this model's companion, or None.
+
+    A companion's ``engines`` allow-list narrows the pair when one
+    engine cannot load the architecture: the KTransformers v0.3.2
+    image has injection rules for deepseek_v3 and qwen3_moe only, so
+    DeepSeek-V3.2, Kimi-K2 and GLM-5.3 name llamacpp alone. A cell
+    scheduled against the list would die at load, after the 30-minute
+    health timeout."""
+    spec = _catalog_entry(model_id, catalog).get("gguf") or {}
+    allowed = spec.get("engines")
+    if not spec or not allowed or engine_type in allowed:
+        return None
+    return (f"the catalog marks its GGUF companion for "
+            f"{', '.join(allowed)} only")
+
+
+def llamacpp_gguf_missing(gguf_path: object) -> Optional[str]:
+    """Why a llama-server launch cannot proceed, or None when it can:
+    the GGUF directory must exist and hold a loadable file (one .gguf,
+    or a first shard) -- checked here so a half-staged quant is refused
+    in milliseconds rather than after the health timeout."""
+    if not gguf_path:
+        return ("llama-server loads weights from GGUF, and no "
+                "llamacpp_gguf_path is configured; stage the model's GGUF "
+                "companion (e.g. the unsloth/*-GGUF repo) and point "
+                "llamacpp_gguf_path at its directory")
+    if not Path(str(gguf_path)).is_dir():
+        return (f"llamacpp_gguf_path {gguf_path!r} is not a directory on "
+                "this host")
+    from .llamacpp import gguf_entry_file
+    try:
+        gguf_entry_file(gguf_path)
+    except ValueError as e:
+        return str(e)
+    return None
 
 
 def ktransformers_gguf_missing(gguf_path: object) -> Optional[str]:
@@ -159,15 +216,18 @@ def ktransformers_gguf_missing(gguf_path: object) -> Optional[str]:
 
 
 def resolve_gguf_companion(model_id: str,
-                           catalog: Optional[list[dict]] = None) -> Optional[str]:
+                           catalog: Optional[list[dict]] = None,
+                           engine: str = "ktransformers") -> Optional[str]:
     """The staged GGUF companion's directory for ``model_id``, from
     the catalog entry's ``gguf`` block -- None when the model has no
     companion (the caller then falls back to the generic "configure
-    ktransformers_gguf_path" refusal).
+    <engine>_gguf_path" refusal). One directory serves both GGUF
+    engines: KTransformers reads every .gguf under it, llama-server
+    opens the first shard.
 
     A companion that exists but is not staged raises ShapeError
     naming the fix (Prepare's "Download GGUF" button): telling the
-    operator to point ktransformers_gguf_path somewhere would be the
+    operator to point <engine>_gguf_path somewhere would be the
     wrong advice for a model capsim already knows how to stage."""
     from ..models import gguf_status
     if catalog is not None:
@@ -179,10 +239,10 @@ def resolve_gguf_companion(model_id: str,
         return None
     if not status["cached"]:
         raise ShapeError(
-            f"ktransformers cannot run {model_id} — its GGUF companion "
+            f"{engine} cannot run {model_id} — its GGUF companion "
             f"{status['repo']}/{status['file']} is not staged; stage the "
             f"GGUF companion in Prepare (Download GGUF) or set "
-            f"ktransformers_gguf_path explicitly")
+            f"{engine}_gguf_path explicitly")
     return status["path"]
 
 
@@ -212,12 +272,21 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
         hw = arena.hardware()
     if not hw.get("count"):
         raise ShapeError("custom engine shapes need a GPU host")
-    devices = assign_devices(tp, replicas, placement, hw["device_groups"])
+    engine_type = str(custom.get("engine") or "vllm_cuda_multi")
+    if engine_type == "llamacpp" and replicas == 1 and tp <= 1:
+        # llama-server has no tensor parallel; its default is a
+        # pipelined split by layer across every GPU it sees, and that
+        # split crosses PCIe domains without an all-reduce. So one
+        # replica at "tp1" means the whole box, not one card -- the
+        # shape the roofline asks for. A tp > 1 confines the replica
+        # to that many cards inside one domain, as for any engine.
+        devices = [sorted(d for g in hw["device_groups"] for d in g)]
+    else:
+        devices = assign_devices(tp, replicas, placement, hw["device_groups"])
     if devices is None:
         raise ShapeError(
             f"{replicas} replicas × tp{tp} does not fit "
             f"{hw['count']} GPUs in domains {hw['device_groups']}")
-    engine_type = str(custom.get("engine") or "vllm_cuda_multi")
     if engine_type not in GPU_ENGINES:
         raise ShapeError(
             f"unknown engine {engine_type!r} — expected one of "
@@ -231,22 +300,32 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
         # Refuse rather than approximate: measuring "close enough" here
         # answers a different question than the one asked.
         raise ShapeError(f"{engine_type} cannot run this shape — {why}")
-    if engine_type != "ktransformers" and _kt_only(model_id, catalog):
+    if engine_type not in GGUF_ENGINES and _kt_only(model_id, catalog):
         # The catalog says the weights exceed the GPUs outright; a
         # vLLM launch would spend the 30-minute health timeout
-        # discovering that. Only the CPU-expert engine runs it.
+        # discovering that. Only the CPU-expert engines run it.
         raise ShapeError(
             f"{engine_type} cannot run {model_id} — the catalog marks it "
-            f"kt_only (weights beyond the GPUs); only ktransformers serves it")
-    if engine_type == "ktransformers":
-        gguf_path = custom.get("ktransformers_gguf_path")
+            f"kt_only (weights beyond the GPUs); only the GGUF engines "
+            f"({', '.join(GGUF_ENGINES)}) serve it")
+    if engine_type in GGUF_ENGINES:
+        why = gguf_engine_excluded(engine_type, model_id, catalog)
+        if why and not custom.get(f"{engine_type}_gguf_path"):
+            # An explicit path is the operator's own GGUF, outside the
+            # catalog's judgement; the companion's allow-list binds
+            # only the companion.
+            raise ShapeError(f"{engine_type} cannot run {model_id} — {why}")
+        key = f"{engine_type}_gguf_path"
+        gguf_path = custom.get(key)
         if not gguf_path:
-            gguf_path = resolve_gguf_companion(model_id, catalog)
+            gguf_path = resolve_gguf_companion(model_id, catalog, engine_type)
             if gguf_path:
-                levers["ktransformers_gguf_path"] = gguf_path
-        why = ktransformers_gguf_missing(gguf_path)
+                levers[key] = gguf_path
+        missing = (ktransformers_gguf_missing if engine_type == "ktransformers"
+                   else llamacpp_gguf_missing)
+        why = missing(gguf_path)
         if why:
-            raise ShapeError(f"ktransformers cannot run {model_id} — {why}")
+            raise ShapeError(f"{engine_type} cannot run {model_id} — {why}")
 
     engine: dict = {
         "model_id": model_id,

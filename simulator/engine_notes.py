@@ -200,6 +200,23 @@ LEVERS: list[Lever] = [
                  "sized by the same --mem-fraction-static, the right "
                  "number for this box is a search, not a guess.",
     ),
+    Lever(
+        key="llamacpp_offload_experts", engine="llamacpp",
+        title="llama.cpp · experts in host RAM",
+        values=["auto", "on", "off"], default="auto",
+        searchable=True, verdict="untested",
+        text="Keeps every MoE expert tensor in host RAM (-ot "
+             "'\\.ffn_.*_exps\\.=CPU') while attention, the dense layers "
+             "and the KV cache stay on the GPUs. 'auto' offloads when "
+             "the GGUF exceeds 85% of the replica's VRAM -- the only "
+             "way a 400-650 GB quant loads on 8 x 96 GB -- and keeps a "
+             "smaller model fully on the GPUs.",
+        measured="Not yet measured here. The trade is decode rate "
+                 "against fit: offloaded experts are read from host "
+                 "memory at DDR5 bandwidth every token, so a model that "
+                 "fits the GPUs is expected to decode several times "
+                 "faster with this off.",
+    ),
 ]
 
 # Engine-level narrative for the arena's engine card.
@@ -252,6 +269,15 @@ ENGINE_NOTES: dict[str, str] = {
         "the only one compiled for SM120; the PyPI wheel stops at "
         "Hopper. Not yet measured on this box; the notes above are "
         "read off the v0.7.1 tag, not observed.",
+    "llamacpp":
+        "llama-server on the model's GGUF companion. The widest path "
+        "to the largest models: every frontier MoE ships an unsloth "
+        "quant, llama.cpp learns new architectures within days, and "
+        "with the experts kept in host RAM it serves weights far beyond "
+        "VRAM -- the same CPU-expert split as KTransformers, without "
+        "being limited to the two architectures that image has a rule "
+        "for. Throughput with offloaded experts is bounded by memory "
+        "bandwidth, so it belongs beside KTransformers, not vLLM.",
 }
 
 

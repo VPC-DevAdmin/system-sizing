@@ -70,6 +70,8 @@ KNOWN_DIMENSIONS: dict[str, str] = {
     "trtllm_cuda_graphs": "categorical",
     "trtllm_postprocess_workers": "categorical",
     "trtllm_moe_backend": "categorical",
+    # auto | on | off -- the CPU-expert switch (engines/llamacpp.py).
+    "llamacpp_offload_experts": "categorical",
 }
 
 # Sentinel meaning "don't pass the flag; let the engine pick".
@@ -352,6 +354,7 @@ def _dim_value(params: dict, dim: str, space: SearchSpace):
             "trtllm_cuda_graphs": "default",
             "trtllm_postprocess_workers": "0",
             "trtllm_moe_backend": "auto",
+            "llamacpp_offload_experts": "auto",
             "engine": "vllm_cuda_multi"}.get(dim)
 
 
@@ -1001,6 +1004,13 @@ def candidate_summary(params: dict, space: SearchSpace) -> dict[str, Any]:
         args = kt_argv(variant["model"], port=0,
                        max_batch_size=_mns)
         args = args[args.index("--max_batch_size"):] if _mns else []
+    elif engine == "llamacpp":
+        # Slots and the pool they share; the driver owns model, host,
+        # port and the GGUF mount.
+        from .engines.llamacpp import serve_argv as lc_argv
+        args = lc_argv("model.gguf", port=0, max_model_len=8192,
+                       slots=_mns, batch_tokens=_mbt)
+        args = args[args.index("-c"):]
     else:
         args = ["--gpu-memory-utilization", str(gmu)]
         if tp > 1:

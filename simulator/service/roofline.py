@@ -45,7 +45,8 @@ async def roofline_state(request: Request) -> dict:
 async def roofline_candidates(limit: int = 8, diverse: bool = True,
                               cached_only: bool = False,
                               spectrum: bool = True, large_limit: int = 3,
-                              beyond_limit: int = 2, extra: int = 0) -> dict:
+                              beyond_limit: int = 2, extra: int = 0,
+                              allow_cross_domain_tp: bool = False) -> dict:
     """The model shortlist in PICK ORDER, with the reasoning shown.
 
     The Roofline tab's auto mode plans exactly this list, so it has to
@@ -68,17 +69,19 @@ async def roofline_candidates(limit: int = 8, diverse: bool = True,
     vram = hw.get("vram_per_gpu_gb")
     ram = hw.get("host_ram_gb")
     gpus = int(hw.get("count") or 8)
+    tp_cap = None if allow_cross_domain_tp else max_tp_of(hw)
     limit = max(1, limit)
     picked = await asyncio.to_thread(
         pick_models, cat, vram_per_gpu_gb=vram, host_ram_gb=ram,
-        gpu_count=gpus, max_tp=max_tp_of(hw), limit=limit, diverse=diverse,
+        gpu_count=gpus, max_tp=tp_cap, limit=limit, diverse=diverse,
         cached_only=cached_only, spectrum=spectrum,
         large_limit=large_limit, beyond_limit=beyond_limit)
     chosen = {c.id for c in picked}
     rest = [c for c in await asyncio.to_thread(
         score_models, cat, vram_per_gpu_gb=vram, host_ram_gb=ram,
-        gpu_count=gpus, max_tp=max_tp_of(hw)) if c.id not in chosen]
+        gpu_count=gpus, max_tp=tp_cap) if c.id not in chosen]
     return {"hardware": hw, "diverse": diverse, "cached_only": cached_only,
+            "allow_cross_domain_tp": allow_cross_domain_tp,
             "spectrum": spectrum,
             "candidates": [_asdict(c) for c in
                            (picked + rest)[:limit + max(0, extra)]]}

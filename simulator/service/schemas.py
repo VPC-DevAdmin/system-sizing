@@ -104,6 +104,12 @@ class RooflineRequest(BaseModel):
     # false = the pure KV-cost ranking, precision twins and all.
     diverse: bool = True
     cached_only: bool = False
+    # Let tensor parallel span both PCIe/NUMA domains (tp8 on an
+    # XE7740). Off by default: cross-domain all-reduce is the wrong
+    # answer for throughput. On, it is the only way to hold NVFP4
+    # giants (DeepSeek-V3.1 at 413 GB, Kimi-K2 at 594 GB) on the GPUs
+    # at all -- the "how big can this box go" question.
+    allow_cross_domain_tp: bool = False
     engines: Optional[list[str]] = None      # None = every staged engine
     max_num_seqs: Optional[list[int]] = None
     output_tokens: Optional[list[int]] = None

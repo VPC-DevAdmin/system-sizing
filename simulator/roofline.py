@@ -203,12 +203,15 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
         need = e.get("min_vram_gb") or size
         gpus = max(1, int(gpu_count or 8))
         fits_gpu, tp = True, 1
+        cross_domain = False
         if vram_per_gpu_gb and need:
             # Whole-box: a model needing more than one card can still
             # run at tp>1, so this only excludes what will not fit the
             # box at all -- and records the tp that does fit it.
             tp = tp_for(float(need), float(vram_per_gpu_gb), gpus, max_tp)
             fits_gpu = tp is not None
+            if tp and max_tp is None and tp > 4 and gpus > 4:
+                cross_domain = True
         if e.get("kt_only"):
             # Staged config-only for KTransformers: its min_vram_gb is
             # the GPU share attention needs, not a weights footprint.
@@ -261,6 +264,9 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
         if size and vram_per_gpu_gb and float(size) <= float(vram_per_gpu_gb):
             c.score *= 1.15
             bits.append("fits one GPU — no tensor-parallel all-reduce")
+        if cross_domain:
+            bits.append(f"tp{tp} spans both PCIe domains — cross-domain "
+                        "all-reduce; held on the GPUs, not tuned for speed")
         if not c.fits_gpu:
             # Out of the FAST race either way; the beyond-VRAM tier
             # may still pick it when KTransformers can carry it.

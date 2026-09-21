@@ -403,3 +403,21 @@ models:
   approx_size_gb: 19
   min_vram_gb: 24
   notes: Google's MoE line in Blackwell-native 4-bit
+- id: nvidia/DeepSeek-V3.1-NVFP4
+  family: deepseek-v3.1
+  series: DeepSeek V3.1
+  moe: true
+  quant: nvfp4
+  approx_size_gb: 413
+  min_vram_gb: 440
+  params_b: 671
+  notes: 671B in Blackwell-native 4-bit — needs tp8 across both PCIe domains on 8x96GB (allow cross-domain tp)
+- id: nvidia/Kimi-K2-Thinking-NVFP4
+  family: kimi-k2-thinking
+  series: Kimi K2
+  moe: true
+  quant: nvfp4
+  approx_size_gb: 594
+  min_vram_gb: 620
+  params_b: 1026
+  notes: 1T-parameter MoE in NVFP4 — tp8 across both domains leaves ~170 GB for KV; the model-size ceiling of the GPUs

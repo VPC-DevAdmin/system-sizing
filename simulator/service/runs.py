@@ -304,12 +304,14 @@ async def _plan_roofline(spec: dict
     vram = hw.get("vram_per_gpu_gb")
     ram = hw.get("host_ram_gb")
     gpus = int(hw.get("count") or 8)
+    tp_cap = (None if spec.get("allow_cross_domain_tp")
+              else max_tp_of(hw))
     models = list(spec.get("models") or [])
     info: dict[str, dict] = {}
     if models:
         scored = await asyncio.to_thread(
             score_models, cat, vram_per_gpu_gb=vram, host_ram_gb=ram,
-            gpu_count=gpus, max_tp=max_tp_of(hw))
+            gpu_count=gpus, max_tp=tp_cap)
         by_id = {c.id: c for c in scored}
         for m in models:
             c = by_id.get(m)
@@ -325,7 +327,7 @@ async def _plan_roofline(spec: dict
         picked = await asyncio.to_thread(
             pick_models, cat,
             vram_per_gpu_gb=vram, host_ram_gb=ram, gpu_count=gpus,
-            max_tp=max_tp_of(hw),
+            max_tp=tp_cap,
             limit=int(spec.get("model_limit") or 8),
             cached_only=bool(spec.get("cached_only")),
             diverse=bool(spec.get("diverse", True)),

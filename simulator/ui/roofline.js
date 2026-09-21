@@ -58,6 +58,7 @@ export const Roofline = {
       $(id).addEventListener("change", () => this.refresh(true));
     }
     $("#rf-confirm").addEventListener("change", () => this.renderPlan());
+    $("#rf-cross-domain").addEventListener("change", () => this.refresh(true));
     onShow("roofline", () => this.refresh(true));
     // Poll regardless of which tab is showing: a run started here keeps
     // going, and the page must be right the moment it is looked at.
@@ -90,7 +91,8 @@ export const Roofline = {
         const l = this.limits();
         const d = await api(`/api/roofline/candidates?limit=${l.model_limit}`
           + `&large_limit=${l.large_limit}&beyond_limit=${l.beyond_limit}`
-          + `&extra=${mode === "manual" ? 40 : 6}&cached_only=${mode === "cached"}`);
+          + `&extra=${mode === "manual" ? 40 : 6}&cached_only=${mode === "cached"}`
+          + `&allow_cross_domain_tp=${$("#rf-cross-domain").checked}`);
         this.candidates = d.candidates || [];
         this.hardware = d.hardware;
       } catch { /* keep whatever we had */ }
@@ -265,6 +267,7 @@ export const Roofline = {
         output_tokens: this.shapes.output_tokens,
         input_tokens: +$("#rf-input-tokens").value || 128,
         confirm_winners: $("#rf-confirm").checked,
+        allow_cross_domain_tp: $("#rf-cross-domain").checked,
       } },
       new_run: false,
     };

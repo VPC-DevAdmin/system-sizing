@@ -1021,3 +1021,16 @@ def test_tensor_parallel_never_spans_a_device_group():
     assert c.fits_gpu is False and c.fits is False
     c = score_models(big, vram_per_gpu_gb=96, gpu_count=8)[0]
     assert c.fits_gpu is True and c.tp == 8
+
+
+def test_cross_domain_tp_is_an_explicit_opt_in():
+    """tp8 across both PCIe domains is off by default (slow all-reduce)
+    and on request holds the NVFP4 giants on the GPUs, saying so."""
+    giants = [{"id": "nvidia/Kimi-K2-Thinking-NVFP4", "family": "kimi-k2-thinking",
+               "series": "Kimi K2", "quant": "nvfp4", "params_b": 1026, "moe": True,
+               "approx_size_gb": 594, "min_vram_gb": 620}]
+    capped = score_models(giants, vram_per_gpu_gb=96, gpu_count=8, max_tp=4)[0]
+    assert capped.fits_gpu is False
+    lifted = score_models(giants, vram_per_gpu_gb=96, gpu_count=8, max_tp=None)[0]
+    assert lifted.fits_gpu is True and lifted.tp == 8 and lifted.replicas == 1
+    assert "spans both PCIe domains" in lifted.why

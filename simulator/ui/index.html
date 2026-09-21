@@ -233,6 +233,9 @@
         </select></label>
       <label class="check"><input type="checkbox" id="rf-confirm" checked>
         Confirm each winner <span class="hint">(full ladder)</span></label>
+      <label class="check"><input type="checkbox" id="rf-cross-domain">
+        Allow tp across PCIe domains <span class="hint">(tp8: holds NVFP4
+        giants on the GPUs; cross-domain all-reduce is slow)</span></label>
       <button id="rf-start" class="primary">Start roofline</button>
       <button id="rf-stop" class="danger" disabled>Stop</button>
       <span id="rf-msg" class="msg"></span>

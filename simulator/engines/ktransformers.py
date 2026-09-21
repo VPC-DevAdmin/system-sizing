@@ -22,12 +22,24 @@ concludes the wrong thing.
 Concurrency needs the ``balance_serve`` backend; the older single-
 stream backends serve one request at a time, which would read as a
 catastrophic engine rather than the wrong launch flag.
+
+Two generations live behind this one engine name. The v0.3.2 server
+above is the archived line: GGUF weights, its own scheduler, no rule
+for anything newer than deepseek_v3. The current line (v0.7.x) is
+kt-kernel served through SGLang -- ``ktransformers_v2.py`` -- and it
+is what serves Kimi-K2 and DeepSeek-V3.2 with AMX experts from the HF
+checkpoint itself. ``resolve_generation`` picks one from the config:
+an explicit ``ktransformers_generation``, else the image tag, else
+what is staged (a safetensors checkpoint or AMX weights mean v0.7, a
+lone GGUF companion means v0.3). The registry, the knobs and the
+metrics parser see a single ``ktransformers`` either way.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -42,6 +54,63 @@ log = logging.getLogger(__name__)
 # v0.3.2 images are the serving builds. AVX512 is the right variant
 # for a Granite Rapids Xeon; NATIVE/FANCY/AVX2 exist for other hosts.
 DEFAULT_IMAGE = "approachingai/ktransformers:v0.3.2-AVX512"
+
+# The two generations and their default images. Tags of the archived
+# line carry an ISA suffix (v0.2.x/v0.3.x-AVX512...); anything else on
+# the repo (v0.4.3-cu128, v0.5.x, the DSV4-* builds) is the SGLang-
+# served line, and only DSV4-specific is compiled for SM120.
+GENERATIONS = ("v0.3", "v0.7")
+DEFAULT_GENERATION_IMAGES = {
+    "v0.3": DEFAULT_IMAGE,
+    "v0.7": "approachingai/ktransformers:DSV4-specific",
+}
+_LEGACY_TAG = re.compile(r":(v?0\.[123](\.[0-9]+)?(post[0-9]*|rc[0-9]*)?-)")
+
+
+def generation_from_image(image: str | None) -> str | None:
+    """Which generation an explicit image tag belongs to, or None when
+    the tag says nothing (no tag, ``latest``)."""
+    if not image:
+        return None
+    if _LEGACY_TAG.search(str(image)):
+        return "v0.3"
+    return "v0.7"
+
+
+def resolve_generation(cfg) -> str:
+    """The generation a config launches.
+
+    Explicit ``ktransformers_generation`` wins; then an explicit image
+    tag; then what is staged -- an AMX weight path or a native
+    kt-method means v0.7, a GGUF companion with nothing else means
+    v0.3 (the only line that serves a config-only HF staging plus
+    GGUF), a staged safetensors checkpoint means v0.7. With nothing
+    staged at all, v0.7: its refusal names what to stage.
+    """
+    explicit = getattr(cfg, "ktransformers_generation", None)
+    if explicit and str(explicit).lower() != "auto":
+        g = str(explicit).lower()
+        if g not in GENERATIONS:
+            raise ValueError(f"ktransformers_generation {explicit!r} is not one "
+                             f"of {', '.join(GENERATIONS)} or auto")
+        return g
+    by_image = generation_from_image(getattr(cfg, "ktransformers_image", None))
+    if by_image:
+        return by_image
+    method = str(getattr(cfg, "ktransformers_kt_method", None) or "").upper()
+    if getattr(cfg, "ktransformers_amx_weight_path", None) or (
+            method and method != "LLAMAFILE"):
+        return "v0.7"
+    from .ktransformers_v2 import _has_safetensors, staged_snapshot
+    local = getattr(cfg, "model_local_path", None)
+    staged = Path(local) if local and Path(local).is_dir() else None
+    if staged is None and not local:
+        staged = staged_snapshot(getattr(cfg, "model_id", None))
+    if staged is not None and _has_safetensors(staged):
+        return "v0.7"
+    if getattr(cfg, "ktransformers_gguf_path", None):
+        return "v0.3"
+    return "v0.7"
 
 # The image ships a conda environment and its ENTRYPOINT is
 # ``tail -f /dev/null`` -- it is built to be run detached and then
@@ -197,8 +266,15 @@ class KTransformersEngine(DockerReplicaEngine):
 
     ENGINE_NAME = "ktransformers"
 
+    @property
+    def generation(self) -> str:
+        return resolve_generation(self.cfg)
+
     def build_replica_command(self, index: int, devices: list[int],
                               container_name: str) -> list[str]:
+        if self.generation == "v0.7":
+            from .ktransformers_v2 import build_replica_command as v07
+            return v07(self, index, devices, container_name)
         cfg = self.cfg
         cmd = [
             "docker", "run", "-d", "--rm",
@@ -269,4 +345,7 @@ class KTransformersEngine(DockerReplicaEngine):
         return None
 
     def _ready_url(self, port: int) -> str:
+        if self.generation == "v0.7":
+            from .ktransformers_v2 import ready_url
+            return ready_url(self.cfg.host, port)
         return f"http://{self.cfg.host}:{port}/v1/models"

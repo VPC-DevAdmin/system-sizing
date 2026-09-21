@@ -145,6 +145,61 @@ LEVERS: list[Lever] = [
                  "EADDRINUSE. Cost one candidate of an eight-candidate "
                  "search before it was fixed.",
     ),
+    Lever(
+        key="ktransformers_generation", engine="ktransformers",
+        title="KTransformers · generation",
+        values=["auto", "v0.3", "v0.7"], default="auto",
+        searchable=False, verdict="required",
+        text="Which KTransformers this launches. v0.3 is the archived "
+             "server (GGUF weights, its own scheduler, no rule newer "
+             "than deepseek_v3); v0.7 is kt-kernel's AMX experts inside "
+             "the kvcache-ai SGLang fork, reading the HF checkpoint "
+             "itself. 'auto' picks v0.7 for a staged safetensors "
+             "checkpoint or AMX weights and v0.3 for a lone GGUF.",
+        measured="Not a performance lever: the two lines serve "
+                 "different models. Kimi-K2 and DeepSeek-V3.2 exist only "
+                 "on v0.7 (the v0.3 image has no rule for deepseek_v32 "
+                 "and never had one for the 1T Kimi); the v0.3 line "
+                 "remains for the GGUF companions already staged. Read "
+                 "off the v0.7.1 tag of kvcache-ai/ktransformers, not "
+                 "measured on this box yet.",
+    ),
+    Lever(
+        key="ktransformers_kt_method", engine="ktransformers",
+        title="KTransformers · CPU weight format (--kt-method)",
+        values=["auto", "FP8", "BF16", "RAWINT4", "AMXINT8", "AMXINT4",
+                "LLAMAFILE"],
+        default="auto", searchable=False, verdict="required",
+        text="What kt-kernel reads for the CPU experts. The native "
+             "formats (block-FP8 DeepSeek/Kimi-K2, INT4 Kimi-K2-"
+             "Thinking, BF16 Qwen3-MoE/GLM, MXFP4 V4) need no "
+             "conversion: --kt-weight-path is the checkpoint directory. "
+             "AMXINT8/AMXINT4 read convert_cpu_weights.py output; "
+             "LLAMAFILE reads a GGUF with the portable kernels.",
+        measured="'auto' is derived from the checkpoint's "
+                 "quantization_config, and a format kt-kernel cannot "
+                 "serve natively (ModelOpt NVFP4, AWQ) is refused with "
+                 "the fix named. The AMX conversion is hours for a 1T "
+                 "model and is never run by capsim.",
+    ),
+    Lever(
+        key="ktransformers_gpu_experts", engine="ktransformers",
+        title="KTransformers · experts kept on the GPU per layer",
+        values=["0", "8", "32"], default="0",
+        # Becomes an arena dimension once search.py's KNOWN_DIMENSIONS
+        # and defaults carry it; until then it is a config knob.
+        searchable=False, verdict="untested",
+        text="--kt-num-gpu-experts: how many routed experts of EACH MoE "
+             "layer stay in VRAM; the rest are served from host RAM. "
+             "Per layer, so 32 on a 61-layer DeepSeek is ~1,800 "
+             "experts of GPU weight. More is faster decode and more "
+             "VRAM; 0 never OOMs.",
+        measured="Not yet measured here. Upstream's Kimi-K2-Thinking "
+                 "table steps 0 -> 8 -> 30 -> 80 per layer from one to "
+                 "eight 48 GB cards; with 96 GB cards and the KV pool "
+                 "sized by the same --mem-fraction-static, the right "
+                 "number for this box is a search, not a guess.",
+    ),
 ]
 
 # Engine-level narrative for the arena's engine card.
@@ -179,7 +234,24 @@ ENGINE_NOTES: dict[str, str] = {
         "It answers a question the others cannot — whether a model far "
         "larger than VRAM can be served at all — and its own docs "
         "demonstrate a max batch of 4, so ranking it on tokens/sec "
-        "against the GPU-resident engines measures the wrong thing.",
+        "against the GPU-resident engines measures the wrong thing. "
+        "Two generations sit behind the name. v0.3.2 is the archived "
+        "server: GGUF weights, its own balance_serve scheduler, and an "
+        "optimize-rule file per architecture that stops at deepseek_v3 "
+        "and qwen3_moe. v0.7 is what upstream ships now: kt-kernel "
+        "(AMX INT4/INT8 and native FP8/BF16/INT4 expert kernels) as a "
+        "wrapper inside the kvcache-ai fork of SGLang, launched with "
+        "SGLang's own launch_server plus --kt-* flags, so readiness "
+        "and /metrics are SGLang's. It reads the CPU experts straight "
+        "from the HF checkpoint — a block-FP8 DeepSeek-V3.2 or "
+        "Kimi-K2, an INT4 Kimi-K2-Thinking/K2.5 — with no conversion "
+        "step, and covers every FusedMoE architecture the fork loads "
+        "(DeepSeek V3/V3.1/V3.2/V4, Kimi K2 family, Qwen3-MoE/Next/"
+        "3.5, GLM-4.5 to 5.x, MiniMax M2/M3). The image is the "
+        "DSV4-specific build — the only v0.7 image on Docker Hub and "
+        "the only one compiled for SM120; the PyPI wheel stops at "
+        "Hopper. Not yet measured on this box; the notes above are "
+        "read off the v0.7.1 tag, not observed.",
 }
 
 

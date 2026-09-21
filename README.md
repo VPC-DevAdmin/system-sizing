@@ -40,7 +40,7 @@ The same persona/knee methodology runs against every engine type registered in [
 | `sglang` | SGLang-CPU in Docker (Intel only; image built from source, see below). |
 | `sglang_cuda` | SGLang on GPUs — the whole box as N independent replicas. |
 | `trtllm` | TensorRT-LLM — `trtllm-serve` as a whole-box, N-replica target, measured on the same footing as vLLM. |
-| `ktransformers` | KTransformers — MoE experts on the CPU, attention on the GPU. |
+| `ktransformers` | KTransformers — MoE experts on the CPU, attention on the GPU. Two generations: the archived v0.3.2 server (GGUF) and the v0.7 line (kt-kernel AMX experts inside SGLang, native FP8/INT4 checkpoints) — see `docs/ktransformers.md`. |
 | `vllm_dual_socket` | vLLM-CPU dual-replica engine for dual-socket NUMA boxes (one container per socket, sticky user routing). |
 | `remote` | An OpenAI-compatible endpoint you don't own; host telemetry is skipped and recorded as such, the endpoint's `/metrics` is scraped when configured. See the [remote-endpoint template](config/profiles/remote-endpoint.yaml). |
 | `mock` | A real in-process OpenAI-compatible SSE server with a synthetic, tunable capacity knee — the whole pipeline on a laptop with zero hardware. Powers CI and UI development (`--profile mock`). |
@@ -210,6 +210,7 @@ simulator/
     sglang_cuda.py    # SGLang on GPUs, N replicas
     trtllm.py         # TensorRT-LLM (trtllm-serve), N replicas
     ktransformers.py  # KTransformers: MoE experts on CPU, attention on GPU
+    ktransformers_v2.py  # the v0.7 line: kt-kernel inside the kvcache-ai SGLang fork
     remote.py         # remote OpenAI-compatible endpoint
     mock.py           # in-process mock engine with a synthetic knee
   # telemetry

@@ -166,16 +166,57 @@ class EngineConfig:
     sglang_image: str = "lmsysorg/sglang:latest"
 
     # ── ktransformers: heterogeneous CPU-expert / GPU-attention ───────
-    ktransformers_image: str = "approachingai/ktransformers:v0.3.2-AVX512"
+    # Two generations share the engine (engines/ktransformers.py):
+    #   v0.3  the archived KTransformers server, weights from GGUF;
+    #   v0.7  kt-kernel CPU experts (AMX) inside the kvcache-ai SGLang
+    #         fork, weights from the HF checkpoint itself (FP8, BF16,
+    #         RAWINT4, MXFP4) or from a converted AMX directory.
+    # "auto" picks by what is staged: a safetensors checkpoint or an
+    # AMX weight path means v0.7, a lone GGUF companion means v0.3.
+    ktransformers_generation: str = "auto"      # auto | v0.3 | v0.7
+    # None -> the generation's own default image (v0.3.2-AVX512 or the
+    # DSV4-specific build of the v0.7 line). An explicit tag also
+    # decides the generation when ktransformers_generation is "auto".
+    ktransformers_image: str | None = None
     ktransformers_extra_flags: list[str] = field(default_factory=list)
-    # Optional GGUF/weights directory mounted for the CPU expert path.
+    # Optional GGUF/weights directory mounted for the CPU expert path
+    # (v0.3 always; v0.7 only under the LLAMAFILE method).
     ktransformers_gguf_path: str | None = None
-    # CPU threads the expert path may use. None -> the engine decides.
+    # CPU threads the expert path may use. None -> physical cores - 2
+    # on a Linux host, else the engine decides.
     ktransformers_cpu_threads: int | None = None
-    # Per-architecture injection rules. KTransformers needs one to know
-    # which tensors go to the CPU and which stay on the GPU; capsim
-    # cannot infer it from the model id.
+    # v0.3 only. Per-architecture injection rules. KTransformers needs
+    # one to know which tensors go to the CPU and which stay on the
+    # GPU; capsim cannot infer it from the model id.
     ktransformers_optimize_config: str | None = None
+    # ── v0.7 (kt-kernel + SGLang) knobs ──
+    # --kt-method. None -> read off the checkpoint's quantization_config
+    # (block-FP8 -> FP8, compressed-tensors int4 -> RAWINT4, mxfp4 ->
+    # MXFP4, unquantized bf16 -> BF16). AMXINT4/AMXINT8 are never
+    # auto-picked: they need ktransformers_amx_weight_path.
+    ktransformers_kt_method: str | None = None
+    # Output of kt-kernel/scripts/convert_cpu_weights.py, for the
+    # AMXINT4/AMXINT8 methods. capsim does not run the converter.
+    ktransformers_amx_weight_path: str | None = None
+    # --kt-num-gpu-experts: routed experts PER MoE LAYER kept in VRAM.
+    # 0 leaves every expert on the CPU (never OOMs, slowest decode).
+    ktransformers_gpu_experts: int = 0
+    # --kt-threadpool-count: one pool per NUMA node. None -> counted
+    # from /sys on a Linux host, else the engine's default (2).
+    ktransformers_threadpool_count: int | None = None
+    # --kt-max-deferred-experts-per-token (pipelined CPU/GPU execution;
+    # the docs recommend 1-4). None -> the engine's default.
+    ktransformers_deferred_experts: int | None = None
+    # --kt-gpu-prefill-token-threshold: prompts longer than this take
+    # the layerwise GPU prefill path (native FP8/RAWINT4/MXFP4 only;
+    # costs one MoE layer of extra VRAM). None -> the engine's default.
+    ktransformers_gpu_prefill_threshold: int | None = None
+    # --kt-enable-dynamic-expert-update (needs the threshold above).
+    ktransformers_dynamic_expert_update: bool = False
+    # GPU compute capability the container JIT-compiles for
+    # (TORCH_CUDA_ARCH_LIST / FLASHINFER_CUDA_ARCH_LIST). "12.0" is
+    # consumer/pro Blackwell (RTX PRO 6000, RTX 5090).
+    ktransformers_cuda_arch: str = "12.0"
 
     # ── trtllm: TensorRT-LLM via trtllm-serve ─────────────────────────
     # Launched through the image's OWN entrypoint — see engines/trtllm.py

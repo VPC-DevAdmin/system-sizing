@@ -2471,6 +2471,7 @@ ENGINE_IMAGE_ENV = {
     "trtllm": ("OPTIMIZER_TRTLLM_IMAGE", "trtllm_image"),
     "sglang_cuda": ("OPTIMIZER_SGLANG_IMAGE", "sglang_image"),
     "ktransformers": ("OPTIMIZER_KTRANSFORMERS_IMAGE", "ktransformers_image"),
+    "llamacpp": ("OPTIMIZER_LLAMACPP_IMAGE", "llamacpp_image"),
 }
 
 

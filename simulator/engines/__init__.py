@@ -23,6 +23,9 @@ def make_engine(engine_type: str, config) -> Engine:
     if engine_type == "ktransformers":
         from .ktransformers import KTransformersEngine
         return KTransformersEngine(config)
+    if engine_type == "llamacpp":
+        from .llamacpp import LlamaCppEngine
+        return LlamaCppEngine(config)
     if engine_type == "trtllm":
         from .trtllm import TrtLlmEngine
         return TrtLlmEngine(config)

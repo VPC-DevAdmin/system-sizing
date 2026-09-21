@@ -55,17 +55,25 @@ class CatalogError(ValueError):
 
 
 def _normalize_gguf(raw: object, source: str, model_id: str) -> Optional[dict]:
-    """The optional GGUF companion: ``{repo, file, size_gb}`` or None.
+    """The optional GGUF companion: ``{repo, file, size_gb, engines}``
+    or None.
 
-    KTransformers loads weights from GGUF only, so a catalog entry
-    that names its companion is what lets Prepare stage it and the
-    launcher resolve ``--gguf_path`` without the operator hand-editing
-    a path. ``file`` is one ``.gguf`` (it may carry a subdirectory
-    when the repo shards its quants into folders), or a DIRECTORY
-    when the quant itself is split into ``-00001-of-0000N`` shards --
-    a 400 GB DeepSeek quant is nine files, and KTransformers reads
-    every .gguf under ``--gguf_path``, so the directory is the unit
-    Prepare stages and the launcher mounts."""
+    KTransformers and llama.cpp load weights from GGUF only, so a
+    catalog entry that names its companion is what lets Prepare stage
+    it and the launchers resolve their GGUF path without the operator
+    hand-editing one. ``file`` is one ``.gguf`` (it may carry a
+    subdirectory when the repo shards its quants into folders), or a
+    DIRECTORY when the quant itself is split into ``-00001-of-0000N``
+    shards -- a 400 GB DeepSeek quant is nine files, KTransformers
+    reads every .gguf under ``--gguf_path`` and llama-server opens the
+    rest from the first shard, so the directory is the unit Prepare
+    stages and the launchers mount.
+
+    ``engines`` is the allow-list of GGUF engines that can serve it,
+    defaulting to both: an architecture the KTransformers v0.3.2 image
+    has no injection rule for (deepseek_v32, kimi_k2, glm_moe_dsa,
+    minimax_m2) names ``[llamacpp]`` so the roofline never schedules
+    a KTransformers cell that dies at load."""
     if raw in (None, {}, ""):
         return None
     if not isinstance(raw, dict):
@@ -85,8 +93,24 @@ def _normalize_gguf(raw: object, source: str, model_id: str) -> Optional[dict]:
         raise CatalogError(f"{source}: '{model_id}' gguf.file '{file}' must "
                            f"name a .gguf file inside the repo")
     size = raw.get("size_gb")
+    # Lazy: the engines package pulls in every launcher, and the
+    # catalog must stay importable without them.
+    from .engines.knobs import GGUF_ENGINES
+    engines_raw = raw.get("engines")
+    if engines_raw in (None, ""):
+        engines = list(GGUF_ENGINES)
+    else:
+        if isinstance(engines_raw, str):
+            engines_raw = [engines_raw]
+        if (not isinstance(engines_raw, list) or not engines_raw
+                or any(str(e) not in GGUF_ENGINES for e in engines_raw)):
+            raise CatalogError(
+                f"{source}: '{model_id}' gguf.engines must be a non-empty "
+                f"list drawn from {list(GGUF_ENGINES)}, got {engines_raw!r}")
+        engines = [e for e in GGUF_ENGINES if e in {str(x) for x in engines_raw}]
     return {"repo": repo, "file": file,
-            "size_gb": float(size) if size is not None else None}
+            "size_gb": float(size) if size is not None else None,
+            "engines": engines}
 
 
 def _normalize_host_ram(raw: object, source: str, model_id: str) -> Optional[float]:

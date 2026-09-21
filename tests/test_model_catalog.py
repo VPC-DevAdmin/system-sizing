@@ -231,11 +231,23 @@ def test_gguf_companion_parsing(tmp_path) -> None:
     """))
     e = {x["id"]: x for x in load_model_catalog(user_dir=user)}["org/Thing"]
     assert e["gguf"] == {"repo": "org/Thing-GGUF",
-                         "file": "Q4_K_M/Thing-Q4_K_M.gguf", "size_gb": None}
+                         "file": "Q4_K_M/Thing-Q4_K_M.gguf", "size_gb": None,
+                         "engines": ["ktransformers", "llamacpp"]}
+
+    # The allow-list narrows the pair (order canonical, string accepted).
+    (user / "a.yaml").write_text(textwrap.dedent("""\
+        models:
+          - id: org/Thing
+            gguf: {repo: org/Thing-GGUF, file: Q4, engines: llamacpp}
+    """))
+    e = {x["id"]: x for x in load_model_catalog(user_dir=user)}["org/Thing"]
+    assert e["gguf"]["engines"] == ["llamacpp"]
 
     for bad in ("gguf: {repo: not-a-repo, file: x.gguf}",
                 "gguf: {repo: org/R, file: weights.safetensors}",
                 "gguf: {repo: org/R, file: ../escape.gguf}",
+                "gguf: {repo: org/R, file: x.gguf, engines: [vllm_cuda_multi]}",
+                "gguf: {repo: org/R, file: x.gguf, engines: []}",
                 "gguf: just-a-string"):
         (user / "a.yaml").write_text(f"models:\n  - id: org/Thing\n    {bad}\n")
         with pytest.raises(CatalogError, match="gguf"):
@@ -251,12 +263,28 @@ def test_kt_only_and_host_ram_and_shard_directories(tmp_path) -> None:
     v31 = by_id["deepseek-ai/DeepSeek-V3.1"]
     assert v31["kt_only"] is True and v31["host_ram_gb"] == 450.0
     assert v31["gguf"] == {"repo": "unsloth/DeepSeek-V3.1-GGUF",
-                           "file": "UD-Q4_K_XL", "size_gb": 386.9}
+                           "file": "UD-Q4_K_XL", "size_gb": 386.9,
+                           "engines": ["ktransformers", "llamacpp"]}
     # V3.2's sparse-attention architecture is not served by the
-    # v0.3.2 image: no companion, and the notes say so.
+    # v0.3.2 image, but llama.cpp loads it: the companion is
+    # llama.cpp-only, and the notes say so.
     v32 = by_id["deepseek-ai/DeepSeek-V3.2"]
-    assert v32["gguf"] is None and v32["kt_only"] is False
+    assert v32["gguf"]["engines"] == ["llamacpp"] and v32["kt_only"] is True
+    assert v32["gguf"]["repo"] == "unsloth/DeepSeek-V3.2-GGUF"
     assert "KTransformers" in v32["notes"] and "V3.1" in v32["notes"]
+    # The other GGUF-only giants: Kimi-K2-Thinking (the largest GGUF on
+    # the Hub, 14 shards) and GLM-5.3, both beyond the GPUs; MiniMax-M2.7
+    # fits the GPUs and merely gains a llama.cpp companion.
+    kimi = by_id["moonshotai/Kimi-K2-Thinking"]
+    assert kimi["kt_only"] and kimi["gguf"]["engines"] == ["llamacpp"]
+    assert kimi["gguf"] == {"repo": "unsloth/Kimi-K2-Thinking-GGUF",
+                            "file": "UD-Q4_K_XL", "size_gb": 646.2,
+                            "engines": ["llamacpp"]}
+    assert kimi["host_ram_gb"] >= kimi["gguf"]["size_gb"]
+    glm = by_id["zai-org/GLM-5.3"]
+    assert glm["kt_only"] and glm["gguf"]["size_gb"] == 467.3
+    mm = by_id["MiniMaxAI/MiniMax-M2.7"]
+    assert not mm["kt_only"] and mm["gguf"]["engines"] == ["llamacpp"]
     # Qwen3-235B is GPU-fitting AND KTransformers-eligible: both
     # precisions share the sharded Q4_K_M, neither is kt_only.
     bf16 = by_id["Qwen/Qwen3-235B-A22B-Instruct-2507"]

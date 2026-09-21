@@ -92,7 +92,7 @@ def _write_profile(
     # A winner must promote to a profile for the engine that WON it.
     # Writing a vLLM profile for any other engine would silently
     # re-measure the winning shape on the engine that did not win it.
-    NON_VLLM = ("trtllm", "sglang_cuda", "ktransformers")
+    NON_VLLM = ("trtllm", "sglang_cuda", "ktransformers", "llamacpp")
     trtllm = engine_type in NON_VLLM
     engine: dict[str, Any] = {
         "type": (engine_type if engine_type in NON_VLLM
@@ -123,6 +123,7 @@ def _write_profile(
         key = {"trtllm": "trtllm_extra_flags",
                "sglang_cuda": "sglang_extra_flags",
                "ktransformers": "ktransformers_extra_flags",
+               "llamacpp": "llamacpp_extra_flags",
                }.get(engine_type, "vllm_extra_flags")
         engine[key] = [str(f) for f in extra_flags]
     # No docker_volumes on purpose: the vllm_cuda launcher mounts the

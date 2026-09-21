@@ -39,6 +39,12 @@ def _build(engine: str, tmp_path: Path, **extra) -> dict:
         gguf = tmp_path / "gguf"
         gguf.mkdir(exist_ok=True)
         custom["ktransformers_gguf_path"] = str(gguf)
+    if engine == "llamacpp" and "llamacpp_gguf_path" not in extra:
+        # llama-server likewise, and its directory must hold a GGUF.
+        gguf = tmp_path / "gguf"
+        gguf.mkdir(exist_ok=True)
+        (gguf / "m.gguf").write_bytes(b"GGUF")
+        custom["llamacpp_gguf_path"] = str(gguf)
     custom.update(extra)
     path = _build_custom_config(custom, tmp_path)
     return yaml.safe_load(path.read_text())["engine"]
@@ -82,6 +88,7 @@ def test_each_engine_launches_its_own_binary(engine, hw, tmp_path):
         "trtllm": "trtllm-serve",
         "sglang_cuda": "sglang.launch_server",
         "ktransformers": "ktransformers.server.main",
+        "llamacpp": "ggml-org/llama.cpp:server-cuda -m /gguf/",
     }[engine]
     assert marker in cmd
 

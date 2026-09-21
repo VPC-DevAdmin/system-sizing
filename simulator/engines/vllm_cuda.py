@@ -222,10 +222,8 @@ class VllmCudaEngine(Engine):
         # play), mount the RESOLVED cache so weights land / are found
         # on the disk the user actually picked.
         if "/root/.cache/huggingface" not in mounted_targets:
-            from ..models import hf_cache_dir
-            cache = hf_cache_dir()
-            cache.mkdir(parents=True, exist_ok=True)
-            cmd += ["-v", f"{cache}:/root/.cache/huggingface"]
+            from ..models import cache_mount_args
+            cmd += cache_mount_args()
         # HF token for gated models, offline mode for staged weights.
         from .base import hub_env_args
         cmd += hub_env_args(cfg.model_id)

@@ -66,3 +66,23 @@ def test_replica_command_carries_offline_mode(tmp_path, monkeypatch) -> None:
         replica_devices=[[0], [1]]))
     cmd = eng.build_replica_command(0, [0], "vllm-r0-x")
     assert "HF_HUB_OFFLINE=1" in _env_pairs(cmd)
+
+
+def test_cache_overflow_symlinks_are_mounted_at_their_own_path(tmp_path, monkeypatch):
+    """A cache spread over drives with symlinked model dirs: the engine
+    mounts each overflow root at its host path so the links resolve
+    inside the container (the XE7740 keeps 1 TB of NVFP4 giants on a
+    second drive this way)."""
+    from simulator.models import cache_mount_args, cache_overflow_roots
+
+    cache = tmp_path / "cache"
+    (cache / "hub" / "models--org--Local").mkdir(parents=True)
+    overflow = tmp_path / "overflow"
+    (overflow / "hub" / "models--org--Giant").mkdir(parents=True)
+    (cache / "hub" / "models--org--Giant").symlink_to(overflow / "hub" / "models--org--Giant")
+    (cache / "hub" / "models--org--Dangling").symlink_to(tmp_path / "nowhere")
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(cache))
+    assert cache_overflow_roots(cache) == [overflow]
+    args = cache_mount_args()
+    assert args == ["-v", f"{cache}:/root/.cache/huggingface",
+                    "-v", f"{overflow}:{overflow}"]

@@ -36,6 +36,50 @@ def _storage_config() -> dict:
         return {}
 
 
+def cache_overflow_roots(cache: Path | None = None) -> list[Path]:
+    """Host directories that model entries in the cache SYMLINK into.
+
+    A box outgrows one drive: the XE7740's cache lives on /data2 and
+    its 1 TB of NVFP4 giants on /data, linked in as
+    ``hub/models--nvidia--Kimi-K2-Thinking-NVFP4 -> /data/capsim/
+    hf-overflow/hub/models--...``. The hub library follows the links
+    on the host; inside a container they dangle unless the target
+    root is mounted at the SAME path. Every engine mounts each root
+    this returns beside the cache, so an operator can spread the cache
+    over drives with plain symlinks and nothing else.
+    """
+    cache = cache or hf_cache_dir()
+    hub = cache / "hub"
+    roots: list[Path] = []
+    if not hub.is_dir():
+        return roots
+    for entry in sorted(hub.iterdir()):
+        if not entry.is_symlink():
+            continue
+        try:
+            target = entry.resolve(strict=True)
+        except OSError:
+            continue
+        if cache.resolve() in target.parents:
+            continue
+        # The overflow's own hub/ directory's parent: mount that root.
+        root = target.parent.parent if target.parent.name == "hub" else target.parent
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def cache_mount_args(container_cache: str = "/root/.cache/huggingface") -> list[str]:
+    """``-v`` arguments for the HF cache plus every overflow root it
+    links into (mounted at its own host path so the links resolve)."""
+    cache = hf_cache_dir()
+    cache.mkdir(parents=True, exist_ok=True)
+    out = ["-v", f"{cache}:{container_cache}"]
+    for root in cache_overflow_roots(cache):
+        out += ["-v", f"{root}:{root}"]
+    return out
+
+
 def hf_cache_dir() -> Path:
     """Resolved HF cache directory. Precedence: OPTIMIZER_HF_CACHE env
     > the UI-chosen location in ~/.config/capsim/storage.json >

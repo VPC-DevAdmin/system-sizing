@@ -209,10 +209,8 @@ class DockerReplicaEngine(Engine):
             out += ["-v", f"{host_path}:{container_path}"]
             mounted.add(container_path)
         if "/root/.cache/huggingface" not in mounted:
-            from ..models import hf_cache_dir
-            cache = hf_cache_dir()
-            cache.mkdir(parents=True, exist_ok=True)
-            out += ["-v", f"{cache}:/root/.cache/huggingface"]
+            from ..models import cache_mount_args
+            out += cache_mount_args()
         from .base import hub_env_args
         out += hub_env_args(cfg.model_id)
         for k, v in (cfg.docker_extra_env or {}).items():

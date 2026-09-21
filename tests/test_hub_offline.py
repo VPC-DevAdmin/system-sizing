@@ -86,3 +86,38 @@ def test_cache_overflow_symlinks_are_mounted_at_their_own_path(tmp_path, monkeyp
     args = cache_mount_args()
     assert args == ["-v", f"{cache}:/root/.cache/huggingface",
                     "-v", f"{overflow}:{overflow}"]
+
+
+def test_trtllm_names_the_staged_tokenizer_directory(tmp_path, monkeypatch) -> None:
+    """trtllm-serve resolves a hub id's tokenizer through the hub API
+    even with the snapshot cached, which offline mode refuses: the
+    server came up tokenizer-less and answered HTTP 400 (XE7740,
+    Llama-3.3-70B NVFP4). The launcher points --tokenizer at the
+    snapshot as the container sees it; an unstaged model keeps the
+    hub id and the network."""
+    from simulator.engines.trtllm import TrtLlmEngine
+    from simulator.models import staged_snapshot_in_container
+
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path))
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    _stage(tmp_path, "org/M")
+    _stage(tmp_path, "org/Partial", complete=False)
+    assert staged_snapshot_in_container("org/M") == (
+        "/root/.cache/huggingface/hub/models--org--M/snapshots/abc123")
+    assert staged_snapshot_in_container("org/Partial") is None
+    assert staged_snapshot_in_container("org/Missing") is None
+    assert staged_snapshot_in_container("/models/local") is None
+
+    def _cmd(model_id):
+        eng = TrtLlmEngine(EngineConfig(
+            type="trtllm", model_id=model_id, port=9100,
+            replica_devices=[[0]], max_model_len=2048))
+        return eng.build_replica_command(0, [0], "trtllm-r0-x")
+
+    cmd = _cmd("org/M")
+    assert cmd[cmd.index("--tokenizer") + 1] == (
+        "/root/.cache/huggingface/hub/models--org--M/snapshots/abc123")
+    assert cmd[cmd.index("serve") + 1] == "org/M"      # weights still by id
+    assert "HF_HUB_OFFLINE=1" in _env_pairs(cmd)
+    assert "--tokenizer" not in _cmd("org/Missing")

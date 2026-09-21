@@ -306,8 +306,13 @@ def serve_argv(model: str, *, port: int, tp: int,
                expert_parallel: bool = False,
                trust_remote_code: bool = False,
                options_path: str | None = None,
-               extra: list[str] | None = None) -> list[str]:
+               extra: list[str] | None = None,
+               tokenizer: str | None = None) -> list[str]:
     """The container CMD: ``trtllm-serve serve ...``.
+
+    ``tokenizer`` is a local directory for the tokenizer when the
+    weights are named by hub id: trtllm-serve loads the tokenizer
+    through the hub API otherwise, which offline mode refuses.
 
     Deliberately NOT an --entrypoint override. The image's ENV
     LD_LIBRARY_PATH omits /usr/local/tensorrt/lib; that path is added
@@ -334,6 +339,8 @@ def serve_argv(model: str, *, port: int, tp: int,
         argv += ["--trust_remote_code"]
     if options_path:
         argv += ["--extra_llm_api_options", options_path]
+    if tokenizer:
+        argv += ["--tokenizer", tokenizer]
     argv += list(extra or [])
     return argv
 
@@ -385,8 +392,13 @@ class TrtLlmEngine(DockerReplicaEngine):
             options_path=self._opts_path,
             extra=list(cfg.docker_extra_args or []),
         )
+        tokenizer = None
+        if not cfg.model_local_path:
+            from ..models import staged_snapshot_in_container
+            tokenizer = staged_snapshot_in_container(cfg.model_id)
         return cmd + serve_argv(
             cfg.model_local_path or cfg.model_id,
+            tokenizer=tokenizer,
             port=self._port(index),
             tp=len(devices),
             backend=getattr(cfg, "trtllm_backend", None) or "pytorch",

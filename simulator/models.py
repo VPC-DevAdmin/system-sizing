@@ -97,6 +97,34 @@ def container_cache_path(host_path: str | Path) -> Optional[str]:
     return None
 
 
+def staged_snapshot_in_container(model_id: str | None,
+                                 cache: Path | None = None) -> Optional[str]:
+    """The staged snapshot directory of ``model_id`` at the path an
+    engine container sees it (through the cache mount), or None when
+    the model is not a hub id, is not fully cached, or lives outside
+    every mounted root.
+
+    Why: ``trtllm-serve`` resolves a hub id's TOKENIZER through the
+    hub's model API even when every file is in the cache, and offline
+    mode refuses that call -- the server came up with no tokenizer and
+    answered every request with HTTP 400 (XE7740, Llama-3.3-70B NVFP4,
+    the first TensorRT-LLM launch that survived executor creation).
+    Pointing ``--tokenizer`` at the snapshot skips the hub entirely.
+    """
+    if not model_id or "/" not in model_id or model_id.startswith(("/", ".")):
+        return None
+    cache = cache or hf_cache_dir()
+    try:
+        if not model_status(model_id, cache)["cached"]:
+            return None
+    except OSError:
+        return None
+    rev = _latest_snapshot(_model_dir(model_id, cache))
+    if rev is None:
+        return None
+    return container_cache_path(rev.resolve() if rev.is_symlink() else rev)
+
+
 def cache_mount_args(container_cache: str = "/root/.cache/huggingface") -> list[str]:
     """``-v`` arguments for the HF cache plus every overflow root it
     links into (mounted at its own host path so the links resolve)."""

@@ -266,7 +266,7 @@
     <h2>Spectrum &mdash; speed across size</h2>
     <div class="rf-spectrum-chart"><canvas id="chart-rf-spectrum"></canvas></div>
     <div class="chart-note">One point per model that served, at its best
-      engine and shape: weights on a log axis against total tokens per
+      engine and shape: weights on a log axis against generation tokens per
       second. <span class="tier tier-fast">fast</span> picks are the
       vendor round-robin, <span class="tier tier-large">largest on GPU</span>
       the biggest weights the cards hold (tensor-parallel where one card
@@ -275,8 +275,8 @@
       &mdash; a CPU-bound number, not a GPU one.</div>
     <table id="rf-spectrum" style="margin-top:10px">
       <thead><tr><th>Model</th><th>Tier</th><th>Vendor</th><th>Params</th>
-        <th>Weights</th><th>Best engine</th><th>Total tok/s</th>
-        <th>Output tok/s</th><th>Concurrency</th><th>KV capacity</th>
+        <th>Weights</th><th>Best engine</th><th>Generation tok/s</th>
+        <th>Total tok/s (with prompt)</th><th>Concurrency</th><th>KV capacity</th>
         <th>TTFT p95</th><th>Status</th></tr></thead>
       <tbody></tbody>
     </table>

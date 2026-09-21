@@ -857,7 +857,9 @@ def test_summary_names_fastest_and_largest_and_draws_the_spectrum():
                   models=["o/small", "o/big", "o/beyond", "o/pending"])
     # Fastest is by TOTAL tok/s (the vllm cell), while ``best`` keeps
     # its output-rate meaning (the trt cell).
-    assert s["fastest"]["engine"] == "vllm"
+    # Ranked on GENERATION tokens: trt generated more even though vllm
+    # moved more total (prompt + generation) tokens.
+    assert s["fastest"]["engine"] == "trt"
     assert s["best"]["engine"] == "trt"
     assert s["largest_served"]["model"] == "o/big"
     assert s["largest_served"]["best_engine"] == "vllm"
@@ -870,9 +872,11 @@ def test_summary_names_fastest_and_largest_and_draws_the_spectrum():
     assert [r["status"] for r in spec] == ["served", "pending", "served",
                                            "failed"]
     small = spec[0]
-    assert small["tier"] == "fast" and small["best_engine"] == "vllm"
-    assert small["total_tok_s"] == 9000.0 and small["concurrency"] == 2048
-    assert small["kv_capacity_tokens"] == 1e6 and small["ttft_p95_ms"] == 900.0
+    assert small["tier"] == "fast" and small["best_engine"] == "trt"
+    assert small["out_tok_s"] == 5200.0 and small["total_tok_s"] == 8000.0
+    # The kv/ttft detail came from the vllm cell; trt won on generation
+    # and carries none, so the row reports what its best cell measured.
+    assert small["kv_capacity_tokens"] is None and small["ttft_p95_ms"] is None
     assert {"model", "vendor", "params_b", "approx_size_gb", "tier",
             "best_engine", "out_tok_s", "total_tok_s", "concurrency",
             "kv_capacity_tokens", "ttft_p95_ms", "status"} == set(small)

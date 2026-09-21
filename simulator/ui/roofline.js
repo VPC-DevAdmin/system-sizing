@@ -365,8 +365,8 @@ export const Roofline = {
     const info = d.plan?.model_info || {};
     const fi = fast ? info[fast.model] || {} : {};
     $("#rf-fastest").innerHTML = fast ? `
-      <div class="hl-label">fastest · total tokens / sec</div>
-      <div class="hl-now">${num(fast.total_tok_s || fast.out_tok_s)}</div>
+      <div class="hl-label">fastest · generation tokens / sec</div>
+      <div class="hl-now">${num(fast.out_tok_s)}</div>
       <div class="hl-sub"><b>${short(fast.model)}</b> ${tierTag(fi.tier)}
         on <b>${Engines.label(fast.engine)}</b>
         ${fast.tp > 1 ? `· tp${fast.tp} × ${fast.replicas}` : ""}
@@ -374,7 +374,8 @@ export const Roofline = {
         ${fast.confirmed ? '· <span class="status-pass">confirmed</span>'
           : '· <span class="msg">search rung — not yet confirmed</span>'}</div>
       <div class="rf-kvs">
-        <div class="hl-kv"><span>output tok/s</span><b>${num(fast.out_tok_s)}</b></div>
+        <div class="hl-kv"><span>total tok/s (with prompt)</span><b>${
+          num(fast.total_tok_s)}</b></div>
         <div class="hl-kv"><span>concurrency</span><b>${
           num(fast.concurrency ?? fast.in_flight)}</b></div>
         <div class="hl-kv"><span>tok / W</span><b>${fast.tokens_per_watt ?? "—"}</b></div>
@@ -389,8 +390,8 @@ export const Roofline = {
         ${large.params_b ? `· ${num(large.params_b)}B params` : ""}
         on <b>${Engines.label(large.best_engine)}</b></div>
       <div class="rf-kvs">
-        <div class="hl-kv"><span>total tok/s</span><b>${num(large.total_tok_s)}</b></div>
-        <div class="hl-kv"><span>output tok/s</span><b>${num(large.out_tok_s)}</b></div>
+        <div class="hl-kv"><span>generation tok/s</span><b>${num(large.out_tok_s)}</b></div>
+        <div class="hl-kv"><span>total tok/s (with prompt)</span><b>${num(large.total_tok_s)}</b></div>
         <div class="hl-kv"><span>concurrency</span><b>${num(large.concurrency)}</b></div>
         <div class="hl-kv"><span>TTFT p95</span><b>${
           large.ttft_p95_ms != null ? num(large.ttft_p95_ms) + " ms" : "—"}</b></div>
@@ -474,7 +475,7 @@ export const Roofline = {
     $("#rf-spectrum-panel").hidden = !rows.length;
     if ($("#rf-spectrum-panel").hidden) return;
 
-    const points = rows.filter(r => r.total_tok_s && r.approx_size_gb);
+    const points = rows.filter(r => r.out_tok_s && r.approx_size_gb);
     if (!this.charts.spectrum) {
       this.charts.spectrum = makeChart("#chart-rf-spectrum", {
         type: "bubble",
@@ -486,13 +487,13 @@ export const Roofline = {
         x: { type: "logarithmic", title: { display: true, text: "weights (GB)" },
           ticks: { callback: v => [10, 20, 50, 100, 200, 500, 1000, 2000]
             .includes(v) ? num(v) : "" } },
-        y: { title: { display: true, text: "total tokens / sec" } },
+        y: { title: { display: true, text: "generation tokens / sec" } },
         options: { plugins: {
           legend: { position: "bottom" },
           tooltip: { callbacks: {
             title: items => items.map(i => i.raw.label),
             label: i => [
-              `${num(i.raw.y)} total tok/s (${num(i.raw.out)} output) on ${i.raw.engine}`,
+              `${num(i.raw.y)} generation tok/s (${num(i.raw.total)} with prompt) on ${i.raw.engine}`,
               `${num(i.raw.x)} GB${i.raw.params ? ` · ${num(i.raw.params)}B params` : ""}`
                 + ` · ${TIER[i.raw.tier]?.label || i.raw.tier}`,
               `concurrency ${num(i.raw.conc)}${
@@ -505,9 +506,9 @@ export const Roofline = {
     const c = this.charts.spectrum;
     for (const ds of c.data.datasets) {
       ds.data = points.filter(r => (r.tier || "fast") === ds.tier).map(r => ({
-        x: r.approx_size_gb, y: r.total_tok_s, r: 7,
+        x: r.approx_size_gb, y: r.out_tok_s, r: 7,
         label: short(r.model), engine: Engines.label(r.best_engine),
-        out: r.out_tok_s, params: r.params_b, tier: r.tier || "fast",
+        total: r.total_tok_s, params: r.params_b, tier: r.tier || "fast",
         conc: r.concurrency, ttft: r.ttft_p95_ms,
       }));
     }
@@ -530,8 +531,8 @@ export const Roofline = {
         <td>${r.params_b ? num(r.params_b, 1) + "B" : "—"}</td>
         <td>${r.approx_size_gb ? num(r.approx_size_gb) + " GB" : "—"}</td>
         <td>${r.best_engine ? Engines.label(r.best_engine) : "—"}</td>
-        <td><b>${num(r.total_tok_s)}</b></td>
-        <td>${num(r.out_tok_s)}</td>
+        <td><b>${num(r.out_tok_s)}</b></td>
+        <td>${num(r.total_tok_s)}</td>
         <td>${num(r.concurrency)}</td>
         <td>${r.kv_capacity_tokens ? num(r.kv_capacity_tokens) : "—"}</td>
         <td>${r.ttft_p95_ms != null ? num(r.ttft_p95_ms) + " ms" : "—"}</td>

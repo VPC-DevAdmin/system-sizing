@@ -734,8 +734,13 @@ class State:
         return d
 
 
-def _total(r: dict) -> float:
-    return float(r.get("total_tok_s") or r.get("out_tok_s") or 0)
+def _generation(r: dict) -> float:
+    """The rate every ranking uses: GENERATION tokens per second. Total
+    (prompt + generation) is carried alongside for the prefill story,
+    but it flatters short outputs and prefill-heavy windows -- an
+    85k 'total' on a 70B was 38k generated -- and generation is the
+    number the vendor convention and this team's history both mean."""
+    return float(r.get("out_tok_s") or 0)
 
 
 def summarize(results: list[dict], model_info: dict | None = None,
@@ -748,7 +753,8 @@ def summarize(results: list[dict], model_info: dict | None = None,
     while the matrix tells you what to do with the next model you try.
 
     A spectrum search has two winners, not one: ``fastest`` (the cell
-    with the highest total token rate) and ``largest_served`` (the
+    with the highest GENERATION token rate; total is reported beside
+    it, never ranked on) and ``largest_served`` (the
     biggest model any engine actually produced a peak for), and the
     ``spectrum`` in between -- one row per planned model, by weight,
     with its best cell or the reason it has none. ``model_info`` is
@@ -763,7 +769,7 @@ def summarize(results: list[dict], model_info: dict | None = None,
         by_model.setdefault(r["model"], r)
         by_engine.setdefault(r["engine"], r)
     best = max(usable, key=lambda r: r["out_tok_s"], default=None)
-    fastest = max(usable, key=_total, default=None)
+    fastest = max(usable, key=_generation, default=None)
 
     info = model_info or {}
     order: list[str] = list(models or [])
@@ -772,7 +778,7 @@ def summarize(results: list[dict], model_info: dict | None = None,
             order.append(r["model"])
     failed_models = {r["model"] for r in results if r.get("error")}
     best_total: dict[str, dict] = {}
-    for r in sorted(usable, key=_total, reverse=True):
+    for r in sorted(usable, key=_generation, reverse=True):
         best_total.setdefault(r["model"], r)
 
     def size_key(m: str) -> tuple[float, float]:

@@ -31,7 +31,10 @@ def _footprint_gb(engine: str, f: float) -> float:
     value, _ = to_engine_fraction(engine, f, total_vram_gb=T, weights_gb=W)
     assert value is not None
     if engine == "trtllm":
-        return W + value * (T - W)
+        # The executor workspace held back from the KV share is VRAM
+        # the engine really occupies, so it counts toward the footprint.
+        from simulator.engines.vram import TRTLLM_WORKSPACE_RESERVE_GB
+        return W + value * (T - W) + TRTLLM_WORKSPACE_RESERVE_GB
     if engine == "sglang_cuda":
         from simulator.engines.vram import SGLANG_ACTIVATION_RESERVE
         return value * T + SGLANG_ACTIVATION_RESERVE * T
@@ -75,7 +78,8 @@ def test_translation_differs_from_passing_it_through():
                                   weights_gb=60.0)
     assert small != pytest.approx(0.95, abs=1e-3)
     assert large < small                       # heavier weights, less free
-    assert large == pytest.approx((0.95 * T - 60.0) / (T - 60.0), rel=1e-6)
+    from simulator.engines.vram import TRTLLM_WORKSPACE_RESERVE_GB as R
+    assert large == pytest.approx((0.95 * T - R - 60.0) / (T - 60.0), rel=1e-6)
 
 
 def test_weights_shard_with_tensor_parallelism_not_replicas():
@@ -127,7 +131,8 @@ def test_trtllm_options_carry_the_translated_value():
         vram_per_gpu_gb=T, model_weights_gb=W))
     got = opts["kv_cache_config"]["free_gpu_memory_fraction"]
     assert got != 0.95                                  # not passed through
-    assert got == pytest.approx((0.95 * T - W) / (T - W), abs=1e-4)
+    from simulator.engines.vram import TRTLLM_WORKSPACE_RESERVE_GB as R
+    assert got == pytest.approx((0.95 * T - R - W) / (T - W), abs=1e-4)
 
 
 # ── the translation is checked, not trusted ───────────────────────────
@@ -216,3 +221,18 @@ def test_trtllm_options_file_is_mounted_by_absolute_path(tmp_path):
         assert mount.startswith("/"), mount
     finally:
         os.chdir(cwd)
+
+
+def test_trtllm_holds_back_an_executor_workspace():
+    """Llama-3.3-70B FP8 on a 96 GB card: the old translation left
+    4.8 GB for TensorRT-LLM's executor and it died creating it. Now an
+    8 GB workspace comes off the top before the KV share is computed."""
+    from simulator.engines.vram import TRTLLM_WORKSPACE_RESERVE_GB, to_engine_fraction
+
+    g, why = to_engine_fraction("trtllm", 0.95, total_vram_gb=95.6, weights_gb=70.0)
+    kv_gb = 0.95 * 95.6 - TRTLLM_WORKSPACE_RESERVE_GB - 70.0
+    assert abs(g - kv_gb / (95.6 - 70.0)) < 1e-6 and g < 0.55
+    assert "workspace" in why
+    # A model that only fits without the reserve is refused, not OOMed.
+    g2, why2 = to_engine_fraction("trtllm", 0.95, total_vram_gb=95.6, weights_gb=85.0)
+    assert g2 is None and "workspace" in why2

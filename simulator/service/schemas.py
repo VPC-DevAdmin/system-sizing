@@ -110,6 +110,9 @@ class RooflineRequest(BaseModel):
     # giants (DeepSeek-V3.1 at 413 GB, Kimi-K2 at 594 GB) on the GPUs
     # at all -- the "how big can this box go" question.
     allow_cross_domain_tp: bool = False
+    # On resume, forget the FAILED cells of these engines so they run
+    # again (after a launcher fix); measured cells are kept.
+    retry_engines: Optional[list[str]] = None
     engines: Optional[list[str]] = None      # None = every staged engine
     max_num_seqs: Optional[list[int]] = None
     output_tokens: Optional[list[int]] = None

@@ -28,15 +28,15 @@ def test_gpus_arg_quoting() -> None:
 
 def test_replica_commands_and_urls() -> None:
     eng = VllmCudaMultiEngine(_cfg())
-    assert eng.replica_urls == [
-        "http://127.0.0.1:9100/v1", "http://127.0.0.1:9101/v1",
-        "http://127.0.0.1:9102/v1", "http://127.0.0.1:9103/v1",
-    ]
+    # Ports come from this launch's window (rotating per launch) plus
+    # the replica index, so the four are consecutive within it.
+    p0 = eng._port(0)
+    assert eng.replica_urls == [f"http://127.0.0.1:{p0 + i}/v1" for i in range(4)]
     cmd = eng.build_replica_command(2, [1], "vllm-r2-x")
     joined = " ".join(cmd)
     assert "--gpus device=1" in joined
     assert "--ipc=host" in joined
-    assert "--port 9102" in joined                     # port + index
+    assert f"--port {eng._port(2)}" in joined          # this launch's window + index
     assert "--tensor-parallel-size 1" in joined
     assert "/root/.cache/huggingface" in joined        # cache mounted
 

@@ -23,6 +23,7 @@ Subclasses supply:
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import re
@@ -45,6 +46,29 @@ log = logging.getLogger(__name__)
 # One per engine: a leftover container of ANY engine holds port 9100
 # and answers health checks for the wrong server, so every prefix must
 # be swept before every launch.
+# Per-launch HTTP port windows. Each launch takes the next window of
+# PORT_WINDOW ports above cfg.port, cycling through PORT_WINDOWS
+# windows, so a port is reused only after PORT_WINDOWS launches --
+# long past the ~60 s TIME_WAIT the previous cell's connections leave
+# behind. With the defaults the range is cfg.port .. cfg.port + 127.
+PORT_WINDOW = 16          # replicas per launch never exceed 8
+PORT_WINDOWS = 8
+_launch_counter = itertools.count(int(time.time()))
+
+
+def next_launch_number() -> int:
+    """Monotonic within this process, seeded from the clock so two
+    processes started seconds apart (a serve restart mid-roofline) do
+    not replay the same windows."""
+    return next(_launch_counter)
+
+
+def replica_port(base_port: int, launch_no: int, index: int) -> int:
+    if not 0 <= index < PORT_WINDOW:
+        raise ValueError(f"replica index {index} exceeds the port window")
+    return int(base_port) + (int(launch_no) % PORT_WINDOWS) * PORT_WINDOW + int(index)
+
+
 CAPSIM_CONTAINER_PREFIXES = ("vllm-", "trtllm-", "sglang-",
                              "ktransformers-", "llamacpp-")
 
@@ -145,6 +169,12 @@ class DockerReplicaEngine(Engine):
         self._replicas: list[tuple[int, list[int], int, str,
                                    Optional[subprocess.Popen]]] = []
         self._run_id: str = ""
+        # HTTP ports rotate per launch (replica_port): the previous
+        # cell's servers leave their ports in TIME_WAIT for a minute
+        # after teardown, and trtllm-serve's bind check (a plain socket
+        # without SO_REUSEADDR) fails on them -- "Address already in
+        # use" on replicas 4-7 right after a stop, XE7740 2026-09-21.
+        self._launch_no = next_launch_number()
         # Cancel safety. launch() runs in a worker thread
         # (asyncio.to_thread) and cancelling the awaiting task does
         # NOT stop the thread: it goes on creating containers while
@@ -183,11 +213,11 @@ class DockerReplicaEngine(Engine):
         return [[int(d) for d in g] for g in groups]
 
     def _port(self, index: int) -> int:
-        return self.cfg.port + index
+        return replica_port(self.cfg.port, self._launch_no, index)
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.cfg.host}:{self.cfg.port}/v1"
+        return f"http://{self.cfg.host}:{self._port(0)}/v1"
 
     @property
     def replica_urls(self) -> list[str]:

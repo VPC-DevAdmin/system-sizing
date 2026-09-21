@@ -1048,3 +1048,24 @@ def test_ktransformers_is_never_scheduled_for_a_dense_model():
     from simulator.roofline import is_transient
     assert is_transient("RuntimeError: replica 0 container exited during startup: "
                         "FileNotFoundError: [Errno 2] No such file or directory: '/gguf/x'")
+
+
+def test_resume_can_retry_an_engines_failed_cells(tmp_path):
+    """After a launcher fix the operator asks for the failed TensorRT-LLM
+    cells back; measured cells and other engines' failures stay."""
+    from simulator.roofline import State, save_state
+
+    st = State()
+    st.plan = {"cells": [{"model": "m", "engine": "trtllm", "max_num_seqs": 1024,
+                          "output_tokens": 128}]}
+    st.results = [
+        {"model": "m", "engine": "trtllm", "max_num_seqs": 1024, "output_tokens": 128,
+         "error": "RuntimeError: Executor creation failed due to insufficient GPU memory."},
+        {"model": "m", "engine": "trtllm", "max_num_seqs": 2048, "output_tokens": 128,
+         "out_tok_s": 100.0},
+        {"model": "m", "engine": "sglang_cuda", "max_num_seqs": 1024, "output_tokens": 128,
+         "error": "boom"},
+    ]
+    save_state(tmp_path / "roofline.json", st)
+    kept = [r for r in st.results if not (r.get("error") and r["engine"] in ["trtllm"])]
+    assert len(kept) == 2 and all(r["engine"] != "trtllm" or r.get("out_tok_s") for r in kept)

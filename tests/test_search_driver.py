@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -309,7 +310,7 @@ search: {budget: 4, initial_samples: 2}
     assert f"--mem-fraction-static {FIXED_GMU}" not in argv
     # KV dtype in SGLang's own spelling.
     assert "--kv-cache-dtype fp8_e4m3" in argv
-    assert "--port 8000" in argv
+    assert re.search(r"--port \d+", argv)      # this launch's window
     assert [r.name for r in cfg.replicas][0] == "sglang-s0"
 
 
@@ -335,7 +336,7 @@ def test_vllm_candidate_launches_through_the_engine_class(
     assert "--tensor-parallel-size 2" in argv
     assert "--max-num-seqs 256" in argv
     assert "--served-model-name m" in argv
-    assert "--port 8001" in argv
+    assert re.search(r"--port \d+", argv)      # this launch's window
 
 
 def test_a_refused_knob_is_recorded_without_a_launch(

@@ -98,7 +98,8 @@ def test_launch_uses_the_images_own_entrypoint(tmp_path, monkeypatch):
     import simulator.engines.llamacpp as lc
     monkeypatch.setattr(lc, "physical_cores", lambda: 172)
     gguf = _gguf_dir(tmp_path, "Kimi-K2-Thinking-UD-Q4_K_XL.gguf")
-    cmd = LlamaCppEngine(_cfg(gguf)).build_replica_command(
+    eng = LlamaCppEngine(_cfg(gguf))
+    cmd = eng.build_replica_command(
         0, [0, 1, 2, 3, 4, 5, 6, 7], "llamacpp-r0-x")
     assert ENTRYPOINT == "/app/llama-server"
     assert "--entrypoint" not in cmd
@@ -110,7 +111,7 @@ def test_launch_uses_the_images_own_entrypoint(tmp_path, monkeypatch):
     assert f"{gguf}:/gguf:ro" in cmd
     argv = _argv(cmd)
     assert _flag(argv, "-m") == "/gguf/Kimi-K2-Thinking-UD-Q4_K_XL.gguf"
-    assert _flag(argv, "--host") == "0.0.0.0" and _flag(argv, "--port") == "9100"
+    assert _flag(argv, "--host") == "0.0.0.0" and _flag(argv, "--port") == str(eng._port(0))
     assert _flag(argv, "-ngl") == "999" and _flag(argv, "-sm") == "layer"
     assert _flag(argv, "-fa") == "on"
     assert "-cb" in argv and "--metrics" in argv

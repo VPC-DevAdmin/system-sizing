@@ -223,3 +223,24 @@ def test_shutdown_survives_a_process_group_that_already_left(tmp_path,
     monkeypatch.setattr(eng._proc, "wait", lambda timeout=None: 0)
     eng.shutdown()                               # no ProcessLookupError
     assert eng._proc is None
+
+
+def test_http_ports_rotate_per_launch():
+    """trtllm-serve binds its port with a plain socket, so a port the
+    previous cell's server left in TIME_WAIT fails with 'Address
+    already in use'. Consecutive launches take different windows."""
+    from simulator.config import EngineConfig
+    from simulator.engines.docker_replica import PORT_WINDOW, PORT_WINDOWS, replica_port
+    from simulator.engines.vllm_cuda_multi import VllmCudaMultiEngine
+
+    cfg = EngineConfig(type="vllm_cuda_multi", model_id="org/M", port=9100,
+                       replica_devices=[[i] for i in range(8)])
+    a, b = VllmCudaMultiEngine(cfg), VllmCudaMultiEngine(cfg)
+    assert {a._port(i) for i in range(8)}.isdisjoint({b._port(i) for i in range(8)})
+    assert a.base_url == f"http://127.0.0.1:{a._port(0)}/v1"
+    assert a.replica_urls[3].endswith(f":{a._port(3)}/v1")
+    assert replica_port(9100, 0, 7) == 9107
+    assert replica_port(9100, PORT_WINDOWS, 0) == 9100          # wraps
+    assert replica_port(9100, 1, 0) == 9100 + PORT_WINDOW
+    for i in range(PORT_WINDOWS):
+        assert 9100 <= replica_port(9100, i, 7) < 9100 + PORT_WINDOWS * PORT_WINDOW

@@ -68,7 +68,7 @@ def test_replica_argv_carries_the_shape():
     j = " ".join(cmd)
     assert "--gpus device=1" in j
     assert "--ipc=host" in j
-    assert "--port 9101" in j                  # port + index
+    assert f"--port {eng._port(1)}" in j       # this launch's window + index
     assert "--max_batch_size 2048" in j        # NOT --max-num-seqs
     assert "--max_num_tokens 8192" in j
     assert "--max_seq_len 8192" in j

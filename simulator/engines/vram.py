@@ -62,6 +62,15 @@ SGLANG_ACTIVATION_RESERVE = 0.07
 # Leave the engine some room; 1.0 is an OOM in every implementation.
 MAX_FRACTION = 0.98
 
+# TensorRT-LLM's executor allocates its workspace, CUDA graphs and
+# activations OUTSIDE the KV pool, from whatever free_gpu_memory_fraction
+# leaves. The old translation left exactly (1 - f) of the card -- 4.8 GB
+# on a 96 GB card -- which was enough for a 31 GB model and not for
+# 70 GB ones: Llama-3.3-70B FP8 and Nemotron-3-Super died in executor
+# creation with 576 MiB free (XE7740, 2026-09-21). Hold back a fixed
+# workspace on top of the operator's share.
+TRTLLM_WORKSPACE_RESERVE_GB = 8.0
+
 
 def weights_per_gpu_gb(model_size_gb: float | None,
                        tensor_parallel: int = 1) -> float | None:
@@ -114,16 +123,18 @@ def to_engine_fraction(engine: str, fraction: float, *,
     if W >= T:
         return None, (f"weights need {W:.0f} GB but each GPU has "
                       f"{T:.0f} GB — raise tensor parallelism")
-    budget = f * T
+    budget = f * T - TRTLLM_WORKSPACE_RESERVE_GB
     if budget <= W:
-        return None, (f"{f:.2f} of {T:.0f} GB is {budget:.0f} GB, which "
-                      f"does not cover {W:.0f} GB of weights — nothing "
-                      f"would be left for KV")
+        return None, (f"{f:.2f} of {T:.0f} GB minus an "
+                      f"{TRTLLM_WORKSPACE_RESERVE_GB:.0f} GB executor "
+                      f"workspace is {budget:.0f} GB, which does not cover "
+                      f"{W:.0f} GB of weights — nothing would be left for KV")
     g = (budget - W) / (T - W)
     g = max(0.01, min(MAX_FRACTION, g))
     return g, (f"{f:.2f} of {T:.0f} GB total, minus {W:.0f} GB of "
-               f"weights, leaves {budget - W:.0f} GB of KV — which is "
-               f"{g:.2f} of the {T - W:.0f} GB TensorRT-LLM sees free")
+               f"weights and an {TRTLLM_WORKSPACE_RESERVE_GB:.0f} GB "
+               f"executor workspace, leaves {budget - W:.0f} GB of KV — "
+               f"which is {g:.2f} of the {T - W:.0f} GB TensorRT-LLM sees free")
 
 
 def explain(engine: str, fraction: float, *, total_vram_gb: float | None,

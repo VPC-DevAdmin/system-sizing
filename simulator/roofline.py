@@ -978,6 +978,7 @@ async def run_roofline(
     confirm_winners: bool = True,
     engine_shape: dict | None = None,
     model_info: dict[str, dict] | None = None,
+    retry_engines: list[str] | None = None,
 ) -> Path:
     """Stage, search the product, confirm each model's winner, report.
 
@@ -1004,6 +1005,15 @@ async def run_roofline(
     done: dict[str, dict] = {}
     hopeless: dict[str, str] = {}
     if st and st.plan.get("cells"):
+        if retry_engines:
+            # The operator fixed something for these engines (a memory
+            # reserve, a port handoff): forget their failures, keep their
+            # measurements, and let resume run the cells again.
+            before = len(st.results)
+            st.results = [r for r in st.results
+                          if not (r.get("error") and r.get("engine") in retry_engines)]
+            log.info("roofline: retrying %d failed cells on %s",
+                     before - len(st.results), ", ".join(retry_engines))
         done = {cell_key(r): r for r in st.results if not r.get("error")}
         hopeless = permanently_failed(st.results)
         log.info("roofline: resuming with %d cells measured, %d written off",

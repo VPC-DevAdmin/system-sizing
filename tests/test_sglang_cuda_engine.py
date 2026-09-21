@@ -31,7 +31,7 @@ def test_replica_argv_carries_the_shape():
     j = " ".join(cmd)
     assert "--gpus device=2" in j
     assert "--ipc=host" in j
-    assert "--port 9102" in j                     # port + index
+    assert f"--port {eng._port(2)}" in j          # this launch's window + index
     assert "sglang.launch_server" in j
     assert "--max-running-requests 2048" in j     # NOT --max-num-seqs
     assert "--max-prefill-tokens 8192" in j

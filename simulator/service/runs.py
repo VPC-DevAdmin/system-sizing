@@ -484,6 +484,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             build_config=_build_rf, runs_base=runs_base,
             resume=resume,
             confirm_winners=bool(spec.get("confirm_winners", True)),
+                retry_engines=list(spec.get("retry_engines") or []),
             engine_shape=shape_of(base_custom),
             model_info=model_info,
         )

@@ -365,3 +365,37 @@ def test_config_only_staging_accepts_a_tiktoken_tokenizer(tmp_path, monkeypatch)
     assert not model_status("moonshotai/Kimi-K2-Thinking", config_only=True)["cached"]
     (snap / "tiktoken.model").write_text("x")
     assert model_status("moonshotai/Kimi-K2-Thinking", config_only=True)["cached"]
+
+
+def test_models_list_polls_downloads_before_it_reads_the_cache(tmp_path, monkeypatch) -> None:
+    """A download that finished between the row scan and the poll was
+    reported finished beside a row that still said not cached; the
+    companion test failed one full-suite run in three on that window.
+    The order is now observable: the rows are read only after every
+    download has been polled."""
+    cache = tmp_path / "hf"
+    cache.mkdir()
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(cache))
+    log = tmp_path / "dl.log"
+    log.write_text("done\n")
+    polled = {"n": 0}
+
+    class _Proc:
+        def poll(self):
+            polled["n"] += 1
+            return 0
+
+    seen = {"polled_before_rows": None}
+
+    def rows(**kw):
+        seen["polled_before_rows"] = polled["n"] > 0
+        return [{"model": "org/tiny", "cached": True, "gguf": None,
+                 "referenced_by": ["catalog:tiny"]}]
+    monkeypatch.setattr(models_mod, "referenced_models", rows)
+
+    with TestClient(create_app(tmp_path / "runs")) as client:
+        client.app.state.model_downloads["org/tiny#gguf"] = {
+            "proc": _Proc(), "log": str(log), "started_at": 0.0}
+        doc = client.get("/api/models").json()
+    assert seen["polled_before_rows"] is True
+    assert doc["downloads"]["org/tiny#gguf"]["running"] is False

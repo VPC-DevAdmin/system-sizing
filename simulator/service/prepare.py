@@ -177,7 +177,11 @@ async def storage_set(req: StorageRequest) -> dict:
 @router.get("/api/models")
 async def models_list(request: Request) -> dict:
     from ..models import hf_cache_dir, referenced_models
-    entries = await asyncio.to_thread(referenced_models)
+    # Poll the downloads BEFORE reading the cache. The other order
+    # had a window: a download finishing between the row scan and the
+    # poll was reported finished beside a row that still said "not
+    # cached" -- a stale UI on the box, and a test that failed one
+    # run in three.
     downloads = {}
     for model, dl in list(request.app.state.model_downloads.items()):
         exit_code = dl["proc"].poll()
@@ -189,6 +193,7 @@ async def models_list(request: Request) -> dict:
             "log": dl["log"],
             "log_tail": tail,
         }
+    entries = await asyncio.to_thread(referenced_models)
     # A companion download is keyed "<model>#gguf"; the row's gguf
     # block says whether one is in flight so the UI needs no join.
     for row in entries:

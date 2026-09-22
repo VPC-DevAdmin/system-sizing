@@ -1440,3 +1440,47 @@ def test_resume_can_redo_an_engines_measured_cells(tmp_path, monkeypatch):
     assert len(sweeps) == 2                                   # forgotten: re-run
     st = rf.load_state(tmp_path / rf.STATE_NAME)
     assert len([r for r in st.results if r["engine"] == "llamacpp"]) == 1
+
+
+def test_cross_domain_cells_launch_with_placement_span():
+    """Every tp8 cell of the giants pass failed at config time: the
+    planner allowed cross-domain tp but the device assigner still
+    refused a TP set spanning the two PCIe domains. Such cells carry
+    placement "span" (a shape key, so they key apart from the refused
+    rows), and so does an escalation that crosses the domain."""
+    from simulator.roofline import cell_key, cells, escalate_cell
+    from simulator.search import assign_devices
+    groups = [[0, 1, 2, 3], [4, 5, 6, 7]]
+    assert assign_devices(8, 1, "pack", groups) is None
+    assert assign_devices(8, 1, "span", groups) == [[0, 1, 2, 3, 4, 5, 6, 7]]
+    assert assign_devices(4, 2, "span", groups) == [[0, 1, 2, 3], [4, 5, 6, 7]]
+    giant = {"tier": "large", "fits_gpu": True, "tp": 8, "replicas": 1,
+             "cross_domain": True, "kt_eligible": False}
+    c = cells(["nvidia/Kimi-K2-Thinking-NVFP4"], ["vllm_cuda_multi"],
+              {"max_num_seqs": [1024], "output_tokens": [128]},
+              engine_shape={"tp": 1, "replicas": 8},
+              model_info={"nvidia/Kimi-K2-Thinking-NVFP4": giant})
+    assert c[0]["tp"] == 8 and c[0]["placement"] == "span"
+    assert "placement=span" in cell_key(c[0])
+    plain = {**c[0]}
+    plain.pop("placement")
+    assert cell_key(plain) != cell_key(c[0])
+    # An escalation from tp4 (the domain) to tp8 crosses it.
+    cell = {"model": "m", "engine": "vllm_cuda_multi", "max_num_seqs": 2048,
+            "output_tokens": 128, "tp": 4, "replicas": 2, "gpu_memory_utilization": 0.95}
+    nxt = escalate_cell(cell, gpu_count=8, max_tp=None, weight_gb=235, vram_gb=96,
+                        domain_tp=4)
+    assert nxt["tp"] == 8 and nxt["placement"] == "span"
+    within = escalate_cell({**cell, "tp": 2, "replicas": 4}, gpu_count=8,
+                           max_tp=None, weight_gb=235, vram_gb=96, domain_tp=4)
+    assert within["tp"] == 4 and "placement" not in within
+
+
+def test_scored_giants_are_marked_cross_domain():
+    from simulator.roofline import score_models
+    cat = [{"id": "nvidia/Kimi-K2-Thinking-NVFP4", "family": "kimi-k2", "series": "Kimi K2",
+            "params_b": 1026, "moe": True, "approx_size_gb": 594, "min_vram_gb": 620}]
+    c = score_models(cat, vram_per_gpu_gb=96, host_ram_gb=2015, gpu_count=8, max_tp=None)[0]
+    assert c.tp == 8 and c.cross_domain and c.info()["cross_domain"]
+    capped = score_models(cat, vram_per_gpu_gb=96, host_ram_gb=2015, gpu_count=8, max_tp=4)[0]
+    assert not capped.fits_gpu and not capped.cross_domain

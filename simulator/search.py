@@ -425,9 +425,18 @@ def assign_devices(
     spread — deal replicas round-robin across groups: replicas land on
              different domains (balanced host bandwidth). A TP replica
              never spans groups in either mode — cross-domain
-             all-reduce is the one shape that's never the answer.
+             all-reduce is the one shape that's never the answer for
+             speed.
+    span   — the box is one pool: a TP replica may cross domains. The
+             one shape that lets a 594 GB checkpoint onto eight 96 GB
+             cards at all (the roofline's allow_cross_domain_tp); the
+             all-reduce pays the PCIe hop, and the run measures what
+             that costs rather than refusing to find out.
     """
     total = sum(len(g) for g in device_groups)
+    if placement == "span":
+        device_groups = [[d for g in device_groups for d in g]]
+        placement = "pack"
     if tp * dp > total or tp > max(len(g) for g in device_groups):
         return None
     pools = [list(g) for g in device_groups]

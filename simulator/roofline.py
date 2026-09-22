@@ -123,6 +123,9 @@ class Candidate:
     # FP8, compressed-tensors INT4, MXFP4, bf16) -- the road to a 1T
     # model on this engine that needs no GGUF at all.
     kt_native: bool = False
+    # ``cross_domain``: the tp that holds the weights is wider than any
+    # PCIe domain, so its cells launch with placement "span".
+    cross_domain: bool = False
     fits_ram: bool = True
     kt_eligible: bool = False
     gguf_engines: Optional[list] = None
@@ -147,7 +150,7 @@ class Candidate:
         ``summarize`` to draw the spectrum."""
         return {"tier": self.tier, "fits_gpu": self.fits_gpu,
                 "fits_ram": self.fits_ram, "kt_eligible": self.kt_eligible,
-                "kt_native": self.kt_native,
+                "kt_native": self.kt_native, "cross_domain": self.cross_domain,
                 "gguf_engines": list(self.gguf_engines or GGUF_ENGINES),
                 "tp": self.tp, "replicas": self.replicas,
                 "approx_size_gb": self.size_gb, "params_b": self.params_b,
@@ -282,6 +285,7 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             kv_bytes=kv_bytes_per_token(mid, cache),
             fits_gpu=fits_gpu, fits_ram=fits_ram, kt_eligible=kt_eligible,
             kt_native=kt_native, gguf_engines=gguf_engines,
+            cross_domain=bool(cross_domain and fits_gpu),
             fits=fits_gpu or (kt_eligible and fits_ram),
             tp=tp if fits_gpu else None,
             replicas=(gpus // tp) if fits_gpu else None,
@@ -533,7 +537,7 @@ def _pick_fast(ranked: list[Candidate], limit: int, diverse: bool,
 # key: a roofline restarted with a new prompt length, memory share or
 # KV precision measures NEW cells instead of reusing old ones.
 SHAPE_KEYS = ("input_tokens", "gpu_memory_utilization", "kv_cache_dtype",
-              "replicas", "tp", "max_model_len")
+              "replicas", "tp", "max_model_len", "placement")
 LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_", "llamacpp_")
 
 
@@ -672,6 +676,10 @@ def cells(models: list[str], engines: list[str], shapes: dict, *,
                     and int(info["tp"]) > 1):
                 shape["tp"] = int(info["tp"])
                 shape["replicas"] = int(info.get("replicas") or 1)
+                if info.get("cross_domain"):
+                    # Wider than any PCIe domain: the device assigner
+                    # refuses that unless told the box is one pool.
+                    shape["placement"] = "span"
             for n in mns:
                 if e in max_batch:
                     n = min(n, max_batch[e])
@@ -790,7 +798,8 @@ SHARE_FLOOR = 0.80
 def escalate_cell(cell: dict, *, gpu_count: int,
                   max_tp: Optional[int] = None,
                   weight_gb: float | None = None,
-                  vram_gb: float | None = None) -> Optional[dict]:
+                  vram_gb: float | None = None,
+                  domain_tp: Optional[int] = None) -> Optional[dict]:
     """The next cell to try after this one ran out of GPU memory, or
     None when every lever is spent. GGUF engines have no lever.
 
@@ -827,6 +836,10 @@ def escalate_cell(cell: dict, *, gpu_count: int,
         out["tp"] = tp * 2
         out["replicas"] = max(1, int(gpu_count) // (tp * 2))
         out["escalated_from"] = tp
+        if domain_tp and tp * 2 > int(domain_tp):
+            # Past the PCIe domain: only allowed because max_tp let it
+            # through (cross-domain tp), and only launchable as "span".
+            out["placement"] = "span"
         return out
 
     def leaner() -> Optional[dict]:
@@ -844,6 +857,8 @@ def escalate_cell(cell: dict, *, gpu_count: int,
 
     weight_bound = (weight_gb is None or vram_gb is None
                     or float(weight_gb) / tp > 0.5 * float(vram_gb))
+    if domain_tp is None and max_tp:
+        domain_tp = int(max_tp)
     first, second = (wider, leaner) if weight_bound else (leaner, wider)
     return first() or second()
 
@@ -851,7 +866,8 @@ def escalate_cell(cell: dict, *, gpu_count: int,
 def escalations(plan_cells: list[dict], results: list[dict], *,
                 gpu_count: int, max_tp: Optional[int] = None,
                 model_info: dict[str, dict] | None = None,
-                vram_gb: float | None = None) -> list[dict]:
+                vram_gb: float | None = None,
+                domain_tp: Optional[int] = None) -> list[dict]:
     """Cells the plan owes to memory failures already recorded: for
     every failed row that asks for more cards, the next tp step, unless
     the plan already has it. Called on resume so escalations survive a
@@ -865,7 +881,7 @@ def escalations(plan_cells: list[dict], results: list[dict], *,
         info = (model_info or {}).get(r.get("model")) or {}
         nxt = escalate_cell(r, gpu_count=gpu_count, max_tp=max_tp,
                             weight_gb=info.get("approx_size_gb"),
-                            vram_gb=vram_gb)
+                            vram_gb=vram_gb, domain_tp=domain_tp)
         if nxt is None:
             continue
         k = cell_key(nxt)
@@ -875,7 +891,7 @@ def escalations(plan_cells: list[dict], results: list[dict], *,
         out.append({k2: v for k2, v in nxt.items()
                     if k2 in ("model", "engine", "max_num_seqs",
                               "output_tokens", "escalated_from",
-                              "escalated_from_share")
+                              "escalated_from_share", "placement")
                     or _is_shape_key(k2)})
     return out
 
@@ -1163,6 +1179,7 @@ async def run_roofline(
     gpu_count: int = 8,
     max_tp: Optional[int] = None,
     vram_per_gpu_gb: float | None = None,
+    domain_tp: Optional[int] = None,
 ) -> Path:
     """Stage, search the product, confirm each model's winner, report.
 
@@ -1225,7 +1242,7 @@ async def run_roofline(
                        notes=notes)
     owed = escalations(plan_cells, st.results, gpu_count=gpu_count,
                        max_tp=max_tp, model_info=model_info,
-                       vram_gb=vram_per_gpu_gb)
+                       vram_gb=vram_per_gpu_gb, domain_tp=domain_tp)
     if owed:
         log.info("roofline: %d tp escalations owed to earlier memory "
                  "failures", len(owed))
@@ -1309,7 +1326,8 @@ async def run_roofline(
                 minfo = (model_info or {}).get(cell["model"]) or {}
                 nxt = escalate_cell(cell, gpu_count=gpu_count, max_tp=max_tp,
                                     weight_gb=minfo.get("approx_size_gb"),
-                                    vram_gb=vram_per_gpu_gb)
+                                    vram_gb=vram_per_gpu_gb,
+                                    domain_tp=domain_tp)
                 if nxt is not None and cell_key(nxt) not in {
                         cell_key(c) for c in work}:
                     log.info("roofline: %s / %s out of memory at tp%d@%s, "

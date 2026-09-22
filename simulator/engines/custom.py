@@ -264,7 +264,8 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
     replicas = int(custom.get("replicas") or 1)
     tp = int(custom.get("tp") or 1)
     placement = (custom.get("placement")
-                 if custom.get("placement") in ("pack", "spread") else "pack")
+                 if custom.get("placement") in ("pack", "spread", "span")
+                 else "pack")
     if hw is None:
         # Through the module attribute: tests pin the topology by
         # monkeypatching arena.hardware.

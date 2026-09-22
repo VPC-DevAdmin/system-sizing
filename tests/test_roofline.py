@@ -1381,3 +1381,62 @@ def test_a_staged_native_checkpoint_opens_ktransformers(tmp_path, monkeypatch):
     from simulator.roofline import engines_for
     assert engines_for("ktransformers", after) and engines_for("llamacpp", after)
     assert not engines_for("vllm_cuda_multi", after)
+
+
+def test_gguf_engine_cells_climb_a_ladder_sized_to_their_slots():
+    """A 512-stream first rung against a 32-slot llama-server measured
+    a queue (XE7740 giants pass). GGUF engines climb to their slots and
+    one rung past; GPU engines keep the caller's ladder."""
+    from simulator.roofline import ladder_for
+    assert ladder_for("llamacpp", 32, [512, 2048]) == [8, 16, 32, 64]
+    assert ladder_for("ktransformers", 4, [512, 2048]) == [1, 2, 4, 8]
+    assert ladder_for("ktransformers", 4) == [1, 2, 4, 8]
+    assert ladder_for("vllm_cuda_multi", 1024, [512, 2048]) == [512, 2048]
+    assert ladder_for("vllm_cuda_multi", 1024) is None       # sweep default
+
+
+def test_resume_can_redo_an_engines_measured_cells(tmp_path, monkeypatch):
+    """Unlike retry_engines (failures only), redo_engines forgets every
+    row of the engine so a wrong measurement is replaced."""
+    import simulator.roofline as rf
+
+    sweeps: list[tuple[str, list | None]] = []
+
+    def fake_build(overrides):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("x: 1")
+        return cfg
+
+    class _Out:
+        db_directory = ""
+
+    class _Cfg:
+        output = _Out()
+
+    async def fake_sweep(cfg, cohort, *, new_run, ladder_override=None):
+        sweeps.append(("sweep", ladder_override))
+        out = tmp_path / f"sweep_{len(sweeps)}.json"
+        out.write_text(json.dumps({"peak": {"out_tok_s": 5.0, "concurrency": 32}}))
+        return out
+
+    async def fake_staged(models, st, path, **kw):
+        return set(models)
+
+    monkeypatch.setattr("simulator.config.load_config", lambda p: _Cfg())
+    monkeypatch.setattr("simulator.headline_sweep.run_headline_sweep", fake_sweep)
+    monkeypatch.setattr(rf, "ensure_staged", fake_staged)
+    monkeypatch.setattr("simulator.personas.cohort_from_persona", lambda name: object())
+    monkeypatch.setattr("simulator.headline_shapes.apply_shape_to_generation",
+                        lambda *a, **k: None)
+    kw = dict(models=["m"], engines=["llamacpp"],
+              shapes={"max_num_seqs": [32], "output_tokens": [128]},
+              build_config=fake_build, runs_base=tmp_path, confirm_winners=False,
+              engine_shape={"tp": 1, "replicas": 1})
+    asyncio.run(rf.run_roofline(resume=False, **kw))
+    assert sweeps == [("sweep", [8, 16, 32, 64])]
+    asyncio.run(rf.run_roofline(resume=True, **kw))
+    assert len(sweeps) == 1                                   # measured: skipped
+    asyncio.run(rf.run_roofline(resume=True, redo_engines=["llamacpp"], **kw))
+    assert len(sweeps) == 2                                   # forgotten: re-run
+    st = rf.load_state(tmp_path / rf.STATE_NAME)
+    assert len([r for r in st.results if r["engine"] == "llamacpp"]) == 1

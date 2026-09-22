@@ -555,6 +555,25 @@ def shape_of(custom: dict) -> dict:
             if _is_shape_key(k) and v not in (None, "")}
 
 
+def ladder_for(engine: str, max_num_seqs: int | None,
+               search: list[int] | None = None) -> list[int] | None:
+    """The concurrency ladder a cell's sweep climbs. GPU engines take
+    the caller's ladder (the coarse search rungs, or None for the
+    sweep's full default). A GGUF engine serves at most its slot
+    count -- KTransformers 4, llama-server 32 -- and a ladder that
+    starts at 512 streams measured a queue, not the engine: 32 in
+    flight, 480 waiting, readings from 108 to 3,280 tok/s on the same
+    model and a second rung that produced nothing (XE7740, every
+    llama.cpp cell of the giants pass). Such a cell climbs to its
+    slots and one rung past them to show the ceiling.
+    """
+    if engine not in GGUF_ENGINES:
+        return list(search) if search is not None else None
+    n = max(1, int(max_num_seqs or 1))
+    rungs = sorted({max(1, n // 4), max(1, n // 2), n, n * 2})
+    return rungs
+
+
 def engine_defaults(engine: str) -> dict:
     """Per-engine overrides of the roofline's GPU-engine defaults.
 
@@ -1140,6 +1159,7 @@ async def run_roofline(
     engine_shape: dict | None = None,
     model_info: dict[str, dict] | None = None,
     retry_engines: list[str] | None = None,
+    redo_engines: list[str] | None = None,
     gpu_count: int = 8,
     max_tp: Optional[int] = None,
     vram_per_gpu_gb: float | None = None,
@@ -1183,6 +1203,15 @@ async def run_roofline(
                           if not (r.get("error") and r.get("engine") in retry_engines)]
             log.info("roofline: retrying %d failed cells on %s",
                      before - len(st.results), ", ".join(retry_engines))
+        if redo_engines:
+            # A measurement known to be wrong (a ladder that measured
+            # a queue) is forgotten whether or not it errored; the
+            # cells run again on the next pass.
+            before = len(st.results)
+            st.results = [r for r in st.results
+                          if r.get("engine") not in redo_engines]
+            log.info("roofline: redoing %d cells on %s",
+                     before - len(st.results), ", ".join(redo_engines))
         done = {cell_key(r): r for r in st.results if not r.get("error")}
         hopeless = permanently_failed(st.results)
         log.info("roofline: resuming with %d cells measured, %d written off",
@@ -1268,7 +1297,9 @@ async def run_roofline(
             from .headline_optimize import SEARCH_LADDER
             summary = await run_headline_sweep(
                 sub, cohort_from_persona("headline_generation"),
-                new_run=True, ladder_override=SEARCH_LADDER)
+                new_run=True,
+                ladder_override=ladder_for(cell["engine"], cell["max_num_seqs"],
+                                           SEARCH_LADDER))
             row.update(_peak_of(summary))
         except Exception as e:  # noqa: BLE001
             # One dead cell must not end a six-hour run.
@@ -1319,7 +1350,9 @@ async def run_roofline(
                 sub.output.db_directory = str(runs_base)
                 final = await run_headline_sweep(
                     sub, cohort_from_persona("headline_generation"),
-                    new_run=True)
+                    new_run=True,
+                    ladder_override=ladder_for(best["engine"],
+                                               best["max_num_seqs"]))
                 row = {**best, "confirmed": True, **_peak_of(final)}
                 st.results.append(row)
             except Exception as e:  # noqa: BLE001

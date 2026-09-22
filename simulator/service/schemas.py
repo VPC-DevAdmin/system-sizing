@@ -113,6 +113,7 @@ class RooflineRequest(BaseModel):
     # On resume, forget the FAILED cells of these engines so they run
     # again (after a launcher fix); measured cells are kept.
     retry_engines: Optional[list[str]] = None
+    redo_engines: Optional[list[str]] = None
     engines: Optional[list[str]] = None      # None = every staged engine
     max_num_seqs: Optional[list[int]] = None
     output_tokens: Optional[list[int]] = None

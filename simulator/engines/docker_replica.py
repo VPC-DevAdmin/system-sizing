@@ -452,14 +452,20 @@ class DockerReplicaEngine(Engine):
         r"Executor creation failed due to insufficient GPU memory",
         re.I)
 
-    def _fatal_in_log(self, tail_bytes: int = 65536) -> Optional[str]:
-        """The first fatal line in the tail of the engine log, or None."""
+    def _fatal_in_log(self, tail_bytes: int | None = 65536) -> Optional[str]:
+        """The first fatal line in the engine log, or None. ``tail_bytes``
+        bounds the read for the once-a-few-seconds startup scan; None
+        reads the whole file -- an engine that died mid-sweep has by
+        then buried its traceback under a hundred thousand lines of
+        request errors (DeepSeek-V3.1-NVFP4 at tp8: the OOM sat 180k
+        lines back and the death was reported without its cause)."""
         if self._log_path is None:
             return None
         try:
             with open(self._log_path, "rb") as f:
-                f.seek(0, 2)
-                f.seek(max(0, f.tell() - tail_bytes))
+                if tail_bytes is not None:
+                    f.seek(0, 2)
+                    f.seek(max(0, f.tell() - tail_bytes))
                 text = f.read().decode("utf-8", "replace")
         except OSError:
             return None

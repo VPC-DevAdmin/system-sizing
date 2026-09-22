@@ -327,3 +327,17 @@ def test_health_wait_extends_while_the_engine_log_still_grows(tmp_path, monkeypa
     with pytest.raises(TimeoutError) as ei:
         eng._wait_for_replica_ready(0, 9100, "cid")
     assert "timeout 1s" in str(ei.value)
+
+
+def test_death_cause_is_found_behind_a_flood_of_request_errors(tmp_path):
+    """DeepSeek-V3.1-NVFP4 at tp8 died of CUDA out-of-memory and then
+    logged 180k lines of request errors; the tail scan missed the
+    cause and the roofline could not classify (or escalate) the cell."""
+    eng = _engine(1)
+    eng._log_path = tmp_path / "engine.log"
+    with open(eng._log_path, "w") as f:
+        f.write("[r0] torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB\n")
+        for i in range(20000):
+            f.write(f"[r0] request {i} failed: engine not ready\n")
+    assert eng._fatal_in_log() is None                       # the tail: nothing
+    assert "CUDA out of memory" in eng._fatal_in_log(None)   # the whole log

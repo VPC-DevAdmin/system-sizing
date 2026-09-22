@@ -535,7 +535,7 @@ async def run_headline_sweep(
                 probe = getattr(engine, "_fatal_in_log", None)
                 if callable(probe):
                     try:
-                        cause = probe()
+                        cause = probe(None)      # the whole log, not its tail
                     except Exception:  # noqa: BLE001
                         cause = None
                 raise EngineBrokenError(

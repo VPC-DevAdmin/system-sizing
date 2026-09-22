@@ -728,29 +728,75 @@ def is_memory_failure(err: str) -> bool:
     return bool(err) and bool(MEMORY_FAILURE.search(err))
 
 
+SHARE_STEP = 0.05
+SHARE_FLOOR = 0.80
+
+
 def escalate_cell(cell: dict, *, gpu_count: int,
-                  max_tp: Optional[int] = None) -> Optional[dict]:
-    """The same cell at twice the tensor parallelism, or None when the
-    cap (the largest device group unless cross-domain tp is allowed,
-    then the box) is already reached. GGUF engines have no tp lever.
-    ``replicas`` shrinks so the cell still uses the whole box."""
+                  max_tp: Optional[int] = None,
+                  weight_gb: float | None = None,
+                  vram_gb: float | None = None) -> Optional[dict]:
+    """The next cell to try after this one ran out of GPU memory, or
+    None when every lever is spent. GGUF engines have no lever.
+
+    Two levers, chosen by what the memory is going to:
+
+    * **Weight-bound** (the weights per GPU take more than half the
+      card, or their size is unknown): twice the tensor parallelism,
+      ``gpu_count // tp`` replicas so the box stays full, up to the
+      device group (or the box under cross-domain tp). TensorRT-LLM
+      loading a 63 GB NVFP4 checkpoint to 93 GB at tp1 is this case.
+    * **Not weight-bound** (a 14 GB model on a 96 GB card): the weights
+      are not the problem, the 0.95 memory share is -- vLLM sizes the
+      KV pool to it and the sampler's first softmax over 2048
+      sequences then has nowhere to go (gpt-oss-20b and -120b at 2048
+      seqs died this way at tp1, tp2 AND tp4). Step the share down by
+      SHARE_STEP, to SHARE_FLOOR, at the same tp.
+
+    When the preferred lever is spent the other one is tried, so a
+    cell walks tp1 -> tp2 -> tp4 -> tp4@0.90 -> ... before it is
+    given up on.
+    """
     if cell.get("engine") in GGUF_ENGINES:
         return None
-    tp = int(cell.get("tp") or 1) * 2
+    tp = int(cell.get("tp") or 1)
     cap = min(int(gpu_count), int(max_tp)) if max_tp else int(gpu_count)
-    if tp > cap:
-        return None
-    out = dict(cell)
-    out.pop("error", None)
-    out.pop("escalated_from", None)
-    out["tp"] = tp
-    out["replicas"] = max(1, int(gpu_count) // tp)
-    out["escalated_from"] = int(cell.get("tp") or 1)
-    return out
+    share = cell.get("gpu_memory_utilization")
+
+    def wider() -> Optional[dict]:
+        if tp * 2 > cap:
+            return None
+        out = dict(cell)
+        for k in ("error", "escalated_from", "escalated_from_share", "note"):
+            out.pop(k, None)
+        out["tp"] = tp * 2
+        out["replicas"] = max(1, int(gpu_count) // (tp * 2))
+        out["escalated_from"] = tp
+        return out
+
+    def leaner() -> Optional[dict]:
+        if share in (None, ""):
+            return None
+        nxt = round(float(share) - SHARE_STEP, 2)
+        if nxt < SHARE_FLOOR - 1e-9:
+            return None
+        out = dict(cell)
+        for k in ("error", "escalated_from", "escalated_from_share", "note"):
+            out.pop(k, None)
+        out["gpu_memory_utilization"] = nxt
+        out["escalated_from_share"] = float(share)
+        return out
+
+    weight_bound = (weight_gb is None or vram_gb is None
+                    or float(weight_gb) / tp > 0.5 * float(vram_gb))
+    first, second = (wider, leaner) if weight_bound else (leaner, wider)
+    return first() or second()
 
 
 def escalations(plan_cells: list[dict], results: list[dict], *,
-                gpu_count: int, max_tp: Optional[int] = None) -> list[dict]:
+                gpu_count: int, max_tp: Optional[int] = None,
+                model_info: dict[str, dict] | None = None,
+                vram_gb: float | None = None) -> list[dict]:
     """Cells the plan owes to memory failures already recorded: for
     every failed row that asks for more cards, the next tp step, unless
     the plan already has it. Called on resume so escalations survive a
@@ -761,7 +807,10 @@ def escalations(plan_cells: list[dict], results: list[dict], *,
     for r in results:
         if not is_memory_failure(r.get("error") or ""):
             continue
-        nxt = escalate_cell(r, gpu_count=gpu_count, max_tp=max_tp)
+        info = (model_info or {}).get(r.get("model")) or {}
+        nxt = escalate_cell(r, gpu_count=gpu_count, max_tp=max_tp,
+                            weight_gb=info.get("approx_size_gb"),
+                            vram_gb=vram_gb)
         if nxt is None:
             continue
         k = cell_key(nxt)
@@ -770,7 +819,8 @@ def escalations(plan_cells: list[dict], results: list[dict], *,
         have.add(k)
         out.append({k2: v for k2, v in nxt.items()
                     if k2 in ("model", "engine", "max_num_seqs",
-                              "output_tokens", "escalated_from")
+                              "output_tokens", "escalated_from",
+                              "escalated_from_share")
                     or _is_shape_key(k2)})
     return out
 
@@ -1056,6 +1106,7 @@ async def run_roofline(
     retry_engines: list[str] | None = None,
     gpu_count: int = 8,
     max_tp: Optional[int] = None,
+    vram_per_gpu_gb: float | None = None,
 ) -> Path:
     """Stage, search the product, confirm each model's winner, report.
 
@@ -1108,7 +1159,8 @@ async def run_roofline(
                        engine_shape=engine_shape, model_info=model_info,
                        notes=notes)
     owed = escalations(plan_cells, st.results, gpu_count=gpu_count,
-                       max_tp=max_tp)
+                       max_tp=max_tp, model_info=model_info,
+                       vram_gb=vram_per_gpu_gb)
     if owed:
         log.info("roofline: %d tp escalations owed to earlier memory "
                  "failures", len(owed))
@@ -1187,19 +1239,25 @@ async def run_roofline(
             row["error"] = f"{type(e).__name__}: {e}"
             log.warning("roofline cell failed: %s", e)
             if is_memory_failure(row["error"]):
-                nxt = escalate_cell(cell, gpu_count=gpu_count, max_tp=max_tp)
+                minfo = (model_info or {}).get(cell["model"]) or {}
+                nxt = escalate_cell(cell, gpu_count=gpu_count, max_tp=max_tp,
+                                    weight_gb=minfo.get("approx_size_gb"),
+                                    vram_gb=vram_per_gpu_gb)
                 if nxt is not None and cell_key(nxt) not in {
                         cell_key(c) for c in work}:
-                    log.info("roofline: %s / %s out of memory at tp%d, "
-                             "planning tp%d x %d replicas",
+                    log.info("roofline: %s / %s out of memory at tp%d@%s, "
+                             "planning tp%d x %d replicas @%s",
                              cell["model"], cell["engine"],
-                             int(cell.get("tp") or 1), nxt["tp"],
-                             nxt["replicas"])
+                             int(cell.get("tp") or 1),
+                             cell.get("gpu_memory_utilization"),
+                             nxt["tp"], nxt["replicas"],
+                             nxt.get("gpu_memory_utilization"))
                     work.insert(i, nxt)
                     st.plan["cells"] = list(st.plan.get("cells") or []) + [nxt]
                 elif nxt is None:
                     row["note"] = (f"out of GPU memory at tp{int(cell.get('tp') or 1)}"
-                                   f"; no wider tp on this host")
+                                   f"@{cell.get('gpu_memory_utilization')}; "
+                                   f"no wider tp or leaner share left")
         st.results.append(row)
         st.current = None
         save_state(path, st)
@@ -1209,6 +1267,12 @@ async def run_roofline(
         save_state(path, st)
         for mid, best in (summarize(st.results).get("best_per_model")
                           or {}).items():
+            # Resume: a winner already confirmed at this exact shape
+            # is not swept again -- eleven sweeps cost five hours.
+            bk = cell_key(best)
+            if any(r.get("confirmed") and not r.get("error")
+                   and cell_key(r) == bk for r in st.results):
+                continue
             st.current = {**best, "phase": "confirming"}
             save_state(path, st)
             try:

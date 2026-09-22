@@ -282,3 +282,48 @@ def test_health_wait_fails_fast_on_a_fatal_engine_log(tmp_path, monkeypatch):
     eng._log_path.write_text("[r0] loading weights...\n")
     with pytest.raises(TimeoutError):
         eng._wait_for_replica_ready(0, 9100, "cid")
+
+
+def test_health_wait_extends_while_the_engine_log_still_grows(tmp_path, monkeypatch):
+    """Nemotron-3-Super at tp2 finished loading at 30:00 sharp and was
+    filed as a transient timeout. A log that is still growing when the
+    timeout lands buys more time, up to a hard cap; a silent one does
+    not."""
+    class R:
+        stdout = "true\n"
+
+    monkeypatch.setattr(dr.subprocess, "run", lambda *a, **k: R())
+    calls = {"n": 0}
+
+    def server_up_late(*a, **k):
+        calls["n"] += 1
+        if calls["n"] < 6:
+            raise ConnectionError("not up")
+
+        class Resp:
+            status_code = 200
+        return Resp()
+    monkeypatch.setattr(dr.httpx, "get", server_up_late)
+    monkeypatch.setattr(dr.time, "sleep", lambda s: None)
+    eng = _engine(1)
+    eng.cfg.startup_timeout_s = 1
+    eng._log_path = tmp_path / "engine.log"
+    eng._log_path.write_text("loading 1%\n")
+    # Every tick the log grows, so the wait outlives the 1 s timeout.
+    real_size = eng._log_size
+
+    def growing():
+        with open(eng._log_path, "a") as f:
+            f.write("loading more\n")
+        return real_size()
+    monkeypatch.setattr(eng, "_log_size", growing)
+    eng._wait_for_replica_ready(0, 9100, "cid")       # no TimeoutError
+    assert calls["n"] == 6
+    # Silent log: the timeout stands, and the message says how long.
+    def never_up(*a, **k):
+        raise ConnectionError("not up")
+    monkeypatch.setattr(dr.httpx, "get", never_up)
+    monkeypatch.setattr(eng, "_log_size", real_size)
+    with pytest.raises(TimeoutError) as ei:
+        eng._wait_for_replica_ready(0, 9100, "cid")
+    assert "timeout 1s" in str(ei.value)

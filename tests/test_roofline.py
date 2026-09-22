@@ -1256,3 +1256,92 @@ def test_run_notes_when_no_wider_tp_exists(tmp_path, monkeypatch):
     st = rf.load_state(path)
     assert len(st.results) == 1
     assert "no wider tp" in st.results[0]["note"]
+
+
+def test_a_non_weight_bound_oom_steps_the_memory_share_down_first():
+    """gpt-oss-20b (14 GB) at 2048 seqs died for memory at tp1, tp2 AND
+    tp4: the weights were never the problem, the 0.95 share was (the
+    sampler's first softmax had nowhere to go). Small weights -> lean
+    the share first; big weights -> widen tp first; each falls back to
+    the other when spent."""
+    from simulator.roofline import SHARE_FLOOR, escalate_cell
+    small = {"model": "s", "engine": "vllm_cuda_multi", "max_num_seqs": 2048,
+             "output_tokens": 128, "tp": 1, "replicas": 8,
+             "gpu_memory_utilization": 0.95}
+    nxt = escalate_cell(small, gpu_count=8, max_tp=4, weight_gb=14, vram_gb=96)
+    assert nxt["tp"] == 1 and nxt["gpu_memory_utilization"] == 0.90
+    assert nxt["escalated_from_share"] == 0.95 and "escalated_from" not in nxt
+    # Walks down to the floor, then widens tp.
+    c = nxt
+    shares = []
+    while c["tp"] == 1:
+        shares.append(c["gpu_memory_utilization"])
+        c = escalate_cell(c, gpu_count=8, max_tp=4, weight_gb=14, vram_gb=96)
+    assert shares[-1] == SHARE_FLOOR and c["tp"] == 2 and c["escalated_from"] == 1
+    # Big weights: tp first, share only once tp is capped.
+    big = {**small, "model": "b"}
+    w = escalate_cell(big, gpu_count=8, max_tp=4, weight_gb=63, vram_gb=96)
+    assert w["tp"] == 2 and w["gpu_memory_utilization"] == 0.95
+    capped = {**big, "tp": 4, "replicas": 2}
+    lean = escalate_cell(capped, gpu_count=8, max_tp=4, weight_gb=63, vram_gb=96)
+    assert lean["tp"] == 4 and lean["gpu_memory_utilization"] == 0.90
+    # Unknown weights keep the old rule (tp first).
+    assert escalate_cell(small, gpu_count=8, max_tp=4)["tp"] == 2
+    # Nothing left: floor share at the tp cap.
+    spent = {**capped, "gpu_memory_utilization": SHARE_FLOOR}
+    assert escalate_cell(spent, gpu_count=8, max_tp=4, weight_gb=63, vram_gb=96) is None
+
+
+def test_share_escalations_are_owed_on_resume_with_model_weights():
+    from simulator.roofline import cell_key, escalations
+    plan = [{"model": "openai/gpt-oss-20b", "engine": "vllm_cuda_multi",
+             "max_num_seqs": 2048, "output_tokens": 128, "tp": 1, "replicas": 8,
+             "gpu_memory_utilization": 0.95, "input_tokens": 128}]
+    results = [{**plan[0], "error": "torch.OutOfMemoryError: CUDA out of memory."}]
+    info = {"openai/gpt-oss-20b": {"approx_size_gb": 14}}
+    owed = escalations(plan, results, gpu_count=8, max_tp=4, model_info=info,
+                       vram_gb=96)
+    assert len(owed) == 1 and owed[0]["gpu_memory_utilization"] == 0.90
+    assert owed[0]["tp"] == 1 and owed[0]["escalated_from_share"] == 0.95
+    assert cell_key(owed[0]) != cell_key(plan[0])
+
+
+def test_resume_does_not_confirm_a_winner_twice(tmp_path, monkeypatch):
+    import simulator.roofline as rf
+
+    sweeps: list[str] = []
+
+    def fake_build(overrides):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("x: 1")
+        return cfg
+
+    class _Out:
+        db_directory = ""
+
+    class _Cfg:
+        output = _Out()
+
+    async def fake_sweep(cfg, cohort, *, new_run, ladder_override=None):
+        sweeps.append("confirm" if ladder_override is None else "search")
+        out = tmp_path / f"sweep_{len(sweeps)}.json"
+        out.write_text(json.dumps({"peak": {"out_tok_s": 100.0, "concurrency": 8}}))
+        return out
+
+    async def fake_staged(models, st, path, **kw):
+        return set(models)
+
+    monkeypatch.setattr("simulator.config.load_config", lambda p: _Cfg())
+    monkeypatch.setattr("simulator.headline_sweep.run_headline_sweep", fake_sweep)
+    monkeypatch.setattr(rf, "ensure_staged", fake_staged)
+    monkeypatch.setattr("simulator.personas.cohort_from_persona", lambda name: object())
+    monkeypatch.setattr("simulator.headline_shapes.apply_shape_to_generation",
+                        lambda *a, **k: None)
+    kw = dict(models=["m"], engines=["trtllm"],
+              shapes={"max_num_seqs": [1024], "output_tokens": [128]},
+              build_config=fake_build, runs_base=tmp_path, confirm_winners=True,
+              engine_shape={"tp": 1, "replicas": 8})
+    asyncio.run(rf.run_roofline(resume=False, **kw))
+    assert sweeps == ["search", "confirm"]
+    asyncio.run(rf.run_roofline(resume=True, **kw))
+    assert sweeps == ["search", "confirm"]          # nothing re-run

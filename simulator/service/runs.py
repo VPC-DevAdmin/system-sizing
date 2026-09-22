@@ -339,7 +339,8 @@ async def _plan_roofline(spec: dict
         info = {k: v for k, v in info.items() if v}
     if not models:
         raise HTTPException(422, "no model fits this host")
-    return engines, models, info, {"gpu_count": gpus, "max_tp": tp_cap}
+    return engines, models, info, {"gpu_count": gpus, "max_tp": tp_cap,
+                                   "vram_per_gpu_gb": vram}
 
 
 async def _start_run_locked(app, req: StartRunRequest) -> dict:
@@ -489,6 +490,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             model_info=model_info,
             gpu_count=int(hw_bounds.get("gpu_count") or 8),
             max_tp=hw_bounds.get("max_tp"),
+            vram_per_gpu_gb=hw_bounds.get("vram_per_gpu_gb"),
         )
     elif kind == "headline_optimize":
         # Engine shape and request shape are coupled, so they are

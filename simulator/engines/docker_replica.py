@@ -471,12 +471,48 @@ class DockerReplicaEngine(Engine):
         line = text[line_start:line_end if line_end >= 0 else None].strip()
         return re.sub(r"^\[r\d+\]\s*", "", line)[:300]
 
+    # A launch that is still visibly loading when the timeout lands is
+    # not stuck. Nemotron-3-Super at tp2 x 4 replicas on the XE7740
+    # finished its weight load and CUDA-graph capture at 30:00 -- the
+    # very second the 1800 s wait gave up -- and was filed as a
+    # transient timeout. While the engine log keeps growing the wait
+    # continues, up to PROGRESS_GRACE_FACTOR x the timeout; a log that
+    # has been silent for PROGRESS_SILENCE_S is a hang and the timeout
+    # stands.
+    PROGRESS_GRACE_FACTOR = 2.0
+    PROGRESS_SILENCE_S = 300.0
+
+    def _log_size(self) -> int:
+        try:
+            return self._log_path.stat().st_size if self._log_path else 0
+        except OSError:
+            return 0
+
     def _wait_for_replica_ready(self, index: int, port: int,
                                 container_id: str) -> None:
         start = time.time()
         backoff = 1.0
         last_scan = 0.0
-        while time.time() - start < self.cfg.startup_timeout_s:
+        timeout = float(self.cfg.startup_timeout_s)
+        hard_cap = timeout * self.PROGRESS_GRACE_FACTOR
+        size = self._log_size()
+        last_growth = start
+        extended = False
+        while True:
+            now = time.time()
+            elapsed = now - start
+            if elapsed >= timeout:
+                cur = self._log_size()
+                if cur > size:
+                    size, last_growth = cur, now
+                if (elapsed >= hard_cap
+                        or now - last_growth > self.PROGRESS_SILENCE_S):
+                    break
+                if not extended:
+                    extended = True
+                    log.info("replica %d not ready at %.0fs but its log "
+                             "is still growing; waiting up to %.0fs",
+                             index, timeout, hard_cap)
             if self._stopping.is_set():
                 raise self._cancelled()
             if time.time() - last_scan >= 5.0:
@@ -512,7 +548,9 @@ class DockerReplicaEngine(Engine):
             time.sleep(backoff)
             backoff = min(5.0, backoff * 1.2)
         raise TimeoutError(
-            f"replica {index} not healthy in {self.cfg.startup_timeout_s}s "
+            f"replica {index} not healthy in {int(time.time() - start)}s "
+            f"(timeout {self.cfg.startup_timeout_s}s"
+            f"{', extended while the log grew' if extended else ''}) "
             f"— see {self._log_path}"
         )
 

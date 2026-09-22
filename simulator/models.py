@@ -70,6 +70,42 @@ def cache_overflow_roots(cache: Path | None = None) -> list[Path]:
     return roots
 
 
+def hf_token() -> Optional[str]:
+    """The Hugging Face token capsim should use, in huggingface_hub's
+    own order: ``HF_TOKEN``, ``HUGGING_FACE_HUB_TOKEN``, the file
+    ``HF_TOKEN_PATH`` names, then the token file under ``HF_HOME``
+    (default ``~/.cache/huggingface``) -- and, because capsim runs its
+    downloads with ``HF_HOME`` pointed at its own cache, the token file
+    under that cache too. None when there is none.
+
+    Why one resolver: engine containers, the downloader and the hub
+    lookups each read only the two variables, so ``hf auth login`` on
+    the box (which writes ``~/.cache/huggingface/token``) left every
+    one of them anonymous. Now a login is enough."""
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        v = os.environ.get(var)
+        if v:
+            return v.strip()
+    candidates: list[Path] = []
+    tp = os.environ.get("HF_TOKEN_PATH")
+    if tp:
+        candidates.append(Path(tp))
+    home = os.environ.get("HF_HOME")
+    candidates.append((Path(home) if home else Path.home() / ".cache" / "huggingface") / "token")
+    try:
+        candidates.append(hf_cache_dir() / "token")
+    except Exception:  # noqa: BLE001 - storage.json unreadable: no cache token
+        pass
+    for c in candidates:
+        try:
+            t = c.read_text().strip()
+        except OSError:
+            continue
+        if t:
+            return t
+    return None
+
+
 CONTAINER_HF_CACHE = "/root/.cache/huggingface"
 
 
@@ -492,7 +528,7 @@ def download_command(model_id: str,
     else:
         raise ValueError(f"unknown companion {companion!r}")
     env = {"HF_HOME": str(hf_cache_dir())}
-    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        if os.environ.get(var):
-            env[var] = os.environ[var]
+    tok = hf_token()
+    if tok:
+        env["HF_TOKEN"] = tok
     return argv, env

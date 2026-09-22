@@ -293,11 +293,11 @@ def hub_model_exists(model_id: str, timeout: float = 5.0) -> Optional[bool]:
     401/404 both mean "not usable by this host". The operator's HF
     token rides along when set, so their own private/accepted-gated
     repos verify correctly."""
-    import os as _os
 
     import httpx
     headers = {}
-    token = _os.environ.get("HF_TOKEN") or _os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    from .models import hf_token
+    token = hf_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:

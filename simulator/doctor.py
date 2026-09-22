@@ -447,6 +447,13 @@ def hf_token_source() -> str | None:
     token_file = (Path(home) if home else Path.home() / ".cache" / "huggingface") / "token"
     if token_file.is_file():
         return str(token_file)
+    try:
+        from .models import hf_cache_dir
+        cache_token = hf_cache_dir() / "token"
+        if cache_token.is_file():
+            return str(cache_token)
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 

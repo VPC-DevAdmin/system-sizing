@@ -121,3 +121,45 @@ def test_trtllm_names_the_staged_tokenizer_directory(tmp_path, monkeypatch) -> N
     assert cmd[cmd.index("serve") + 1] == "org/M"      # weights still by id
     assert "HF_HUB_OFFLINE=1" in _env_pairs(cmd)
     assert "--tokenizer" not in _cmd("org/Missing")
+
+
+def test_hub_token_comes_from_env_then_files(tmp_path, monkeypatch) -> None:
+    """One resolver for the engines, the downloader and the hub
+    lookups: env first, then HF_TOKEN_PATH, then the login file under
+    HF_HOME / ~/.cache/huggingface, then capsim's own cache. ``hf auth
+    login`` on the box is enough."""
+    from simulator.models import hf_token
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path / "cache"))
+    (tmp_path / "cache").mkdir()
+    for v in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH", "HF_HOME"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    assert hf_token() is None
+    (tmp_path / "cache" / "token").write_text("hf_cache\n")
+    assert hf_token() == "hf_cache"
+    login = tmp_path / "home" / ".cache" / "huggingface"
+    login.mkdir(parents=True)
+    (login / "token").write_text("hf_login")
+    assert hf_token() == "hf_login"
+    (tmp_path / "explicit").write_text("hf_path")
+    monkeypatch.setenv("HF_TOKEN_PATH", str(tmp_path / "explicit"))
+    assert hf_token() == "hf_path"
+    monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "hf_env2")
+    assert hf_token() == "hf_env2"
+    monkeypatch.setenv("HF_TOKEN", "hf_env")
+    assert hf_token() == "hf_env"
+
+
+def test_engine_containers_and_downloads_carry_the_login_token(tmp_path, monkeypatch) -> None:
+    from simulator.models import download_command
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path))
+    for v in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH", "HF_HOME", "HF_HUB_OFFLINE"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    login = tmp_path / "home" / ".cache" / "huggingface"
+    login.mkdir(parents=True)
+    (login / "token").write_text("hf_login")
+    assert _env_pairs(hub_env_args("org/Missing")) == ["HF_TOKEN=hf_login"]
+    _, env = download_command("org/M")
+    assert env["HF_TOKEN"] == "hf_login" and env["HF_HOME"] == str(tmp_path)

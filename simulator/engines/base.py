@@ -53,9 +53,10 @@ def hub_env_args(model_id: str | None) -> list[str]:
     the environment wins either way.
     """
     out: list[str] = []
-    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        if os.environ.get(var):
-            out += ["-e", f"{var}={os.environ[var]}"]
+    from ..models import hf_token
+    tok = hf_token()
+    if tok:
+        out += ["-e", f"HF_TOKEN={tok}"]
     explicit = os.environ.get("HF_HUB_OFFLINE")
     if explicit is not None:
         out += ["-e", f"HF_HUB_OFFLINE={explicit}"]

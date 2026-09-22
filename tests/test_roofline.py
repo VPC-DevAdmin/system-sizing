@@ -1606,3 +1606,16 @@ def test_peak_row_carries_the_rungs_outcomes(tmp_path):
     assert row["samples"] == 19659 and row["errors"] == 4419
     assert row["no_content"] == 26317 and row["scrape_gaps"] == 1
     assert row["success_rate"] == round(19659 / (19659 + 4419), 3)
+
+
+def test_resume_owes_a_native_ktransformers_row_its_share_step():
+    from simulator.roofline import escalations
+    row = {"model": "moonshotai/Kimi-K2-Thinking", "engine": "ktransformers",
+           "max_num_seqs": 4, "output_tokens": 128, "tp": 1, "replicas": 1,
+           "gpu_memory_utilization": 0.95, "input_tokens": 128,
+           "error": "torch.OutOfMemoryError: CUDA out of memory"}
+    info = {"moonshotai/Kimi-K2-Thinking": {"kt_native": True, "approx_size_gb": 594}}
+    owed = escalations([], [row], gpu_count=8, max_tp=4, model_info=info, vram_gb=96)
+    assert len(owed) == 1 and owed[0]["gpu_memory_utilization"] == 0.90
+    assert owed[0]["kt_native"] is True and owed[0]["replicas"] == 1
+    assert escalations([], [row], gpu_count=8, max_tp=4, model_info={}, vram_gb=96) == []

@@ -917,6 +917,11 @@ def escalations(plan_cells: list[dict], results: list[dict], *,
         if not is_memory_failure(r.get("error") or ""):
             continue
         info = (model_info or {}).get(r.get("model")) or {}
+        if (r.get("engine") == "ktransformers" and info.get("kt_native")
+                and not r.get("kt_native")):
+            # A row written before the planner marked native cells:
+            # the plan's record of the model says what it is.
+            r = {**r, "kt_native": True}
         nxt = escalate_cell(r, gpu_count=gpu_count, max_tp=max_tp,
                             weight_gb=info.get("approx_size_gb"),
                             vram_gb=vram_gb, domain_tp=domain_tp)

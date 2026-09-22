@@ -1484,3 +1484,19 @@ def test_scored_giants_are_marked_cross_domain():
     assert c.tp == 8 and c.cross_domain and c.info()["cross_domain"]
     capped = score_models(cat, vram_per_gpu_gb=96, host_ram_gb=2015, gpu_count=8, max_tp=4)[0]
     assert not capped.fits_gpu and not capped.cross_domain
+
+
+def test_a_modelopt_nvfp4_checkpoint_does_not_open_ktransformers(tmp_path, monkeypatch):
+    """nvidia/DeepSeek-V3.1-NVFP4 declares nothing in config.json (dtype
+    bfloat16) and keeps its quantisation in hf_quant_config.json; the
+    resolver read it as a native BF16 checkpoint and the giants pass
+    planned two KTransformers cells that could only fail."""
+    from simulator.roofline import _native_kt_checkpoint
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path))
+    snap = tmp_path / "hub" / "models--nvidia--DeepSeek-V3.1-NVFP4" / "snapshots" / "a"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+    (snap / "model-00001-of-00163.safetensors").write_bytes(b"0")
+    assert _native_kt_checkpoint("nvidia/DeepSeek-V3.1-NVFP4", tmp_path)
+    (snap / "hf_quant_config.json").write_text(json.dumps({"quantization": {"quant_algo": "NVFP4"}}))
+    assert not _native_kt_checkpoint("nvidia/DeepSeek-V3.1-NVFP4", tmp_path)

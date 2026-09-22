@@ -199,6 +199,12 @@ def _native_kt_checkpoint(model_id: str, cache: Path | None = None) -> bool:
         return False
     if rev is None or not _has_safetensors(rev):
         return False
+    if (rev / "hf_quant_config.json").is_file():
+        # NVIDIA ModelOpt (NVFP4, FP8 by ModelOpt) keeps its
+        # quantisation in this side file and leaves config.json's
+        # dtype at bfloat16, which kt_method_for would read as a
+        # plain BF16 checkpoint; kt-kernel has no NVFP4 path.
+        return False
     try:
         doc = json.loads((rev / "config.json").read_text())
     except (OSError, ValueError):

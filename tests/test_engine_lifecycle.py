@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -244,3 +245,40 @@ def test_http_ports_rotate_per_launch():
     assert replica_port(9100, 1, 0) == 9100 + PORT_WINDOW
     for i in range(PORT_WINDOWS):
         assert 9100 <= replica_port(9100, i, 7) < 9100 + PORT_WINDOWS * PORT_WINDOW
+
+
+def test_health_wait_fails_fast_on_a_fatal_engine_log(tmp_path, monkeypatch):
+    """KTransformers' API process outlives its dead model-loading
+    worker, so the container never exits and the health wait ran the
+    full 30 minutes on the XE7740 before filing a transient timeout
+    (DeepSeek-V3.1: "no kernel image is available"). The wait now reads
+    the engine's own log and fails with the real cause."""
+    class R:
+        stdout = "true\n"
+
+    monkeypatch.setattr(dr.subprocess, "run", lambda *a, **k: R())
+
+    def no_server(*a, **k):
+        raise ConnectionError("not up")
+    monkeypatch.setattr(dr.httpx, "get", no_server)
+    eng = _engine(1)
+    eng.cfg.startup_timeout_s = 30
+    eng._log_path = tmp_path / "engine.log"
+    eng._log_path.write_text(
+        "[r0] Injecting lm_head as ktransformers.operators.linear\n"
+        "[r0] RuntimeError: CUDA error: no kernel image is available for "
+        "execution on the device\n"
+        "[r0] CUDA kernel errors might be asynchronously reported\n")
+    t0 = time.time()
+    with pytest.raises(RuntimeError) as ei:
+        eng._wait_for_replica_ready(0, 9100, "cid")
+    assert time.time() - t0 < 10
+    msg = str(ei.value)
+    assert "engine died during startup" in msg
+    assert "no kernel image is available" in msg
+    assert "[r0]" not in msg
+    # A log without a fatal line still waits (here: until the timeout).
+    eng.cfg.startup_timeout_s = 1
+    eng._log_path.write_text("[r0] loading weights...\n")
+    with pytest.raises(TimeoutError):
+        eng._wait_for_replica_ready(0, 9100, "cid")

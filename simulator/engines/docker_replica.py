@@ -434,13 +434,59 @@ class DockerReplicaEngine(Engine):
                 return ln.strip()[:300]
         return "the engine log is empty"
 
+    # Lines that mean the launch is over even though the container is
+    # still running. Some servers keep their API process alive after
+    # the model-loading worker dies (KTransformers' balance_serve
+    # forks the engine; the parent lingers), so "container exited" is
+    # never raised and the health wait runs the full timeout -- 30
+    # minutes per cell on the XE7740 for a DeepSeek load that died in
+    # its first CUDA kernel. The failure is then filed as a transient
+    # timeout and retried on every resume. Matched against the
+    # engine's own log; deliberately narrow, since engines log
+    # recoverable errors too.
+    FATAL_LOG_PATTERNS = re.compile(
+        r"no kernel image is available for execution on the device|"
+        r"CUDA error: (?:an illegal memory access|device-side assert|"
+        r"invalid device function|out of memory)|"
+        r"torch\.OutOfMemoryError|"
+        r"Executor creation failed due to insufficient GPU memory",
+        re.I)
+
+    def _fatal_in_log(self, tail_bytes: int = 65536) -> Optional[str]:
+        """The first fatal line in the tail of the engine log, or None."""
+        if self._log_path is None:
+            return None
+        try:
+            with open(self._log_path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - tail_bytes))
+                text = f.read().decode("utf-8", "replace")
+        except OSError:
+            return None
+        m = self.FATAL_LOG_PATTERNS.search(text)
+        if not m:
+            return None
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        line_end = text.find("\n", m.end())
+        line = text[line_start:line_end if line_end >= 0 else None].strip()
+        return re.sub(r"^\[r\d+\]\s*", "", line)[:300]
+
     def _wait_for_replica_ready(self, index: int, port: int,
                                 container_id: str) -> None:
         start = time.time()
         backoff = 1.0
+        last_scan = 0.0
         while time.time() - start < self.cfg.startup_timeout_s:
             if self._stopping.is_set():
                 raise self._cancelled()
+            if time.time() - last_scan >= 5.0:
+                last_scan = time.time()
+                fatal = self._fatal_in_log()
+                if fatal:
+                    raise RuntimeError(
+                        f"replica {index} engine died during startup "
+                        f"(container still running): {fatal} (full log: "
+                        f"{self._log_path})")
             try:
                 r = subprocess.run(
                     ["docker", "inspect", "-f", "{{.State.Running}}",

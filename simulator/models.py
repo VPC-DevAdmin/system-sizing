@@ -215,7 +215,11 @@ CONFIG_ONLY_INCLUDE = ("*.json", "tokenizer*", "*.txt", "*.model", "*.py")
 
 def _include_args(patterns: tuple[str, ...] | list[str]) -> list[str]:
     return [a for pat in patterns for a in ("--include", pat)]
-_TOKENIZER_FILES = ("tokenizer.json", "tokenizer.model")
+# What "a tokenizer is staged" looks like on disk: the HF fast
+# tokenizer, a SentencePiece model, or a tiktoken vocabulary --
+# Kimi-K2 ships ``tiktoken.model`` + ``tokenization_kimi.py`` and no
+# tokenizer.json, and its config-only staging read as incomplete.
+_TOKENIZER_FILES = ("tokenizer.json", "tokenizer.model", "tiktoken.model")
 
 
 def _latest_snapshot(d: Path) -> Path | None:

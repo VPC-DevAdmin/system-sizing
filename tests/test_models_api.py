@@ -351,3 +351,17 @@ def test_referenced_models_rows_carry_kt_fields(tmp_path, monkeypatch) -> None:
     small = by_id["Qwen/Qwen3-32B"]
     assert small["kt_only"] is False and small["host_ram_gb"] is None
     assert small["arch"] is None and small["config_only"] is False
+
+
+def test_config_only_staging_accepts_a_tiktoken_tokenizer(tmp_path, monkeypatch):
+    """Kimi-K2-Thinking ships tiktoken.model + tokenization_kimi.py and
+    no tokenizer.json; its config-only staging read as not cached and
+    the roofline skipped its GGUF cells."""
+    from simulator.models import model_status
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path))
+    snap = tmp_path / "hub" / "models--moonshotai--Kimi-K2-Thinking" / "snapshots" / "abc"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    assert not model_status("moonshotai/Kimi-K2-Thinking", config_only=True)["cached"]
+    (snap / "tiktoken.model").write_text("x")
+    assert model_status("moonshotai/Kimi-K2-Thinking", config_only=True)["cached"]

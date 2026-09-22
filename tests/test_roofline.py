@@ -1495,7 +1495,8 @@ def test_a_modelopt_nvfp4_checkpoint_does_not_open_ktransformers(tmp_path, monke
     monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path))
     snap = tmp_path / "hub" / "models--nvidia--DeepSeek-V3.1-NVFP4" / "snapshots" / "a"
     snap.mkdir(parents=True)
-    (snap / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+    (snap / "config.json").write_text(json.dumps({
+        "architectures": ["DeepseekV3ForCausalLM"], "torch_dtype": "bfloat16"}))
     (snap / "model-00001-of-00163.safetensors").write_bytes(b"0")
     assert _native_kt_checkpoint("nvidia/DeepSeek-V3.1-NVFP4", tmp_path)
     (snap / "hf_quant_config.json").write_text(json.dumps({"quantization": {"quant_algo": "NVFP4"}}))
@@ -1523,3 +1524,17 @@ def test_a_model_with_cells_still_queued_is_pending_not_failed():
     assert st.to_dict()["summary"]["spectrum"][0]["status"] == "failed"  # written off
     st.status = "finished"
     assert st.to_dict()["summary"]["spectrum"][0]["status"] == "failed"
+
+
+def test_native_kt_checkpoints_are_limited_to_the_forks_architectures(tmp_path):
+    from simulator.roofline import _native_kt_checkpoint
+    def stage(mid, arch, extra):
+        snap = tmp_path / "hub" / f"models--{mid.replace('/', '--')}" / "snapshots" / "a"
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text(json.dumps({"architectures": [arch], **extra}))
+        (snap / "model-00001-of-00002.safetensors").write_bytes(b"0")
+    stage("openai/gpt-oss-20b", "GptOssForCausalLM",
+          {"quantization_config": {"quant_method": "mxfp4"}})
+    stage("zai-org/GLM-5.3-Flash", "Glm4MoeForCausalLM", {"torch_dtype": "bfloat16"})
+    assert not _native_kt_checkpoint("openai/gpt-oss-20b", tmp_path)
+    assert _native_kt_checkpoint("zai-org/GLM-5.3-Flash", tmp_path)

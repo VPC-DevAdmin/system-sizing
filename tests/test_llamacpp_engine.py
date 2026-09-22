@@ -595,6 +595,10 @@ def test_output_grammar_parser_is_off_for_benchmarks():
     argv = serve_argv("model.gguf", port=9100, max_model_len=4096, slots=32)
     assert argv[argv.index("--reasoning-format") + 1] == "none"
     assert "--no-jinja" in argv
+    assert argv[argv.index("--chat-template") + 1] == "chatml"
+    named = serve_argv("model.gguf", port=9100, max_model_len=4096, slots=32,
+                       chat_template="deepseek3")
+    assert named[named.index("--chat-template") + 1] == "deepseek3"
     on = serve_argv("model.gguf", port=9100, max_model_len=4096, slots=32,
              jinja=True)
     assert "--no-jinja" not in on and "--reasoning-format" in on

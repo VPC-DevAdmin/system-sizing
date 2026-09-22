@@ -148,6 +148,29 @@ def _catalog_entry(model_id: str, catalog: Optional[list[dict]]) -> dict:
         return {}
 
 
+def _native_kt_launch(custom: dict, model_id: str) -> bool:
+    """True when this KTransformers launch reads a NATIVE checkpoint
+    (the v0.7 line: kt-kernel inside SGLang) rather than a GGUF: the
+    generation resolves to v0.7 and the model's staged snapshot is one
+    the roofline's native check accepts. The GGUF companion rule is
+    about which engine can read the companion; it does not bind a
+    launch that never opens it. Kimi-K2-Thinking's 594 GB INT4
+    checkpoint was refused at config time for exactly that reason."""
+    if custom.get("ktransformers_gguf_path"):
+        return False
+    try:
+        from ..config import EngineConfig
+        from ..roofline import _native_kt_checkpoint
+        from .ktransformers import resolve_generation
+        probe = EngineConfig(type="ktransformers", model_id=model_id, port=1,
+                             **{k: v for k, v in custom.items()
+                                if k.startswith("ktransformers_")})
+        return (resolve_generation(probe) == "v0.7"
+                and _native_kt_checkpoint(model_id))
+    except Exception:  # noqa: BLE001 - unknown lever or unstaged model
+        return False
+
+
 def _kt_only(model_id: str, catalog: Optional[list[dict]]) -> bool:
     """Does the catalog mark ``model_id`` as beyond the GPUs (``kt_only``:
     served by the GGUF engines alone)?"""
@@ -309,7 +332,9 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
             f"{engine_type} cannot run {model_id} — the catalog marks it "
             f"kt_only (weights beyond the GPUs); only the GGUF engines "
             f"({', '.join(GGUF_ENGINES)}) serve it")
-    if engine_type in GGUF_ENGINES:
+    native_kt = (engine_type == "ktransformers"
+                 and _native_kt_launch(custom, model_id))
+    if engine_type in GGUF_ENGINES and not native_kt:
         why = gguf_engine_excluded(engine_type, model_id, catalog)
         if why and not custom.get(f"{engine_type}_gguf_path"):
             # An explicit path is the operator's own GGUF, outside the

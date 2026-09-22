@@ -175,6 +175,7 @@ def serve_argv(gguf_file: str, *, port: int, gguf_mount: str = GGUF_MOUNT,
                threads: int | None = None,
                offload_experts: bool = False,
                jinja: bool = False,
+               chat_template: str | None = None,
                kv_cache_type: str | None = None,
                batch_tokens: int | None = None,
                alias: str | None = None,
@@ -213,7 +214,11 @@ def serve_argv(gguf_file: str, *, port: int, gguf_mount: str = GGUF_MOUNT,
         "--reasoning-format", "none",
     ]
     if not jinja:
-        argv.append("--no-jinja")
+        # The legacy formatter refuses a template it does not know
+        # ("this custom template is not supported, try using --jinja"
+        # -- DeepSeek-V3.2), so name a built-in one. ChatML is the
+        # generic choice: tokens are what the benchmark counts.
+        argv += ["--no-jinja", "--chat-template", chat_template or "chatml"]
     if alias:
         argv += ["-a", alias]
     if threads:
@@ -345,6 +350,7 @@ class LlamaCppEngine(DockerReplicaEngine):
             threads=threads,
             offload_experts=self.offload_experts(devices),
             jinja=bool(getattr(cfg, "llamacpp_jinja", False)),
+            chat_template=getattr(cfg, "llamacpp_chat_template", None),
             kv_cache_type=kv_type,
             batch_tokens=getattr(cfg, "max_num_batched_tokens", None),
             alias=getattr(cfg, "served_model_name", None) or cfg.model_id,

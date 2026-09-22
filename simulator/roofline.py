@@ -209,7 +209,21 @@ def _native_kt_checkpoint(model_id: str, cache: Path | None = None) -> bool:
         doc = json.loads((rev / "config.json").read_text())
     except (OSError, ValueError):
         return False
+    archs = doc.get("architectures") or []
+    if not any(str(a).startswith(KT_V07_ARCH_PREFIXES) for a in archs):
+        # gpt-oss is mxfp4 too, but its layout is not DeepSeek-V4's
+        # and the fork's FusedMoE does not load it; the planner gave
+        # it KTransformers cells that could only be refused.
+        return False
     return kt_method_for(doc) is not None
+
+
+# Architectures the v0.7 fork's FusedMoE loads (docs/ktransformers.md):
+# DeepSeek V3/V3.1/V3.2/V4 and Kimi K2 (DeepseekV3ForCausalLM), Qwen3
+# MoE / Next / 3.5, GLM-4.5 .. 5.x, MiniMax M2/M3.
+KT_V07_ARCH_PREFIXES = ("DeepseekV3", "DeepseekV32", "DeepseekV4", "Kimi",
+                        "Qwen3Moe", "Qwen3Next", "Qwen3_5Moe", "Glm4Moe",
+                        "Glm5", "MiniMaxM")
 
 
 def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,

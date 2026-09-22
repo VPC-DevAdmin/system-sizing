@@ -352,3 +352,26 @@ def test_engine_card_names_both_generations():
     keys = {lv.key for lv in levers_for("ktransformers")}
     assert {"ktransformers_generation", "ktransformers_kt_method",
             "ktransformers_gpu_experts"} <= keys
+
+
+def test_a_native_checkpoint_passes_the_config_builder_without_a_gguf(tmp_path, monkeypatch):
+    """Kimi-K2-Thinking's GGUF companion is llama.cpp-only; the config
+    builder refused every KTransformers launch for it although the
+    v0.7 line reads the staged native INT4 checkpoint and never opens
+    the GGUF."""
+    import json
+
+    from simulator.engines.custom import _native_kt_launch
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path))
+    mid = "moonshotai/Kimi-K2-Thinking"
+    snap = tmp_path / "hub" / "models--moonshotai--Kimi-K2-Thinking" / "snapshots" / "a"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text(json.dumps({
+        "architectures": ["DeepseekV3ForCausalLM"],
+        "quantization_config": {"quant_method": "compressed-tensors",
+                                "config_groups": {"g": {"weights": {"num_bits": 4, "type": "int"}}}}}))
+    assert not _native_kt_launch({}, mid)                      # config only
+    (snap / "model-00001-of-00062.safetensors").write_bytes(b"0")
+    assert _native_kt_launch({}, mid)
+    assert not _native_kt_launch({"ktransformers_gguf_path": "/gguf"}, mid)
+    assert not _native_kt_launch({"ktransformers_generation": "v0.3"}, mid)

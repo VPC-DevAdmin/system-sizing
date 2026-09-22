@@ -237,6 +237,9 @@ class EngineConfig:
     # a reasoning model's reply does not fit it; off by default for a
     # benchmark that only counts tokens (engines/llamacpp.py).
     llamacpp_jinja: bool = False
+    # A built-in llama-server template name for the legacy formatter
+    # (default chatml); only read when llamacpp_jinja is off.
+    llamacpp_chat_template: str | None = None
 
     # ── trtllm: TensorRT-LLM via trtllm-serve ─────────────────────────
     # Launched through the image's OWN entrypoint — see engines/trtllm.py

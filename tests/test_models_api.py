@@ -399,3 +399,38 @@ def test_models_list_polls_downloads_before_it_reads_the_cache(tmp_path, monkeyp
         doc = client.get("/api/models").json()
     assert seen["polled_before_rows"] is True
     assert doc["downloads"]["org/tiny#gguf"]["running"] is False
+
+
+def test_custom_code_checkpoints_get_trust_remote_code_by_default(tmp_path, monkeypatch) -> None:
+    """Kimi-K2-Thinking-NVFP4 failed on SGLang ("Couldn't instantiate
+    the backend tokenizer") and TensorRT-LLM ("contains custom code
+    which must be executed") because nothing passed trust-remote-code
+    for its tiktoken tokenizer class. An auto_map in the staged config
+    or tokenizer config turns it on unless the operator decided."""
+    import json as _json
+
+    from simulator.engines.custom import custom_engine
+    from simulator.models import needs_remote_code
+    cache = tmp_path / "hf"
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(cache))
+    hw = {"count": 8, "device_groups": [[0, 1, 2, 3], [4, 5, 6, 7]],
+          "vram_per_gpu_gb": 96}
+    def stage(mid, tok_cfg):
+        snap = cache / "hub" / f"models--{mid.replace('/', '--')}" / "snapshots" / "a"
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text(_json.dumps({"architectures": ["DeepseekV3ForCausalLM"]}))
+        (snap / "tokenizer_config.json").write_text(_json.dumps(tok_cfg))
+    stage("nvidia/Kimi-K2-Thinking-NVFP4",
+          {"auto_map": {"AutoTokenizer": ["tokenization_kimi.TikTokenTokenizer", None]}})
+    stage("org/Plain", {"tokenizer_class": "LlamaTokenizer"})
+    assert needs_remote_code("nvidia/Kimi-K2-Thinking-NVFP4")
+    assert not needs_remote_code("org/Plain")
+    assert not needs_remote_code("org/Missing")
+    base = {"engine": "sglang_cuda", "tp": 8, "replicas": 1, "placement": "span",
+            "max_model_len": 2048, "gpu_memory_utilization": 0.9}
+    kimi = custom_engine({**base, "model_id": "nvidia/Kimi-K2-Thinking-NVFP4"}, hw=hw, catalog=[])
+    plain = custom_engine({**base, "model_id": "org/Plain"}, hw=hw, catalog=[])
+    assert kimi["trust_remote_code"] is True and plain["trust_remote_code"] is False
+    forced = custom_engine({**base, "model_id": "nvidia/Kimi-K2-Thinking-NVFP4",
+                            "trust_remote_code": False}, hw=hw, catalog=[])
+    assert forced["trust_remote_code"] is False

@@ -316,6 +316,12 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
             f"unknown engine {engine_type!r} — expected one of "
             f"{', '.join(GPU_ENGINES)}")
 
+    if custom.get("trust_remote_code") is None:
+        # Not the operator's call: a checkpoint that ships custom
+        # model or tokenizer code needs it, and the engines only say
+        # so after a failed launch (models.needs_remote_code).
+        from ..models import needs_remote_code
+        custom = {**custom, "trust_remote_code": needs_remote_code(model_id)}
     levers = levers_from(custom)
     knobs = canonical(custom)
     weights, model_quant = _model_facts(model_id, tp, catalog)

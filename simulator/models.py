@@ -133,6 +133,31 @@ def container_cache_path(host_path: str | Path) -> Optional[str]:
     return None
 
 
+def needs_remote_code(model_id: str | None, cache: Path | None = None) -> bool:
+    """Does the staged checkpoint ship custom model or tokenizer code?
+    Transformers refuses such a repo without trust-remote-code; the
+    engines then fail in their own words -- SGLang "Couldn't
+    instantiate the backend tokenizer", TensorRT-LLM "contains custom
+    code which must be executed", both on Kimi-K2-Thinking-NVFP4,
+    whose tokenizer is a tiktoken class in tokenization_kimi.py. The
+    signal is an ``auto_map`` in config.json or tokenizer_config.json,
+    which is exactly what transformers keys the requirement on."""
+    if not model_id or "/" not in model_id or model_id.startswith(("/", ".")):
+        return False
+    cache = cache or hf_cache_dir()
+    rev = _latest_snapshot(_model_dir(model_id, cache))
+    if rev is None:
+        return False
+    for name in ("config.json", "tokenizer_config.json"):
+        try:
+            doc = json.loads((rev / name).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict) and doc.get("auto_map"):
+            return True
+    return False
+
+
 def staged_snapshot_in_container(model_id: str | None,
                                  cache: Path | None = None) -> Optional[str]:
     """The staged snapshot directory of ``model_id`` at the path an

@@ -1641,3 +1641,24 @@ def test_progress_counts_settled_plan_cells_not_result_rows():
     pr = st.to_dict()["progress"]
     assert pr == {"planned": 3, "settled": 2, "measured": 1, "attempts": 5,
                   "confirmations": 1}
+
+
+def test_a_winner_must_complete_its_requests():
+    """Kimi-K2-Thinking-NVFP4: 6,154 tok/s at 10% completion vs 4,121 at
+    100%; gpt-oss-20b: 107,803 at 39% vs 104,908 at 95%. The raw rate
+    stays on the row; the ranking goes to the row that served."""
+    base = {"model": "m", "engine": "sglang_cuda", "max_num_seqs": 1024,
+            "tp": 8, "replicas": 1}
+    rows = [{**base, "output_tokens": 256, "out_tok_s": 6154.3, "success_rate": 0.1},
+            {**base, "output_tokens": 128, "out_tok_s": 4120.9, "success_rate": 1.0},
+            {**base, "output_tokens": 64, "out_tok_s": 3000.0}]          # no record
+    s = summarize(rows)
+    assert s["best_per_model"]["m"]["out_tok_s"] == 4120.9
+    assert s["search_best_per_model"]["m"]["out_tok_s"] == 4120.9
+    assert s["fastest"]["out_tok_s"] == 4120.9
+    # Only failing rows: the least bad still publishes, flagged by its rate.
+    s2 = summarize([rows[0]])
+    assert s2["best_per_model"]["m"]["out_tok_s"] == 6154.3
+    # A confirmed row that served beats an unconfirmed one that did not.
+    s3 = summarize([rows[0], {**rows[1], "confirmed": True}])
+    assert s3["best_per_model"]["m"]["confirmed"]

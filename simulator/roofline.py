@@ -1056,6 +1056,12 @@ class State:
         return out
 
 
+# The completion rate a published rung must reach. Below it the
+# engine rate is real but the requests behind it mostly were not
+# served; the row keeps its number and loses the ranking.
+MIN_SUCCESS = 0.9
+
+
 def _generation(r: dict) -> float:
     """The rate every ranking uses: GENERATION tokens per second. Total
     (prompt + generation) is carried alongside for the prefill story,
@@ -1091,8 +1097,17 @@ def summarize(results: list[dict], model_info: dict | None = None,
     # full one, and when the two disagree the confirmation is the
     # number (Llama-70B FP8: 21,140 searched, 16,185 confirmed). The
     # search peak stays beside it as the best observation.
-    def _rank(r: dict) -> tuple[int, float]:
-        return (1 if r.get("confirmed") else 0, _generation(r))
+    def _rank(r: dict) -> tuple[int, int, float]:
+        # A published number completes its requests. Kimi-K2-Thinking-
+        # NVFP4 at 4,096 offered streams read 6,154 tok/s with 10% of
+        # turns completing (the engine holds 1,024; the rest were
+        # rejected) against 4,121 with every turn completing; gpt-oss-
+        # 20b's 107,803 completed 39% against 104,908 at 95%. Rows
+        # under MIN_SUCCESS rank below every row at or above it (or
+        # with no outcome record); the raw rate stays on the row.
+        sr = r.get("success_rate")
+        solid = 1 if (sr is None or sr >= MIN_SUCCESS) else 0
+        return (solid, 1 if r.get("confirmed") else 0, _generation(r))
 
     by_model: dict[str, dict] = {}
     by_engine: dict[str, dict] = {}
@@ -1100,7 +1115,7 @@ def summarize(results: list[dict], model_info: dict | None = None,
     for r in sorted(usable, key=_rank, reverse=True):
         by_model.setdefault(r["model"], r)
         by_engine.setdefault(r["engine"], r)
-    for r in sorted(usable, key=_generation, reverse=True):
+    for r in sorted(usable, key=lambda r: _rank(r)[::2], reverse=True):
         if not r.get("confirmed"):
             search_best.setdefault(r["model"], r)
     for m, r in by_model.items():

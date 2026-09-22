@@ -1345,3 +1345,39 @@ def test_resume_does_not_confirm_a_winner_twice(tmp_path, monkeypatch):
     assert sweeps == ["search", "confirm"]
     asyncio.run(rf.run_roofline(resume=True, **kw))
     assert sweeps == ["search", "confirm"]          # nothing re-run
+
+
+def test_a_staged_native_checkpoint_opens_ktransformers(tmp_path, monkeypatch):
+    """Kimi-K2-Thinking's GGUF companion is llama.cpp-only (the v0.3
+    KTransformers line cannot read it), but its native compressed-
+    tensors INT4 checkpoint is exactly what the v0.7 line loads. Once
+    those safetensors are staged the model gets a KTransformers cell;
+    config-only staging does not open it."""
+    monkeypatch.setenv("OPTIMIZER_HF_CACHE", str(tmp_path))
+    cat = [{"id": "moonshotai/Kimi-K2-Thinking", "family": "kimi-k2",
+            "series": "Kimi K2", "params_b": 1026, "moe": True,
+            "approx_size_gb": 594, "min_vram_gb": 620, "kt_only": True,
+            "gguf": {"repo": "unsloth/Kimi-K2-Thinking-GGUF", "file": "UD-Q4_K_XL",
+                     "size_gb": 646.2, "engines": ["llamacpp"]}}]
+    snap = tmp_path / "hub" / "models--moonshotai--Kimi-K2-Thinking" / "snapshots" / "a"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text(json.dumps({
+        "architectures": ["DeepseekV3ForCausalLM"],
+        "quantization_config": {"quant_method": "compressed-tensors",
+                                "config_groups": {"g": {"weights": {"num_bits": 4, "type": "int"}}}}}))
+    (snap / "tiktoken.model").write_text("x")
+
+    def info():
+        c = score_models(cat, vram_per_gpu_gb=96, host_ram_gb=2015, gpu_count=8,
+                         max_tp=4, cache=tmp_path)[0]
+        return c.info()
+    before = info()
+    assert before["kt_native"] is False
+    assert before["gguf_engines"] == ["llamacpp"]
+    (snap / "model-00001-of-00062.safetensors").write_bytes(b"0")
+    after = info()
+    assert after["kt_native"] is True and after["fits_gpu"] is False
+    assert after["gguf_engines"] == ["llamacpp", "ktransformers"]
+    from simulator.roofline import engines_for
+    assert engines_for("ktransformers", after) and engines_for("llamacpp", after)
+    assert not engines_for("vllm_cuda_multi", after)

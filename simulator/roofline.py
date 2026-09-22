@@ -118,6 +118,11 @@ class Candidate:
     # allow-list among them. ``fits`` is what the roofline can measure
     # at all: fits_gpu, or a GGUF engine can carry it.
     fits_gpu: bool = True
+    # ``kt_native``: a full native checkpoint is staged in a
+    # quantisation the KTransformers v0.7 line reads directly (block
+    # FP8, compressed-tensors INT4, MXFP4, bf16) -- the road to a 1T
+    # model on this engine that needs no GGUF at all.
+    kt_native: bool = False
     fits_ram: bool = True
     kt_eligible: bool = False
     gguf_engines: Optional[list] = None
@@ -142,6 +147,7 @@ class Candidate:
         ``summarize`` to draw the spectrum."""
         return {"tier": self.tier, "fits_gpu": self.fits_gpu,
                 "fits_ram": self.fits_ram, "kt_eligible": self.kt_eligible,
+                "kt_native": self.kt_native,
                 "gguf_engines": list(self.gguf_engines or GGUF_ENGINES),
                 "tp": self.tp, "replicas": self.replicas,
                 "approx_size_gb": self.size_gb, "params_b": self.params_b,
@@ -176,6 +182,25 @@ def tp_for(need_gb: float, vram_per_gpu_gb: float, gpu_count: int = 8,
             return tp
         tp *= 2
     return None
+
+
+def _native_kt_checkpoint(model_id: str, cache: Path | None = None) -> bool:
+    """True when the model's newest cached snapshot holds safetensors
+    in a quantisation ``kt_method_for`` names (the v0.7 line's native
+    formats). Config-only stagings and GGUF-only models are False."""
+    from .engines.ktransformers_v2 import _has_safetensors, kt_method_for
+    from .models import _latest_snapshot, _model_dir, hf_cache_dir
+    try:
+        rev = _latest_snapshot(_model_dir(model_id, cache or hf_cache_dir()))
+    except OSError:
+        return False
+    if rev is None or not _has_safetensors(rev):
+        return False
+    try:
+        doc = json.loads((rev / "config.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return kt_method_for(doc) is not None
 
 
 def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
@@ -226,12 +251,23 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
         # the companion is catalogued and the weights fit the RAM.
         gguf_spec = e.get("gguf") or {}
         kt_eligible = bool(gguf_spec)
-        gguf_engines = list(gguf_spec.get("engines") or GGUF_ENGINES)
+        gguf_engines = (list(gguf_spec.get("engines") or GGUF_ENGINES)
+                        if gguf_spec else [])
         if kt_eligible and not e.get("moe") and "ktransformers" in gguf_engines:
             # The KTransformers serving image is an MoE engine (CPU
             # experts, GPU attention); a dense Llama dies at load with
             # KeyError: 'LlamaForCausalLM'. llama.cpp still serves it.
             gguf_engines = [g for g in gguf_engines if g != "ktransformers"]
+        # A staged NATIVE checkpoint the v0.7 line reads (Kimi-K2-
+        # Thinking's compressed-tensors INT4, DeepSeek's block FP8) is
+        # its own road onto KTransformers, whatever the GGUF companion
+        # allows: the companion's allow-list is about which engine can
+        # read THAT file, not about the engine itself.
+        kt_native = bool(e.get("moe")) and _native_kt_checkpoint(mid, cache)
+        if kt_native:
+            kt_eligible = True
+            if "ktransformers" not in gguf_engines:
+                gguf_engines = gguf_engines + ["ktransformers"]
         fits_ram = True
         if size:
             fits_ram = (host_ram_gb is not None
@@ -245,7 +281,7 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
             size_gb=size, cached=bool(st.get("cached")),
             kv_bytes=kv_bytes_per_token(mid, cache),
             fits_gpu=fits_gpu, fits_ram=fits_ram, kt_eligible=kt_eligible,
-            gguf_engines=gguf_engines,
+            kt_native=kt_native, gguf_engines=gguf_engines,
             fits=fits_gpu or (kt_eligible and fits_ram),
             tp=tp if fits_gpu else None,
             replicas=(gpus // tp) if fits_gpu else None,

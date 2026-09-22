@@ -1347,6 +1347,9 @@ async def run_roofline(
                           if r.get("engine") not in redo_engines]
             log.info("roofline: redoing %d cells on %s",
                      before - len(st.results), ", ".join(redo_engines))
+        filled = backfill_outcomes(st.results, runs_base)
+        if filled:
+            log.info("roofline: outcomes backfilled on %d older rows", filled)
         done = {cell_key(r): r for r in st.results if not r.get("error")}
         hopeless = permanently_failed(st.results)
         log.info("roofline: resuming with %d cells measured, %d written off",
@@ -1506,6 +1509,35 @@ async def run_roofline(
                         "final_status": "ok"})
     log.info("roofline done: %s", summarize(st.results).get("best"))
     return path
+
+
+def backfill_outcomes(results: list[dict], runs_base) -> int:
+    """Give rows measured before outcomes rode on them (samples,
+    errors, success_rate) those fields from their retained sweep
+    file. Without this an old confirmed row with no record ranked as
+    solid above a newer row that completed 95% -- gpt-oss-20b's
+    107,803 (39% completed, per its own sweep file) over 104,908.
+    Returns how many rows were filled."""
+    n = 0
+    for r in results:
+        if r.get("error") or r.get("samples") is not None or not r.get("run_dir"):
+            continue
+        path = Path(runs_base).parent / r["run_dir"] / "headline_sweep.json"
+        if not path.is_file():
+            path = Path(r["run_dir"]) / "headline_sweep.json"
+        try:
+            doc = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        pk = doc.get("peak") or {}
+        if pk.get("samples") is None or pk.get("errors") is None:
+            continue
+        r["samples"], r["errors"] = pk["samples"], pk["errors"]
+        r["no_content"] = pk.get("no_content")
+        tot = pk["samples"] + pk["errors"]
+        r["success_rate"] = round(pk["samples"] / tot, 3) if tot else None
+        n += 1
+    return n
 
 
 def _peak_of(summary_path) -> dict:

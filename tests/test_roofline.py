@@ -1662,3 +1662,24 @@ def test_a_winner_must_complete_its_requests():
     # A confirmed row that served beats an unconfirmed one that did not.
     s3 = summarize([rows[0], {**rows[1], "confirmed": True}])
     assert s3["best_per_model"]["m"]["confirmed"]
+
+
+def test_resume_backfills_outcomes_from_retained_sweeps(tmp_path):
+    """gpt-oss-20b's confirmed 107,803 was measured before outcomes
+    rode on rows; its sweep file says 19,659 completed against 30,736
+    errors. Backfilled, it ranks below the 104,908 that completed 95%."""
+    from simulator.roofline import backfill_outcomes
+    runs = tmp_path / "runs"
+    (runs / "run_527").mkdir(parents=True)
+    (runs / "run_527" / "headline_sweep.json").write_text(json.dumps(
+        {"peak": {"out_tok_s": 107803.4, "samples": 19659, "errors": 30736}}))
+    old = {"model": "openai/gpt-oss-20b", "engine": "vllm_cuda_multi",
+           "max_num_seqs": 1024, "output_tokens": 256, "tp": 1, "replicas": 8,
+           "out_tok_s": 107803.4, "confirmed": True, "run_dir": "runs/run_527"}
+    new = {**old, "max_num_seqs": 2048, "out_tok_s": 104907.7, "confirmed": False,
+           "samples": 950, "errors": 50, "success_rate": 0.95, "run_dir": "runs/run_700"}
+    rows = [old, new]
+    assert backfill_outcomes(rows, runs) == 1
+    assert old["samples"] == 19659 and old["success_rate"] == 0.39
+    assert backfill_outcomes(rows, runs) == 0                      # idempotent
+    assert summarize(rows)["best_per_model"]["openai/gpt-oss-20b"]["out_tok_s"] == 104907.7

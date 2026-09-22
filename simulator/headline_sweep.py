@@ -45,7 +45,7 @@ from .config import Config
 from .cpu_binding import expand_thread_binding
 from .database import AGGREGATE_COLUMN_NAMES, Database
 from .engines import make_engine
-from .headline_search import Chunk, chunks_converged, scrape_complete
+from .headline_search import Chunk, chunks_converged, scrape_complete, whole_scrape
 from .measurement import _percentile
 from .open_loop import EngineBrokenError, WorkerPool, smoke_test_engine
 from .personas import Cohort
@@ -344,7 +344,11 @@ async def run_headline_sweep(
         })
 
     async def _chunk(phase: str, seconds: int, acc: _Acc) -> Chunk:
-        m0 = await _metrics()
+        # The two boundary scrapes are the measurement (the rates are
+        # their counter deltas): retried until whole, decisive if not.
+        # A mid-chunk scrape that misses a replica only thins the
+        # running/queue means and is skipped, not fatal.
+        m0 = await whole_scrape(_metrics)
         whole = scrape_complete(m0)
         t0 = time.monotonic()
         running: list[float] = []
@@ -353,14 +357,13 @@ async def run_headline_sweep(
             await asyncio.sleep(1.0)
             m = await _metrics()
             acc.add(pool.drain_turn_queue())
-            if not scrape_complete(m):
-                whole = False
-            if m.get("num_running") is not None:
-                running.append(float(m["num_running"]))
-            if m.get("queue_depth") is not None:
-                waiting.append(float(m["queue_depth"]))
+            if scrape_complete(m):
+                if m.get("num_running") is not None:
+                    running.append(float(m["num_running"]))
+                if m.get("queue_depth") is not None:
+                    waiting.append(float(m["queue_depth"]))
             _snapshot(phase, m, acc_offered[0], acc)
-        m1 = await _metrics()
+        m1 = await whole_scrape(_metrics)
         whole = whole and scrape_complete(m1)
         dt = max(1e-3, time.monotonic() - t0)
         gen = ((m1.get("generation_tokens_total") or 0)

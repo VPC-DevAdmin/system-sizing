@@ -336,3 +336,34 @@ def test_a_scrape_missing_a_replica_is_not_a_measurement():
     assert scrape_complete({"replicas_scraped": 8.0, "replicas_total": 8.0})
     assert not scrape_complete({"replicas_scraped": 7.0, "replicas_total": 8.0})
     assert not scrape_complete({})
+
+
+def test_streams_held_but_nothing_generated_is_not_steady():
+    """512 prompts on a 1T model at tp8 were still prefilling after a
+    chunk; two such chunks agreed on 'running 512, rate None' and the
+    rung was scored a steady nothing."""
+    from simulator.headline_search import Chunk, chunks_converged
+    a = Chunk(running=512.0, queue=0.0, out_rate=None, prompt_rate=None)
+    assert not chunks_converged(a, a)
+    b = Chunk(running=512.0, queue=0.0, out_rate=4000.0, prompt_rate=100.0)
+    assert chunks_converged(b, b)
+
+
+def test_boundary_scrapes_are_retried_until_whole():
+    import asyncio
+
+    from simulator.headline_search import whole_scrape
+    answers = [{"replicas_scraped": 7.0, "replicas_total": 8.0},
+               {"replicas_scraped": 7.0, "replicas_total": 8.0},
+               {"replicas_scraped": 8.0, "replicas_total": 8.0, "generation_tokens_total": 9.0}]
+    calls = {"n": 0}
+
+    async def fetch():
+        m = answers[min(calls["n"], len(answers) - 1)]
+        calls["n"] += 1
+        return m
+    m = asyncio.run(whole_scrape(fetch, tries=3, pause_s=0.0))
+    assert m["generation_tokens_total"] == 9.0 and calls["n"] == 3
+    calls["n"] = 0
+    m = asyncio.run(whole_scrape(fetch, tries=2, pause_s=0.0))
+    assert m["replicas_scraped"] == 7.0 and calls["n"] == 2       # gave up, incomplete

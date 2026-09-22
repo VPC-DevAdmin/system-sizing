@@ -104,6 +104,22 @@ class Chunk:
     complete: bool = True            # every replica answered every scrape
 
 
+async def whole_scrape(fetch, tries: int = 3, pause_s: float = 0.5) -> dict:
+    """A chunk-boundary scrape, retried until every replica answers or
+    the tries run out. The boundaries are what the counter deltas come
+    from, so they must be whole; a /metrics that takes a moment under
+    a 1T model's load is asked again rather than costing the chunk."""
+    import asyncio
+    m: dict = {}
+    for i in range(max(1, tries)):
+        m = await fetch()
+        if scrape_complete(m):
+            return m
+        if i + 1 < tries:
+            await asyncio.sleep(pause_s)
+    return m
+
+
 def scrape_complete(m: dict) -> bool:
     """Did every replica answer this scrape? Engines that do not report
     replica counts (single-process servers, mocks) are taken as whole;
@@ -131,6 +147,12 @@ def chunks_converged(prev: Chunk, cur: Chunk, *,
     the cell a legitimate zero, which then pruned a perfectly good
     region out of the climb. Waiting is right; scoring is not."""
     if not cur.out_rate and not cur.running:
+        return False
+    if cur.running and not cur.out_rate:
+        # Streams held, nothing generated: the engine is still
+        # prefilling them (512 prompts on a 1T model at tp8 take
+        # longer than a chunk). Two such chunks "agreed" and scored
+        # Kimi-K2-Thinking-NVFP4 a steady nothing.
         return False
     if prev.running and cur.running:
         if abs(cur.running - prev.running) > \

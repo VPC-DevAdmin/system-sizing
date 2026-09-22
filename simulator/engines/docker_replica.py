@@ -612,7 +612,10 @@ class DockerReplicaEngine(Engine):
         per_replica = []
         for i, _d, port, _cid, _s in self._replicas:
             try:
-                r = httpx.get(self._metrics_url(port), timeout=2.0)
+                # Ten seconds, not two: a 1T model's /metrics at 4k
+                # streams answered slowly and every boundary scrape
+                # that timed out cost the chunk.
+                r = httpx.get(self._metrics_url(port), timeout=10.0)
                 if r.status_code == 200:
                     per_replica.append(self._parse_replica(i, r.text))
             except Exception:  # noqa: BLE001

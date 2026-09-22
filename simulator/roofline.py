@@ -692,6 +692,10 @@ def cells(models: list[str], engines: list[str], shapes: dict, *,
                     notes.append(_skip_note(m, e, info))
                 continue
             shape = {**shape_of(engine_shape or {}), **engine_defaults(e)}
+            if e == "ktransformers" and info and info.get("kt_native"):
+                # Not a shape key: it tells the escalation rule which
+                # levers a KTransformers cell has (the v0.7 line's).
+                shape["kt_native"] = True
             if (info and e not in GGUF_ENGINES and info.get("tp")
                     and int(info["tp"]) > 1):
                 shape["tp"] = int(info["tp"])
@@ -841,7 +845,9 @@ def escalate_cell(cell: dict, *, gpu_count: int,
     cell walks tp1 -> tp2 -> tp4 -> tp4@0.90 -> ... before it is
     given up on.
     """
-    if cell.get("engine") in GGUF_ENGINES:
+    native_kt = (cell.get("engine") == "ktransformers"
+                 and bool(cell.get("kt_native")))
+    if cell.get("engine") in GGUF_ENGINES and not native_kt:
         return None
     tp = int(cell.get("tp") or 1)
     cap = min(int(gpu_count), int(max_tp)) if max_tp else int(gpu_count)
@@ -877,10 +883,22 @@ def escalate_cell(cell: dict, *, gpu_count: int,
 
     weight_bound = (weight_gb is None or vram_gb is None
                     or float(weight_gb) / tp > 0.5 * float(vram_gb))
+    if native_kt:
+        # The v0.7 line keeps the experts in host RAM; what the card
+        # holds is attention plus the KV pool SGLang sizes from the
+        # memory share, not from need. Kimi-K2-Thinking loaded 25 GB
+        # of weights onto a 96 GB card and died allocating that pool.
+        # The catalog's 594 GB is the whole checkpoint, so the weight
+        # rule would widen tp first; the share is the lever, tp
+        # (SGLang's, over more cards) the fallback. One replica always.
+        weight_bound = False
     if domain_tp is None and max_tp:
         domain_tp = int(max_tp)
     first, second = (wider, leaner) if weight_bound else (leaner, wider)
-    return first() or second()
+    out = first() or second()
+    if out is not None and native_kt:
+        out["replicas"] = 1
+    return out
 
 
 def escalations(plan_cells: list[dict], results: list[dict], *,
@@ -911,7 +929,8 @@ def escalations(plan_cells: list[dict], results: list[dict], *,
         out.append({k2: v for k2, v in nxt.items()
                     if k2 in ("model", "engine", "max_num_seqs",
                               "output_tokens", "escalated_from",
-                              "escalated_from_share", "placement")
+                              "escalated_from_share", "placement",
+                              "kt_native")
                     or _is_shape_key(k2)})
     return out
 

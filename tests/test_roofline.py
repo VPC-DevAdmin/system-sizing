@@ -1538,3 +1538,31 @@ def test_native_kt_checkpoints_are_limited_to_the_forks_architectures(tmp_path):
     stage("zai-org/GLM-5.3-Flash", "Glm4MoeForCausalLM", {"torch_dtype": "bfloat16"})
     assert not _native_kt_checkpoint("openai/gpt-oss-20b", tmp_path)
     assert _native_kt_checkpoint("zai-org/GLM-5.3-Flash", tmp_path)
+
+
+def test_a_native_ktransformers_cell_escalates_its_share_then_its_tp():
+    """Kimi-K2-Thinking on the v0.7 line loaded 25 GB of attention
+    weights onto one 96 GB card and died allocating the KV pool SGLang
+    sizes from the memory share. GGUF-based KTransformers cells have no
+    lever; a native one leans the share first, then widens SGLang's tp,
+    one replica throughout."""
+    from simulator.roofline import cells, escalate_cell
+    info = {"tier": "beyond_vram", "fits_gpu": False, "kt_eligible": True,
+            "kt_native": True, "gguf_engines": ["llamacpp", "ktransformers"],
+            "approx_size_gb": 594}
+    c = cells(["moonshotai/Kimi-K2-Thinking"], ["ktransformers", "llamacpp"],
+              {"max_num_seqs": [1024], "output_tokens": [128]},
+              engine_shape={"tp": 1, "replicas": 8, "gpu_memory_utilization": 0.95},
+              model_info={"moonshotai/Kimi-K2-Thinking": info})
+    kt = [x for x in c if x["engine"] == "ktransformers"][0]
+    lc = [x for x in c if x["engine"] == "llamacpp"][0]
+    assert kt["kt_native"] is True and "kt_native" not in lc
+    oom = {**kt, "error": "torch.OutOfMemoryError: CUDA out of memory"}
+    nxt = escalate_cell(oom, gpu_count=8, max_tp=4, weight_gb=594, vram_gb=96)
+    assert nxt["gpu_memory_utilization"] == 0.90 and nxt["tp"] == 1
+    assert nxt["replicas"] == 1 and nxt["kt_native"] is True
+    floor = {**kt, "gpu_memory_utilization": 0.80}
+    wider = escalate_cell(floor, gpu_count=8, max_tp=4, weight_gb=594, vram_gb=96)
+    assert wider["tp"] == 2 and wider["replicas"] == 1
+    # A GGUF-based KTransformers cell still has no lever.
+    assert escalate_cell({**kt, "kt_native": False}, gpu_count=8, max_tp=4) is None

@@ -321,12 +321,17 @@ export const Roofline = {
     const donePanel = $("#rf-progress-panel");
     donePanel.hidden = false;
     const cur = d.current;
-    const pct = cellsTotal
-      ? Math.round(100 * (sum.attempted || 0) / cellsTotal) : 0;
+    /* Settled planned cells against the plan; attempts (retries,
+     * escalations, confirmations) are a separate count, so the bar
+     * never reads 157%. */
+    const prog = d.progress || {};
+    const settled = prog.settled ?? sum.attempted ?? 0;
+    const pct = cellsTotal ? Math.round(100 * settled / cellsTotal) : 0;
     $("#rf-progress").innerHTML =
       `<b>${d.status}</b>${d.note ? ` · ${d.note}` : ""}
-       · <b>${sum.attempted || 0}</b> of ${cellsTotal} cells
-       (${pct}%)${sum.failed?.length
+       · <b>${settled}</b> of ${cellsTotal} cells settled
+       (${pct}%)${prog.attempts != null ? ` · ${prog.attempts} attempts` : ""}${
+         prog.confirmations ? ` · ${prog.confirmations} confirmed` : ""}${sum.failed?.length
          ? ` · <span class="status-marginal">${sum.failed.length} failed</span>`
          : ""}
        ${cur ? `<br><span class="msg">now: ${cur.model || ""}

@@ -1619,3 +1619,25 @@ def test_resume_owes_a_native_ktransformers_row_its_share_step():
     assert len(owed) == 1 and owed[0]["gpu_memory_utilization"] == 0.90
     assert owed[0]["kt_native"] is True and owed[0]["replicas"] == 1
     assert escalations([], [row], gpu_count=8, max_tp=4, model_info={}, vram_gb=96) == []
+
+
+def test_progress_counts_settled_plan_cells_not_result_rows():
+    """Result rows include retries, escalations and confirmations; the
+    Roofline tab read "381 of 242 cells (157%)" from them."""
+    from simulator.roofline import State
+    st = State()
+    st.status = "searching"
+    a = {"model": "m", "engine": "vllm_cuda_multi", "max_num_seqs": 1024,
+         "output_tokens": 128, "tp": 1, "replicas": 8}
+    b = {**a, "output_tokens": 256}
+    c = {**a, "engine": "trtllm"}
+    st.plan = {"models": ["m"], "model_info": {}, "cells": [a, b, c]}
+    st.results = [
+        {**a, "out_tok_s": 10.0},                       # measured
+        {**a, "out_tok_s": 11.0, "confirmed": True},    # confirmation of a
+        {**b, "error": "x"}, {**b, "error": "x"},       # written off
+        {**c, "error": "TimeoutError: not healthy"},    # transient: not settled
+    ]
+    pr = st.to_dict()["progress"]
+    assert pr == {"planned": 3, "settled": 2, "measured": 1, "attempts": 5,
+                  "confirmations": 1}

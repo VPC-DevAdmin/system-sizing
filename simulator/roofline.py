@@ -1021,7 +1021,23 @@ class State:
             staging={m.get("id"): m.get("status") for m in self.models},
             pending=None if d["done"] else self.pending_models(hopeless))
         d["written_off"] = hopeless
+        d["progress"] = self.progress(hopeless)
         return d
+
+    def progress(self, hopeless: dict | None = None) -> dict:
+        """Planned cells settled (measured or written off) against the
+        plan, with attempts counted separately. Result rows include
+        retries, escalations and confirmations, so "381 of 242 cells"
+        is what counting rows against the plan showed on the XE7740."""
+        hopeless = permanently_failed(self.results) if hopeless is None else hopeless
+        done = {cell_key(r) for r in self.results if not r.get("error")}
+        cells = self.plan.get("cells") or []
+        settled = sum(1 for c in cells
+                      if cell_key(c) in done or cell_key(c) in hopeless)
+        return {"planned": len(cells), "settled": settled,
+                "measured": sum(1 for c in cells if cell_key(c) in done),
+                "attempts": len(self.results),
+                "confirmations": sum(1 for r in self.results if r.get("confirmed"))}
 
     def pending_models(self, hopeless: dict | None = None) -> set[str]:
         """Models with a planned cell that has neither been measured

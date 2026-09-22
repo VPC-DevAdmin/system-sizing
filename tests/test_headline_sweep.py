@@ -237,3 +237,16 @@ def test_reasoning_only_completions_are_kept_apart_from_failures():
              {"error": "hard_timeout"},
              {"error": "no_content_tokens"}])
     assert len(acc.ttft) == 1 and acc.errors == 2 and acc.no_content == 2
+
+
+def test_a_rung_of_nothing_but_errors_means_the_engine_died():
+    from simulator.headline_sweep import Rung, engine_dead
+    dead = Rung(concurrency=2048, in_flight=None, queue_depth=None, out_tok_s=None,
+                prompt_tok_s=None, total_tok_s=None, samples=0, errors=464855)
+    assert engine_dead(dead)
+    quiet = Rung(concurrency=512, in_flight=512.0, queue_depth=0.0, out_tok_s=None,
+                 prompt_tok_s=None, total_tok_s=None, samples=0, errors=0)
+    assert not engine_dead(quiet)                      # still filling, no errors
+    fine = Rung(concurrency=512, in_flight=500.0, queue_depth=0.0, out_tok_s=4000.0,
+                prompt_tok_s=100.0, total_tok_s=4100.0, samples=900, errors=12)
+    assert not engine_dead(fine)

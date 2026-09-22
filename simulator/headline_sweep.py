@@ -120,6 +120,18 @@ def peak_rung(rungs: list[Rung]) -> Rung | None:
     return max(settled or scored, key=lambda r: r.out_tok_s or 0.0)
 
 
+def engine_dead(rung: Rung) -> bool:
+    """A rung in which the engine answered nothing but errors and its
+    metrics were gone. DeepSeek-V3.1-NVFP4 at tp8 on the XE7740 hit
+    CUDA out-of-memory in every scheduler rank four minutes into its
+    first rung; the API process lived on, the sweep climbed three more
+    rungs and spent fifteen minutes collecting 2.6 million errors,
+    and the cell read "ladder exhausted" -- not the memory failure it
+    was, which the roofline would have escalated."""
+    return (rung.samples == 0 and rung.errors > 0
+            and rung.in_flight is None and not rung.out_tok_s)
+
+
 def should_stop(rungs: list[Rung], min_gain_pct: float) -> str | None:
     """Stop when the curve has plateaued or the engine is saturated.
 
@@ -518,6 +530,17 @@ async def run_headline_sweep(
                 pk = peak_rung(rungs)
                 progress["peak"] = asdict(pk) if pk else None
 
+            if engine_dead(rung):
+                cause = None
+                probe = getattr(engine, "_fatal_in_log", None)
+                if callable(probe):
+                    try:
+                        cause = probe()
+                    except Exception:  # noqa: BLE001
+                        cause = None
+                raise EngineBrokenError(
+                    f"engine stopped serving at {n} streams"
+                    f"{': ' + cause if cause else ' (no metrics, every request failed)'}")
             reason = should_stop(rungs, sim.headline_sweep_min_gain_pct)
             if reason:
                 stop_reason = reason

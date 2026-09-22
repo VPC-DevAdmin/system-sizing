@@ -1065,13 +1065,31 @@ def summarize(results: list[dict], model_info: dict | None = None,
     """
     usable = [r for r in results
               if r.get("out_tok_s") and r.get("steady_state", True)]
+    # Confirmed rows publish. A search rung ranks candidates on a
+    # coarse ladder; the confirmation re-measures the winner on the
+    # full one, and when the two disagree the confirmation is the
+    # number (Llama-70B FP8: 21,140 searched, 16,185 confirmed). The
+    # search peak stays beside it as the best observation.
+    def _rank(r: dict) -> tuple[int, float]:
+        return (1 if r.get("confirmed") else 0, _generation(r))
+
     by_model: dict[str, dict] = {}
     by_engine: dict[str, dict] = {}
-    for r in sorted(usable, key=lambda x: -(x["out_tok_s"] or 0)):
+    search_best: dict[str, dict] = {}
+    for r in sorted(usable, key=_rank, reverse=True):
         by_model.setdefault(r["model"], r)
         by_engine.setdefault(r["engine"], r)
-    best = max(usable, key=lambda r: r["out_tok_s"], default=None)
-    fastest = max(usable, key=_generation, default=None)
+    for r in sorted(usable, key=_generation, reverse=True):
+        if not r.get("confirmed"):
+            search_best.setdefault(r["model"], r)
+    for m, r in by_model.items():
+        sp = search_best.get(m)
+        if r.get("confirmed") and sp is not None:
+            r = dict(r)
+            r["search_out_tok_s"] = sp.get("out_tok_s")
+            by_model[m] = r
+    best = max(usable, key=_rank, default=None)
+    fastest = max(usable, key=_rank, default=None)
 
     info = model_info or {}
     order: list[str] = list(models or [])
@@ -1079,9 +1097,7 @@ def summarize(results: list[dict], model_info: dict | None = None,
         if r.get("model") and r["model"] not in order:
             order.append(r["model"])
     failed_models = {r["model"] for r in results if r.get("error")}
-    best_total: dict[str, dict] = {}
-    for r in sorted(usable, key=_generation, reverse=True):
-        best_total.setdefault(r["model"], r)
+    best_total: dict[str, dict] = dict(by_model)
 
     def size_key(m: str) -> tuple[float, float]:
         i = info.get(m) or {}
@@ -1117,6 +1133,9 @@ def summarize(results: list[dict], model_info: dict | None = None,
             if b else None,
             "kv_capacity_tokens": b.get("kv_cache_tokens") if b else None,
             "ttft_p95_ms": b.get("ttft_p95_ms") if b else None,
+            "success_rate": b.get("success_rate") if b else None,
+            "confirmed": bool(b.get("confirmed")) if b else False,
+            "search_out_tok_s": b.get("search_out_tok_s") if b else None,
             "status": status,
         })
     spectrum.sort(key=lambda row: size_key(row["model"]))
@@ -1136,6 +1155,7 @@ def summarize(results: list[dict], model_info: dict | None = None,
             [m for m in order if m in best_total or m in failed_models]),
         "spectrum": spectrum,
         "best_per_model": by_model,
+        "search_best_per_model": search_best,
         "best_per_engine": by_engine,
         "measured": len(usable),
         "attempted": len(results),
@@ -1412,10 +1432,12 @@ async def run_roofline(
     if confirm_winners:
         st.status = "confirming"
         save_state(path, st)
-        for mid, best in (summarize(st.results).get("best_per_model")
+        for mid, best in (summarize(st.results).get("search_best_per_model")
                           or {}).items():
-            # Resume: a winner already confirmed at this exact shape
-            # is not swept again -- eleven sweeps cost five hours.
+            # The search winner is what gets confirmed (a confirmed row
+            # would otherwise be its own winner and never re-swept);
+            # one already confirmed at this exact shape is not swept
+            # again -- eleven sweeps cost five hours.
             bk = cell_key(best)
             if any(r.get("confirmed") and not r.get("error")
                    and cell_key(r) == bk for r in st.results):
@@ -1470,6 +1492,17 @@ def _peak_of(summary_path) -> dict:
         "kv_cache_pct": pk.get("kv_cache_pct"),
         "gpu_power_w": pk.get("gpu_power_w"),
         "steady_state": pk.get("steady_state", True),
+        # Outcomes of the winning rung, so the number is never shown
+        # without what it cost: completed turns, failed turns, and
+        # reasoning-only completions (tokens generated, no answer).
+        "samples": pk.get("samples"),
+        "errors": pk.get("errors"),
+        "no_content": pk.get("no_content"),
+        "success_rate": (
+            round(pk["samples"] / (pk["samples"] + pk["errors"]), 3)
+            if pk.get("samples") is not None and pk.get("errors") is not None
+            and (pk["samples"] + pk["errors"]) > 0 else None),
+        "scrape_gaps": pk.get("scrape_gaps"),
         "kv_cache_tokens": doc.get("kv_cache_tokens"),
         "run_dir": str(Path(summary_path).parent),
         "tokens_per_watt": (

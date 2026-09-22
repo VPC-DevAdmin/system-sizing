@@ -222,3 +222,18 @@ def test_a_sweep_that_never_settled_still_reports_something():
     pk = peak_rung(rungs)
     assert pk.out_tok_s == 15000.0
     assert pk.steady_state is False        # visible, not hidden
+
+
+def test_reasoning_only_completions_are_kept_apart_from_failures():
+    """gpt-oss-20b's winning rung recorded 30,736 'errors', of which
+    4,419 were HarmonyError failures in the engine log and the rest
+    were reasoning-only completions the client files as
+    no_content_tokens. They are different things."""
+    from simulator.headline_sweep import _Acc
+    acc = _Acc()
+    acc.add([{"ttft_ms": 10.0, "tpot_ms": 2.0},
+             {"error": "no_content_tokens"},
+             {"error": "HarmonyError"},
+             {"error": "hard_timeout"},
+             {"error": "no_content_tokens"}])
+    assert len(acc.ttft) == 1 and acc.errors == 2 and acc.no_content == 2

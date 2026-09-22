@@ -323,3 +323,16 @@ def test_pressure_keeps_climbing_until_the_engine_stops_keeping_up():
     assert underfed(600.0, 1024, 0.0) is False
     # Escalation is bounded.
     assert underfed(1022.0, 1024, 2.0, steps=MAX_PRESSURE_STEPS) is False
+
+
+def test_a_scrape_missing_a_replica_is_not_a_measurement():
+    """The XE7740's gpt-oss telemetry showed cache-hit counters going
+    backwards and decode rates of 895k and 1.08M tok/s: a replica
+    whose scrape failed dropped out of the sums, then came back with
+    its whole history as apparent new generation. A chunk is whole
+    only when every replica answered every scrape."""
+    from simulator.headline_search import scrape_complete
+    assert scrape_complete({"generation_tokens_total": 5.0})           # no counts: whole
+    assert scrape_complete({"replicas_scraped": 8.0, "replicas_total": 8.0})
+    assert not scrape_complete({"replicas_scraped": 7.0, "replicas_total": 8.0})
+    assert not scrape_complete({})

@@ -880,7 +880,8 @@ def test_summary_names_fastest_and_largest_and_draws_the_spectrum():
     assert small["kv_capacity_tokens"] is None and small["ttft_p95_ms"] is None
     assert {"model", "vendor", "params_b", "approx_size_gb", "tier",
             "best_engine", "out_tok_s", "total_tok_s", "concurrency",
-            "kv_capacity_tokens", "ttft_p95_ms", "status"} == set(small)
+            "kv_capacity_tokens", "ttft_p95_ms", "status",
+            "success_rate", "confirmed", "search_out_tok_s"} == set(small)
     # A model that could not be staged says so.
     s2 = summarize(rows, model_info=info, models=["o/pending"],
                    staging={"o/pending": "unavailable"})
@@ -1566,3 +1567,42 @@ def test_a_native_ktransformers_cell_escalates_its_share_then_its_tp():
     assert wider["tp"] == 2 and wider["replicas"] == 1
     # A GGUF-based KTransformers cell still has no lever.
     assert escalate_cell({**kt, "kt_native": False}, gpu_count=8, max_tp=4) is None
+
+
+def test_confirmed_rows_publish_and_the_search_peak_rides_beside():
+    """Llama-70B FP8 searched 21,140 and confirmed 16,185; the search
+    number kept winning. The confirmed row is the publishable one; the
+    search peak is carried as search_out_tok_s, and the confirmation
+    loop is driven by the search winner so a confirmed row does not
+    become its own never-re-swept winner."""
+    base = {"model": "m", "engine": "sglang_cuda", "max_num_seqs": 2048,
+            "output_tokens": 128, "tp": 1, "replicas": 8}
+    rows = [{**base, "out_tok_s": 21140.0},
+            {**base, "out_tok_s": 16185.0, "confirmed": True, "samples": 900,
+             "errors": 100, "success_rate": 0.9},
+            {**base, "engine": "vllm_cuda_multi", "out_tok_s": 15000.0}]
+    s = summarize(rows)
+    best = s["best_per_model"]["m"]
+    assert best["confirmed"] and best["out_tok_s"] == 16185.0
+    assert best["search_out_tok_s"] == 21140.0
+    assert s["fastest"]["out_tok_s"] == 16185.0
+    assert s["search_best_per_model"]["m"]["out_tok_s"] == 21140.0
+    row = s["spectrum"][0]
+    assert row["confirmed"] and row["success_rate"] == 0.9
+    assert row["out_tok_s"] == 16185.0 and row["search_out_tok_s"] == 21140.0
+    # No confirmation yet: the search peak publishes, flagged as such.
+    s2 = summarize([rows[0], rows[2]])
+    assert not s2["best_per_model"]["m"].get("confirmed")
+    assert s2["best_per_model"]["m"]["out_tok_s"] == 21140.0
+
+
+def test_peak_row_carries_the_rungs_outcomes(tmp_path):
+    from simulator.roofline import _peak_of
+    p = tmp_path / "headline_sweep.json"
+    p.write_text(json.dumps({"peak": {"out_tok_s": 107803.4, "concurrency": 4096,
+                                      "samples": 19659, "errors": 4419,
+                                      "no_content": 26317, "scrape_gaps": 1}}))
+    row = _peak_of(p)
+    assert row["samples"] == 19659 and row["errors"] == 4419
+    assert row["no_content"] == 26317 and row["scrape_gaps"] == 1
+    assert row["success_rate"] == round(19659 / (19659 + 4419), 3)

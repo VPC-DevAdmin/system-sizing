@@ -379,10 +379,17 @@ export const Roofline = {
         ${fast.tp > 1 ? `· tp${fast.tp} × ${fast.replicas}` : ""}
         · mns ${fast.max_num_seqs} · ${d.input_tokens}→${fast.output_tokens}
         ${fast.confirmed ? '· <span class="status-pass">confirmed</span>'
-          : '· <span class="msg">search rung — not yet confirmed</span>'}</div>
+          : '· <span class="msg">search rung — not yet confirmed</span>'}
+        ${fast.confirmed && fast.search_out_tok_s
+          ? `· search peak ${num(fast.search_out_tok_s)}` : ""}</div>
       <div class="rf-kvs">
         <div class="hl-kv"><span>total tok/s (with prompt)</span><b>${
           num(fast.total_tok_s)}</b></div>
+        <div class="hl-kv"><span>completed · success</span><b>${
+          fast.samples != null ? `${num(fast.samples)} · ${
+            fast.success_rate != null ? (fast.success_rate * 100).toFixed(1) + "%" : "—"}${
+            fast.no_content ? ` <small>(+${num(fast.no_content)} reasoning-only)</small>` : ""}`
+          : "—"}</b></div>
         <div class="hl-kv"><span>concurrency</span><b>${
           num(fast.concurrency ?? fast.in_flight)}</b></div>
         <div class="hl-kv"><span>tok / W</span><b>${fast.tokens_per_watt ?? "—"}</b></div>

@@ -592,6 +592,17 @@ class DockerReplicaEngine(Engine):
         return True
 
     def get_metrics(self) -> dict[str, float]:
+        """Whole-box counters, plus how many replicas answered.
+
+        A replica whose scrape fails is left out of the sums. Because
+        every rate is a difference of cumulative counters between two
+        scrapes, a missing replica at one boundary and not the other
+        makes its whole history look like new generation: the XE7740's
+        gpt-oss telemetry showed cache-hit counters going backwards
+        and decode rates of 895k and 1.08M tok/s. The sweep reads
+        ``replicas_scraped`` against ``replicas_total`` and discards a
+        chunk that was not whole.
+        """
         per_replica = []
         for i, _d, port, _cid, _s in self._replicas:
             try:
@@ -600,7 +611,10 @@ class DockerReplicaEngine(Engine):
                     per_replica.append(self._parse_replica(i, r.text))
             except Exception:  # noqa: BLE001
                 continue
-        return aggregate_replica_metrics(per_replica)
+        agg = aggregate_replica_metrics(per_replica)
+        agg["replicas_scraped"] = float(len(per_replica))
+        agg["replicas_total"] = float(len(self._replicas))
+        return agg
 
     def _parse_replica(self, index: int, text: str) -> dict[str, float]:
         """Hook so stateful parsers can key accumulators per replica."""

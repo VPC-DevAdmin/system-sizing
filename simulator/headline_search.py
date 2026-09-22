@@ -101,6 +101,19 @@ class Chunk:
     queue: float | None              # waiting mean
     out_rate: float | None           # generation tok/s
     prompt_rate: float | None        # prompt tok/s
+    complete: bool = True            # every replica answered every scrape
+
+
+def scrape_complete(m: dict) -> bool:
+    """Did every replica answer this scrape? Engines that do not report
+    replica counts (single-process servers, mocks) are taken as whole;
+    an empty scrape is not."""
+    if not m:
+        return False
+    total = m.get("replicas_total")
+    if total is None:
+        return True
+    return float(m.get("replicas_scraped") or 0) >= float(total)
 
 
 def chunks_converged(prev: Chunk, cur: Chunk, *,

@@ -45,7 +45,7 @@ from .config import Config
 from .cpu_binding import expand_thread_binding
 from .database import AGGREGATE_COLUMN_NAMES, Database
 from .engines import make_engine
-from .headline_search import Chunk, chunks_converged
+from .headline_search import Chunk, chunks_converged, scrape_complete
 from .measurement import _percentile
 from .open_loop import EngineBrokenError, WorkerPool, smoke_test_engine
 from .personas import Cohort
@@ -71,8 +71,10 @@ class Rung:
     ttft_p95_ms: float | None = None
     tpot_p50_ms: float | None = None
     tpot_p95_ms: float | None = None
-    samples: int = 0
-    errors: int = 0
+    samples: int = 0                 # completed turns with an answer
+    errors: int = 0                  # failed turns
+    no_content: int = 0              # reasoning-only completions
+    scrape_gaps: int = 0             # chunks discarded for a missing replica
     kv_cache_pct: float | None = None
     gpu_power_w: float | None = None
     steady_state: bool = True
@@ -174,15 +176,27 @@ def _cohort_shape(cohort: Cohort) -> dict | None:
 
 @dataclass
 class _Acc:
-    """Per-rung accumulators for client-side latency."""
+    """Per-rung accumulators for client-side latency and outcomes.
+
+    ``errors`` are turns that failed: transport errors, timeouts,
+    stalls, an engine's parse failure (gpt-oss's HarmonyError). A
+    reasoning model that spent its whole budget thinking and never
+    started an answer is filed by the client as ``no_content_tokens``;
+    it generated real tokens the engine counted, so it is kept apart
+    (``no_content``) rather than counted as a failure or a success.
+    """
     ttft: list[float] = field(default_factory=list)
     tpot: list[float] = field(default_factory=list)
     errors: int = 0
+    no_content: int = 0
 
     def add(self, turns: list[dict]) -> None:
         for t in turns:
             if t.get("error"):
-                self.errors += 1
+                if t["error"] == "no_content_tokens":
+                    self.no_content += 1
+                else:
+                    self.errors += 1
                 continue
             if t.get("ttft_ms") is not None:
                 self.ttft.append(float(t["ttft_ms"]))
@@ -319,6 +333,7 @@ async def run_headline_sweep(
 
     async def _chunk(phase: str, seconds: int, acc: _Acc) -> Chunk:
         m0 = await _metrics()
+        whole = scrape_complete(m0)
         t0 = time.monotonic()
         running: list[float] = []
         waiting: list[float] = []
@@ -326,12 +341,15 @@ async def run_headline_sweep(
             await asyncio.sleep(1.0)
             m = await _metrics()
             acc.add(pool.drain_turn_queue())
+            if not scrape_complete(m):
+                whole = False
             if m.get("num_running") is not None:
                 running.append(float(m["num_running"]))
             if m.get("queue_depth") is not None:
                 waiting.append(float(m["queue_depth"]))
             _snapshot(phase, m, acc_offered[0], acc)
         m1 = await _metrics()
+        whole = whole and scrape_complete(m1)
         dt = max(1e-3, time.monotonic() - t0)
         gen = ((m1.get("generation_tokens_total") or 0)
                - (m0.get("generation_tokens_total") or 0))
@@ -342,6 +360,7 @@ async def run_headline_sweep(
             queue=statistics.fmean(waiting) if waiting else None,
             out_rate=gen / dt if gen else None,
             prompt_rate=prm / dt if prm else None,
+            complete=whole,
         )
 
     acc_offered = [ladder[0]]   # current offered count, for snapshots
@@ -403,12 +422,25 @@ async def run_headline_sweep(
 
             acc = _Acc()
             chunks: list[Chunk] = []
+            scrape_gaps = 0
             t_start = time.monotonic()
             steady = False
             while True:
-                chunks.append(await _chunk(
+                chunk = await _chunk(
                     f"{n} streams — measuring (chunk {len(chunks) + 1})",
-                    sim.headline_measure_s, acc))
+                    sim.headline_measure_s, acc)
+                if not chunk.complete:
+                    # A replica did not answer: the counters this
+                    # chunk's rates come from are not the box's. It
+                    # is measured again, never compared or published.
+                    scrape_gaps += 1
+                    log.warning("rung %d: a replica scrape failed during "
+                                "chunk %d; discarding it", n,
+                                len(chunks) + scrape_gaps)
+                    if time.monotonic() - t_start >= sim.headline_measure_max_s:
+                        break
+                    continue
+                chunks.append(chunk)
                 if len(chunks) >= 2 and chunks_converged(chunks[-2],
                                                          chunks[-1]):
                     steady = True
@@ -418,6 +450,15 @@ async def run_headline_sweep(
                                 "state", n, sim.headline_measure_max_s)
                     break
             measure_s = round(time.monotonic() - t_start)
+            if not chunks:
+                # Every chunk of the rung had a scrape gap. Nothing
+                # here is a measurement; the rung records that and
+                # the ladder moves on.
+                log.warning("rung %d: no whole chunk in %ds; not measured",
+                            n, measure_s)
+                chunks.append(Chunk(running=None, queue=None,
+                                    out_rate=None, prompt_rate=None,
+                                    complete=False))
             last = chunks[-1]
             _, tele_rows, tele_agg = await telemetry.stop()
             db.insert_telemetry(tele_rows)
@@ -448,6 +489,7 @@ async def run_headline_sweep(
                 tpot_p50_ms=round(_percentile(acc.tpot, 0.50), 2) or None,
                 tpot_p95_ms=round(_percentile(acc.tpot, 0.95), 2) or None,
                 samples=len(acc.ttft), errors=acc.errors,
+                no_content=acc.no_content, scrape_gaps=scrape_gaps,
                 kv_cache_pct=(round(sum(kv_vals) / len(kv_vals), 2)
                               if kv_vals else None),
                 gpu_power_w=(round(sum(gpu_vals) / len(gpu_vals), 1)

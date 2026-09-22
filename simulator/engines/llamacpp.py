@@ -174,6 +174,7 @@ def serve_argv(gguf_file: str, *, port: int, gguf_mount: str = GGUF_MOUNT,
                slots: int | None = None,
                threads: int | None = None,
                offload_experts: bool = False,
+               jinja: bool = False,
                kv_cache_type: str | None = None,
                batch_tokens: int | None = None,
                alias: str | None = None,
@@ -200,7 +201,19 @@ def serve_argv(gguf_file: str, *, port: int, gguf_mount: str = GGUF_MOUNT,
         "-np", str(slots),
         "-cb",
         "--metrics",
+        # llama-server parses its own chat output through a grammar
+        # derived from the model's jinja template (reasoning, tool
+        # calls). DeepSeek-V3.2 loaded, generated, and then answered
+        # every request HTTP 500: "The model produced output that does
+        # not match the expected peg-native format" (XE7740 giants
+        # pass). A capacity benchmark counts tokens; it does not need
+        # thoughts extracted or tool calls parsed, so the parser is
+        # off: thoughts stay in message.content and the legacy chat
+        # formatter (which has no output grammar) builds the prompt.
+        "--reasoning-format", "none",
     ]
+    if not jinja:
+        argv.append("--no-jinja")
     if alias:
         argv += ["-a", alias]
     if threads:
@@ -331,6 +344,7 @@ class LlamaCppEngine(DockerReplicaEngine):
             slots=getattr(cfg, "max_num_seqs", None),
             threads=threads,
             offload_experts=self.offload_experts(devices),
+            jinja=bool(getattr(cfg, "llamacpp_jinja", False)),
             kv_cache_type=kv_type,
             batch_tokens=getattr(cfg, "max_num_batched_tokens", None),
             alias=getattr(cfg, "served_model_name", None) or cfg.model_id,

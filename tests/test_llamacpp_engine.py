@@ -583,3 +583,18 @@ def test_gguf_inside_the_cache_is_reached_through_the_cache_mount(tmp_path, monk
     joined = " ".join(cmd)
     assert ":/gguf:ro" not in joined
     assert "-m /root/.cache/huggingface/hub/models--u--M-GGUF/snapshots/abc/UD-Q4_K_XL/M-UD-Q4_K_XL-00001-of-00002.gguf" in joined
+
+
+def test_output_grammar_parser_is_off_for_benchmarks():
+    """DeepSeek-V3.2 loaded and generated, then answered every request
+    HTTP 500 because llama-server's template-derived output grammar
+    rejected its own reply. Tokens are what a capacity benchmark
+    counts, so thoughts stay unparsed and the legacy formatter builds
+    the prompt; an operator can turn jinja back on."""
+    from simulator.engines.llamacpp import serve_argv
+    argv = serve_argv("model.gguf", port=9100, max_model_len=4096, slots=32)
+    assert argv[argv.index("--reasoning-format") + 1] == "none"
+    assert "--no-jinja" in argv
+    on = serve_argv("model.gguf", port=9100, max_model_len=4096, slots=32,
+             jinja=True)
+    assert "--no-jinja" not in on and "--reasoning-format" in on

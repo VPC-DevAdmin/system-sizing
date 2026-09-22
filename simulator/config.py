@@ -232,6 +232,11 @@ class EngineConfig:
     # the GPUs. None -> automatic: on when the GGUF exceeds 85% of the
     # replica's VRAM, off otherwise.
     llamacpp_offload_experts: bool | None = None
+    # llama-server's jinja chat pipeline parses the model's output
+    # through a template-derived grammar and fails whole requests when
+    # a reasoning model's reply does not fit it; off by default for a
+    # benchmark that only counts tokens (engines/llamacpp.py).
+    llamacpp_jinja: bool = False
 
     # ── trtllm: TensorRT-LLM via trtllm-serve ─────────────────────────
     # Launched through the image's OWN entrypoint — see engines/trtllm.py

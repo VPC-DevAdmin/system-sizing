@@ -1500,3 +1500,26 @@ def test_a_modelopt_nvfp4_checkpoint_does_not_open_ktransformers(tmp_path, monke
     assert _native_kt_checkpoint("nvidia/DeepSeek-V3.1-NVFP4", tmp_path)
     (snap / "hf_quant_config.json").write_text(json.dumps({"quantization": {"quant_algo": "NVFP4"}}))
     assert not _native_kt_checkpoint("nvidia/DeepSeek-V3.1-NVFP4", tmp_path)
+
+
+def test_a_model_with_cells_still_queued_is_pending_not_failed():
+    """The giants pass showed every NVFP4 giant as "failed" in the UI
+    while their fixed span cells were still queued: the refused tp8
+    rows were read as the verdict."""
+    from simulator.roofline import State
+    st = State()
+    st.status = "searching"
+    base = {"model": "nvidia/Kimi-K2-Thinking-NVFP4", "engine": "vllm_cuda_multi",
+            "max_num_seqs": 1024, "output_tokens": 128, "tp": 8, "replicas": 1}
+    st.plan = {"models": [base["model"]], "model_info": {},
+               "cells": [{**base, "placement": "span"}]}
+    st.results = [{**base, "error": "HTTPException: 422: 1 replicas x tp8 does not fit"}]
+    row = st.to_dict()["summary"]["spectrum"][0]
+    assert row["status"] == "pending"
+    st.results.append({**base, "placement": "span",
+                       "error": "RuntimeError: CUDA out of memory"})
+    st.results.append({**base, "placement": "span",
+                       "error": "RuntimeError: CUDA out of memory"})
+    assert st.to_dict()["summary"]["spectrum"][0]["status"] == "failed"  # written off
+    st.status = "finished"
+    assert st.to_dict()["summary"]["spectrum"][0]["status"] == "failed"

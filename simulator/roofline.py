@@ -976,12 +976,30 @@ class State:
         d = asdict(self)
         d["kind"] = "roofline"
         d["done"] = self.status in ("finished", "failed", "stopped")
+        hopeless = permanently_failed(self.results)
         d["summary"] = summarize(
             self.results, model_info=self.plan.get("model_info"),
             models=self.plan.get("models"),
-            staging={m.get("id"): m.get("status") for m in self.models})
-        d["written_off"] = permanently_failed(self.results)
+            staging={m.get("id"): m.get("status") for m in self.models},
+            pending=None if d["done"] else self.pending_models(hopeless))
+        d["written_off"] = hopeless
         return d
+
+    def pending_models(self, hopeless: dict | None = None) -> set[str]:
+        """Models with a planned cell that has neither been measured
+        nor written off -- their story is not over. Failed rows from
+        an earlier pass (a refused tp8 shape before placement "span"
+        existed) must not read as the model's verdict while the fixed
+        cells are still queued."""
+        hopeless = permanently_failed(self.results) if hopeless is None else hopeless
+        done = {cell_key(r) for r in self.results if not r.get("error")}
+        out: set[str] = set()
+        for c in self.plan.get("cells") or []:
+            k = cell_key(c)
+            if k in done or k in hopeless:
+                continue
+            out.add(c["model"])
+        return out
 
 
 def _generation(r: dict) -> float:
@@ -995,7 +1013,8 @@ def _generation(r: dict) -> float:
 
 def summarize(results: list[dict], model_info: dict | None = None,
               models: list[str] | None = None,
-              staging: dict | None = None) -> dict:
+              staging: dict | None = None,
+              pending: set[str] | None = None) -> dict:
     """The matrix, plus the cells that won it -- in two directions.
 
     Deliberately reports best-per-model and best-per-engine alongside
@@ -1044,6 +1063,10 @@ def summarize(results: list[dict], model_info: dict | None = None,
             status = "served"
         elif (staging or {}).get(m) == "unavailable":
             status = "unavailable"
+        elif pending is not None and m in pending:
+            # Cells still to run (a live run): earlier failures are
+            # attempts, not the verdict.
+            status = "pending"
         elif m in failed_models:
             status = "failed"
         else:

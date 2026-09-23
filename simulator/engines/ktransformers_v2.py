@@ -195,6 +195,7 @@ def launch_argv(model: str, *, port: int, tp: int,
                 max_running_requests: int | None = None,
                 chunked_prefill_size: int | None = None,
                 mem_fraction_static: float | None = None,
+                max_total_tokens: int | None = None,
                 trust_remote_code: bool = True,
                 extra: list[str] | None = None) -> list[str]:
     """The container CMD: ``python -m sglang.launch_server`` with the
@@ -241,6 +242,8 @@ def launch_argv(model: str, *, port: int, tp: int,
                  "--max-prefill-tokens", str(int(chunked_prefill_size))]
     if mem_fraction_static is not None:
         argv += ["--mem-fraction-static", str(float(mem_fraction_static))]
+    if max_total_tokens:
+        argv += ["--max-total-tokens", str(int(max_total_tokens))]
     argv += [
         "--attention-backend", "flashinfer",
         "--disable-shared-experts-fusion",
@@ -448,6 +451,16 @@ def build_replica_command(engine, index: int, devices: list[int],
         total_vram_gb=getattr(cfg, "vram_per_gpu_gb", None),
         weights_gb=getattr(cfg, "model_weights_gb", None))[0]
 
+    # The fork sizes the KV pool from the memory it sees free after the
+    # GPU share of the weights, and on Kimi-K2-Thinking (23 GB on the
+    # GPU, 70 GB free) it asked for ~3 GB per layer over 61 layers and
+    # died allocating it, at every share. The cell's own concurrency
+    # times its context is all the pool can ever hold; cap it there.
+    total_tokens = getattr(cfg, "ktransformers_max_total_tokens", None)
+    seqs, ctx = getattr(cfg, "max_num_seqs", None), cfg.max_model_len
+    if not total_tokens and seqs and ctx:
+        total_tokens = int(seqs) * int(ctx)
+
     return cmd + launch_argv(
         model_in_container,
         port=engine._port(index),
@@ -464,6 +477,7 @@ def build_replica_command(engine, index: int, devices: list[int],
         max_running_requests=getattr(cfg, "max_num_seqs", None),
         chunked_prefill_size=getattr(cfg, "max_num_batched_tokens", None),
         mem_fraction_static=mem_fraction,
+        max_total_tokens=total_tokens,
         trust_remote_code=True,
         extra=list(getattr(cfg, "ktransformers_extra_flags", None) or []),
     )

@@ -211,6 +211,9 @@ class EngineConfig:
     # the layerwise GPU prefill path (native FP8/RAWINT4/MXFP4 only;
     # costs one MoE layer of extra VRAM). None -> the engine's default.
     ktransformers_gpu_prefill_threshold: int | None = None
+    # --max-total-tokens: the KV pool, in tokens. None -> max_num_seqs
+    # x max_model_len (the fork oversizes the pool on its own).
+    ktransformers_max_total_tokens: int | None = None
     # --kt-enable-dynamic-expert-update (needs the threshold above).
     ktransformers_dynamic_expert_update: bool = False
     # GPU compute capability the container JIT-compiles for

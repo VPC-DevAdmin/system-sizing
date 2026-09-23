@@ -320,12 +320,27 @@ def test_non_v4_checkpoints_read_their_own_config(tmp_path, monkeypatch):
                                    replica_devices=[[0]]))
     j = " ".join(eng.build_replica_command(0, [0], "ktransformers-r0-x"))
     assert "-e SGLANG_APPLY_CONFIG_BACKUP=none" in j
+    # No KV cap without a concurrency to size it from.
+    assert "--max-total-tokens" not in j
 
     assert v2.config_backup_env({"model_type": "deepseek_v4",
                                  "architectures": ["DeepseekV4ForCausalLM"]}) == {}
     assert v2.config_backup_env(None) == {}
     assert v2.config_backup_env({"model_type": "minimax_m2"}) == {
         "SGLANG_APPLY_CONFIG_BACKUP": "none"}
+
+
+def test_kv_pool_is_capped_at_the_cells_own_need(tmp_path, monkeypatch):
+    """The fork oversized Kimi's KV pool (~3 GB a layer x 61) and died
+    at every memory share; the pool never needs more than concurrency
+    times context."""
+    _stage(tmp_path, monkeypatch, "moonshotai/Kimi-K2-Thinking", RAWINT4)
+    monkeypatch.setattr(kt, "physical_cores", lambda: 172)
+    eng = KTransformersEngine(_cfg(model_id="moonshotai/Kimi-K2-Thinking",
+                                   replica_devices=[[0]], max_num_seqs=4,
+                                   max_model_len=4096))
+    cmd = eng.build_replica_command(0, [0], "ktransformers-r0-x")
+    assert cmd[cmd.index("--max-total-tokens") + 1] == "16384"
 
 
 def test_numa_and_cuda_arch_helpers(monkeypatch):

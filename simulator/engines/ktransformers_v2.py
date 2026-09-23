@@ -155,6 +155,34 @@ def cuda_arch_env(arch: str | None) -> dict[str, str]:
             "FLASHINFER_CUDA_ARCH_LIST": fi_arch}
 
 
+# model_type / architecture markers of the checkpoint family the image
+# was built for; its config-backup hack is right only for these.
+V4_MARKERS = ("deepseek_v4", "deepseek_ref", "deepseekv4")
+
+
+def config_backup_env(config_doc: dict | None) -> dict[str, str]:
+    """Turn off the image's DeepSeek-V4 config substitution for every
+    other checkpoint.
+
+    The fork's config loader (hf_transformers_utils) sends ANY
+    checkpoint whose architectures mention "deepseek" through a
+    temporary V4 path that, with SGLANG_APPLY_CONFIG_BACKUP at its
+    default ``auto``, replaces the checkpoint's config.json with a
+    packaged V4 one picked by layer count. Kimi-K2-Thinking (61 layers,
+    DeepseekV3ForCausalLM) came up as V4-large: 128 heads instead of
+    64, a 129k vocabulary instead of 164k, sparse attention with fp8
+    KV and 64-token pages -- and its KV pool then outgrew the GPU at
+    every memory share. ``none`` makes the loader read the checkpoint's
+    own config. Unknown config: leave the image's default alone."""
+    if not isinstance(config_doc, dict):
+        return {}
+    marks = [str(config_doc.get("model_type") or "")]
+    marks += [str(a) for a in config_doc.get("architectures") or []]
+    if any(m in x.lower() for x in marks for m in V4_MARKERS):
+        return {}
+    return {"SGLANG_APPLY_CONFIG_BACKUP": "none"}
+
+
 def launch_argv(model: str, *, port: int, tp: int,
                 weight_path: str, method: str,
                 cpu_infer: int | None = None,
@@ -388,6 +416,14 @@ def build_replica_command(engine, index: int, devices: list[int],
     ]
     cmd += engine._mount_args()
     for k, v in cuda_arch_env(getattr(cfg, "ktransformers_cuda_arch", None)).items():
+        cmd += ["-e", f"{k}={v}"]
+    doc = None
+    if host_dir is not None:
+        try:
+            doc = json.loads((host_dir / "config.json").read_text())
+        except (OSError, ValueError):
+            doc = None
+    for k, v in config_backup_env(doc).items():
         cmd += ["-e", f"{k}={v}"]
     if method in AMX_METHODS:
         cmd += ["-v", f"{amx}:/kt-weights:ro"]

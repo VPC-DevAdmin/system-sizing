@@ -307,6 +307,27 @@ def test_kt_method_is_read_off_the_checkpoint():
     assert v2.kt_method_for(None) is None
 
 
+def test_non_v4_checkpoints_read_their_own_config(tmp_path, monkeypatch):
+    """The image substitutes a packaged DeepSeek-V4 config for any
+    "deepseek" architecture unless told not to; Kimi-K2-Thinking came
+    up as V4 (128 heads, 129k vocab, sparse fp8 KV) and its KV pool
+    ran out of GPU at every share. Only a V4 checkpoint keeps it."""
+    _stage(tmp_path, monkeypatch, "moonshotai/Kimi-K2-Thinking",
+           {**RAWINT4, "model_type": "kimi_k2",
+            "architectures": ["DeepseekV3ForCausalLM"]})
+    monkeypatch.setattr(kt, "physical_cores", lambda: 172)
+    eng = KTransformersEngine(_cfg(model_id="moonshotai/Kimi-K2-Thinking",
+                                   replica_devices=[[0]]))
+    j = " ".join(eng.build_replica_command(0, [0], "ktransformers-r0-x"))
+    assert "-e SGLANG_APPLY_CONFIG_BACKUP=none" in j
+
+    assert v2.config_backup_env({"model_type": "deepseek_v4",
+                                 "architectures": ["DeepseekV4ForCausalLM"]}) == {}
+    assert v2.config_backup_env(None) == {}
+    assert v2.config_backup_env({"model_type": "minimax_m2"}) == {
+        "SGLANG_APPLY_CONFIG_BACKUP": "none"}
+
+
 def test_numa_and_cuda_arch_helpers(monkeypatch):
     assert v2.parse_numa_nodes(["node0", "node1", "has_cpu", "online", "node10"]) == 3
     assert v2.parse_numa_nodes(["online"]) == 0

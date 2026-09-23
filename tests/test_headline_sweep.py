@@ -297,3 +297,20 @@ def test_the_peak_skips_a_rung_whose_requests_failed():
     assert peak_rung([slow, clean, timed_out]) is clean
     # Nothing served anywhere: still report the best, not nothing.
     assert peak_rung([timed_out]) is timed_out
+
+
+def test_a_shortfall_far_below_capacity_is_not_a_batch_ceiling():
+    """gpt-oss-20b's confirmation stopped at 49 of 128 offered on an
+    engine with 8 x 2048 slots; the streams were ending early, not the
+    engine refusing them."""
+    from simulator.headline_sweep import Rung, should_stop
+
+    def r(c, inflight, out):
+        return Rung(concurrency=c, in_flight=inflight, queue_depth=0, out_tok_s=out,
+                    prompt_tok_s=None, total_tok_s=None, steady_state=True)
+    rungs = [r(64, 59.5, 7886.1), r(128, 49.0, 9389.3)]
+    assert should_stop(rungs, 3.0) is not None                 # the old misfire
+    assert should_stop(rungs, 3.0, capacity=16384) is None     # climbs on
+    # A KV-bound ceiling well inside capacity still stops the climb.
+    kv = [r(1024, 906.4, 3270.7), r(2048, 992.8, 3109.4), r(4096, 958.9, 2787.8)]
+    assert "ceiling" in should_stop(kv, 3.0, capacity=2048)

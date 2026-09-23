@@ -148,6 +148,34 @@ def rung_served(r: dict) -> bool:
     return done == 0 or ((r.get("samples") or 0) + (r.get("no_content") or 0)) / done >= MIN_SUCCESS
 
 
+def rate_confidence(r: dict) -> str:
+    """How far a rung's rate can be trusted.
+
+    SGLang and llama.cpp count a request's tokens when it FINISHES; a
+    window that saw fewer than two completions per stream read whole
+    waves of finishing requests (llama.cpp giants: 67.5 / 135 / 270 on
+    one engine; Kimi-K2 NVFP4 on SGLang: 4,121 by counter, 3,270 by
+    the engine's own gauge). Rungs measured by the gauge or with ample
+    completions are "measured"; the rest are flagged."""
+    src = r.get("rate_source") or "counter"
+    if src in ("engine_gauge", "client_stream"):
+        return "measured"
+    inflight = r.get("in_flight") or 0
+    done = (r.get("samples") or 0) + (r.get("errors") or 0) + (r.get("no_content") or 0)
+    if inflight and done < 2 * inflight:
+        return "wave_quantized_suspect"
+    return "measured"
+
+
+def tpot_implied(r: dict) -> float | None:
+    """Streams in flight / median time per token: the decode rate the
+    per-token timings imply (prefill stalls excluded, so a ceiling)."""
+    inflight, tpot = r.get("in_flight"), r.get("tpot_p50_ms")
+    if not inflight or not tpot:
+        return None
+    return round(float(inflight) / (float(tpot) / 1000.0), 1)
+
+
 def curve_point(r: dict) -> dict:
     samples = r.get("samples") or 0
     errors = r.get("errors") or 0
@@ -182,7 +210,9 @@ def curve_point(r: dict) -> dict:
         "success_rate": round((samples + no_content) / done, 4) if done else None,
         "steady_state": r.get("steady_state"),
         "engine_held_offered": held,
-        "rate_source": r.get("rate_source", "counter"),
+        "rate_source": r.get("rate_source") or "counter",
+        "rate_confidence": rate_confidence(r),
+        "tpot_implied_tok_per_s": tpot_implied(r),
         "gpu_power_w": power,
         "tokens_per_watt": round(out / power, 3) if out and power else None,
     }
@@ -261,6 +291,8 @@ def row_document(row: dict, *, info: dict, sweep: dict | None, system: dict,
             "success_rate": success if success is not None else row.get("success_rate"),
             "steady_state": peak.get("steady_state", row.get("steady_state")),
             "gpu_power_w": peak.get("gpu_power_w", row.get("gpu_power_w")),
+            "rate_confidence": rate_confidence(peak) if peak else None,
+            "tpot_implied_tok_per_s": tpot_implied(peak) if peak else None,
             "tokens_per_watt": (round(peak["out_tok_s"] / peak["gpu_power_w"], 3)
                                 if peak.get("out_tok_s") and peak.get("gpu_power_w")
                                 else row.get("tokens_per_watt")),
@@ -447,7 +479,10 @@ def index_row(doc: dict) -> dict:
             "output_tokens": (m.get("workload") or {}).get("output_tokens"),
             "status": c["final_status"], "peak_pool": cap.get("pool_size"),
             "generated_tok_per_s": cap.get("generated_tok_per_s"),
-            "success_rate": cap.get("success_rate"), "source_dir": m["source_dir"],
+            "success_rate": cap.get("success_rate"),
+            "rate_confidence": cap.get("rate_confidence"),
+            "tpot_implied_tok_per_s": cap.get("tpot_implied_tok_per_s"),
+            "source_dir": m["source_dir"],
             "error": (c.get("error") or "")[:200] or None}
 
 

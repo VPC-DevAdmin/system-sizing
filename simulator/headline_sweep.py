@@ -155,8 +155,21 @@ def engine_dead(rung: Rung) -> bool:
             and rung.in_flight is None and not rung.out_tok_s)
 
 
-def should_stop(rungs: list[Rung], min_gain_pct: float) -> str | None:
+def should_stop(rungs: list[Rung], min_gain_pct: float,
+                capacity: int | None = None) -> str | None:
     """Stop when the curve has plateaued or the engine is saturated.
+
+    ``capacity`` is the engine's configured batch width across the box
+    (max_num_seqs x replicas). A running count far below it is not the
+    engine's ceiling: gpt-oss-20b's confirmation (8 x 2048 slots) held
+    49 of 128 offered because thousands of reasoning-only answers and
+    parse errors finished early and the load generator could not
+    refill streams as fast as they ended -- and the sweep stopped
+    there, at 9,389 tok/s, on an engine whose search had held 1,500+
+    streams at 105k. Short of a tenth of capacity the shortfall is the
+    client's, and the climb continues. (A KV-bound ceiling below the
+    batch width -- Kimi-K2 NVFP4 held ~990 of 2,048 -- is well above a
+    tenth and still stops the climb.)
 
     Returns a human reason, or None to keep climbing.
     """
@@ -174,8 +187,10 @@ def should_stop(rungs: list[Rung], min_gain_pct: float) -> str | None:
     prev_best_running = max(
         (r.in_flight or 0.0) for r in rungs[:-1]) if len(rungs) > 1 else 0.0
     still_growing = (last.in_flight or 0.0) > prev_best_running * 1.05
+    far_below_capacity = bool(capacity) and (last.in_flight or 0.0) < 0.1 * float(capacity)
     if (last.steady_state
             and not still_growing
+            and not far_below_capacity
             and not engine_held(last.concurrency, last.in_flight)):
         return (f"the engine held {last.in_flight:.0f} of "
                 f"{last.concurrency} offered streams and stopped growing "
@@ -189,6 +204,16 @@ def should_stop(rungs: list[Rung], min_gain_pct: float) -> str | None:
             return (f"output rate gained under {min_gain_pct:.0f}% over the "
                     f"last two rungs — the throughput curve has plateaued")
     return None
+
+
+def _batch_capacity(cfg) -> int | None:
+    """max_num_seqs x replicas for the engine under test, or None."""
+    eng = getattr(cfg, "engine", None)
+    mns = getattr(eng, "max_num_seqs", None)
+    if not mns:
+        return None
+    groups = getattr(eng, "replica_devices", None) or [None]
+    return int(mns) * max(1, len(groups))
 
 
 def _cohort_shape(cohort: Cohort) -> dict | None:
@@ -638,7 +663,8 @@ async def run_headline_sweep(
                 raise EngineBrokenError(
                     f"engine stopped serving at {n} streams"
                     f"{': ' + cause if cause else ' (no metrics, every request failed)'}")
-            reason = should_stop(rungs, sim.headline_sweep_min_gain_pct)
+            reason = should_stop(rungs, sim.headline_sweep_min_gain_pct,
+                                 capacity=_batch_capacity(cfg))
             if reason:
                 stop_reason = reason
                 log.info("headline sweep stopping: %s", reason)

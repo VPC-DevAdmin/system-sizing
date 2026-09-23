@@ -203,3 +203,13 @@ def test_capacity_is_the_best_rung_that_served():
     none = {**sweep, "rungs": [bad_peak]}
     c2 = ex.row_document(row, info={}, sweep=none, system=SYSTEM, generated_at="t")["cohorts"][0]
     assert c2["final_status"] == "no_passing_rung" and c2["capacity_throughput"] is None
+
+
+def test_few_completion_counter_rungs_are_flagged_with_a_timing_cross_check():
+    wave = {"concurrency": 32, "in_flight": 32.0, "out_tok_s": 269.2, "samples": 40,
+            "errors": 0, "tpot_p50_ms": 228.98, "steady_state": True, "held": True}
+    p = ex.curve_point(wave)
+    assert p["rate_confidence"] == "wave_quantized_suspect"
+    assert p["tpot_implied_tok_per_s"] == round(32 / 0.22898, 1)
+    assert ex.curve_point({**wave, "rate_source": "engine_gauge"})["rate_confidence"] == "measured"
+    assert ex.curve_point({**wave, "samples": 5000})["rate_confidence"] == "measured"

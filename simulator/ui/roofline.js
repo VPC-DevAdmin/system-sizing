@@ -682,7 +682,8 @@ export const Roofline = {
           ? '<span class="status-fail" title="no rung served 90% of its requests">below 90%</span>'
           : `<span class="status-fail" title="${(r.error || "").replace(/"/g, "&quot;")}">failed</span>`}</td>
       <td class="num">${num(r.peak_pool)}</td>
-      <td class="num"><b>${num(r.generated_tok_per_s, 1)}</b></td>
+      <td class="num"><b>${num(r.generated_tok_per_s, 1)}</b>${r.rate_confidence === "wave_quantized_suspect"
+        ? ` <span class="status-fail" title="Counted from requests finishing in waves; per-token timing implies ${num(r.tpot_implied_tok_per_s, 1)} tok/s">≈</span>` : ""}</td>
       <td class="num">${r.success_rate != null ? (r.success_rate * 100).toFixed(0) + "%" : "—"}</td>
     </tr>`).join("");
   },

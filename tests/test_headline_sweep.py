@@ -264,7 +264,10 @@ def test_few_completions_use_littles_law_not_the_wave_counter():
     gen, prompt = little_rate(32.0, acc)
     assert abs(gen - 32 * 128 / 86.8) < 0.1
     assert abs(prompt - 32 * 128 / 86.8) < 0.1
-    # Plenty of completions: the counter is a rate and is kept.
-    acc.add([{"end_to_end_ms": 86800, "output_tokens": 128}] * 40)
-    assert little_rate(32.0, acc) is None
     assert little_rate(None, acc) is None
+    assert little_rate(4.0, _Acc()) is None
+
+
+def test_chunk_rate_source_defaults_to_the_counter():
+    from simulator.headline_search import Chunk
+    assert Chunk(running=4, queue=0, out_rate=33.2, prompt_rate=1).rate_source == "counter"

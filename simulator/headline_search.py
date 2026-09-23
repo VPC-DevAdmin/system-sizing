@@ -102,6 +102,7 @@ class Chunk:
     out_rate: float | None           # generation tok/s
     prompt_rate: float | None        # prompt tok/s
     complete: bool = True            # every replica answered every scrape
+    rate_source: str = "counter"     # or "little" (headline_sweep.little_rate)
 
 
 async def whole_scrape(fetch, tries: int = 3, pause_s: float = 0.5) -> dict:

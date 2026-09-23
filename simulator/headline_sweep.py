@@ -232,15 +232,17 @@ class _Acc:
                                    + float(t.get("history_tokens") or 0))
 
 
-# Fewer completions than this many per running stream and the
-# counter rate is a count of waves, not a rate.
-LITTLE_MIN_TURNS_PER_STREAM = 2
+# A chunk that saw fewer completions than this reads the counter to
+# within one request's tokens either side -- +-1/N of the rate. Below
+# it the rate comes from Little's law instead.
+LITTLE_MIN_TURNS_PER_CHUNK = 20
 
 
-def little_rate(running: float | None, acc: _Acc) -> tuple[float, float] | None:
-    """(generated, prompt) tokens/s by Little's law -- running streams
-    x tokens per request / request lifetime -- when the window saw too
-    few completions for the engine's counter; None otherwise.
+def little_rate(population: float | None, acc: _Acc) -> tuple[float, float] | None:
+    """(generated, prompt) tokens/s by Little's law -- streams in the
+    system x tokens per request / request lifetime -- from every answer
+    the rung has seen; None without data. The chunk uses it when it saw
+    fewer than LITTLE_MIN_TURNS_PER_CHUNK completions.
 
     SGLang adds a request's tokens to generation_tokens_total when the
     request FINISHES. A closed loop of equal-length requests on a slow
@@ -250,15 +252,13 @@ def little_rate(running: float | None, acc: _Acc) -> tuple[float, float] | None:
     two (265) when the decode rate was 32 / 0.6 s = 53. Lifetimes and
     token counts are per request, so this estimate does not quantise.
     """
-    if not running or not acc.e2e:
-        return None
-    if len(acc.e2e) >= LITTLE_MIN_TURNS_PER_STREAM * running:
+    if not population or not acc.e2e:
         return None
     life_s = statistics.fmean(acc.e2e) / 1000.0
     if life_s <= 0:
         return None
-    return (running * statistics.fmean(acc.gen) / life_s,
-            running * statistics.fmean(acc.prompt) / life_s)
+    return (population * statistics.fmean(acc.gen) / life_s,
+            population * statistics.fmean(acc.prompt) / life_s)
 
 
 async def run_headline_sweep(
@@ -395,6 +395,7 @@ async def run_headline_sweep(
         # running/queue means and is skipped, not fatal.
         m0 = await whole_scrape(_metrics)
         whole = scrape_complete(m0)
+        seen_before = len(acc.e2e)
         t0 = time.monotonic()
         running: list[float] = []
         waiting: list[float] = []
@@ -415,12 +416,25 @@ async def run_headline_sweep(
                - (m0.get("generation_tokens_total") or 0))
         prm = ((m1.get("prompt_tokens_total") or 0)
                - (m0.get("prompt_tokens_total") or 0))
+        run_mean = statistics.fmean(running) if running else None
+        q_mean = statistics.fmean(waiting) if waiting else None
+        out_rate = gen / dt if gen else None
+        prompt_rate = prm / dt if prm else None
+        source = "counter"
+        if run_mean and len(acc.e2e) - seen_before < LITTLE_MIN_TURNS_PER_CHUNK:
+            # Client lifetimes include the engine's queue, so the
+            # population is running plus waiting.
+            ll = little_rate(run_mean + (q_mean or 0.0), acc)
+            if ll is not None:
+                out_rate, prompt_rate = ll
+                source = "little"
         return Chunk(
-            running=statistics.fmean(running) if running else None,
-            queue=statistics.fmean(waiting) if waiting else None,
-            out_rate=gen / dt if gen else None,
-            prompt_rate=prm / dt if prm else None,
+            running=run_mean,
+            queue=q_mean,
+            out_rate=out_rate,
+            prompt_rate=prompt_rate,
             complete=whole,
+            rate_source=source,
         )
 
     acc_offered = [ladder[0]]   # current offered count, for snapshots
@@ -534,18 +548,7 @@ async def run_headline_sweep(
 
             out_rate = last.out_rate
             prm_rate = last.prompt_rate
-            rate_source = "counter"
-            # Client lifetimes include the engine's queue, so the
-            # population is running plus waiting.
-            ll = little_rate((last.running or 0) + (last.queue or 0)
-                             if last.running else None, acc)
-            if ll is not None:
-                log.info("rung %d: %d completions for %.0f running; "
-                         "rate by Little's law %.1f (counter %.1f)",
-                         n, len(acc.e2e), last.running or 0, ll[0],
-                         out_rate or 0)
-                out_rate, prm_rate = ll
-                rate_source = "little"
+            rate_source = last.rate_source
             rung = Rung(
                 concurrency=n,
                 in_flight=(round(last.running, 1)

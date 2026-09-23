@@ -252,20 +252,23 @@ def test_a_rung_of_nothing_but_errors_means_the_engine_died():
     assert not engine_dead(fine)
 
 
-def test_few_completions_use_littles_law_not_the_wave_counter():
-    """Kimi on KTransformers finished 32 requests every ~87 s; the
-    finish-time counter read 130 or 265 tok/s depending on how many
-    waves the window caught. 32 streams x 128 tokens / 87 s = 47."""
-    from simulator.headline_sweep import _Acc, little_rate
+def test_few_completions_read_sglangs_gauge_not_the_wave_counter():
+    """Kimi on KTransformers finished 64 requests in one chunk and the
+    finish-time counter read 264 tok/s; the scheduler logged 47-65.
+    Under two completions per stream the gauge, averaged over the rung
+    from its first fresh reading, is the rate."""
+    from simulator.headline_sweep import _Acc, wave_bound
+    assert wave_bound(64, 64.0) and wave_bound(0, 4.0)
+    assert not wave_bound(2048, 1024.0) and not wave_bound(0, None)
     acc = _Acc()
-    acc.add([{"ttft_ms": 10000, "tpot_ms": 600, "end_to_end_ms": 86800,
-              "output_tokens": 100, "reasoning_tokens": 28,
-              "input_tokens": 128} for _ in range(32)])
-    gen, prompt = little_rate(32.0, acc)
-    assert abs(gen - 32 * 128 / 86.8) < 0.1
-    assert abs(prompt - 32 * 128 / 86.8) < 0.1
-    assert little_rate(None, acc) is None
-    assert little_rate(4.0, _Acc()) is None
+    for v in (99.0, 99.0, 99.0):      # the previous rung's interval
+        acc.add_gauge(v)
+    assert acc.gauge == []
+    for v in (46.9, 46.9, 65.1, 65.1, None):
+        acc.add_gauge(v)
+    assert acc.gauge == [46.9, 46.9, 65.1, 65.1]
+    acc.add([{"ttft_ms": 1}, {"error": "no_content_tokens"}])
+    assert acc.completed == 2
 
 
 def test_chunk_rate_source_defaults_to_the_counter():
@@ -273,15 +276,9 @@ def test_chunk_rate_source_defaults_to_the_counter():
     assert Chunk(running=4, queue=0, out_rate=33.2, prompt_rate=1).rate_source == "counter"
 
 
-def test_littles_law_uses_only_answers_submitted_under_the_rung():
-    """At 8 offered on 4 slots, four answers that began under the last
-    rung (no queue wait) doubled the rate with 7.9 in the system."""
-    from simulator.headline_sweep import _Acc, little_rate
-    acc = _Acc(since_ms=1000.0)
-    acc.add([{"submitted_at_ms": 500, "end_to_end_ms": 40000,
-              "output_tokens": 256}] * 4)
-    assert little_rate(8.0, acc) is None
-    acc.add([{"submitted_at_ms": 1500, "end_to_end_ms": 80000,
-              "output_tokens": 256}] * 4)
-    gen, _ = little_rate(8.0, acc)
-    assert abs(gen - 8 * 256 / 80) < 0.1
+def test_sglangs_gen_throughput_is_parsed_and_summed_over_replicas():
+    from simulator.engines.base import Engine
+    from simulator.engines.docker_replica import aggregate_replica_metrics
+    m = Engine._parse_prometheus('sglang:gen_throughput{model_name="k"} 46.93\n')
+    assert m["gen_throughput"] == 46.93
+    assert aggregate_replica_metrics([m, m])["gen_throughput"] == 2 * 46.93

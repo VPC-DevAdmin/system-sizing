@@ -338,6 +338,12 @@ class Engine:
             "sglang:token_usage": "kv_cache_used_pct",
             "sglang:prompt_tokens_total": "prompt_tokens_total",
             "sglang:generation_tokens_total": "generation_tokens_total",
+            # Tokens generated over the scheduler's last decode-log
+            # interval (40 steps) / its wall time, prefill stalls
+            # included. The counter above only moves when a request
+            # FINISHES; this one moves as tokens are made, which is
+            # the rate a slow engine's finishing waves hide.
+            "sglang:gen_throughput": "gen_throughput",
             # SGLang retracts requests under KV pressure; same signal
             # as vLLM preemptions -- latency cliffs follow.
             "sglang:num_retracted_reqs": "preemptions_total",

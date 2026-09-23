@@ -137,6 +137,8 @@ def aggregate_replica_metrics(per_replica: list[dict]) -> dict[str, float]:
     for k in ("num_running", "queue_depth", "prefix_cache_hits",
               "prefix_cache_queries", "prompt_tokens_total",
               "generation_tokens_total", "preemptions_total",
+              # Each replica's own generation rate; the box makes the sum.
+              "gen_throughput",
               # Pool capacity is per replica; the box holds their sum.
               "kv_cache_tokens"):
         vals = [m[k] for m in per_replica if k in m]

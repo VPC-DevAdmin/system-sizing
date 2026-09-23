@@ -81,9 +81,9 @@ class Rung:
     measure_s: int = 0
     held: bool = True                # did the engine hold what we offered?
     # "counter": the engine's generated-token counter over the window;
-    # "little": in-flight x tokens per request / request lifetime, used
-    # when the window saw too few completions for the counter to be
-    # anything but a count of finishing waves (see little_rate).
+    # "engine_gauge": SGLang's own generation-rate gauge, averaged over
+    # the rung, used when the window saw too few completions for the
+    # counter to be anything but a count of finishing waves.
     rate_source: str = "counter"
 
 
@@ -204,20 +204,31 @@ class _Acc:
     """
     ttft: list[float] = field(default_factory=list)
     tpot: list[float] = field(default_factory=list)
-    e2e: list[float] = field(default_factory=list)    # ms, per answer
-    gen: list[float] = field(default_factory=list)    # tokens generated
-    prompt: list[float] = field(default_factory=list)
+    completed: int = 0                                # turns finished
     errors: int = 0
     no_content: int = 0
-    # Wall-clock ms the rung's pressure was set. Only answers submitted
-    # after it feed Little's law: a request that started under the last
-    # rung never waited in this rung's queue, and its lifetime would
-    # undercount the one a queued stream lives (Kimi on KTransformers
-    # at 8 offered / 4 slots read 48 tok/s against a real ~26).
-    since_ms: float = 0.0
+    # SGLang's gen_throughput readings during the rung, from the first
+    # one that changed (the value standing at the rung's start was the
+    # previous rung's interval).
+    gauge: list[float] = field(default_factory=list)
+    gauge_start: float | None = None
+    gauge_live: bool = False
+
+    def add_gauge(self, v: float | None) -> None:
+        if v is None:
+            return
+        if not self.gauge_live:
+            if self.gauge_start is None:
+                self.gauge_start = v
+                return
+            if v == self.gauge_start:
+                return
+            self.gauge_live = True
+        self.gauge.append(float(v))
 
     def add(self, turns: list[dict]) -> None:
         for t in turns:
+            self.completed += 1
             if t.get("error"):
                 if t["error"] == "no_content_tokens":
                     self.no_content += 1
@@ -228,44 +239,21 @@ class _Acc:
                 self.ttft.append(float(t["ttft_ms"]))
             if t.get("tpot_ms") is not None:
                 self.tpot.append(float(t["tpot_ms"]))
-            if (t.get("end_to_end_ms") and t.get("output_tokens") is not None
-                    and float(t.get("submitted_at_ms") or 0) >= self.since_ms):
-                self.e2e.append(float(t["end_to_end_ms"]))
-                # Reasoning chunks are counted apart from the answer;
-                # the engine generated both.
-                self.gen.append(float(t["output_tokens"] or 0)
-                                + float(t.get("reasoning_tokens") or 0))
-                self.prompt.append(float(t.get("input_tokens") or 0)
-                                   + float(t.get("history_tokens") or 0))
 
 
-# A chunk that saw fewer completions than this reads the counter to
-# within one request's tokens either side -- +-1/N of the rate. Below
-# it the rate comes from Little's law instead.
-LITTLE_MIN_TURNS_PER_CHUNK = 20
+# A chunk that saw fewer completions than this many per stream in the
+# system reads the generated-token counter to within a wave: SGLang
+# adds a request's tokens when it FINISHES, and a closed loop of
+# equal-length requests on a slow engine finishes together. Kimi-K2-
+# Thinking on KTransformers (64 streams, ~1 s a step) read 130, 265 or
+# 264 tok/s from whole waves landing in a chunk while its scheduler
+# logged 47-65. Below it, SGLang's gen_throughput gauge is the rate.
+GAUGE_MIN_TURNS_PER_STREAM = 2
 
 
-def little_rate(population: float | None, acc: _Acc) -> tuple[float, float] | None:
-    """(generated, prompt) tokens/s by Little's law -- streams in the
-    system x tokens per request / request lifetime -- from every answer
-    the rung has seen; None without data. The chunk uses it when it saw
-    fewer than LITTLE_MIN_TURNS_PER_CHUNK completions.
-
-    SGLang adds a request's tokens to generation_tokens_total when the
-    request FINISHES. A closed loop of equal-length requests on a slow
-    engine finishes in waves: Kimi-K2-Thinking on KTransformers
-    (10 s prefill, 128 tokens at 0.6 s) finished 32 requests every
-    ~87 s, and a 30-80 s window caught one wave (read 130 tok/s) or
-    two (265) when the decode rate was 32 / 0.6 s = 53. Lifetimes and
-    token counts are per request, so this estimate does not quantise.
-    """
-    if not population or not acc.e2e:
-        return None
-    life_s = statistics.fmean(acc.e2e) / 1000.0
-    if life_s <= 0:
-        return None
-    return (population * statistics.fmean(acc.gen) / life_s,
-            population * statistics.fmean(acc.prompt) / life_s)
+def wave_bound(completions: int, population: float | None) -> bool:
+    """Too few completions in a chunk for the finish-time counter."""
+    return bool(population) and completions < GAUGE_MIN_TURNS_PER_STREAM * population
 
 
 async def run_headline_sweep(
@@ -402,7 +390,7 @@ async def run_headline_sweep(
         # running/queue means and is skipped, not fatal.
         m0 = await whole_scrape(_metrics)
         whole = scrape_complete(m0)
-        seen_before = len(acc.e2e)
+        seen_before = acc.completed
         t0 = time.monotonic()
         running: list[float] = []
         waiting: list[float] = []
@@ -410,6 +398,7 @@ async def run_headline_sweep(
             await asyncio.sleep(1.0)
             m = await _metrics()
             acc.add(pool.drain_turn_queue())
+            acc.add_gauge(m.get("gen_throughput"))
             if scrape_complete(m):
                 if m.get("num_running") is not None:
                     running.append(float(m["num_running"]))
@@ -428,19 +417,20 @@ async def run_headline_sweep(
         out_rate = gen / dt if gen else None
         prompt_rate = prm / dt if prm else None
         source = "counter"
-        if run_mean and len(acc.e2e) - seen_before < LITTLE_MIN_TURNS_PER_CHUNK:
-            # Client lifetimes include the engine's queue, so the
-            # population is running plus waiting.
-            ll = little_rate(run_mean + (q_mean or 0.0), acc)
-            if ll is not None:
-                out_rate, prompt_rate = ll
-                source = "little"
-            else:
-                # No answer submitted under this rung has come back
-                # yet, and a few-completion counter is a wave count;
-                # two such chunks can agree by accident. Unmeasured
-                # keeps the rung measuring (chunks_converged refuses
-                # a running batch without a rate).
+        if wave_bound(acc.completed - seen_before,
+                      (run_mean or 0.0) + (q_mean or 0.0)):
+            if acc.gauge:
+                # Averaged over the rung, not the chunk: one reading
+                # covers 40 decode steps, and consecutive ones swing
+                # with whether a prefill landed inside them.
+                ratio = (prompt_rate / out_rate) if (out_rate and prompt_rate) else None
+                out_rate = statistics.fmean(acc.gauge)
+                prompt_rate = out_rate * ratio if ratio else None
+                source = "engine_gauge"
+            elif m1.get("gen_throughput") is not None:
+                # The gauge exists but has not moved since the rung
+                # began; a few-completion counter could agree with the
+                # next one by accident. Unmeasured keeps measuring.
                 out_rate, prompt_rate = None, None
                 source = "pending"
         return Chunk(
@@ -483,7 +473,6 @@ async def run_headline_sweep(
                 sim.open_loop_max_workers,
                 max(1, math.ceil(n / sim.open_loop_inflight_per_worker))))
             await pool.set_outstanding(n)
-            rung_since_ms = time.time() * 1000.0
 
             # Let the batch fill at the new pressure before measuring.
             settle_end = time.monotonic() + sim.headline_clear_s
@@ -510,7 +499,7 @@ async def run_headline_sweep(
             measurement_id = db.insert_measurement(pre_row)
             telemetry.start(measurement_id)
 
-            acc = _Acc(since_ms=rung_since_ms)
+            acc = _Acc()
             chunks: list[Chunk] = []
             scrape_gaps = 0
             t_start = time.monotonic()

@@ -222,16 +222,32 @@ def row_document(row: dict, *, info: dict, sweep: dict | None, system: dict,
     curve = [curve_point(r) for r in rungs]
     peak = (sweep or {}).get("peak") or {}
     failed = bool(row.get("error"))
+    below_gate = False
+    if rungs and not failed:
+        # Capacity is the best rung that SERVED. Rows measured before
+        # the roofline's 90% gate could carry a peak where most requests
+        # failed (gpt-oss-20b at 39%); a sizing tool must not read that
+        # as capacity.
+        passing = [r for r, c in zip(rungs, curve, strict=True) if c["status"] == "pass"]
+        if passing:
+            settled = [r for r in passing if r.get("steady_state") is not False]
+            peak = max(settled or passing, key=lambda r: r.get("out_tok_s") or 0)
+        else:
+            below_gate = True
     target, soft, fail = pool_sizes(curve, peak.get("concurrency") or row.get("concurrency"))
+    success = None
+    if peak and rungs:
+        pt = curve_point(peak)
+        success = pt["success_rate"]
     shape = (sweep or {}).get("shape") or {}
     cohort = {
         "id": (sweep or {}).get("cohort_id") or "headline_generation",
         "category": "persona",
-        "final_status": "failed" if failed else "ok",
-        "target_capacity_pool_size": None if failed else target,
-        "soft_capacity_pool_size": None if failed else soft,
+        "final_status": ("failed" if failed else "no_passing_rung" if below_gate else "ok"),
+        "target_capacity_pool_size": None if (failed or below_gate) else target,
+        "soft_capacity_pool_size": None if (failed or below_gate) else soft,
         "fail_pool_size": fail,
-        "capacity_throughput": None if failed else {
+        "capacity_throughput": None if (failed or below_gate) else {
             "pool_size": peak.get("concurrency") or row.get("concurrency"),
             "sample_size": peak.get("samples", row.get("samples")),
             "measurement_duration_s": peak.get("measure_s"),
@@ -242,10 +258,12 @@ def row_document(row: dict, *, info: dict, sweep: dict | None, system: dict,
             "in_flight": peak.get("in_flight", row.get("in_flight")),
             "ttft_p95_ms": peak.get("ttft_p95_ms", row.get("ttft_p95_ms")),
             "tpot_p95_ms": peak.get("tpot_p95_ms", row.get("tpot_p95_ms")),
-            "success_rate": row.get("success_rate"),
+            "success_rate": success if success is not None else row.get("success_rate"),
             "steady_state": peak.get("steady_state", row.get("steady_state")),
             "gpu_power_w": peak.get("gpu_power_w", row.get("gpu_power_w")),
-            "tokens_per_watt": row.get("tokens_per_watt"),
+            "tokens_per_watt": (round(peak["out_tok_s"] / peak["gpu_power_w"], 3)
+                                if peak.get("out_tok_s") and peak.get("gpu_power_w")
+                                else row.get("tokens_per_watt")),
         },
         "curve": curve,
         # additions
@@ -376,12 +394,32 @@ def placement_documents(results: dict, *, system: dict, generated_at: str) -> li
     return docs
 
 
+def collapse_rows(rows: list[dict]) -> list[dict]:
+    """The rows a sizing tool wants: every measurement, and for a
+    configuration that never produced one, its latest failure. A
+    failed attempt later retried or escalated into a success is noise
+    -- the giants pass left 282 failures beside 157 measurements, most
+    of them superseded."""
+    from .roofline import cell_key
+    measured = {cell_key(r) for r in rows if not r.get("error")}
+    last_failure: dict[str, int] = {}
+    for i, r in enumerate(rows):
+        if r.get("error"):
+            last_failure[cell_key(r)] = i
+    return [r for i, r in enumerate(rows)
+            if not r.get("error")
+            or (cell_key(r) not in measured and last_failure.get(cell_key(r)) == i)]
+
+
 def build(state: dict, runs_base: Path, *, system: dict,
-          placement: dict | None = None) -> list[dict]:
+          placement: dict | None = None, collapse: bool = True) -> list[dict]:
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     info_by_model = (state.get("plan") or {}).get("model_info") or {}
     docs = []
-    for row in state.get("results") or []:
+    rows = state.get("results") or []
+    if collapse:
+        rows = collapse_rows(rows)
+    for row in rows:
         sweep = None
         if row.get("run_dir"):
             p = runs_base.parent / row["run_dir"] / "headline_sweep.json"
@@ -417,10 +455,10 @@ def _slug(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_")
 
 
-def write(docs: list[dict], out: Path) -> None:
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "runs").mkdir(exist_ok=True)
+def document_names(docs: list[dict]) -> list[str]:
+    """A stable, unique file name per document."""
     seen: dict[str, int] = {}
+    names = []
     for d in docs:
         m = d["meta"]
         ec = m["engine_config"]
@@ -428,10 +466,46 @@ def write(docs: list[dict], out: Path) -> None:
                      f"x{ec.get('replicas')}__{m.get('config_name') or ''}"
                      f"{Path(m['source_dir'] or 'none').name}")
         seen[base] = seen.get(base, 0) + 1
-        name = base if seen[base] == 1 else f"{base}_{seen[base]}"
+        names.append(base if seen[base] == 1 else f"{base}_{seen[base]}")
+    return names
+
+
+def write(docs: list[dict], out: Path) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "runs").mkdir(exist_ok=True)
+    for name, d in zip(document_names(docs), docs, strict=True):
         (out / "runs" / f"{name}.json").write_text(json.dumps(d, indent=1))
     (out / "all.json").write_text(json.dumps(docs, indent=1))
     (out / "index.json").write_text(json.dumps([index_row(d) for d in docs], indent=1))
+
+
+def zip_bytes(docs: list[dict]) -> bytes:
+    """The same layout as ``write``, as a zip in memory -- what the UI
+    downloads."""
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, d in zip(document_names(docs), docs, strict=True):
+            z.writestr(f"runs/{name}.json", json.dumps(d, indent=1))
+        z.writestr("all.json", json.dumps(docs, indent=1))
+        z.writestr("index.json", json.dumps([index_row(d) for d in docs], indent=1))
+    return buf.getvalue()
+
+
+def summary(docs: list[dict]) -> dict:
+    """Counts and the index, for the UI's export panel."""
+    idx = [index_row(d) for d in docs]
+    return {"documents": len(docs),
+            "ok": sum(1 for r in idx if r["status"] == "ok"),
+            "failed": sum(1 for r in idx if r["status"] == "failed"),
+            "no_passing_rung": sum(1 for r in idx if r["status"] == "no_passing_rung"),
+            "placement": sum(1 for r in idx if r["run_kind"] == "kt_expert_placement"),
+            "models": len({r["model"] for r in idx}),
+            "generated_at": docs[0]["meta"]["generated_at"] if docs else None,
+            "system": ({k: v for k, v in docs[0]["meta"]["system"].items() if k != "topology"}
+                       if docs else None),
+            "index": idx}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -439,13 +513,16 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--state", default="runs/roofline.json")
     ap.add_argument("--placement", default="runs/kt_placement/kt_placement.json")
     ap.add_argument("--out", default="exports/sizing")
+    ap.add_argument("--all-attempts", action="store_true",
+                    help="keep failed attempts that a later retry superseded")
     a = ap.parse_args(argv)
     state_path = Path(a.state)
     state = json.loads(state_path.read_text())
     placement = None
     if a.placement and Path(a.placement).is_file():
         placement = json.loads(Path(a.placement).read_text())
-    docs = build(state, state_path.parent, system=detect_system(), placement=placement)
+    docs = build(state, state_path.parent, system=detect_system(), placement=placement,
+                 collapse=not a.all_attempts)
     write(docs, Path(a.out))
     ok = sum(1 for d in docs if d["cohorts"][0]["final_status"] == "ok")
     print(f"{len(docs)} documents ({ok} ok, {len(docs) - ok} failed) -> {a.out}")

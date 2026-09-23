@@ -64,6 +64,7 @@ export const Roofline = {
     $("#rf-confirm").addEventListener("change", () => this.renderPlan());
     $("#rf-cross-domain").addEventListener("change", () => this.refresh(true));
     onShow("roofline", () => this.refresh(true));
+    this.mountExport();
     // Poll regardless of which tab is showing: a run started here keeps
     // going, and the page must be right the moment it is looked at.
     setInterval(() => this.refresh(), 5000);
@@ -362,6 +363,13 @@ export const Roofline = {
     this.renderMatrix(d, sum);
     this.renderSpectrum(d, sum);
     this.renderTable(d);
+    // The export is rebuilt on the server per request; refetch its
+    // summary only when the result set has changed.
+    const n = (d.results || []).length;
+    if (n !== this.exportSeen) {
+      this.exportSeen = n;
+      this.loadExport();
+    }
     this.renderCharts(sum);
   },
 
@@ -583,6 +591,110 @@ export const Roofline = {
         <td>${r.tokens_per_watt ?? "—"}</td>
         <td>${flags}</td></tr>`;
     }).join("");
+  },
+
+  /* ── Sizing export ─────────────────────────────────────────────
+   * The roofline's measurements (and the KTransformers placement
+   * windows) as documents in the sizing tool's shape, built by
+   * simulator/export_sizing.py. The panel is created here rather than
+   * in index.html so the export travels with this view. */
+  mountExport() {
+    const anchor = $("#rf-results-panel");
+    if (!anchor || $("#rf-export-panel")) return;
+    anchor.insertAdjacentHTML("afterend", `
+      <section class="panel" id="rf-export-panel" hidden>
+        <h2>Sizing export</h2>
+        <div class="msg" id="rf-export-summary"></div>
+        <div class="rf-export-actions">
+          <button id="rf-export-json" class="primary">Download JSON</button>
+          <button id="rf-export-zip">Download ZIP</button>
+          <label class="msg"><input type="checkbox" id="rf-export-all">
+            Include failed attempts a later retry superseded</label>
+          <button id="rf-export-refresh" class="ghost small">Refresh</button>
+        </div>
+        <div class="rf-export-table">
+          <table id="rf-export-index">
+            <thead><tr><th>Model</th><th>Engine</th><th>Kind</th><th>GPUs</th>
+              <th>Quant</th><th>Out</th><th>Status</th><th>Peak streams</th>
+              <th>Gen tok/s</th><th>Success</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="chart-note">One document per measured configuration, in the
+          sizing tool's shape: <b>meta</b> (models, engines, engine config, system)
+          and <b>cohorts</b> whose curve is the concurrency ladder. JSON is every
+          document in one array; ZIP adds one file per configuration and an index.
+          Saturation runs enforce no latency target, so <b>target_status</b> reads
+          not_evaluated; for reasoning models, output tokens include chain-of-thought.</div>
+      </section>`);
+    const style = document.createElement("style");
+    style.textContent = `
+      .rf-export-actions { display: flex; flex-wrap: wrap; gap: 10px 14px;
+        align-items: center; margin: 12px 0; }
+      .rf-export-actions label { display: inline-flex; gap: 6px; align-items: center; }
+      .rf-export-table { max-height: 420px; overflow: auto; }
+      .rf-export-table td.num { text-align: right; font-variant-numeric: tabular-nums; }`;
+    document.head.appendChild(style);
+    $("#rf-export-json").addEventListener("click", () => this.downloadExport("json"));
+    $("#rf-export-zip").addEventListener("click", () => this.downloadExport("zip"));
+    $("#rf-export-refresh").addEventListener("click", () => this.loadExport());
+    $("#rf-export-all").addEventListener("change", () => this.loadExport());
+  },
+
+  exportQuery() {
+    return $("#rf-export-all")?.checked ? "?all_attempts=true" : "";
+  },
+
+  async loadExport() {
+    if (!$("#rf-export-panel")) return;
+    let s;
+    try {
+      s = await api(`/api/roofline/export/index${this.exportQuery()}`);
+    } catch (e) {
+      $("#rf-export-summary").textContent = `Export unavailable: ${e.message || e}`;
+      return;
+    }
+    this.exportInfo = s;
+    $("#rf-export-panel").hidden = !s.documents;
+    if (!s.documents) return;
+    const sys = s.system || {};
+    const acc = (sys.accelerators || []).map(a => `${a.count}× ${a.model}`).join(", ");
+    $("#rf-export-summary").innerHTML = `<b>${s.documents}</b> documents:
+      ${s.ok} measured, ${s.failed} failed${s.no_passing_rung
+        ? `, ${s.no_passing_rung} with no rung above 90% success` : ""}, ${s.placement} placement ·
+      ${s.models} models · ${[sys.vendor, sys.platform].filter(Boolean).join(" ")}
+      ${acc ? " · " + acc : ""} · built ${new Date(s.generated_at).toLocaleString()}`;
+    const rows = (s.index || []).slice().sort((a, b) =>
+      (a.status === "ok" ? 0 : 1) - (b.status === "ok" ? 0 : 1)
+      || (b.generated_tok_per_s || 0) - (a.generated_tok_per_s || 0));
+    const kind = (r) => r.run_kind === "kt_expert_placement" ? "placement"
+      : (r.phase || "");
+    $("#rf-export-index tbody").innerHTML = rows.map(r => `<tr>
+      <td>${short(r.model)}</td>
+      <td>${Engines.label(r.engine)}${r.tp > 1 || r.replicas > 1
+        ? ` <span class="msg">tp${r.tp} × ${r.replicas}</span>` : ""}</td>
+      <td>${kind(r)}</td>
+      <td class="num">${r.gpus ?? "—"}</td>
+      <td>${r.quant ?? "—"}</td>
+      <td class="num">${r.output_tokens ?? "—"}</td>
+      <td>${r.status === "ok" ? '<span class="status-pass">ok</span>'
+        : r.status === "no_passing_rung"
+          ? '<span class="status-fail" title="no rung served 90% of its requests">below 90%</span>'
+          : `<span class="status-fail" title="${(r.error || "").replace(/"/g, "&quot;")}">failed</span>`}</td>
+      <td class="num">${num(r.peak_pool)}</td>
+      <td class="num"><b>${num(r.generated_tok_per_s, 1)}</b></td>
+      <td class="num">${r.success_rate != null ? (r.success_rate * 100).toFixed(0) + "%" : "—"}</td>
+    </tr>`).join("");
+  },
+
+  downloadExport(kind) {
+    const s = this.exportInfo || {};
+    const a = document.createElement("a");
+    a.href = `/api/roofline/export${kind === "zip" ? ".zip" : ""}${this.exportQuery()}`;
+    a.download = kind === "zip" ? (s.zip_name || "sizing.zip") : (s.json_name || "sizing.json");
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   },
 
   renderCharts(sum) {

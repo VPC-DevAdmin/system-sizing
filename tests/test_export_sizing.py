@@ -127,7 +127,7 @@ def test_build_reads_sweeps_and_write_lays_out_files(tmp_path):
     (runs / "run_326" / "headline_sweep.json").write_text(json.dumps(SWEEP))
     state = {"plan": {"model_info": {ROW["model"]: {"quant": "NVFP4"}}},
              "results": [ROW, {**ROW, "run_dir": None, "error": "boom", "confirmed": False}]}
-    docs = ex.build(state, runs, system=SYSTEM)
+    docs = ex.build(state, runs, system=SYSTEM, collapse=False)
     assert len(docs[0]["cohorts"][0]["curve"]) == 3
     out = tmp_path / "out"
     ex.write(docs, out)
@@ -135,3 +135,71 @@ def test_build_reads_sweeps_and_write_lays_out_files(tmp_path):
     idx = json.loads((out / "index.json").read_text())
     assert idx[0]["generated_tok_per_s"] == 127349.7 and idx[1]["status"] == "failed"
     assert len(list((out / "runs").glob("*.json"))) == 2
+
+
+def test_superseded_failures_collapse_and_lasting_ones_stay():
+    ok = {**ROW, "tp": 2, "replicas": 4}
+    oom = {**ok, "error": "CUDA out of memory", "run_dir": None, "confirmed": False}
+    never = {**ROW, "model": "x/never", "error": "exited once", "run_dir": None}
+    never2 = {**never, "error": "exited twice"}
+    rows = ex.collapse_rows([oom, ok, never, never2])
+    assert ok in rows and oom not in rows
+    assert never2 in rows and never not in rows
+    assert len(rows) == 2
+
+
+def test_the_ui_routes_serve_index_json_and_zip(tmp_path, monkeypatch):
+    import io
+    import zipfile
+
+    from fastapi.testclient import TestClient
+
+    from simulator.roofline import State, save_state
+    from simulator.service import create_app
+    from simulator.service import roofline as svc
+
+    runs = tmp_path / "runs"
+    (runs / "run_326").mkdir(parents=True)
+    (runs / "run_326" / "headline_sweep.json").write_text(json.dumps(SWEEP))
+    st = State()
+    st.plan = {"model_info": {ROW["model"]: {"quant": "NVFP4"}}}
+    st.results = [{**ROW, "run_dir": "runs/run_326"},
+                  {**ROW, "model": "x/never", "error": "boom", "run_dir": None}]
+    save_state(runs / "roofline.json", st)
+    monkeypatch.setattr(svc, "_SYSTEM", SYSTEM)
+    c = TestClient(create_app(runs_base=runs))
+
+    idx = c.get("/api/roofline/export/index").json()
+    assert idx["documents"] == 2 and idx["ok"] == 1 and idx["failed"] == 1
+    assert idx["json_name"].endswith(".json") and "xe7740" in idx["json_name"]
+
+    r = c.get("/api/roofline/export")
+    assert r.status_code == 200
+    assert "attachment" in r.headers["content-disposition"]
+    docs = r.json()
+    assert docs[0]["cohorts"][0]["capacity_throughput"]["generated_tok_per_s"] == 127349.7
+
+    z = c.get("/api/roofline/export.zip")
+    assert z.headers["content-type"] == "application/zip"
+    names = zipfile.ZipFile(io.BytesIO(z.content)).namelist()
+    assert "all.json" in names and "index.json" in names
+    assert sum(n.startswith("runs/") for n in names) == 2
+
+
+def test_capacity_is_the_best_rung_that_served():
+    """A pre-gate row whose peak rung mostly failed: capacity moves to
+    the best passing rung; with none passing the document says so."""
+    bad_peak = {"concurrency": 4096, "out_tok_s": 107803.4, "samples": 390, "errors": 610,
+                "steady_state": True, "held": True, "measure_s": 90}
+    good = {"concurrency": 2048, "out_tok_s": 60000.0, "samples": 5000, "errors": 0,
+            "steady_state": True, "held": True, "measure_s": 90, "gpu_power_w": 3000.0}
+    sweep = {**SWEEP, "rungs": [good, bad_peak], "peak": bad_peak}
+    row = {**ROW, "model": "openai/gpt-oss-20b", "out_tok_s": 107803.4, "success_rate": 0.39}
+    c = ex.row_document(row, info={}, sweep=sweep, system=SYSTEM, generated_at="t")["cohorts"][0]
+    assert c["final_status"] == "ok"
+    assert c["capacity_throughput"]["generated_tok_per_s"] == 60000.0
+    assert c["capacity_throughput"]["success_rate"] == 1.0
+    assert c["target_capacity_pool_size"] == 2048 and c["fail_pool_size"] == 4096
+    none = {**sweep, "rungs": [bad_peak]}
+    c2 = ex.row_document(row, info={}, sweep=none, system=SYSTEM, generated_at="t")["cohorts"][0]
+    assert c2["final_status"] == "no_passing_rung" and c2["capacity_throughput"] is None

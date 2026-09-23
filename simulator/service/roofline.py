@@ -41,6 +41,75 @@ async def roofline_state(request: Request) -> dict:
     return doc
 
 
+# ── sizing export ────────────────────────────────────────────
+# The roofline's measurements in the sizing tool's document shape
+# (export_sizing.py), built from the state file on every request so a
+# download is never older than the page it was clicked on.
+
+_SYSTEM: dict | None = None
+
+
+def _export_docs(request: Request, collapse: bool) -> list[dict]:
+    import json
+    from pathlib import Path
+
+    from ..export_sizing import build, detect_system
+    from ..roofline import load_state
+    global _SYSTEM
+    state_path = Path(request.app.state.paths.roofline_state)
+    st = load_state(state_path)
+    if st is None:
+        return []
+    if _SYSTEM is None:
+        _SYSTEM = detect_system()
+    placement = None
+    p = state_path.parent / "kt_placement" / "kt_placement.json"
+    if p.is_file():
+        try:
+            placement = json.loads(p.read_text())
+        except ValueError:
+            placement = None
+    return build(st.to_dict(), state_path.parent, system=_SYSTEM,
+                 placement=placement, collapse=collapse)
+
+
+def _export_name(ext: str) -> str:
+    import time
+    host = ((_SYSTEM or {}).get("platform") or "capsim").replace("PowerEdge ", "")
+    return f"{host.lower().replace(' ', '-')}_sizing_{time.strftime('%Y-%m-%d')}.{ext}"
+
+
+@router.get("/api/roofline/export/index")
+async def roofline_export_index(request: Request, all_attempts: bool = False) -> dict:
+    from ..export_sizing import summary
+    docs = await asyncio.to_thread(_export_docs, request, not all_attempts)
+    return {**summary(docs), "json_name": _export_name("json"),
+            "zip_name": _export_name("zip")}
+
+
+@router.get("/api/roofline/export")
+async def roofline_export(request: Request, all_attempts: bool = False):
+    import json
+
+    from fastapi.responses import Response
+    docs = await asyncio.to_thread(_export_docs, request, not all_attempts)
+    return Response(json.dumps(docs, indent=1), media_type="application/json",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{_export_name("json")}"'})
+
+
+@router.get("/api/roofline/export.zip")
+async def roofline_export_zip(request: Request, all_attempts: bool = False):
+    from fastapi.responses import Response
+
+    from ..export_sizing import zip_bytes
+    docs = await asyncio.to_thread(_export_docs, request, not all_attempts)
+    data = await asyncio.to_thread(zip_bytes, docs)
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{_export_name("zip")}"'})
+
+
 @router.get("/api/roofline/candidates")
 async def roofline_candidates(limit: int = 8, diverse: bool = True,
                               cached_only: bool = False,

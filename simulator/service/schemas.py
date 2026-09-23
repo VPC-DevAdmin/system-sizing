@@ -114,6 +114,7 @@ class RooflineRequest(BaseModel):
     # again (after a launcher fix); measured cells are kept.
     retry_engines: Optional[list[str]] = None
     redo_engines: Optional[list[str]] = None
+    priority_models: Optional[list[str]] = None
     engines: Optional[list[str]] = None      # None = every staged engine
     max_num_seqs: Optional[list[int]] = None
     output_tokens: Optional[list[int]] = None

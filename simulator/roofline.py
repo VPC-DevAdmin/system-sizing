@@ -1294,6 +1294,7 @@ async def run_roofline(
     model_info: dict[str, dict] | None = None,
     retry_engines: list[str] | None = None,
     redo_engines: list[str] | None = None,
+    priority_models: list[str] | None = None,
     gpu_count: int = 8,
     max_tp: Optional[int] = None,
     vram_per_gpu_gb: float | None = None,
@@ -1403,6 +1404,12 @@ async def run_roofline(
     # the same cell one tp step wider, right behind the failed one so
     # the model's answer is still complete before the next model.
     work = list(plan_cells)
+    if priority_models:
+        # The operator wants one model's answer first (a 1T model on
+        # KTransformers whose escalated cells sat behind two dozen
+        # others). Stable, so the model-major order holds otherwise.
+        pri = set(priority_models)
+        work.sort(key=lambda c: 0 if c["model"] in pri else 1)
     i = 0
     while i < len(work):
         cell = work[i]

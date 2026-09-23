@@ -1683,3 +1683,42 @@ def test_resume_backfills_outcomes_from_retained_sweeps(tmp_path):
     assert old["samples"] == 19659 and old["success_rate"] == 0.39
     assert backfill_outcomes(rows, runs) == 0                      # idempotent
     assert summarize(rows)["best_per_model"]["openai/gpt-oss-20b"]["out_tok_s"] == 104907.7
+
+
+def test_priority_models_run_first_on_resume(tmp_path, monkeypatch):
+    import simulator.roofline as rf
+    order: list[str] = []
+
+    def fake_build(overrides):
+        order.append(overrides["model_id"])
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("x: 1")
+        return cfg
+
+    class _Out:
+        db_directory = ""
+
+    class _Cfg:
+        output = _Out()
+
+    async def fake_sweep(cfg, cohort, *, new_run, ladder_override=None):
+        out = tmp_path / f"sweep_{len(order)}.json"
+        out.write_text(json.dumps({"peak": {"out_tok_s": 1.0, "concurrency": 8}}))
+        return out
+
+    async def fake_staged(models, st, path, **kw):
+        return set(models)
+
+    monkeypatch.setattr("simulator.config.load_config", lambda p: _Cfg())
+    monkeypatch.setattr("simulator.headline_sweep.run_headline_sweep", fake_sweep)
+    monkeypatch.setattr(rf, "ensure_staged", fake_staged)
+    monkeypatch.setattr("simulator.personas.cohort_from_persona", lambda name: object())
+    monkeypatch.setattr("simulator.headline_shapes.apply_shape_to_generation",
+                        lambda *a, **k: None)
+    asyncio.run(rf.run_roofline(
+        models=["a", "b", "c"], engines=["trtllm"],
+        shapes={"max_num_seqs": [1024], "output_tokens": [128]},
+        build_config=fake_build, runs_base=tmp_path, resume=False,
+        confirm_winners=False, engine_shape={"tp": 1, "replicas": 8},
+        priority_models=["c"]))
+    assert order == ["c", "a", "b"]

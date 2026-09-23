@@ -488,6 +488,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             confirm_winners=bool(spec.get("confirm_winners", True)),
             retry_engines=list(spec.get("retry_engines") or []),
             redo_engines=list(spec.get("redo_engines") or []),
+            priority_models=list(spec.get("priority_models") or []),
             engine_shape=shape_of(base_custom),
             model_info=model_info,
             gpu_count=int(hw_bounds.get("gpu_count") or 8),

@@ -121,8 +121,26 @@ def peak_rung(rungs: list[Rung]) -> Rung | None:
     scored = [r for r in rungs if r.out_tok_s]
     if not scored:
         return None
-    settled = [r for r in scored if r.steady_state]
-    return max(settled or scored, key=lambda r: r.out_tok_s or 0.0)
+    # A rung whose answers mostly failed is not a rate anyone is
+    # served at: Kimi-K2-Thinking on KTransformers at 512 offered
+    # generated 97 tok/s while all 256 requests timed out, and it
+    # beat the clean 128-stream rung (60). No answers back yet is not
+    # failure -- a slow rung can end before its first lifetime does.
+    served = [r for r in scored if rung_served(r)] or scored
+    settled = [r for r in served if r.steady_state]
+    return max(settled or served, key=lambda r: r.out_tok_s or 0.0)
+
+
+# The roofline's publishing bar (roofline.MIN_SUCCESS).
+RUNG_MIN_SUCCESS = 0.9
+
+
+def rung_served(r: Rung) -> bool:
+    """At least RUNG_MIN_SUCCESS of the rung's finished requests got an
+    answer (reasoning-only completions count as served: the engine
+    generated them), or none finished at all."""
+    done = r.samples + r.errors + r.no_content
+    return done == 0 or (r.samples + r.no_content) / done >= RUNG_MIN_SUCCESS
 
 
 def engine_dead(rung: Rung) -> bool:

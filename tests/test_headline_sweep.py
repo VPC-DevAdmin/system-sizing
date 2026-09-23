@@ -283,3 +283,17 @@ def test_sglangs_gen_throughput_is_parsed_and_summed_over_replicas():
     m = Engine._parse_prometheus('sglang:gen_throughput{model_name="k"} 46.93\n')
     assert m["gen_throughput"] == 46.93
     assert aggregate_replica_metrics([m, m])["gen_throughput"] == 2 * 46.93
+
+
+def test_the_peak_skips_a_rung_whose_requests_failed():
+    from simulator.headline_sweep import Rung, peak_rung
+    clean = Rung(concurrency=128, in_flight=128, queue_depth=0, out_tok_s=59.7,
+                 prompt_tok_s=None, total_tok_s=None, samples=64)
+    timed_out = Rung(concurrency=512, in_flight=256, queue_depth=350,
+                     out_tok_s=96.8, prompt_tok_s=None, total_tok_s=None,
+                     errors=256)
+    slow = Rung(concurrency=64, in_flight=64, queue_depth=0, out_tok_s=37.9,
+                prompt_tok_s=None, total_tok_s=None)
+    assert peak_rung([slow, clean, timed_out]) is clean
+    # Nothing served anywhere: still report the best, not nothing.
+    assert peak_rung([timed_out]) is timed_out

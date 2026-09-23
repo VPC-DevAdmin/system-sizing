@@ -220,6 +220,24 @@ class EngineConfig:
     # (TORCH_CUDA_ARCH_LIST / FLASHINFER_CUDA_ARCH_LIST). "12.0" is
     # consumer/pro Blackwell (RTX PRO 6000, RTX 5090).
     ktransformers_cuda_arch: str = "12.0"
+    # One replica per socket (DP over NUMA nodes): each replica's CPU
+    # experts, threads and memory stay on the node its GPUs hang off.
+    # replica_numa names the node per replica; None -> replica index
+    # modulo the host's node count (GPUs 0-3 / 4-7 on an XE7740).
+    ktransformers_numa_pin: bool = False
+    ktransformers_replica_numa: list[int] | None = None
+    # --kt-expert-placement-strategy: frequency | uniform | front-loading
+    # | random. frequency reads per-expert activation counts from
+    # expert_freq_path (a .pt holding {"logical_count": [n, layers,
+    # experts]}) and keeps each layer's most-used experts on the GPU.
+    ktransformers_expert_placement: str | None = None
+    ktransformers_expert_freq_path: str | None = None
+    # Record expert activations (the fork's stat recorder plus which
+    # experts sat on the GPU) into record_dir/r<replica>/ -- how a
+    # frequency file is made, and how the share of expert work left on
+    # the CPU is measured rather than assumed.
+    ktransformers_record_experts: bool = False
+    ktransformers_record_dir: str | None = None
 
     # ── llamacpp: llama-server, GGUF-fed, optional CPU experts ────────
     # Floating CUDA server tag; pin server-cuda-v<release> to reproduce

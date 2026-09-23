@@ -160,6 +160,77 @@ def cuda_arch_env(arch: str | None) -> dict[str, str]:
 V4_MARKERS = ("deepseek_v4", "deepseek_ref", "deepseekv4")
 
 
+def parse_cpulist(text: str) -> list[int]:
+    """CPU ids from a sysfs cpulist ("0,2,4-7")."""
+    out: list[int] = []
+    for part in text.strip().split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.extend(range(int(a), int(b) + 1))
+        else:
+            out.append(int(part))
+    return out
+
+
+def node_cpulist(node: int) -> str | None:
+    """The sysfs cpulist of a NUMA node, verbatim (docker --cpuset-cpus
+    takes the same syntax), or None off Linux."""
+    try:
+        return (Path(LINUX_NUMA_ROOT) / f"node{int(node)}" / "cpulist").read_text().strip()
+    except OSError:
+        return None
+
+
+PLACEMENTS = ("frequency", "front-loading", "uniform", "random")
+CONTAINER_FREQ_DIR = "/kt-freq"
+CONTAINER_RECORD_DIR = "/kt-dist"
+
+
+def placement_args(strategy: str | None, freq_path: str | None
+                   ) -> tuple[list[str], list[str]]:
+    """(docker args, server args) for GPU expert placement. frequency
+    without a file is refused: the fork would fall back to uniform
+    with a warning and the run would measure the wrong thing."""
+    if not strategy:
+        if freq_path:
+            raise ValueError("ktransformers_expert_freq_path is set but "
+                             "ktransformers_expert_placement is not")
+        return [], []
+    if strategy not in PLACEMENTS:
+        raise ValueError(f"ktransformers_expert_placement {strategy!r} is not "
+                         f"one of {', '.join(PLACEMENTS)}")
+    docker: list[str] = []
+    server = ["--kt-expert-placement-strategy", strategy]
+    if strategy == "frequency":
+        if not freq_path or not Path(freq_path).is_file():
+            raise ValueError("frequency placement needs ktransformers_"
+                             f"expert_freq_path to name a .pt file (got {freq_path!r})")
+        name = Path(freq_path).name
+        if not name.endswith(".pt"):
+            raise ValueError("the fork reads activation counts only from a .pt")
+        docker += ["-v", f"{Path(freq_path).parent}:{CONTAINER_FREQ_DIR}:ro"]
+        server += ["--init-expert-location", f"{CONTAINER_FREQ_DIR}/{name}"]
+    return docker, server
+
+
+def record_args(record_dir: str | None, index: int) -> tuple[list[str], list[str]]:
+    """(docker args, server args) that turn on the fork's expert
+    recorder with dumps landing in record_dir/r<index>. The recorder
+    keeps the last 1000 forward passes and a dump resets it, so a
+    caller dumps every few minutes and sums the files."""
+    if not record_dir:
+        raise ValueError("ktransformers_record_experts needs ktransformers_record_dir")
+    host = Path(record_dir) / f"r{index}"
+    host.mkdir(parents=True, exist_ok=True)
+    docker = ["-v", f"{host}:{CONTAINER_RECORD_DIR}",
+              "-e", f"SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR={CONTAINER_RECORD_DIR}"]
+    server = ["--expert-distribution-recorder-mode", "stat",
+              "--record-kt-gpu-expert-distribution"]
+    return docker, server
+
+
 def config_backup_env(config_doc: dict | None) -> dict[str, str]:
     """Turn off the image's DeepSeek-V4 config substitution for every
     other checkpoint.
@@ -439,11 +510,41 @@ def build_replica_command(engine, index: int, devices: list[int],
             weight_path = "/gguf"
     else:
         weight_path = model_in_container
-    cmd += list(cfg.docker_extra_args or [])
-    cmd.append(getattr(cfg, "ktransformers_image", None) or DEFAULT_IMAGE)
-
+    extra_server: list[str] = []
+    numa_nodes: list[int] | None = None
     cpu_threads = getattr(cfg, "ktransformers_cpu_threads", None) or default_cpu_infer()
     pools = getattr(cfg, "ktransformers_threadpool_count", None) or numa_node_count()
+    if getattr(cfg, "ktransformers_numa_pin", False):
+        # One socket per replica: its threads, its memory, its node's
+        # share of the cores. Without the cpuset the replica's kt-kernel
+        # pool would still be told one node while SGLang's own threads
+        # and every page it allocates wander across both.
+        nodes = numa_node_count() or 1
+        per = getattr(cfg, "ktransformers_replica_numa", None)
+        node = int(per[index]) if per and index < len(per) else index % nodes
+        cpus = node_cpulist(node)
+        if cpus:
+            cmd += ["--cpuset-cpus", cpus]
+        cmd += ["--cpuset-mems", str(node)]
+        from .ktransformers import physical_cores
+        cores = physical_cores()
+        if not getattr(cfg, "ktransformers_cpu_threads", None) and cores:
+            cpu_threads = max(1, cores // nodes - 2)
+        pools = 1
+        numa_nodes = [node]
+    pdocker, pserver = placement_args(
+        getattr(cfg, "ktransformers_expert_placement", None),
+        getattr(cfg, "ktransformers_expert_freq_path", None))
+    cmd += pdocker
+    extra_server += pserver
+    if getattr(cfg, "ktransformers_record_experts", False):
+        rdocker, rserver = record_args(getattr(cfg, "ktransformers_record_dir", None), index)
+        cmd += rdocker
+        extra_server += rserver
+    if numa_nodes is not None:
+        extra_server += ["--kt-numa-nodes", *[str(n) for n in numa_nodes]]
+    cmd += list(cfg.docker_extra_args or [])
+    cmd.append(getattr(cfg, "ktransformers_image", None) or DEFAULT_IMAGE)
 
     from .vram import to_engine_fraction
     mem_fraction = to_engine_fraction(
@@ -479,7 +580,7 @@ def build_replica_command(engine, index: int, devices: list[int],
         mem_fraction_static=mem_fraction,
         max_total_tokens=total_tokens,
         trust_remote_code=True,
-        extra=list(getattr(cfg, "ktransformers_extra_flags", None) or []),
+        extra=extra_server + list(getattr(cfg, "ktransformers_extra_flags", None) or []),
     )
 
 

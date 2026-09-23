@@ -411,3 +411,65 @@ def test_a_native_checkpoint_passes_the_config_builder_without_a_gguf(tmp_path, 
     assert _native_kt_launch({}, mid)
     assert not _native_kt_launch({"ktransformers_gguf_path": "/gguf"}, mid)
     assert not _native_kt_launch({"ktransformers_generation": "v0.3"}, mid)
+
+
+def test_dp_replicas_pin_to_their_socket(tmp_path, monkeypatch):
+    """TP4 x DP2 on an XE7740: replica 0 on GPUs 0-3 and node 0,
+    replica 1 on GPUs 4-7 and node 1 -- cpuset, memory, one kt pool on
+    that node, and half the physical cores less two."""
+    _stage(tmp_path, monkeypatch, "moonshotai/Kimi-K2-Thinking", RAWINT4)
+    monkeypatch.setattr(kt, "physical_cores", lambda: 172)
+    monkeypatch.setattr(v2, "numa_node_count", lambda: 2)
+    monkeypatch.setattr(v2, "node_cpulist", lambda n: f"{n},{n + 2},{n + 4}")
+    eng = KTransformersEngine(_cfg(model_id="moonshotai/Kimi-K2-Thinking",
+                                   replica_devices=[[0, 1, 2, 3], [4, 5, 6, 7]],
+                                   ktransformers_numa_pin=True))
+    r1 = eng.build_replica_command(1, [4, 5, 6, 7], "ktransformers-r1-x")
+    assert r1[r1.index("--cpuset-cpus") + 1] == "1,3,5"
+    assert r1[r1.index("--cpuset-mems") + 1] == "1"
+    assert r1[r1.index("--kt-numa-nodes") + 1] == "1"
+    assert r1[r1.index("--kt-threadpool-count") + 1] == "1"
+    assert r1[r1.index("--kt-cpuinfer") + 1] == "84"
+    r0 = eng.build_replica_command(0, [0, 1, 2, 3], "ktransformers-r0-x")
+    assert r0[r0.index("--kt-numa-nodes") + 1] == "0"
+    # Unpinned: both pools, every core, no cpuset.
+    free = KTransformersEngine(_cfg(model_id="moonshotai/Kimi-K2-Thinking"))
+    c = free.build_replica_command(0, [0, 1, 2, 3], "ktransformers-r0-x")
+    assert "--cpuset-cpus" not in c and "--kt-numa-nodes" not in c
+
+
+def test_frequency_placement_mounts_the_counts_and_recording_mounts_a_dir(tmp_path, monkeypatch):
+    _stage(tmp_path, monkeypatch, "moonshotai/Kimi-K2-Thinking", RAWINT4)
+    monkeypatch.setattr(kt, "physical_cores", lambda: 172)
+    freq = tmp_path / "calib" / "kimi_freq.pt"
+    freq.parent.mkdir()
+    freq.write_bytes(b"pt")
+    rec = tmp_path / "rec"
+    eng = KTransformersEngine(_cfg(
+        model_id="moonshotai/Kimi-K2-Thinking", replica_devices=[[0]],
+        ktransformers_expert_placement="frequency",
+        ktransformers_expert_freq_path=str(freq),
+        ktransformers_record_experts=True, ktransformers_record_dir=str(rec)))
+    cmd = eng.build_replica_command(0, [0], "ktransformers-r0-x")
+    j = " ".join(cmd)
+    assert f"-v {freq.parent}:/kt-freq:ro" in j
+    assert cmd[cmd.index("--kt-expert-placement-strategy") + 1] == "frequency"
+    assert cmd[cmd.index("--init-expert-location") + 1] == "/kt-freq/kimi_freq.pt"
+    assert f"-v {rec / 'r0'}:/kt-dist" in j
+    assert "-e SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR=/kt-dist" in j
+    assert cmd[cmd.index("--expert-distribution-recorder-mode") + 1] == "stat"
+    assert "--record-kt-gpu-expert-distribution" in cmd
+    assert (rec / "r0").is_dir()
+
+
+def test_placement_refusals():
+    with pytest.raises(ValueError, match="needs ktransformers_expert_freq_path"):
+        v2.placement_args("frequency", None)
+    with pytest.raises(ValueError, match="not one of"):
+        v2.placement_args("hottest", None)
+    with pytest.raises(ValueError, match="placement is not"):
+        v2.placement_args(None, "/x.pt")
+    with pytest.raises(ValueError, match="record_dir"):
+        v2.record_args(None, 0)
+    assert v2.placement_args("uniform", None) == ([], ["--kt-expert-placement-strategy", "uniform"])
+    assert v2.parse_cpulist("0,2,4-6") == [0, 2, 4, 5, 6]

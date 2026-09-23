@@ -115,6 +115,9 @@ class RooflineRequest(BaseModel):
     retry_engines: Optional[list[str]] = None
     redo_engines: Optional[list[str]] = None
     priority_models: Optional[list[str]] = None
+    # Add the KTransformers scaling matrix (tp x GPU experts x streams)
+    # for every model with a native checkpoint staged.
+    kt_scale: bool = False
     engines: Optional[list[str]] = None      # None = every staged engine
     max_num_seqs: Optional[list[int]] = None
     output_tokens: Optional[list[int]] = None

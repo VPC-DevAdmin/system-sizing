@@ -1722,3 +1722,80 @@ def test_priority_models_run_first_on_resume(tmp_path, monkeypatch):
         confirm_winners=False, engine_shape={"tp": 1, "replicas": 8},
         priority_models=["c"]))
     assert order == ["c", "a", "b"]
+
+
+KIMI_CONFIG = {"architectures": ["DeepseekV3ForCausalLM"], "model_type": "kimi_k2",
+               "hidden_size": 7168, "moe_intermediate_size": 2048,
+               "n_routed_experts": 384, "num_hidden_layers": 61,
+               "first_k_dense_replace": 1, "kv_lora_rank": 512,
+               "qk_rope_head_dim": 64,
+               "quantization_config": {"quant_method": "compressed-tensors",
+                                       "config_groups": {"g": {"weights": {
+                                           "num_bits": 4, "type": "int"}}}}}
+
+
+def _stage_kimi(tmp_path, disk_gb: float = 594.0):
+    snap = tmp_path / "hub" / "models--moonshotai--Kimi-K2-Thinking" / "snapshots" / "a"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text(json.dumps(KIMI_CONFIG))
+    f = snap / "model-00001.safetensors"
+    with f.open("wb") as fh:          # sparse: the size is what counts
+        fh.truncate(int(disk_gb * 1e9))
+    return snap
+
+
+def test_kt_expert_budget_matches_what_kimi_loaded(tmp_path):
+    """Kimi-K2-Thinking loaded 23.5 GB onto one card with every expert
+    on the CPUs; one expert index across its 60 MoE layers is 1.49 GB
+    at INT4."""
+    from simulator.roofline import kt_expert_budget, kt_gpu_expert_fit
+    _stage_kimi(tmp_path)
+    b = kt_expert_budget("moonshotai/Kimi-K2-Thinking", tmp_path)
+    assert abs(b["slot_gb"] - 1.486) < 0.01
+    assert 20 < b["base_gb"] < 26 and b["n_experts"] == 384
+    assert b["kv_bytes_per_token"] == 576 * 61 * 2
+    fits = [kt_gpu_expert_fit(b, tp=tp, seqs=64, vram_gb=95) for tp in (1, 2, 4, 8)]
+    assert fits == sorted(fits) and 0 < fits[0] < 60 and fits[-1] <= 384
+    # More streams, more KV, fewer experts.
+    assert kt_gpu_expert_fit(b, tp=4, seqs=256, vram_gb=95) < fits[2]
+
+
+def test_kt_scale_plans_tp_by_experts_by_streams(tmp_path, monkeypatch):
+    """The scaling matrix: every tp the box allows x 64/256 streams x
+    no / half / all-the-room GPU experts, one replica, tp past the
+    PCIe domain spanning it, a 1k context."""
+    from simulator.roofline import kt_scale_cells
+    _stage_kimi(tmp_path)
+    info = {"moonshotai/Kimi-K2-Thinking": {"kt_native": True}}
+    c = kt_scale_cells(["moonshotai/Kimi-K2-Thinking", "other/model"],
+                       model_info=info, gpu_count=8, max_tp=None, domain_tp=4,
+                       vram_gb=95, output_tokens=128, input_tokens=128,
+                       engine_shape={"gpu_memory_utilization": 0.95},
+                       cache=tmp_path)
+    assert len(c) == 4 * 2 * 3
+    assert {x["tp"] for x in c} == {1, 2, 4, 8}
+    assert {x["max_num_seqs"] for x in c} == {64, 256}
+    assert all(x["replicas"] == 1 and x["max_model_len"] == 1024 for x in c)
+    assert all((x.get("placement") == "span") == (x["tp"] == 8) for x in c)
+    tp4 = sorted(x["ktransformers_gpu_experts"] for x in c
+                 if x["tp"] == 4 and x["max_num_seqs"] == 64)
+    assert tp4[0] == 0 and tp4[1] == tp4[2] // 2
+    assert len({cell_key(x) for x in c}) == len(c)
+    # Capped at the device group when cross-domain tp is not allowed.
+    c4 = kt_scale_cells(["moonshotai/Kimi-K2-Thinking"], model_info=info,
+                        gpu_count=8, max_tp=4, domain_tp=4, vram_gb=95,
+                        output_tokens=128, input_tokens=128, cache=tmp_path)
+    assert max(x["tp"] for x in c4) == 4
+
+
+def test_a_kt_scale_oom_sheds_gpu_experts_first():
+    from simulator.roofline import escalate_cell
+    cell = {"model": "moonshotai/Kimi-K2-Thinking", "engine": "ktransformers",
+            "max_num_seqs": 64, "output_tokens": 128, "tp": 4, "replicas": 1,
+            "gpu_memory_utilization": 0.95, "kt_native": True,
+            "ktransformers_gpu_experts": 177,
+            "error": "torch.OutOfMemoryError: CUDA out of memory"}
+    nxt = escalate_cell(cell, gpu_count=8, max_tp=None, weight_gb=594, vram_gb=96)
+    assert nxt["ktransformers_gpu_experts"] == 118 and nxt["tp"] == 4
+    assert nxt["gpu_memory_utilization"] == 0.95 and "error" not in nxt
+    assert cell_key(nxt) != cell_key(cell)

@@ -719,6 +719,133 @@ def cells(models: list[str], engines: list[str], shapes: dict, *,
     return out
 
 
+# ── KTransformers scaling matrix ─────────────────────────────────────
+#
+# The plan's KTransformers cell is one GPU, every expert on the CPUs,
+# four streams: the "fits where nothing else does" point. Whether the
+# CPUs are worth anything next to GPUs is a different question, and it
+# is answered by moving experts onto more GPUs and serving more
+# streams: tp x GPU-resident experts x concurrency. Opt-in (kt_scale),
+# native checkpoints only (the v0.7 line has the expert lever).
+KT_SCALE_TPS = (1, 2, 4, 8)
+KT_SCALE_SEQS = (64, 256)
+# The roofline's requests are 128 in / 256 out at most; a 1k context
+# keeps the KV pool at 256 streams to ~18 GB a card instead of ~73.
+KT_SCALE_CTX = 1024
+# Only this share of the computed room is filled with experts.
+KT_SCALE_FILL = 0.9
+# Bytes a parameter takes on the card, by --kt-method.
+KT_BYTES_PER_PARAM = {"RAWINT4": 0.5625, "MXFP4": 0.53, "FP8": 1.0,
+                      "FP8_PERCHANNEL": 1.0, "BF16": 2.0}
+
+
+def kt_expert_budget(model_id: str, cache: Path | None = None) -> dict | None:
+    """What one GPU-resident expert slot costs for a staged native
+    checkpoint: ``slot_gb`` (one expert index across every MoE layer --
+    what ``--kt-num-gpu-experts`` counts), ``base_gb`` (everything that
+    is not a routed expert), ``n_experts`` and ``kv_bytes_per_token``.
+    None when the checkpoint is not staged or its config is not a
+    routed-expert one.
+
+    Kimi-K2-Thinking: 60 MoE layers x 3 x 7168 x 2048 at INT4 = 1.49 GB
+    a slot, 384 slots, 23 GB of base -- which is what it loaded.
+    """
+    from .engines.ktransformers_v2 import kt_method_for
+    from .models import _latest_snapshot, _model_dir, hf_cache_dir
+    try:
+        rev = _latest_snapshot(_model_dir(model_id, cache or hf_cache_dir()))
+        doc = json.loads((rev / "config.json").read_text()) if rev else None
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    doc = doc.get("text_config") or doc
+    try:
+        h = int(doc["hidden_size"])
+        mi = int(doc["moe_intermediate_size"])
+        n = int(doc.get("n_routed_experts") or doc["num_experts"])
+        layers = int(doc["num_hidden_layers"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    moe_layers = layers - int(doc.get("first_k_dense_replace") or 0)
+    bpp = KT_BYTES_PER_PARAM.get(kt_method_for(doc) or "", 2.0)
+    slot_gb = moe_layers * 3 * h * mi * bpp / 1e9
+    disk_gb = sum(f.stat().st_size for f in rev.glob("*.safetensors")) / 1e9
+    base_gb = max(5.0, disk_gb - n * slot_gb)
+    if doc.get("kv_lora_rank"):
+        # MLA: one latent plus the rope key per token per layer, the
+        # same on every tp rank.
+        kv = (int(doc["kv_lora_rank"]) + int(doc.get("qk_rope_head_dim") or 64)) * layers * 2
+    else:
+        heads = int(doc.get("num_key_value_heads") or doc.get("num_attention_heads") or 8)
+        hd = int(doc.get("head_dim") or h // int(doc.get("num_attention_heads") or 1))
+        kv = 2 * heads * hd * layers * 2
+    return {"slot_gb": slot_gb, "base_gb": base_gb, "n_experts": n,
+            "kv_bytes_per_token": kv}
+
+
+def kt_gpu_expert_fit(budget: dict, *, tp: int, seqs: int, vram_gb: float,
+                      share: float = 0.95, ctx: int = KT_SCALE_CTX) -> int:
+    """How many expert slots (per layer) ``tp`` cards hold beside the
+    base weights and a ``seqs`` x ``ctx`` KV pool, inside SGLang's
+    static share of each card."""
+    from .engines.vram import to_engine_fraction
+    # SGLang's static share (weights + KV); the rest of the card is
+    # its activation reserve (engines/vram.py).
+    static = to_engine_fraction("sglang_cuda", share, total_vram_gb=vram_gb,
+                                weights_gb=None)[0] or share
+    kv_gb = seqs * ctx * budget["kv_bytes_per_token"] / 1e9
+    per_card = vram_gb * static - kv_gb
+    room = tp * per_card - budget["base_gb"]
+    if room <= 0:
+        return 0
+    return max(0, min(int(budget["n_experts"]),
+                      int(KT_SCALE_FILL * room / budget["slot_gb"])))
+
+
+def kt_scale_cells(models: list[str], *, model_info: dict[str, dict] | None,
+                   gpu_count: int, max_tp: Optional[int],
+                   domain_tp: Optional[int], vram_gb: float | None,
+                   output_tokens: int, input_tokens: int,
+                   engine_shape: dict | None = None,
+                   cache: Path | None = None) -> list[dict]:
+    """The scaling matrix for every native-KTransformers model: each tp
+    the box allows x each concurrency x {no experts, half the room,
+    all the room} on the GPUs. One replica; tp past the PCIe domain
+    spans it."""
+    if not vram_gb:
+        return []
+    cap = min(int(gpu_count), int(max_tp)) if max_tp else int(gpu_count)
+    out: list[dict] = []
+    for m in models:
+        info = (model_info or {}).get(m) or {}
+        if not info.get("kt_native"):
+            continue
+        budget = kt_expert_budget(m, cache)
+        if budget is None:
+            continue
+        shape = {**shape_of(engine_shape or {}),
+                 **engine_defaults("ktransformers"),
+                 "max_model_len": KT_SCALE_CTX, "replicas": 1,
+                 "kt_native": True, "kt_scale": True}
+        share = float(shape.get("gpu_memory_utilization") or 0.95)
+        for tp in KT_SCALE_TPS:
+            if tp > cap:
+                continue
+            for seqs in KT_SCALE_SEQS:
+                fit = kt_gpu_expert_fit(budget, tp=tp, seqs=seqs,
+                                        vram_gb=float(vram_gb), share=share)
+                for experts in sorted({0, fit // 2, fit}):
+                    cell = {"model": m, "engine": "ktransformers",
+                            "max_num_seqs": seqs, "output_tokens": output_tokens,
+                            "input_tokens": input_tokens, **shape, "tp": tp,
+                            "ktransformers_gpu_experts": experts}
+                    if domain_tp and tp > int(domain_tp):
+                        cell["placement"] = "span"
+                    out.append(cell)
+    return out
+
+
 def _skip_note(model: str, engine: str, info: dict) -> str:
     if engine in GGUF_ENGINES:
         if info.get("kt_eligible"):
@@ -894,6 +1021,18 @@ def escalate_cell(cell: dict, *, gpu_count: int,
         weight_bound = False
     if domain_tp is None and max_tp:
         domain_tp = int(max_tp)
+    experts = int(cell.get("ktransformers_gpu_experts") or 0)
+    if native_kt and experts > 0:
+        # Experts placed on the cards are what the scaling matrix
+        # sized by estimate; a miss sheds a third of them at the same
+        # tp and share before anything else moves.
+        out = dict(cell)
+        for k in ("error", "escalated_from", "escalated_from_share", "note"):
+            out.pop(k, None)
+        out["ktransformers_gpu_experts"] = (experts * 2) // 3
+        out["escalated_from_experts"] = experts
+        out["replicas"] = 1
+        return out
     first, second = (wider, leaner) if weight_bound else (leaner, wider)
     out = first() or second()
     if out is not None and native_kt:
@@ -934,8 +1073,8 @@ def escalations(plan_cells: list[dict], results: list[dict], *,
         out.append({k2: v for k2, v in nxt.items()
                     if k2 in ("model", "engine", "max_num_seqs",
                               "output_tokens", "escalated_from",
-                              "escalated_from_share", "placement",
-                              "kt_native")
+                              "escalated_from_share", "escalated_from_experts",
+                              "placement", "kt_native", "kt_scale")
                     or _is_shape_key(k2)})
     return out
 
@@ -1295,6 +1434,7 @@ async def run_roofline(
     retry_engines: list[str] | None = None,
     redo_engines: list[str] | None = None,
     priority_models: list[str] | None = None,
+    kt_scale: bool = False,
     gpu_count: int = 8,
     max_tp: Optional[int] = None,
     vram_per_gpu_gb: float | None = None,
@@ -1362,6 +1502,18 @@ async def run_roofline(
     plan_cells = cells(models, engines, shapes, input_tokens=input_tokens,
                        engine_shape=engine_shape, model_info=model_info,
                        notes=notes)
+    if kt_scale:
+        have = {cell_key(c) for c in plan_cells}
+        extra = [c for c in kt_scale_cells(
+                     models, model_info=model_info, gpu_count=gpu_count,
+                     max_tp=max_tp, domain_tp=domain_tp,
+                     vram_gb=vram_per_gpu_gb,
+                     output_tokens=min(shapes.get("output_tokens")
+                                       or DEFAULT_SHAPES["output_tokens"]),
+                     input_tokens=input_tokens, engine_shape=engine_shape)
+                 if cell_key(c) not in have]
+        log.info("roofline: %d KTransformers scaling cells", len(extra))
+        plan_cells = plan_cells + extra
     owed = escalations(plan_cells, st.results, gpu_count=gpu_count,
                        max_tp=max_tp, model_info=model_info,
                        vram_gb=vram_per_gpu_gb, domain_tp=domain_tp)

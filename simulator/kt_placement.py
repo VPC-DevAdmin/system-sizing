@@ -68,29 +68,36 @@ def example_plan() -> dict:
         "prompt_set": "/data/capsim/datasets/kt_placement/prompts.jsonl",
         "out_dir": "/data/system-sizing/runs/kt_placement",
         "max_tokens": 256,
-        "warmup_s": 120,
-        "measure_s": 300,
+        # At ~1.3 tok/s a stream (64 streams, TP4 x DP2) a 256-token
+        # answer takes ~200 s; the window must outlive a request for
+        # outcomes and latency to be read at all (the smoke run's 90 s
+        # window finished none), and 256 streams would pass the client
+        # timeout.
+        "warmup_s": 240,
+        "measure_s": 420,
+        "request_timeout_s": 1200,
         "calibrate_s": 1500,
         "calibrate_concurrency": 128,
         "calibrate_max_tokens": 128,
         "mixes": ["balanced", "code_heavy", "chinese_heavy"],
         "configs": [
-            {"name": "dp2_uniform", "calibrate": True, "concurrency": [128, 256],
+            {"name": "dp2_uniform", "calibrate": True, "concurrency": [64, 128],
              "custom": {**kt, "replicas": 2, "ktransformers_numa_pin": True,
                         "ktransformers_expert_placement": "uniform",
                         "ktransformers_record_experts": True}},
-            {"name": "dp2_frequency", "concurrency": [128, 256],
+            {"name": "dp2_frequency", "concurrency": [64, 128],
              "custom": {**kt, "replicas": 2, "ktransformers_numa_pin": True,
                         "ktransformers_expert_placement": "frequency",
                         "ktransformers_expert_freq_path": "@calibration",
                         "ktransformers_record_experts": True}},
-            {"name": "dp1_frequency", "concurrency": [128, 256],
+            {"name": "dp1_frequency", "concurrency": [64, 128], "mixes": ["balanced"],
              "custom": {**kt, "replicas": 1, "max_num_seqs": 256,
                         "ktransformers_max_total_tokens": 262144,
                         "ktransformers_expert_placement": "frequency",
                         "ktransformers_expert_freq_path": "@calibration",
                         "ktransformers_record_experts": True}},
-            {"name": "sglang_tp8_nvfp4", "concurrency": [128, 256, 1024],
+            {"name": "sglang_tp8_nvfp4", "concurrency": [64, 128, 1024],
+             "mixes": ["balanced"],
              "custom": {"engine": "sglang_cuda",
                         "model_id": "nvidia/Kimi-K2-Thinking-NVFP4",
                         "tp": 8, "replicas": 1, "placement": "span",
@@ -422,7 +429,7 @@ class Results:
 async def measure(engine, model: str, items: list[dict], mix: str, split: str,
                   concurrency: int, *, warmup_s: float, measure_s: float,
                   max_tokens: int, record_dir: Path | None, image: str | None,
-                  out_dir: Path, seed: int) -> dict:
+                  out_dir: Path, seed: int, timeout_s: float = 600.0) -> dict:
     """One window: warm up, then measure with the recorder (if any)
     reset at the window's start and dumped at its end."""
     sampler = MixSampler(items, MIXES[mix], split, seed)
@@ -432,7 +439,8 @@ async def measure(engine, model: str, items: list[dict], mix: str, split: str,
     w0 = t_start + warmup_s
     w1 = w0 + measure_s
     load = asyncio.create_task(closed_loop(urls, model, sampler, concurrency=concurrency,
-                                           until=w1, max_tokens=max_tokens, done=done))
+                                           until=w1, max_tokens=max_tokens, done=done,
+                                           timeout_s=timeout_s))
     await asyncio.sleep(max(0.0, w0 - time.monotonic()))
     before = seen_files(record_dir)
     if record_dir is not None:
@@ -542,7 +550,7 @@ async def run(plan: dict) -> Path:
                 res.calibration["config"] = name
                 freq_path = res.calibration["freq_path"]
                 res.save(out_dir)
-            for mix in plan["mixes"]:
+            for mix in cfg.get("mixes") or plan["mixes"]:
                 for conc in cfg["concurrency"]:
                     w = await measure(
                         engine, model, items, mix, "eval", int(conc),
@@ -550,7 +558,8 @@ async def run(plan: dict) -> Path:
                         measure_s=float(plan["measure_s"]),
                         max_tokens=int(plan["max_tokens"]),
                         record_dir=record_dir, image=image, out_dir=out_dir,
-                        seed=int(plan.get("seed", 7)))
+                        seed=int(plan.get("seed", 7)),
+                        timeout_s=float(plan.get("request_timeout_s", 600)))
                     w.update({"config": name,
                               "gpu_experts": custom.get("ktransformers_gpu_experts"),
                               "replicas": custom.get("replicas"),

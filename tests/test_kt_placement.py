@@ -88,5 +88,8 @@ def test_example_plan_shape():
     assert plan["configs"][1]["custom"]["ktransformers_expert_freq_path"] == "@calibration"
     # The placement comparison holds everything but placement fixed.
     a, b = plan["configs"][0]["custom"], plan["configs"][1]["custom"]
+    assert plan["configs"][0]["concurrency"] == plan["configs"][1]["concurrency"]
+    assert "mixes" not in plan["configs"][0] and "mixes" not in plan["configs"][1]
+    assert plan["measure_s"] > 300 and plan["request_timeout_s"] > 600
     diff = {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
     assert diff == {"ktransformers_expert_placement", "ktransformers_expert_freq_path"}

@@ -209,6 +209,12 @@ class _Acc:
     prompt: list[float] = field(default_factory=list)
     errors: int = 0
     no_content: int = 0
+    # Wall-clock ms the rung's pressure was set. Only answers submitted
+    # after it feed Little's law: a request that started under the last
+    # rung never waited in this rung's queue, and its lifetime would
+    # undercount the one a queued stream lives (Kimi on KTransformers
+    # at 8 offered / 4 slots read 48 tok/s against a real ~26).
+    since_ms: float = 0.0
 
     def add(self, turns: list[dict]) -> None:
         for t in turns:
@@ -222,7 +228,8 @@ class _Acc:
                 self.ttft.append(float(t["ttft_ms"]))
             if t.get("tpot_ms") is not None:
                 self.tpot.append(float(t["tpot_ms"]))
-            if t.get("end_to_end_ms") and t.get("output_tokens") is not None:
+            if (t.get("end_to_end_ms") and t.get("output_tokens") is not None
+                    and float(t.get("submitted_at_ms") or 0) >= self.since_ms):
                 self.e2e.append(float(t["end_to_end_ms"]))
                 # Reasoning chunks are counted apart from the answer;
                 # the engine generated both.
@@ -428,6 +435,14 @@ async def run_headline_sweep(
             if ll is not None:
                 out_rate, prompt_rate = ll
                 source = "little"
+            else:
+                # No answer submitted under this rung has come back
+                # yet, and a few-completion counter is a wave count;
+                # two such chunks can agree by accident. Unmeasured
+                # keeps the rung measuring (chunks_converged refuses
+                # a running batch without a rate).
+                out_rate, prompt_rate = None, None
+                source = "pending"
         return Chunk(
             running=run_mean,
             queue=q_mean,
@@ -468,6 +483,7 @@ async def run_headline_sweep(
                 sim.open_loop_max_workers,
                 max(1, math.ceil(n / sim.open_loop_inflight_per_worker))))
             await pool.set_outstanding(n)
+            rung_since_ms = time.time() * 1000.0
 
             # Let the batch fill at the new pressure before measuring.
             settle_end = time.monotonic() + sim.headline_clear_s
@@ -494,7 +510,7 @@ async def run_headline_sweep(
             measurement_id = db.insert_measurement(pre_row)
             telemetry.start(measurement_id)
 
-            acc = _Acc()
+            acc = _Acc(since_ms=rung_since_ms)
             chunks: list[Chunk] = []
             scrape_gaps = 0
             t_start = time.monotonic()

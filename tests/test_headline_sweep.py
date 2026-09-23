@@ -271,3 +271,17 @@ def test_few_completions_use_littles_law_not_the_wave_counter():
 def test_chunk_rate_source_defaults_to_the_counter():
     from simulator.headline_search import Chunk
     assert Chunk(running=4, queue=0, out_rate=33.2, prompt_rate=1).rate_source == "counter"
+
+
+def test_littles_law_uses_only_answers_submitted_under_the_rung():
+    """At 8 offered on 4 slots, four answers that began under the last
+    rung (no queue wait) doubled the rate with 7.9 in the system."""
+    from simulator.headline_sweep import _Acc, little_rate
+    acc = _Acc(since_ms=1000.0)
+    acc.add([{"submitted_at_ms": 500, "end_to_end_ms": 40000,
+              "output_tokens": 256}] * 4)
+    assert little_rate(8.0, acc) is None
+    acc.add([{"submitted_at_ms": 1500, "end_to_end_ms": 80000,
+              "output_tokens": 256}] * 4)
+    gen, _ = little_rate(8.0, acc)
+    assert abs(gen - 8 * 256 / 80) < 0.1

@@ -213,6 +213,7 @@ class _Acc:
     gauge: list[float] = field(default_factory=list)
     gauge_start: float | None = None
     gauge_live: bool = False
+    gauge_updates: int = 0            # fresh readings (value changes)
 
     def add_gauge(self, v: float | None) -> None:
         if v is None:
@@ -224,6 +225,10 @@ class _Acc:
             if v == self.gauge_start:
                 return
             self.gauge_live = True
+        if not self.gauge or v != self.gauge[-1]:
+            self.gauge_updates += 1
+        # Per second, so each reading weighs as long as it stood --
+        # i.e. by the length of the interval it covers.
         self.gauge.append(float(v))
 
     def add(self, turns: list[dict]) -> None:
@@ -249,6 +254,10 @@ class _Acc:
 # 264 tok/s from whole waves landing in a chunk while its scheduler
 # logged 47-65. Below it, SGLang's gen_throughput gauge is the rate.
 GAUGE_MIN_TURNS_PER_STREAM = 2
+# One reading covers ~40 decode steps and swings 47-65 with whether a
+# prefill fell inside it; a rung measured from one reading "settled"
+# in 31 s at 58 with no answer back. Three is the least a rate is.
+GAUGE_MIN_UPDATES = 3
 
 
 def wave_bound(completions: int, population: float | None) -> bool:
@@ -419,7 +428,7 @@ async def run_headline_sweep(
         source = "counter"
         if wave_bound(acc.completed - seen_before,
                       (run_mean or 0.0) + (q_mean or 0.0)):
-            if acc.gauge:
+            if acc.gauge_updates >= GAUGE_MIN_UPDATES:
                 # Averaged over the rung, not the chunk: one reading
                 # covers 40 decode steps, and consecutive ones swing
                 # with whether a prefill landed inside them.
@@ -428,9 +437,10 @@ async def run_headline_sweep(
                 prompt_rate = out_rate * ratio if ratio else None
                 source = "engine_gauge"
             elif m1.get("gen_throughput") is not None:
-                # The gauge exists but has not moved since the rung
-                # began; a few-completion counter could agree with the
-                # next one by accident. Unmeasured keeps measuring.
+                # The gauge exists but has not moved often enough since
+                # the rung began; a few-completion counter, or one
+                # reading, could agree with the next chunk by accident.
+                # Unmeasured keeps measuring.
                 out_rate, prompt_rate = None, None
                 source = "pending"
         return Chunk(

@@ -267,6 +267,7 @@ def test_few_completions_read_sglangs_gauge_not_the_wave_counter():
     for v in (46.9, 46.9, 65.1, 65.1, None):
         acc.add_gauge(v)
     assert acc.gauge == [46.9, 46.9, 65.1, 65.1]
+    assert acc.gauge_updates == 2
     acc.add([{"ttft_ms": 1}, {"error": "no_content_tokens"}])
     assert acc.completed == 2
 

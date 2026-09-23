@@ -1786,6 +1786,28 @@ def test_kt_scale_plans_tp_by_experts_by_streams(tmp_path, monkeypatch):
                         gpu_count=8, max_tp=4, domain_tp=4, vram_gb=95,
                         output_tokens=128, input_tokens=128, cache=tmp_path)
     assert max(x["tp"] for x in c4) == 4
+    # Written off on KTransformers: no matrix.
+    assert kt_scale_cells(["moonshotai/Kimi-K2-Thinking"], model_info=info,
+                          gpu_count=8, max_tp=4, domain_tp=4, vram_gb=95,
+                          output_tokens=128, input_tokens=128, cache=tmp_path,
+                          skip={"moonshotai/Kimi-K2-Thinking"}) == []
+
+
+def test_kt_scale_skips_a_model_one_card_holds_whole(tmp_path):
+    from simulator.roofline import kt_scale_cells
+    snap = tmp_path / "hub" / "models--zai-org--GLM-4.7-Flash" / "snapshots" / "a"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text(json.dumps({
+        "architectures": ["Glm4MoeForCausalLM"], "hidden_size": 2048,
+        "moe_intermediate_size": 1536, "n_routed_experts": 64,
+        "num_hidden_layers": 47, "first_k_dense_replace": 1,
+        "kv_lora_rank": 512, "qk_rope_head_dim": 64, "torch_dtype": "bfloat16"}))
+    with (snap / "model.safetensors").open("wb") as fh:
+        fh.truncate(int(60e9))
+    assert kt_scale_cells(["zai-org/GLM-4.7-Flash"],
+                          model_info={"zai-org/GLM-4.7-Flash": {"kt_native": True}},
+                          gpu_count=8, max_tp=None, domain_tp=4, vram_gb=95,
+                          output_tokens=128, input_tokens=128, cache=tmp_path) == []
 
 
 def test_a_kt_scale_oom_sheds_gpu_experts_first():
@@ -1799,3 +1821,14 @@ def test_a_kt_scale_oom_sheds_gpu_experts_first():
     assert nxt["ktransformers_gpu_experts"] == 118 and nxt["tp"] == 4
     assert nxt["gpu_memory_utilization"] == 0.95 and "error" not in nxt
     assert cell_key(nxt) != cell_key(cell)
+
+
+def test_one_load_failure_ends_a_models_kt_matrix():
+    from simulator.roofline import kt_dead_models
+    rows = [{"model": "a", "engine": "ktransformers",
+             "error": "RuntimeError: ValueError: The checkpoint you are trying to load has model type"},
+            {"model": "b", "engine": "ktransformers",
+             "error": "torch.OutOfMemoryError: CUDA out of memory"},
+            {"model": "c", "engine": "ktransformers", "error": "TimeoutError: not healthy in 1800s"},
+            {"model": "d", "engine": "vllm_cuda_multi", "error": "ValueError: nope"}]
+    assert kt_dead_models(rows) == {"a"}

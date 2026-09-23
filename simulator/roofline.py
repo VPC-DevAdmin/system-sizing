@@ -803,16 +803,34 @@ def kt_gpu_expert_fit(budget: dict, *, tp: int, seqs: int, vram_gb: float,
                       int(KT_SCALE_FILL * room / budget["slot_gb"])))
 
 
+def kt_dead_models(results: list[dict]) -> set[str]:
+    """Models KTransformers cannot load at all: a failure that is
+    neither memory (the matrix's own lever) nor transient. One is
+    enough -- the matrix is two dozen launches of the same checkpoint,
+    and GLM-4.7-Flash's "checkpoint you are trying to load" would have
+    failed every one of them."""
+    return {r["model"] for r in results
+            if r.get("engine") == "ktransformers" and r.get("error")
+            and not is_memory_failure(r["error"])
+            and not is_transient(r["error"])}
+
+
 def kt_scale_cells(models: list[str], *, model_info: dict[str, dict] | None,
                    gpu_count: int, max_tp: Optional[int],
                    domain_tp: Optional[int], vram_gb: float | None,
                    output_tokens: int, input_tokens: int,
                    engine_shape: dict | None = None,
-                   cache: Path | None = None) -> list[dict]:
+                   cache: Path | None = None,
+                   skip: set[str] | None = None) -> list[dict]:
     """The scaling matrix for every native-KTransformers model: each tp
     the box allows x each concurrency x {no experts, half the room,
     all the room} on the GPUs. One replica; tp past the PCIe domain
-    spans it."""
+    spans it.
+
+    A model whose every expert already fits one card at the widest
+    concurrency has no CPU question to answer (GLM-4.7-Flash planned
+    24 cells that were the same launch at four tps); ``skip`` names
+    models the run has written off on KTransformers."""
     if not vram_gb:
         return []
     cap = min(int(gpu_count), int(max_tp)) if max_tp else int(gpu_count)
@@ -829,6 +847,12 @@ def kt_scale_cells(models: list[str], *, model_info: dict[str, dict] | None,
                  "max_model_len": KT_SCALE_CTX, "replicas": 1,
                  "kt_native": True, "kt_scale": True}
         share = float(shape.get("gpu_memory_utilization") or 0.95)
+        if m in (skip or set()):
+            continue
+        if kt_gpu_expert_fit(budget, tp=1, seqs=max(KT_SCALE_SEQS),
+                             vram_gb=float(vram_gb),
+                             share=share) >= int(budget["n_experts"]):
+            continue
         for tp in KT_SCALE_TPS:
             if tp > cap:
                 continue
@@ -1250,10 +1274,12 @@ def summarize(results: list[dict], model_info: dict | None = None,
 
     by_model: dict[str, dict] = {}
     by_engine: dict[str, dict] = {}
+    by_pair: dict[str, dict[str, dict]] = {}
     search_best: dict[str, dict] = {}
     for r in sorted(usable, key=_rank, reverse=True):
         by_model.setdefault(r["model"], r)
         by_engine.setdefault(r["engine"], r)
+        by_pair.setdefault(r["model"], {}).setdefault(r["engine"], r)
     for r in sorted(usable, key=lambda r: _rank(r)[::2], reverse=True):
         if not r.get("confirmed"):
             search_best.setdefault(r["model"], r)
@@ -1330,6 +1356,7 @@ def summarize(results: list[dict], model_info: dict | None = None,
             [m for m in order if m in best_total or m in failed_models]),
         "spectrum": spectrum,
         "best_per_model": by_model,
+        "best_per_pair": by_pair,
         "search_best_per_model": search_best,
         "best_per_engine": by_engine,
         "measured": len(usable),
@@ -1510,7 +1537,8 @@ async def run_roofline(
                      vram_gb=vram_per_gpu_gb,
                      output_tokens=min(shapes.get("output_tokens")
                                        or DEFAULT_SHAPES["output_tokens"]),
-                     input_tokens=input_tokens, engine_shape=engine_shape)
+                     input_tokens=input_tokens, engine_shape=engine_shape,
+                     skip=kt_dead_models(st.results))
                  if cell_key(c) not in have]
         log.info("roofline: %d KTransformers scaling cells", len(extra))
         plan_cells = plan_cells + extra
@@ -1570,6 +1598,10 @@ async def run_roofline(
             continue
         key = cell_key(cell)
         if key in done:
+            continue
+        if cell.get("kt_scale") and cell["model"] in kt_dead_models(st.results):
+            log.info("roofline: skipping %s — KTransformers cannot load "
+                     "this model", key)
             continue
         if key in hopeless:
             # Failed the same way twice already. Retrying costs an

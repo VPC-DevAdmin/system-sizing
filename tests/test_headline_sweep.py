@@ -250,3 +250,21 @@ def test_a_rung_of_nothing_but_errors_means_the_engine_died():
     fine = Rung(concurrency=512, in_flight=500.0, queue_depth=0.0, out_tok_s=4000.0,
                 prompt_tok_s=100.0, total_tok_s=4100.0, samples=900, errors=12)
     assert not engine_dead(fine)
+
+
+def test_few_completions_use_littles_law_not_the_wave_counter():
+    """Kimi on KTransformers finished 32 requests every ~87 s; the
+    finish-time counter read 130 or 265 tok/s depending on how many
+    waves the window caught. 32 streams x 128 tokens / 87 s = 47."""
+    from simulator.headline_sweep import _Acc, little_rate
+    acc = _Acc()
+    acc.add([{"ttft_ms": 10000, "tpot_ms": 600, "end_to_end_ms": 86800,
+              "output_tokens": 100, "reasoning_tokens": 28,
+              "input_tokens": 128} for _ in range(32)])
+    gen, prompt = little_rate(32.0, acc)
+    assert abs(gen - 32 * 128 / 86.8) < 0.1
+    assert abs(prompt - 32 * 128 / 86.8) < 0.1
+    # Plenty of completions: the counter is a rate and is kept.
+    acc.add([{"end_to_end_ms": 86800, "output_tokens": 128}] * 40)
+    assert little_rate(32.0, acc) is None
+    assert little_rate(None, acc) is None

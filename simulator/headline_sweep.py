@@ -80,6 +80,11 @@ class Rung:
     steady_state: bool = True
     measure_s: int = 0
     held: bool = True                # did the engine hold what we offered?
+    # "counter": the engine's generated-token counter over the window;
+    # "little": in-flight x tokens per request / request lifetime, used
+    # when the window saw too few completions for the counter to be
+    # anything but a count of finishing waves (see little_rate).
+    rate_source: str = "counter"
 
 
 def engine_held(concurrency: int, in_flight: float | None,
@@ -199,6 +204,9 @@ class _Acc:
     """
     ttft: list[float] = field(default_factory=list)
     tpot: list[float] = field(default_factory=list)
+    e2e: list[float] = field(default_factory=list)    # ms, per answer
+    gen: list[float] = field(default_factory=list)    # tokens generated
+    prompt: list[float] = field(default_factory=list)
     errors: int = 0
     no_content: int = 0
 
@@ -214,6 +222,43 @@ class _Acc:
                 self.ttft.append(float(t["ttft_ms"]))
             if t.get("tpot_ms") is not None:
                 self.tpot.append(float(t["tpot_ms"]))
+            if t.get("end_to_end_ms") and t.get("output_tokens") is not None:
+                self.e2e.append(float(t["end_to_end_ms"]))
+                # Reasoning chunks are counted apart from the answer;
+                # the engine generated both.
+                self.gen.append(float(t["output_tokens"] or 0)
+                                + float(t.get("reasoning_tokens") or 0))
+                self.prompt.append(float(t.get("input_tokens") or 0)
+                                   + float(t.get("history_tokens") or 0))
+
+
+# Fewer completions than this many per running stream and the
+# counter rate is a count of waves, not a rate.
+LITTLE_MIN_TURNS_PER_STREAM = 2
+
+
+def little_rate(running: float | None, acc: _Acc) -> tuple[float, float] | None:
+    """(generated, prompt) tokens/s by Little's law -- running streams
+    x tokens per request / request lifetime -- when the window saw too
+    few completions for the engine's counter; None otherwise.
+
+    SGLang adds a request's tokens to generation_tokens_total when the
+    request FINISHES. A closed loop of equal-length requests on a slow
+    engine finishes in waves: Kimi-K2-Thinking on KTransformers
+    (10 s prefill, 128 tokens at 0.6 s) finished 32 requests every
+    ~87 s, and a 30-80 s window caught one wave (read 130 tok/s) or
+    two (265) when the decode rate was 32 / 0.6 s = 53. Lifetimes and
+    token counts are per request, so this estimate does not quantise.
+    """
+    if not running or not acc.e2e:
+        return None
+    if len(acc.e2e) >= LITTLE_MIN_TURNS_PER_STREAM * running:
+        return None
+    life_s = statistics.fmean(acc.e2e) / 1000.0
+    if life_s <= 0:
+        return None
+    return (running * statistics.fmean(acc.gen) / life_s,
+            running * statistics.fmean(acc.prompt) / life_s)
 
 
 async def run_headline_sweep(
@@ -489,6 +534,18 @@ async def run_headline_sweep(
 
             out_rate = last.out_rate
             prm_rate = last.prompt_rate
+            rate_source = "counter"
+            # Client lifetimes include the engine's queue, so the
+            # population is running plus waiting.
+            ll = little_rate((last.running or 0) + (last.queue or 0)
+                             if last.running else None, acc)
+            if ll is not None:
+                log.info("rung %d: %d completions for %.0f running; "
+                         "rate by Little's law %.1f (counter %.1f)",
+                         n, len(acc.e2e), last.running or 0, ll[0],
+                         out_rate or 0)
+                out_rate, prm_rate = ll
+                rate_source = "little"
             rung = Rung(
                 concurrency=n,
                 in_flight=(round(last.running, 1)
@@ -511,6 +568,7 @@ async def run_headline_sweep(
                              if gpu_vals else None),
                 steady_state=steady, measure_s=measure_s,
                 held=engine_held(n, last.running),
+                rate_source=rate_source,
             )
             rungs.append(rung)
             db.update_measurement(measurement_id, {

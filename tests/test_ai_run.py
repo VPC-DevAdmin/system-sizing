@@ -41,7 +41,7 @@ def test_configs_are_tp1_one_replica_per_gpu_spread_across_domains(tmp_path, mon
     # spread: the two replicas sit in different PCIe/NUMA domains
     assert {d // 4 for g in two["replica_devices"] for d in g} == {0, 1}
     assert len(docs[3]["engine"]["replica_devices"]) == 8
-    assert all(d["engine"]["max_model_len"] == 8192 for d in docs)
+    assert all(d["engine"]["max_model_len"] == 32768 for d in docs)
     assert [d["simulation"]["open_loop_max_workers"] for d in docs] == [16, 16, 32, 64]
     assert all(d["simulation"]["mode"] == "open" for d in docs)
     assert [d["simulation"]["open_loop_min_workers"] for d in docs] == [4, 8, 16, 32]
@@ -77,3 +77,14 @@ def test_floors_are_named():
     assert "floor: quick_lookup has no tested step above its capacity 256" in probs
     assert "floor: conversational has no passing step (capacity null)" in probs
     assert "persona long_form_generator missing" in probs
+
+
+def test_finalize_drops_personas_the_planner_does_not_know():
+    exp = _export()
+    exp["cohorts"].append({"id": "headline_generation", "category": "persona", "curve": []})
+    exp["cohorts"].append({"id": "chat_heavy", "category": "cohort", "curve": []})
+    doc = ai_run.finalize(exp, system=SYSTEM, gpus=8)
+    ids = [c["id"] for c in doc["cohorts"]]
+    assert "headline_generation" not in ids and "chat_heavy" in ids
+    assert doc["meta"]["dropped_cohorts"] == ["headline_generation"]
+    assert ai_run.validate(doc) == []

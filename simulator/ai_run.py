@@ -31,7 +31,13 @@ PERSONAS = ("quick_lookup", "conversational", "writer", "document_qa",
             "code_assist", "long_form_generator")
 PLANNER_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
 GPU_COUNTS = (1, 2, 4, 8)
-MAX_MODEL_LEN = 8192
+# 32K, not the plan's 8K: at 8K the XE7740's first 8-GPU run rejected
+# 24% of document_qa prompts (median 3,500 tokens, tail to 28K with
+# history), 12% of code_assist and 1.4% of long_form_generator before
+# they reached a GPU -- every step read "marginal" on the rejections
+# alone. The R470 reference served them (SGLang at the model's default
+# context, 0% violations), so 32K is what matches it.
+MAX_MODEL_LEN = 32768
 GPU_MEMORY_UTILIZATION = 0.90
 # Workers per GPU for the open-loop generator. The default (16 total)
 # was sized for CPU hosts whose knees sit at 16-32 streams; a GPU knee
@@ -109,9 +115,18 @@ def persona_models() -> dict:
 
 
 def finalize(export: dict, *, system: dict, gpus: int) -> dict:
-    """The planner file: the export with meta.system and meta.personas."""
+    """The planner file: the export with meta.system and meta.personas.
+    Persona cohorts the planner does not know (the rig's saturation
+    personas, headline_*) are dropped -- the importer rejects the whole
+    file over them -- and named in meta.dropped_cohorts."""
     out = json.loads(json.dumps(export))
+    dropped = [c.get("id") for c in out.get("cohorts") or []
+               if c.get("category") == "persona" and c.get("id") not in PERSONAS]
+    out["cohorts"] = [c for c in out.get("cohorts") or []
+                      if not (c.get("category") == "persona" and c.get("id") not in PERSONAS)]
     meta = out.setdefault("meta", {})
+    if dropped:
+        meta["dropped_cohorts"] = dropped
     meta["system"] = {**system, "topology": topology(gpus)}
     meta["personas"] = persona_models()
     ec = meta.get("engine_config") or {}

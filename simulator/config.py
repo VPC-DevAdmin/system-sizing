@@ -480,6 +480,11 @@ class SimulationConfig:
     # cheap subprocesses and only spawn when tardiness demands them.
     open_loop_inflight_per_worker: int = 192
     open_loop_max_workers: int = 16
+    # Workers the run starts with (and never drops below). One suits a
+    # CPU host; a GPU run that starts at one spends its first windows
+    # at each new rate falling behind and re-measuring -- the XE7740
+    # quick_lookup sweep superseded 9 of 20 windows that way.
+    open_loop_min_workers: int = 1
 
     # ── Headline shape search ──
     # Hill-climb over (input, output) firehose shapes at SATURATION:

@@ -37,6 +37,9 @@ GPU_MEMORY_UTILIZATION = 0.90
 # was sized for CPU hosts whose knees sit at 16-32 streams; a GPU knee
 # is hundreds of streams per card.
 WORKERS_PER_GPU = 8
+# ...and the generator starts at half of that, so the first windows at
+# each rate are not spent catching up.
+START_WORKERS_PER_GPU = 4
 
 
 def system_identity(memory_gb: int = 2048) -> dict:
@@ -85,7 +88,8 @@ def write_configs(model: str, out_dir: Path, runs_base: str = "runs_ai") -> list
     for n in GPU_COUNTS:
         doc = config_doc(custom_engine(engine_custom(model, n)), runs_base)
         doc["simulation"] = {"mode": "open",
-                             "open_loop_max_workers": max(16, WORKERS_PER_GPU * n)}
+                             "open_loop_max_workers": max(16, WORKERS_PER_GPU * n),
+                             "open_loop_min_workers": max(4, START_WORKERS_PER_GPU * n)}
         p = out_dir / f"ai-{slug}-{n}gpu.yaml"
         p.write_text(yaml.safe_dump(doc, sort_keys=False))
         paths.append(p)

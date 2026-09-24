@@ -44,6 +44,7 @@ def test_configs_are_tp1_one_replica_per_gpu_spread_across_domains(tmp_path, mon
     assert all(d["engine"]["max_model_len"] == 8192 for d in docs)
     assert [d["simulation"]["open_loop_max_workers"] for d in docs] == [16, 16, 32, 64]
     assert all(d["simulation"]["mode"] == "open" for d in docs)
+    assert [d["simulation"]["open_loop_min_workers"] for d in docs] == [4, 8, 16, 32]
     assert all(d["output"]["db_directory"] == "runs_ai" for d in docs)
 
 

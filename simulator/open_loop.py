@@ -1255,11 +1255,12 @@ class OpenLoopRunner:
         """Predict the in-flight load at the next rate and size the
         worker set for it (Little's law scaling from the last window)."""
         sim = self.cfg.simulation
+        floor = max(1, min(sim.open_loop_min_workers, sim.open_loop_max_workers))
         if self._last_inflight_mean is None or last_rate <= 0:
-            return self.pool.size or 1
+            return max(self.pool.size or 1, floor)
         predicted = self._last_inflight_mean * (next_rate / last_rate) * 1.3
         import math
-        needed = max(1, math.ceil(predicted / sim.open_loop_inflight_per_worker))
+        needed = max(floor, math.ceil(predicted / sim.open_loop_inflight_per_worker))
         return max(self.pool.size, min(needed, sim.open_loop_max_workers))
 
     # ── Main loop ───────────────────────────────────────────────────
@@ -1281,7 +1282,8 @@ class OpenLoopRunner:
             # errors (inside try so cleanup still runs on failure).
             await smoke_test_engine(self.engine)
             self.phase = "starting load workers"
-            await self.pool.scale_to(1)
+            await self.pool.scale_to(max(1, min(sim.open_loop_min_workers,
+                                                sim.open_loop_max_workers)))
             while (rate := self.stepper.next_rate()) is not None:
                 if time.monotonic() - run_started > max_total_s:
                     log.warning("max run duration reached; stopping search")
@@ -1313,9 +1315,12 @@ class OpenLoopRunner:
                     and self.pool.size < sim.open_loop_max_workers
                 ):
                     died = result.verdict_detail.get("worker_deaths")
+                    # Doubling, not +1: the XE7740 quick_lookup sweep
+                    # climbed 5 -> 10 workers one window at a time at a
+                    # single rate, each window minutes long.
                     target = (
                         self.pool.size + len(died) if died
-                        else self.pool.size + 1
+                        else self.pool.size * 2
                     )
                     log.info(
                         "%s at %.3g/s with %d workers — %s and re-measuring",

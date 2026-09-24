@@ -523,3 +523,31 @@ def test_tardiness_p99_is_window_scoped():
         return launcher.stats.tardiness_p99_ms()
 
     assert asyncio.run(main()) == 5.0
+
+
+def test_the_worker_plan_never_drops_below_the_starting_count():
+    """A GPU run starts its generator wide: the XE7740 quick_lookup
+    sweep, started at one worker, superseded 9 of 20 windows catching
+    up."""
+    from types import SimpleNamespace
+
+    from simulator.config import SimulationConfig
+    from simulator.open_loop import OpenLoopRunner
+
+    sim = SimulationConfig()
+    sim.open_loop_min_workers = 32
+    sim.open_loop_max_workers = 64
+    r = OpenLoopRunner.__new__(OpenLoopRunner)
+    r.cfg = SimpleNamespace(simulation=sim)
+    r.pool = SimpleNamespace(size=0)
+    r._last_inflight_mean = None
+    assert r._plan_workers(1.0, 0.0) == 32
+    r.pool = SimpleNamespace(size=32)
+    r._last_inflight_mean = 10.0
+    assert r._plan_workers(2.0, 1.0) == 32                  # light load keeps the floor
+    r._last_inflight_mean = 4000.0
+    assert r._plan_workers(2.0, 1.0) == 55                  # 4000*2*1.3/192 -> 55
+    sim.open_loop_min_workers = 100                         # clamped to the max
+    r.pool = SimpleNamespace(size=0)
+    r._last_inflight_mean = None
+    assert r._plan_workers(1.0, 0.0) == 64

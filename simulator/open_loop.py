@@ -526,6 +526,7 @@ class _WindowResult:
     client_saturated: bool
     measurement_id: int | None
     active_sessions_mean: float = 0.0
+    inflight_mean: float = 0.0
 
 
 def _summarize_turns(turns: list[dict]) -> dict:
@@ -1177,6 +1178,7 @@ class OpenLoopRunner:
             client_saturated=client_saturated,
             measurement_id=measurement_id,
             active_sessions_mean=active_mean,
+            inflight_mean=inflight_mean,
         )
 
     def _mark_superseded(self, measurement_id: int | None) -> None:
@@ -1223,13 +1225,24 @@ class OpenLoopRunner:
         self.current_rate = st["rate"]
         await self.pool.set_rate(st["rate"])
         await self.pool.trim(int(st["sessions"]))
+        # Recovered means the engine is back near the stable window's
+        # load -- RUNNING requests as well as queued ones. XE7740
+        # code_assist at 8 GPUs emptied its waiting queue after the
+        # revert while 3,000-4,300 requests stayed running at a TTFT of
+        # 250-275 s, and every bisection window after it failed on that
+        # inheritance. Long-output personas need longer than the drain
+        # cap alone, so the wait is doubled.
         deadline = (time.monotonic()
-                    + self.cfg.simulation.open_loop_drain_timeout_s)
-        threshold = max(5.0, 0.05 * st["sessions"])
+                    + 2 * self.cfg.simulation.open_loop_drain_timeout_s)
+        q_threshold = max(5.0, 0.05 * st["sessions"])
+        busy_threshold = max(10.0, 1.3 * float(st.get("inflight") or 0.0))
         while time.monotonic() < deadline:
             m = await self._sample_engine()
             qd = m.get("queue_depth")
-            if qd is None or qd <= threshold:
+            running = m.get("num_running")
+            queue_ok = qd is None or qd <= q_threshold
+            running_ok = running is None or running <= busy_threshold
+            if queue_ok and running_ok:
                 break
             await asyncio.sleep(2.0)
         self.phase = "idle"
@@ -1341,12 +1354,20 @@ class OpenLoopRunner:
                     sample_size=result.sample_size,
                 ))
                 last_rate = rate
-                if result.stability == STABLE:
+                from .rate_search import HOPELESS_VIOLATION
+                hopeless = (result.stability == STABLE and result.sla_pass is False
+                            and result.violation_rate >= HOPELESS_VIOLATION)
+                if result.stability == STABLE and not hopeless:
                     self._last_stable = {
                         "rate": rate,
                         "sessions": result.active_sessions_mean,
+                        "inflight": result.inflight_mean,
                     }
-                if result.stability in (DIVERGENT, CLIENT_LIMITED):
+                # A hopeless "stable" window (timeouts draining the
+                # queue) leaves the same backlog a divergent one does:
+                # the XE7740's 1- and 2-GPU quick_lookup sweeps measured
+                # their next, lower rate on top of it and failed it.
+                if result.stability in (DIVERGENT, CLIENT_LIMITED) or hopeless:
                     await self._revert_to_stable()
         except (KeyboardInterrupt, asyncio.CancelledError):
             final_status = "cancelled"

@@ -551,3 +551,45 @@ def test_the_worker_plan_never_drops_below_the_starting_count():
     r.pool = SimpleNamespace(size=0)
     r._last_inflight_mean = None
     assert r._plan_workers(1.0, 0.0) == 64
+
+
+def test_revert_waits_for_running_requests_not_just_the_queue(monkeypatch):
+    """code_assist at 8 GPUs: the waiting queue emptied after a revert
+    while thousands of requests stayed running; the next window
+    inherited them. Recovery now needs running load back near the
+    stable window's in-flight count."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from simulator import open_loop
+    from simulator.config import SimulationConfig
+    from simulator.open_loop import OpenLoopRunner
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(open_loop.asyncio, "sleep", lambda s: real_sleep(0))
+    sim = SimulationConfig()
+    r = OpenLoopRunner.__new__(OpenLoopRunner)
+    r.cfg = SimpleNamespace(simulation=sim)
+    r._last_stable = {"rate": 4.0, "sessions": 2400.0, "inflight": 120.0}
+    calls = []
+
+    class Pool:
+        async def set_rate(self, x):
+            calls.append(("rate", x))
+
+        async def trim(self, n):
+            calls.append(("trim", n))
+    r.pool = Pool()
+    samples = iter([{"queue_depth": 0, "num_running": 4000},
+                    {"queue_depth": 0, "num_running": 900},
+                    {"queue_depth": 0, "num_running": 150}])
+    seen = []
+
+    async def sample():
+        m = next(samples)
+        seen.append(m)
+        return m
+    r._sample_engine = sample
+    asyncio.run(r._revert_to_stable())
+    assert calls == [("rate", 4.0), ("trim", 2400)]
+    assert len(seen) == 3            # did not stop at the empty queue with 4,000 running

@@ -33,10 +33,28 @@ sweep on that backlog.
 
 Fixed in `1fd3680` (a hopeless step is a ceiling; a fuse abort ends
 one persona, not the sweep) and `ff08430` (the rig falls back after
-hopeless steps and waits for running load to recover). Validation:
-conversational, Qwen3-30B, 2 GPUs, run `runs_ai/run_09` on the box
-(started 2026-09-26). Check its narrowing steps pass before launching
-the full re-run.
+hopeless steps and waits for running load to recover).
+
+**Validation still owed (do this first, ~1.5 h):** conversational,
+Qwen3-30B, 2 GPUs (`ai-qwen3-30b-a3b-instruct-2507-fp8-2gpu.yaml`,
+persona `conversational` only). The first attempt, `runs_ai/run_09`,
+was stopped on 2026-09-26 after 65 min to free the GPUs, before it
+proved anything:
+
+| Step | Rate /min | In flight | Violation | Result |
+|---|---|---|---|---|
+| 0 | 60 | 16 | 0 | pass |
+| 1 | 120 | 62 | 0 | pass |
+| 2 | 240 | 955 | 0.996 | fail (hopeless, now a ceiling) |
+| 3 | 170 | 539 | 0.387 | fail |
+| 4 | 202 | 1,751 | 1.0 | fail, divergent |
+
+It was still narrowing between 120 and 170. The fix is proven when a
+narrowing step between the last pass and the first fail *passes*, with
+in-flight near the passing steps' level, not hundreds inherited from
+the failed step. If every step above 120 fails, check in-flight at the
+start of each narrowing step before deciding whether 120 is the real
+knee or the backlog is still leaking through.
 
 **What to run:** both models, each at 1, 2, 4 and 8 GPUs, all six
 planner personas (`quick_lookup, conversational, writer, document_qa,

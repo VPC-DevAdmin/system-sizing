@@ -314,3 +314,20 @@ def test_a_shortfall_far_below_capacity_is_not_a_batch_ceiling():
     # A KV-bound ceiling well inside capacity still stops the climb.
     kv = [r(1024, 906.4, 3270.7), r(2048, 992.8, 3109.4), r(4096, 958.9, 2787.8)]
     assert "ceiling" in should_stop(kv, 3.0, capacity=2048)
+
+
+def test_a_sweep_drains_the_engine_after_an_aborted_workload():
+    import asyncio
+
+    from simulator.runner import _drain_engine
+
+    class Eng:
+        def __init__(self):
+            self.calls = 0
+
+        def get_metrics(self):
+            self.calls += 1
+            return {"num_running": 5, "queue_depth": 3} if self.calls < 3 else {}
+    e = Eng()
+    asyncio.run(_drain_engine(e, timeout_s=5, poll_s=0.01))
+    assert e.calls == 3

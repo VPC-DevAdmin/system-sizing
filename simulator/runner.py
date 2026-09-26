@@ -703,17 +703,53 @@ async def run_sweep(
             fixed_grid_pool_sizes=fixed_grid_pool_sizes,
         )
 
+    async def _guarded(label: str, cohort) -> Path | None:
+        """One workload; an engine-broken abort ends THAT workload, not
+        the sweep. The XE7740's 1-GPU quick_lookup sweep tripped the
+        error fuse while the engine was still clearing an overload
+        backlog, and the five personas behind it never ran. The engine
+        is given time to drain before the next workload starts; a
+        genuinely broken engine trips the next workload's fuse just as
+        fast."""
+        from .open_loop import EngineBrokenError
+        try:
+            return await _one(cohort)
+        except EngineBrokenError as e:
+            log.warning("=== Sweep: %s aborted (%s); continuing ===", label,
+                        str(e).splitlines()[0][:200])
+            await _drain_engine(engine)
+            return None
+
     paths: list[Path] = []
     try:
         for pid in persona_ids:
             log.info("=== Sweep: persona %s ===", pid)
-            paths.append(await _one(cohort_from_persona(pid)))
+            p = await _guarded(pid, cohort_from_persona(pid))
+            if p is not None:
+                paths.append(p)
         for cid in cohort_ids:
             log.info("=== Sweep: cohort %s ===", cid)
-            paths.append(await _one(cid))
+            p = await _guarded(cid, cid)
+            if p is not None:
+                paths.append(p)
     finally:
         await asyncio.to_thread(engine.shutdown)
     return paths
+
+
+async def _drain_engine(engine, timeout_s: float = 600.0, poll_s: float = 5.0) -> None:
+    """Wait until the engine reports nothing running or queued (or the
+    timeout passes) -- the backlog an aborted workload left behind."""
+    import time
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            m = await asyncio.to_thread(engine.get_metrics)
+        except Exception:  # noqa: BLE001 - metrics are advisory here
+            m = {}
+        if (m.get("num_running") or 0) < 1 and (m.get("queue_depth") or 0) < 1:
+            return
+        await asyncio.sleep(poll_s)
 
 
 async def run_spot_check(

@@ -56,6 +56,20 @@ class RateStep:
     sample_size: int = 0
 
 
+# A stable window whose violation rate is at least this is a ceiling,
+# not a stable point: requests are timing out (ttft_stalled) faster
+# than they queue, so the queue looks stationary while almost nothing
+# is served. The XE7740's 1-GPU quick_lookup sweep read "stable" at
+# 3,840, 7,680 and 15,360 sessions/min with TTFT p95 at the 75 s
+# timeout, doubled straight past the knee, and buried the engine.
+HOPELESS_VIOLATION = 0.5
+
+
+def _hopeless(step: "RateStep") -> bool:
+    return step.stability == STABLE and step.sla_pass is False \
+        and step.violation_rate >= HOPELESS_VIOLATION
+
+
 def _round_rate(rate: float) -> float:
     """Round to 3 significant digits — keeps rates human-readable and
     prevents float dust from generating near-duplicate probe points."""
@@ -126,19 +140,20 @@ class RateStepper:
         return {_round_rate(s.rate_per_s) for s in self.history}
 
     def _stable(self) -> list[RateStep]:
-        return [s for s in self.history if s.stability == STABLE]
+        return [s for s in self.history if s.stability == STABLE and not _hopeless(s)]
 
     def _ceilings(self) -> list[RateStep]:
         """Steps that bound the search from above: divergent (the
-        engine gave out) or client_limited (the generator did)."""
+        engine gave out), client_limited (the generator did), or a
+        hopeless "stable" window (timeouts draining the queue)."""
         return [
             s for s in self.history
-            if s.stability in (DIVERGENT, CLIENT_LIMITED)
+            if s.stability in (DIVERGENT, CLIENT_LIMITED) or _hopeless(s)
         ]
 
     def _next_doubling(self) -> Optional[float]:
         last = self.history[-1]
-        if last.stability != STABLE:
+        if last.stability != STABLE or _hopeless(last):
             if len(self.history) == 1:
                 self.phase = PHASE_DOWNWARD
             else:
@@ -159,7 +174,7 @@ class RateStepper:
             s for s in self.history
             if _round_rate(s.rate_per_s) == _round_rate(smallest)
         )
-        if smallest_step.stability == STABLE:
+        if smallest_step.stability == STABLE and not _hopeless(smallest_step):
             self.phase = PHASE_BISECT_STABILITY
             return None
         if smallest <= self.min_rate:

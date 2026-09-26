@@ -111,3 +111,29 @@ def test_refinement_flag_gates_longer_windows():
     stepper.record(RateStep(rate_per_s=2.0, stability=DIVERGENT))
     stepper.next_rate()
     assert stepper.in_refinement
+
+
+def test_a_hopeless_stable_window_stops_the_climb():
+    """1-GPU quick_lookup: above 32/s every request timed out waiting
+    for a first token, the queue stayed flat, and the old stepper
+    doubled to 128/s and 256/s, burying the engine. A "stable" window
+    with >= 50% violations is a ceiling."""
+    def oracle(rate: float) -> RateStep:
+        if rate > 32.0:
+            return RateStep(rate_per_s=rate, stability=STABLE, sla_pass=False,
+                            violation_rate=0.99, sample_size=900)
+        return RateStep(rate_per_s=rate, stability=STABLE, sla_pass=True,
+                        violation_rate=0.0, sample_size=900)
+    stepper = RateStepper(initial_rate_per_s=1.0, max_rate_per_s=512.0)
+    probed = _drive(stepper, oracle)
+    assert max(probed) == 64.0                      # never doubles past the first hopeless step
+    s = stepper.summary()
+    assert s["rate_max_per_s"] <= 32.0 < s["rate_ceiling_per_s"]
+
+
+def test_a_merely_marginal_stable_window_still_climbs():
+    """20% violations is degraded, not hopeless: the stability search
+    keeps doubling and the SLA bisection handles it."""
+    stepper = RateStepper(initial_rate_per_s=1.0, max_rate_per_s=256.0)
+    probed = _drive(stepper, _oracle(stability_boundary=64.0, sla_boundary=16.0))
+    assert max(probed) >= 128.0

@@ -71,9 +71,11 @@ capsim serve                                        # web UI: http://localhost:8
 
 ## The web UI
 
-`capsim serve` starts the control-plane service and the UI on `127.0.0.1:8321`: run lifecycle over HTTP (`/api/runs`, `/api/status`, `/api/export`, `/api/doctor`, catalogs, the optimizer and roofline endpoints) and live telemetry over WebSocket (`/ws/telemetry` — run/snapshot/telemetry/turn/step events). One run at a time, in-process; `run.db` stays the source of truth. The service has no auth: binding `--host` to anything other than loopback requires `--insecure`. Over SSH, tunnel it (`ssh -L 8321:localhost:8321 <host>`).
+`capsim serve` starts the control-plane service and the UI on `127.0.0.1:8321`: run lifecycle over HTTP (`/api/runs`, `/api/status`, `/api/export`, `/api/doctor`, catalogs, the optimizer and roofline endpoints) and live telemetry over WebSocket (`/ws/telemetry` — run/snapshot/telemetry/turn/step events). One run at a time, in-process; `run.db` stays the source of truth. Runs, third-party benchmarks, infrastructure experiments, model downloads and engine image pulls are mutually exclusive: starting any of them while another is in flight returns 409, because they all contend for the same accelerators and disk bandwidth. The service has no auth: binding `--host` to anything other than loopback requires `--insecure`. Over SSH, tunnel it (`ssh -L 8321:localhost:8321 <host>`).
 
-The UI has no build step (Chart.js is vendored so offline benchmark boxes work) and six tabs, in the order a new box goes through them:
+A parallel redesigned workspace is available at `/workspace.html`: choose **Try new UI** in the header, or **Classic UI** in the new sidebar to switch back. Both interfaces use the same service and recorded results. See [the workspace guide](docs/ui-workspace.md) for navigation, evidence handling, and deployment notes.
+
+The Classic UI has no build step (Chart.js is vendored so offline benchmark boxes work) and six tabs, in the order a new box goes through them:
 
 | Tab | What it is for |
 |---|---|
@@ -376,3 +378,7 @@ The container streams its stdout/stderr to `runs/engine_sglang_*.log`. Wait for 
 ### Known-good parallelism shapes
 
 **TP=1** baseline and **TP=4** only. DP/EP combos are upstream-broken on CPU. The simulator's `derive_sglang_thread_binding` validates `tensor_parallel_size` against `engine.cpu_bind` at launch — misconfigurations surface immediately instead of 20 minutes into a model load.
+
+## Third-party roofline benchmarks
+
+Run AIPerf and GuideLLM against the recorded engine configuration of confirmed roofline winners or a selected recorded result. This is an independent re-measurement of the recorded shape, not a replication of the internal number: the internal confirm reads the engine's server-side token counter over converged windows, while the harnesses tokenise streamed deltas client-side through a proxy over a fixed window with a synthetic corpus, so the two figures are expected to differ. Select tools and recipes in Roofline Setup; inspect attempts and download editable DOCX/evidence ZIP files in the Roofline workspace. See [third-party benchmark usage and limitations](docs/third-party-benchmarks.md). MLPerf is deferred.

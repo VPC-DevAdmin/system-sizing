@@ -1,0 +1,642 @@
+<meta charset="utf-8">
+<title>Benchmark Confidence Brief</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  color-scheme:light;
+  --bg:#f7f8fa; --surface:#ffffff; --surface-2:#eff2f6; --ink:#14212e; --muted:#5b6774; --line:#dbe1e8; --line-2:#c5cdd6;
+  --accent:#14385c; --accent-ink:#ffffff; --accent-soft:#e6edf5;
+  --red:#c73a3a; --red-soft:#fbe8e8; --amber:#b57500; --amber-soft:#fff3d6; --green:#1f8a3b; --green-soft:#e4f4e8;
+  --s1:#2a78d6; --s2:#eb6834; --grid:#e6ebf0;
+  --shadow:0 1px 2px rgba(20,33,46,.06),0 10px 28px rgba(20,33,46,.07);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#111518; --surface:#1a2026; --surface-2:#222a31; --ink:#eef2f5; --muted:#a6b1bc; --line:#2b343d; --line-2:#3a444f;
+    --accent:#8fc1ea; --accent-ink:#0d1a20; --accent-soft:#1a2b3c;
+    --red:#ef6b6b; --red-soft:#3a1f1f; --amber:#f0b429; --amber-soft:#3a3018; --green:#4cc06a; --green-soft:#1c3324;
+    --s1:#3987e5; --s2:#d95926; --grid:#2b343d;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#111518; --surface:#1a2026; --surface-2:#222a31; --ink:#eef2f5; --muted:#a6b1bc; --line:#2b343d; --line-2:#3a444f;
+  --accent:#8fc1ea; --accent-ink:#0d1a20; --accent-soft:#1a2b3c;
+  --red:#ef6b6b; --red-soft:#3a1f1f; --amber:#f0b429; --amber-soft:#3a3018; --green:#4cc06a; --green-soft:#1c3324;
+  --s1:#3987e5; --s2:#d95926; --grid:#2b343d;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:16.5px;line-height:1.6;-webkit-font-smoothing:antialiased}
+h1,h2,h3,h4{font-family:Manrope,system-ui,sans-serif;text-wrap:balance;margin:0;line-height:1.15}
+h1{font-size:clamp(2.1rem,5vw,3.5rem);font-weight:800;letter-spacing:-.02em}
+h2{font-size:clamp(1.55rem,3vw,2.2rem);font-weight:800;letter-spacing:-.015em}
+h3{font-size:1.3rem;font-weight:800}
+h4{font-size:1rem;font-weight:700}
+p{margin:0}
+code{font-family:"IBM Plex Mono",monospace;font-size:.9em;background:var(--surface-2);padding:1px 5px;border-radius:4px}
+.wrap{max-width:1100px;margin:0 auto;padding-inline:20px}
+.eyebrow{font-size:.74rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.lede{font-size:1.15rem;color:var(--muted);max-width:62ch}
+.num{font-variant-numeric:tabular-nums}
+
+.nav{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:color-mix(in srgb,var(--bg) 90%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.nav .wrap{display:flex;gap:4px;overflow-x:auto;padding-block:10px;scrollbar-width:none}
+.nav a{white-space:nowrap;text-decoration:none;color:var(--muted);font-size:.85rem;font-weight:600;padding:6px 10px;border-radius:999px}
+.nav a:hover,.nav a:focus-visible{background:var(--accent-soft);color:var(--accent);outline:none}
+.nav a.brand{color:var(--ink);font-family:Manrope;font-weight:800;padding-left:0}
+
+.hero{padding-block:60px 44px;border-bottom:1px solid var(--line)}
+.hero .lede{margin-top:18px}
+.hero .meta{font-size:.86rem;color:var(--muted);margin-top:20px;max-width:70ch}
+
+.summary{padding-block:40px;border-bottom:1px solid var(--line)}
+.sum-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:20px}
+.sum{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;text-decoration:none;color:inherit;display:flex;flex-direction:column;gap:8px;box-shadow:var(--shadow);border-top:5px solid var(--amber)}
+.sum.red{border-top-color:var(--red)} .sum.green{border-top-color:var(--green)}
+.sum .who{font-size:.78rem;color:var(--muted);font-weight:600}
+.sum b{font-family:Manrope;font-size:1.02rem;line-height:1.25}
+.sum p{font-size:.86rem;color:var(--muted)}
+.sum:hover{border-color:var(--accent)}
+.legend{display:flex;flex-wrap:wrap;gap:16px;margin-top:16px;font-size:.86rem;color:var(--muted)}
+.legend span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px;background:var(--amber)}
+.legend span.red::before{background:var(--red)} .legend span.green::before{background:var(--green)}
+
+.tag{display:inline-flex;align-items:center;gap:7px;font-size:.78rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:5px 12px;border-radius:999px}
+.tag.red{background:var(--red-soft);color:var(--red)} .tag.amber{background:var(--amber-soft);color:var(--amber)} .tag.green{background:var(--green-soft);color:var(--green)}
+.tag i{width:9px;height:9px;border-radius:50%;background:currentColor}
+
+.paper{padding-block:56px;border-bottom:1px solid var(--line)}
+.paper-head{display:grid;grid-template-columns:1.3fr 1fr;gap:28px;align-items:start}
+.paper-head .lede{margin-top:10px;font-size:1.05rem}
+.verdict{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px 22px;box-shadow:var(--shadow);border-left:6px solid var(--amber)}
+.verdict.red{border-left-color:var(--red)} .verdict.green{border-left-color:var(--green)}
+.verdict .eyebrow{margin-bottom:8px}
+.verdict h3{margin-bottom:8px}
+.verdict p{font-size:.95rem;color:var(--muted)}
+.verdict ul{margin:10px 0 0;padding-left:18px;font-size:.95rem;display:flex;flex-direction:column;gap:4px}
+
+.issue{margin-top:28px;background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--shadow)}
+.issue-head{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:18px 22px;border-bottom:1px solid var(--line)}
+.issue-head h3{flex:1 1 300px}
+.issue-body{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
+.viz{margin:0;padding:22px;border-right:1px solid var(--line);position:relative}
+.viz svg{width:100%;height:auto;display:block;max-width:100%}
+.viz figcaption{font-size:.86rem;color:var(--muted);margin-top:12px}
+.replay{position:absolute;top:12px;right:12px;font:600 .74rem "IBM Plex Sans",sans-serif;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:4px 10px;cursor:pointer}
+.replay:hover,.replay:focus-visible{color:var(--accent);border-color:var(--accent);outline:none}
+.text{padding:22px 24px;display:flex;flex-direction:column;gap:16px}
+.text p{font-size:1rem}
+.text b.k{font-family:Manrope;font-weight:800;display:block;font-size:.78rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.analogy{background:var(--accent-soft);border-radius:10px;padding:12px 14px;font-style:italic;color:var(--accent);font-size:.98rem}
+.instead{border-left:4px solid var(--accent);padding-left:14px}
+.instead ul{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:5px;font-size:.96rem}
+
+.approach{padding-block:60px;border-bottom:1px solid var(--line)}
+.pillars{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:26px}
+.pillar{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px;box-shadow:var(--shadow)}
+.pillar .glyph{width:46px;height:46px;margin-bottom:12px}
+.pillar h3{margin-bottom:6px}
+.pillar .def{color:var(--muted);font-size:.95rem;margin-bottom:12px}
+.pillar ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:8px;font-size:.95rem}
+.promise{margin-top:26px;background:var(--accent);color:var(--accent-ink);border-radius:14px;padding:26px 28px;display:grid;grid-template-columns:1fr auto;gap:20px;align-items:center}
+.promise h3{color:inherit;font-size:1.4rem}
+.promise p{opacity:.9;font-size:1rem;max-width:64ch}
+
+.offer{padding-block:60px 80px}
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:24px}
+.step{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:var(--shadow)}
+.step .n{font-family:Manrope;font-weight:800;font-size:1.6rem;color:var(--accent);line-height:1}
+.step h4{margin:10px 0 6px}
+.step p{font-size:.92rem;color:var(--muted)}
+.deliver{margin-top:24px;border:1px dashed var(--line-2);border-radius:12px;padding:18px 20px;font-size:.96rem}
+.deliver b{font-family:Manrope}
+.foot{font-size:.84rem;color:var(--muted);margin-top:28px;max-width:80ch}
+
+/* animation: resting state is final; .play runs keyframes */
+.viz .g{transform-box:fill-box;transform-origin:left center}
+.viz .gv{transform-box:fill-box;transform-origin:center bottom}
+.play .grow{animation:grow 1.1s cubic-bezier(.2,.7,.2,1) both}
+.play .grow.d1{animation-delay:.35s}.play .grow.d2{animation-delay:.7s}
+.play .growv{animation:growv 1.1s cubic-bezier(.2,.7,.2,1) both}
+.play .growv.d1{animation-delay:.3s}
+.play .appear{animation:appear .6s ease-out both}
+.play .appear.d1{animation-delay:.6s}.play .appear.d2{animation-delay:1.2s}.play .appear.d3{animation-delay:1.8s}.play .appear.d4{animation-delay:2.4s}
+.play .dim{animation:dim .8s ease-out both;animation-delay:.9s}
+.play .draw{stroke-dasharray:1000;animation:draw 1.6s ease-out both}
+.play .draw.d1{animation-delay:1.5s}
+.play .swap-a{animation:swapA 1.2s ease-in-out both;animation-delay:.8s}
+.play .swap-b{animation:swapB 1.2s ease-in-out both;animation-delay:.8s}
+.play .vanish{animation:vanish 1s ease-in both;animation-delay:.9s}
+.play .spin{animation:spin 1.3s cubic-bezier(.3,.6,.2,1) both;transform-box:fill-box;transform-origin:center}
+.play .spin.d1{animation-delay:.25s}.play .spin.d2{animation-delay:.5s}
+.play .dropout{animation:dropout .8s ease-in both;animation-delay:1.1s}
+.play .dropout.d1{animation-delay:1.5s}.play .dropout.d2{animation-delay:1.9s}
+.play .flow{animation:flow 1.6s linear infinite}
+@keyframes grow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes growv{from{transform:scaleY(0)}to{transform:scaleY(1)}}
+@keyframes appear{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes dim{from{opacity:1}to{opacity:.3}}
+@keyframes draw{from{stroke-dashoffset:1000}to{stroke-dashoffset:0}}
+@keyframes swapA{from{transform:translateX(0)}to{transform:translateX(150px)}}
+@keyframes swapB{from{transform:translateX(0)}to{transform:translateX(-150px)}}
+@keyframes vanish{0%{opacity:1}60%{opacity:1}100%{opacity:0}}
+@keyframes spin{from{transform:rotate(-120deg)}to{transform:rotate(0)}}
+@keyframes dropout{from{opacity:1;transform:none}to{opacity:.12;transform:translateY(10px)}}
+@keyframes flow{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
+@media (prefers-reduced-motion: reduce){ .play *{animation:none !important} .replay{display:none} }
+
+.viz text{font-family:"IBM Plex Sans",system-ui,sans-serif;fill:var(--ink);font-size:12px}
+.viz text.m{fill:var(--muted)} .viz text.mono{font-family:"IBM Plex Mono",monospace} .viz text.big{font-family:Manrope;font-weight:800;font-size:18px}
+.viz text.sm{font-size:10.5px}
+.viz .box{fill:var(--surface-2);stroke:var(--line-2)}
+.viz .ghost{fill:none;stroke:var(--line-2);stroke-dasharray:4 4}
+.viz .gridl{stroke:var(--grid)}
+.viz .axis{stroke:var(--line-2)}
+
+@media (max-width:900px){
+  .paper-head,.issue-body,.promise{grid-template-columns:1fr}
+  .viz{border-right:none;border-bottom:1px solid var(--line)}
+  .sum-grid{grid-template-columns:repeat(2,1fr)}
+  .pillars,.steps{grid-template-columns:1fr}
+}
+@media (max-width:480px){ .sum-grid{grid-template-columns:1fr} }
+</style>
+
+<nav class="nav" aria-label="Sections"><div class="wrap">
+  <a class="brand" href="#top">Benchmark confidence brief</a>
+  <a href="#summary">At a glance</a>
+  <a href="#r770">R770 paper</a>
+  <a href="#prowess">Xeon paper</a>
+  <a href="#pt">Agentic AI paper</a>
+  <a href="#llama">Llama paper</a>
+  <a href="#signal65">Long-context paper</a>
+  <a href="#approach">Our approach</a>
+  <a href="#offer">Proposed next step</a>
+</div></nav>
+
+<header class="hero" id="top"><div class="wrap">
+  <div class="eyebrow">Prepared for Dell Technologies · September 2026</div>
+  <h1 style="margin-top:12px">Five AI performance papers, read the way a customer's engineer will read them</h1>
+  <p class="lede">We reviewed five recent sponsored publications about AI performance on Dell platforms. Most of the measurements are useful. A few have problems that a skeptical customer will spot and that undercut the message. This brief says plainly which papers have a problem, why it matters, and how we would run the same tests so the result holds up.</p>
+  <p class="meta">We ran no new benchmarks for this review. Everything here comes from the papers' own published numbers, commands, and tables. Sponsorship is disclosed in each paper and is not itself a concern.</p>
+</div></header>
+
+<section class="summary" id="summary"><div class="wrap">
+  <div class="eyebrow">At a glance</div>
+  <h2 style="margin-top:8px">Two papers need correcting, two need careful wording, one is sound</h2>
+  <div class="sum-grid">
+    <a class="sum red" href="#r770"><span class="who">Dell · R770 with RTX PRO 4500</span><b>Correct before reusing</b><p>The efficiency figure counts one GPU's power against four GPUs' output. The described setup cannot fit in memory as written.</p></a>
+    <a class="sum red" href="#prowess"><span class="who">Prowess · Xeon 6 workloads</span><b>Fix the write-up</b><p>A published command does not do what the text says, and the web table disagrees with the PDF. The measurements themselves probably stand.</p></a>
+    <a class="sum" href="#pt"><span class="who">Principled Technologies · agentic AI</span><b>Reconcile before quoting savings</b><p>The cost chart contradicts its own appendix, and the cost total implies far more work than the speed figure shows.</p></a>
+    <a class="sum" href="#llama"><span class="who">Dell · Llama across GPU platforms</span><b>Sound data, narrower claim</b><p>Several things changed at once, so the result compares setups rather than GPUs. Testing stopped while numbers were still climbing.</p></a>
+    <a class="sum green" href="#signal65"><span class="who">Signal65 · long-context accuracy</span><b>Sound, one request</b><p>Careful scope and honest limits. The trend across context lengths averages a shrinking group of models.</p></a>
+  </div>
+  <div class="legend"><span class="red">Contains an error a customer can find</span><span>Fine as data, needs clearer wording or missing detail</span><span class="green">No problems found</span></div>
+</div></section>
+
+<!-- R770 -->
+<section class="paper" id="r770"><div class="wrap">
+  <div class="paper-head">
+    <div>
+      <div class="eyebrow">Dell PowerEdge R770 with RTX PRO 4500 · Qwen models</div>
+      <h2 style="margin-top:8px">Good load curves, two errors in the write-up</h2>
+      <p class="lede">The throughput curves are useful and the paper shares more setup detail than most. That detail is what exposes the two problems. Both are visible from the paper's own numbers, and both need fixing before the efficiency or configuration figures are quoted anywhere.</p>
+    </div>
+    <div class="verdict red"><div class="eyebrow">Our verdict</div><h3>Correct before reusing</h3><p>The throughput results may be fine. Two statements in the paper are not.</p><ul><li>The tokens-per-watt figure is overstated four-fold.</li><li>The stated memory configuration cannot run the stated models.</li></ul></div>
+  </div>
+
+  <article class="issue">
+    <div class="issue-head"><h3>Four GPUs' output, one GPU's power</h3><span class="tag red"><i></i>Arithmetic error</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 300" role="img" aria-label="Four GPUs each producing tokens into one total, but only one GPU's 151 watts counted; published 34.5 tokens per second per watt versus 8.6 with matching scope">
+          <rect x="150" y="18" width="240" height="40" rx="8" class="box"/>
+          <text x="270" y="36" text-anchor="middle" class="big num">5,219 tokens/s</text>
+          <text x="270" y="51" text-anchor="middle" class="m sm">the total output of all four GPUs</text>
+          <g>
+            <rect x="30" y="130" width="100" height="48" rx="6" fill="var(--s1)" opacity=".9"/><text x="80" y="150" text-anchor="middle" fill="#fff" font-weight="600">GPU 1</text><text x="80" y="167" text-anchor="middle" fill="#fff" class="num sm">151 W</text>
+            <rect x="160" y="130" width="100" height="48" rx="6" fill="var(--s1)" opacity=".9"/><text x="210" y="150" text-anchor="middle" fill="#fff" font-weight="600">GPU 2</text><text x="210" y="167" text-anchor="middle" fill="#fff" class="num sm">151 W</text>
+            <rect x="290" y="130" width="100" height="48" rx="6" fill="var(--s1)" opacity=".9"/><text x="340" y="150" text-anchor="middle" fill="#fff" font-weight="600">GPU 3</text><text x="340" y="167" text-anchor="middle" fill="#fff" class="num sm">151 W</text>
+            <rect x="420" y="130" width="100" height="48" rx="6" fill="var(--s1)" opacity=".9"/><text x="470" y="150" text-anchor="middle" fill="#fff" font-weight="600">GPU 4</text><text x="470" y="167" text-anchor="middle" fill="#fff" class="num sm">151 W</text>
+          </g>
+          <g fill="none" stroke="var(--s1)" stroke-width="2" stroke-dasharray="6 6" class="flow">
+            <path d="M80 130 C80 100 200 90 210 58"/><path d="M210 130 C210 105 240 90 245 58"/><path d="M340 130 C340 105 300 90 295 58"/><path d="M470 130 C470 100 340 90 330 58"/>
+          </g>
+          <g class="dim"><rect x="160" y="190" width="360" height="26" rx="6" class="ghost"/><text x="340" y="207" text-anchor="middle" class="m sm">power of GPUs 2, 3 and 4: left out of the calculation</text></g>
+          <rect x="30" y="190" width="100" height="26" rx="6" fill="var(--s2)" opacity=".85"/><text x="80" y="207" text-anchor="middle" fill="#fff" font-weight="600" class="sm">counted: 151 W</text>
+          <text x="30" y="243" class="m sm">As published</text>
+          <rect x="120" y="233" width="290" height="14" rx="4" fill="var(--s2)" class="g grow"/>
+          <text x="418" y="245" class="num" font-weight="600">34.5 tokens per watt</text>
+          <text x="30" y="273" class="m sm">Counted fairly</text>
+          <rect x="120" y="263" width="73" height="14" rx="4" fill="var(--s1)" class="g grow d1"/>
+          <text x="200" y="275" class="num appear d1" font-weight="600">8.6 tokens per watt  (5,219 ÷ 4 × 151)</text>
+        </svg>
+        <figcaption>All four GPUs' output is added up, but only one GPU's electricity is divided in. The efficiency number comes out four times too high.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper says</b>It divides the total token rate of 5,219 per second by the 151 watts of a single GPU and reports 34.5 tokens per watt. It then suggests the figure improves further with more GPUs.</p>
+        <p class="analogy">It is like rating a car's fuel economy by counting the miles driven by the whole car but only the fuel burned by one of its four cylinders.</p>
+        <p><b class="k">Why a customer will care</b>Tokens per watt is the number that goes into power budgets and total cost of ownership. A buyer who redoes this division, and someone will, gets a figure four times lower and stops trusting the rest of the paper.</p>
+        <div class="instead"><b class="k">What we would do instead</b><ul><li>Measure electricity at the wall for the whole server, over exactly the same minutes in which the tokens were counted.</li><li>Report tokens per watt for the whole system, with GPU-only power shown separately.</li><li>Have one script recompute every table from the raw readings, so no figure can drift from its source.</li></ul></div>
+      </div>
+    </div>
+  </article>
+
+  <article class="issue">
+    <div class="issue-head"><h3>A model that does not fit the card it is said to run on</h3><span class="tag red"><i></i>Configuration error</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 250" role="img" aria-label="A 32 gigabyte GPU memory bar compared with full-precision model sizes of 54 and 70 gigabytes that overflow it">
+          <text x="20" y="24" class="m sm">Memory on each GPU (each GPU runs its own copy; they cannot pool memory)</text>
+          <rect x="20" y="34" width="176" height="28" rx="5" fill="var(--s1)" class="g grow"/>
+          <text x="204" y="53" class="num" font-weight="600">32 GB</text>
+          <line x1="196" y1="30" x2="196" y2="230" stroke="var(--red)" stroke-width="1.5" stroke-dasharray="4 4"/>
+          <text x="202" y="230" class="sm" fill="var(--red)">card limit</text>
+          <text x="20" y="96" class="m sm">27-billion-parameter model at the stated full precision</text>
+          <rect x="20" y="106" width="297" height="28" rx="5" fill="var(--s2)" class="g grow d1"/>
+          <text x="325" y="125" class="num appear d1" font-weight="600">about 54 GB</text>
+          <text x="20" y="168" class="m sm">35-billion-parameter model at the stated full precision</text>
+          <rect x="20" y="178" width="385" height="28" rx="5" fill="var(--red)" class="g grow d2"/>
+          <text x="413" y="197" class="num appear d2" font-weight="600">about 70 GB</text>
+          <text x="20" y="238" class="m sm">Model weights only. Working memory for requests comes on top.</text>
+        </svg>
+        <figcaption>As described, the models are roughly twice the size of the card. Something not written down, such as a compressed version of the model, made this run.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper says</b>The methodology describes running 27B and 35B models at full 16-bit precision, one copy per 32 GB GPU.</p>
+        <p class="analogy">The recipe calls for a 70-litre pot, and the kitchen only has 32-litre pots. Dinner was clearly served, so a different pot was used. The recipe just does not say which.</p>
+        <p><b class="k">Why a customer will care</b>A customer who orders this configuration and follows the write-up will not get the model to load. The results are probably real, but nobody can tell what setup produced them, so nobody can reproduce or size from them.</p>
+        <div class="instead"><b class="k">What we would do instead</b><ul><li>Before every run, work out whether the model fits, then check that against what the GPU actually allocated.</li><li>Record the precision and settings the running software reports, not the model's name.</li><li>Treat any mismatch between the described setup and the running setup as a blocker for publication.</li></ul></div>
+      </div>
+    </div>
+  </article>
+</div></section>
+
+<!-- Prowess -->
+<section class="paper" id="prowess"><div class="wrap">
+  <div class="paper-head">
+    <div>
+      <div class="eyebrow">Prowess Consulting · Xeon 6 workload comparison</div>
+      <h2 style="margin-top:8px">The numbers probably stand. The write-up does not.</h2>
+      <p class="lede">Prowess published the actual commands it ran, which is more than most do. That is also why the problems are easy to find: one command does not do what the text claims, one headline figure differs between the PDF and the web page, and the biggest gain is mostly about having more cores, not faster ones.</p>
+    </div>
+    <div class="verdict red"><div class="eyebrow">Our verdict</div><h3>Fix the write-up</h3><p>Nothing suggests the measurements are false. A reader cannot repeat them from what was published, and one number is wrong in one of the two places it appears.</p><ul><li>The CPU-pinning command is wrong as written.</li><li>152% in the PDF became 52% on the web.</li><li>The 85% gain is more job slots, not a faster core.</li></ul></div>
+  </div>
+
+  <article class="issue">
+    <div class="issue-head"><h3>"Reserve eight seats" was read as "reserve seat number eight"</h3><span class="tag red"><i></i>Command error</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 250" role="img" aria-label="A grid of 32 CPUs; the intended run reserves eight, the published command reserves only CPU number 8">
+          <rect x="16" y="14" width="508" height="30" rx="6" fill="var(--surface-2)" stroke="var(--line-2)"/>
+          <text x="28" y="34" class="mono" font-size="12.5">numactl -C $NUM_CPU_CORES ...    <tspan fill="var(--muted)"># with NUM_CPU_CORES=8</tspan></text>
+          <text x="16" y="72" class="m sm">What the text says happens: eight CPUs reserved for the job</text>
+          <g id="gridA"></g>
+          <text x="16" y="162" class="m sm">What the command actually asks for: CPU number 8, one CPU</text>
+          <g id="gridB"></g>
+          <text x="16" y="243" class="sm appear d3" fill="var(--red)">The software may have spread itself out anyway. The point is that the published recipe is not the one that produced the results.</text>
+        </svg>
+        <figcaption>The option expects a list of CPU numbers. Giving it a count picks one specific CPU instead.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper says</b>The molecular-dynamics test is described as running each job on a fixed set of cores, and the published launch command is meant to enforce that.</p>
+        <p class="analogy">The command is the equivalent of telling a booking system "8" and expecting eight seats. The system reserves seat 8.</p>
+        <p><b class="k">Why a customer will care</b>Anyone who has used this tool will spot it immediately. If the published recipe does not match the experiment, the reader has to take the rest on faith, and the whole point of publishing commands was to avoid that.</p>
+        <div class="instead"><b class="k">What we would do instead</b><ul><li>Write out the exact CPU list for every job and pin its memory to the matching part of the machine.</li><li>Record where every thread actually ran during the test, not just where it was told to run.</li><li>Publish the launcher that ran the jobs together, since that is the experiment that was measured.</li></ul></div>
+      </div>
+    </div>
+  </article>
+
+  <article class="issue">
+    <div class="issue-head"><h3>More lanes on the highway, not faster cars</h3><span class="tag amber"><i></i>Needs clearer wording</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 250" role="img" aria-label="Sixteen jobs on one system versus thirty on the other; slots grow 1.875 times, total work grows about 1.85 times, so each job runs at about the same speed">
+          <text x="16" y="22" class="m sm">Older system · 16 jobs at once, 8 cores each</text>
+          <g id="slotsA"></g>
+          <text x="16" y="112" class="m sm">Newer system · 30 jobs at once, 8 cores each</text>
+          <g id="slotsB"></g>
+          <g class="appear d2">
+            <rect x="16" y="196" width="508" height="42" rx="6" class="box"/>
+            <text x="30" y="213" class="sm">Room for jobs: 1.875 times more</text>
+            <text x="30" y="230" class="sm">Total work done: about 1.85 times more</text>
+            <text x="300" y="222" class="num" font-weight="600">Each job: about the same speed</text>
+          </g>
+        </svg>
+        <figcaption>The bigger machine does more work because it runs more jobs. That is a real advantage, but it is not the same as each job running faster.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper says</b>The newer system completes about 85 percent more work. The systems also have different core counts and memory. The paper does note that this is a whole-system result.</p>
+        <p class="analogy">A thirty-lane highway moves more cars than a sixteen-lane one. That does not make any individual car faster.</p>
+        <p><b class="k">Why a customer will care</b>The risk is downstream. When "85 percent more work" is shortened to "85 percent faster" in a slide, a customer expecting each job to finish faster will be disappointed. On this paper, the web page also shows 52 percent where the PDF shows 152 percent for one headline figure, which makes the same point: numbers that are retyped drift.</p>
+        <div class="instead"><b class="k">What we would do instead</b><ul><li>Publish two numbers side by side: whole-system capacity, and a like-for-like comparison with the same number of cores and jobs.</li><li>Generate the web page, the PDF, and the slides from one data source so a figure cannot differ between them.</li></ul></div>
+      </div>
+    </div>
+  </article>
+</div></section>
+
+<!-- PT -->
+<section class="paper" id="pt"><div class="wrap">
+  <div class="paper-head">
+    <div>
+      <div class="eyebrow">Principled Technologies · agentic AI on Dell hardware</div>
+      <h2 style="margin-top:8px">Two numbers that do not agree with each other</h2>
+      <p class="lede">PT discloses its workflows, software versions, and cost assumptions, and some of the workflows are genuinely agentic. But the headline cost chart says the opposite of its own appendix, and the five-year cloud bill implies far more work than the quoted speed would produce. Both are questions PT can answer. Until they do, the savings figure should not be quoted.</p>
+    </div>
+    <div class="verdict"><div class="eyebrow">Our verdict</div><h3>Reconcile before quoting savings</h3><p>The measurements look real. The economics built on them cannot be checked from what is published.</p><ul><li>The cost chart and the appendix table disagree.</li><li>The cost total and the speed figure describe very different amounts of work.</li></ul></div>
+  </div>
+
+  <article class="issue">
+    <div class="issue-head"><h3>The chart says one thing, the appendix says the opposite</h3><span class="tag red"><i></i>Labelling error</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 250" role="img" aria-label="Two bars of cost per million tokens; the chart labels the cheaper bar as lower utilization while the appendix labels it higher utilization">
+          <text x="16" y="22" class="m sm">Figure 5 in the report · cost per million tokens</text>
+          <line x1="70" y1="40" x2="70" y2="170" class="axis"/><line x1="70" y1="170" x2="360" y2="170" class="axis"/>
+          <rect x="110" y="70" width="80" height="100" rx="4" fill="var(--s1)" class="gv growv"/>
+          <rect x="230" y="120" width="80" height="50" rx="4" fill="var(--s1)" class="gv growv d1"/>
+          <text x="150" y="62" text-anchor="middle" class="sm">higher cost</text>
+          <text x="270" y="112" text-anchor="middle" class="sm">lower cost</text>
+          <g class="swap-a"><rect x="110" y="178" width="120" height="20" rx="10" fill="var(--red-soft)" stroke="var(--red)"/><text x="170" y="192" text-anchor="middle" class="sm" fill="var(--red)">chart: busier server</text></g>
+          <g class="swap-b"><rect x="260" y="178" width="120" height="20" rx="10" fill="var(--red-soft)" stroke="var(--red)"/><text x="320" y="192" text-anchor="middle" class="sm" fill="var(--red)">chart: idler server</text></g>
+          <g class="appear d2">
+            <rect x="390" y="60" width="134" height="110" rx="8" class="box"/>
+            <text x="457" y="82" text-anchor="middle" class="sm" font-weight="600">Appendix Table 3</text>
+            <text x="457" y="106" text-anchor="middle" class="sm">lower cost goes with</text>
+            <text x="457" y="122" text-anchor="middle" class="sm" font-weight="600">the busier server</text>
+            <text x="457" y="150" text-anchor="middle" class="sm m">which is what you would</text>
+            <text x="457" y="163" text-anchor="middle" class="sm m">expect: fixed cost, more output</text>
+          </g>
+          <text x="16" y="228" class="sm appear d3">The appendix version makes sense. The chart is the one customers see.</text>
+        </svg>
+        <figcaption>Same numbers, opposite captions. The chart was not generated from the table it summarises.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper says</b>The cost chart labels the cheaper per-token result as the less busy server. The appendix table assigns the labels the other way round.</p>
+        <p class="analogy">A busier server spreads its purchase price over more work, so it should be cheaper per token. The appendix agrees. The chart, which is what gets copied into presentations, does not.</p>
+        <p><b class="k">Why a customer will care</b>This is the economic headline of the paper. When a customer's finance team notices the chart contradicts the appendix, every other cost figure in the report gets questioned too.</p>
+        <div class="instead"><b class="k">What we would do instead</b><ul><li>Generate every chart from the same table that appears in the appendix.</li><li>Run an automatic check before release that catches reversed labels, mismatched units, and stale captions.</li></ul></div>
+      </div>
+    </div>
+  </article>
+
+  <article class="issue">
+    <div class="issue-head"><h3>A bill for 31 times more work than the speed figure would produce</h3><span class="tag amber"><i></i>Needs an explanation</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 230" role="img" aria-label="Headline speed of 1,179 tokens per second drawn next to the 36,504 tokens per second implied by the five-year cloud cost, about 31 times larger">
+          <text x="16" y="22" class="m sm">$5,180,423 over five years, at $0.90 per million tokens, pays for about 5.76 trillion tokens</text>
+          <text x="16" y="60" class="sm">Quoted speed of the system</text>
+          <rect x="190" y="48" width="11" height="18" rx="3" fill="var(--s1)" class="g grow"/>
+          <text x="208" y="62" class="num" font-weight="600">1,179 tokens/s</text>
+          <text x="16" y="110" class="sm">Speed needed to use up that bill</text>
+          <rect x="190" y="98" width="330" height="18" rx="3" fill="var(--s2)" class="g grow d1"/>
+          <text x="190" y="136" class="num appear d2" font-weight="600">36,504 tokens/s, non-stop, for five years  ·  about 31 times more</text>
+          <g class="appear d3">
+            <rect x="16" y="158" width="508" height="56" rx="8" class="box"/>
+            <text x="30" y="178" class="sm" font-weight="600">There may be a good reason. The report does not give it.</text>
+            <text x="30" y="196" class="sm m">Counting words read as well as words written, a different mix of tasks, or a different load level could each explain it.</text>
+            <text x="30" y="210" class="sm m">Until one is stated, the savings claim cannot be checked.</text>
+          </g>
+        </svg>
+        <figcaption>Two published numbers that should connect, and no bridge between them.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper says</b>It quotes a five-year cloud bill of about $5.2 million at $0.90 per million tokens, and a system speed of 1,179 tokens per second.</p>
+        <p class="analogy">It is a utility bill for thirty-one times more electricity than the meter says the house can draw. Perhaps the bill counts something the meter does not. The customer needs to be told what.</p>
+        <p><b class="k">Why a customer will care</b>The savings versus cloud is the reason to read the paper. If the customer's own analyst cannot get from the speed to the bill, the comparison is unusable, however good the measurements are. A similar gap sits behind the paper's energy-per-token figure.</p>
+        <div class="instead"><b class="k">What we would do instead</b><ul><li>Publish the token counts behind every cost figure, split into words read, words written, and cached input, per workflow.</li><li>State the load level and hours-per-day assumed in the bill.</li><li>Label a calculated cloud bill as a calculation, and only call it a comparison when the same work was actually run in both places.</li></ul></div>
+      </div>
+    </div>
+  </article>
+</div></section>
+
+<!-- Dell Llama -->
+<section class="paper" id="llama"><div class="wrap">
+  <div class="paper-head">
+    <div>
+      <div class="eyebrow">Dell · Llama inference across GPU platforms</div>
+      <h2 style="margin-top:8px">Sound measurements that prove less than they seem to</h2>
+      <p class="lede">A useful comparison across request sizes and load levels, and unusually open about which runs were chosen as representative. No errors. The issue is what the results are taken to mean: several things changed between the platforms at the same time, and the load tests stopped while throughput was still climbing.</p>
+    </div>
+    <div class="verdict"><div class="eyebrow">Our verdict</div><h3>Sound data, narrower claim</h3><p>Read it as "the best setup we found on each platform", not "this GPU is faster than that one". The paper is one sentence away from being right.</p><ul><li>Precision, GPU, and parallel layout all changed together.</li><li>The top of the curve was never reached.</li></ul></div>
+  </div>
+
+  <article class="issue">
+    <div class="issue-head"><h3>Three things changed, one got the credit</h3><span class="tag amber"><i></i>Claim broader than the test</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 230" role="img" aria-label="Three dials labelled precision, GPU, and parallel layout all turning at once, with the result credited to the GPU alone">
+          <g>
+            <circle cx="90" cy="90" r="46" class="box"/><line x1="90" y1="90" x2="90" y2="52" stroke="var(--s2)" stroke-width="4" stroke-linecap="round" class="spin"/><circle cx="90" cy="90" r="5" fill="var(--ink)"/>
+            <text x="90" y="156" text-anchor="middle" font-weight="600">Number format</text><text x="90" y="172" text-anchor="middle" class="m sm">8-bit vs 4-bit</text>
+            <circle cx="270" cy="90" r="46" class="box"/><line x1="270" y1="90" x2="270" y2="52" stroke="var(--s2)" stroke-width="4" stroke-linecap="round" class="spin d1"/><circle cx="270" cy="90" r="5" fill="var(--ink)"/>
+            <text x="270" y="156" text-anchor="middle" font-weight="600">GPU</text><text x="270" y="172" text-anchor="middle" class="m sm">different generation</text>
+            <circle cx="450" cy="90" r="46" class="box"/><line x1="450" y1="90" x2="450" y2="52" stroke="var(--s2)" stroke-width="4" stroke-linecap="round" class="spin d2"/><circle cx="450" cy="90" r="5" fill="var(--ink)"/>
+            <text x="450" y="156" text-anchor="middle" font-weight="600">How the model is split</text><text x="450" y="172" text-anchor="middle" class="m sm">left uncontrolled</text>
+          </g>
+          <g class="appear d2"><rect x="100" y="190" width="340" height="30" rx="15" fill="var(--amber-soft)" stroke="var(--amber)"/><text x="270" y="210" text-anchor="middle" class="sm" font-weight="600">one result, three knobs turned: the GPU alone cannot take the credit</text></g>
+        </svg>
+        <figcaption>Any of the three could explain the gain. The test cannot say which.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper says</b>It compares Llama running in a compact 4-bit format on one GPU generation against an 8-bit format on another, with the way the model is split across GPUs left to vary.</p>
+        <p class="analogy">Changing the engine, the fuel, and the gearbox at the same time, then crediting the engine for the faster lap.</p>
+        <p><b class="k">Why a customer will care</b>A customer wants to know what they get from the newer GPU. This test cannot tell them, and a competitor will say so. As a comparison of best available setups it is entirely fair; it just has to be described that way.</p>
+        <div class="instead"><b class="k">What we would do instead</b><ul><li>Run two tracks and label each. One changes only the GPU and holds everything else fixed. The other gives each platform the same tuning effort and compares the best result.</li><li>List the unavoidable differences right beside the number, so the reader never has to hunt for them.</li></ul></div>
+      </div>
+    </div>
+  </article>
+
+  <article class="issue">
+    <div class="issue-head"><h3>Testing stopped while the numbers were still climbing</h3><span class="tag amber"><i></i>Not a maximum</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 240" role="img" aria-label="Throughput against number of simultaneous users, rising through the last measured point with a dashed unknown extension beyond it">
+          <g class="gridl"><line x1="60" y1="40" x2="500" y2="40"/><line x1="60" y1="85" x2="500" y2="85"/><line x1="60" y1="130" x2="500" y2="130"/><line x1="60" y1="175" x2="500" y2="175"/></g>
+          <line x1="60" y1="20" x2="60" y2="180" class="axis"/><line x1="60" y1="180" x2="500" y2="180" class="axis"/>
+          <text x="20" y="100" class="m sm" transform="rotate(-90 20 100)" text-anchor="middle">work per second</text>
+          <text x="280" y="204" class="m sm" text-anchor="middle">simultaneous requests</text>
+          <path d="M60 176 C120 170 160 150 200 120 S280 60 340 44" fill="none" stroke="var(--s1)" stroke-width="2.5" class="draw"/>
+          <g fill="var(--s1)"><circle cx="60" cy="176" r="4"/><circle cx="130" cy="164" r="4"/><circle cx="200" cy="120" r="4"/><circle cx="270" cy="80" r="4"/><circle cx="340" cy="44" r="5" stroke="var(--surface)" stroke-width="2"/></g>
+          <path d="M340 44 C380 34 430 32 500 40" fill="none" stroke="var(--s2)" stroke-width="2.5" stroke-dasharray="6 5" class="draw d1"/>
+          <text x="340" y="30" text-anchor="middle" class="sm" font-weight="600">last point tested</text>
+          <text x="440" y="60" class="sm appear d3" fill="var(--s2)" font-weight="600">nobody knows what happens here</text>
+          <text x="60" y="226" class="sm appear d4">The highest number in the paper is the highest number tested, not the most the system can do.</text>
+        </svg>
+        <figcaption>A customer sizing from this curve could buy too much or too little, depending on where it actually flattens.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper says</b>The short-request throughput charts end at the highest load tested, with the line still rising.</p>
+        <p class="analogy">Stopping the stopwatch while the runner is still accelerating, and calling that the top speed.</p>
+        <p><b class="k">Why a customer will care</b>Sizing decisions come from the top of this curve. If the top was never found, the capacity figure is a floor, and it should be sold as one.</p>
+        <div class="instead"><b class="k">What we would do instead</b><ul><li>Keep raising the load until the curve flattens, or say clearly that we stopped first and report the result as "at least this much".</li><li>Mark separately the highest load at which responses still arrive fast enough for a person waiting on them. That is the number a customer with real users needs.</li></ul></div>
+      </div>
+    </div>
+  </article>
+</div></section>
+
+<!-- Signal65 -->
+<section class="paper" id="signal65"><div class="wrap">
+  <div class="paper-head">
+    <div>
+      <div class="eyebrow">Signal65 · long-context accuracy evaluation</div>
+      <h2 style="margin-top:8px">A careful paper with one thing to tidy</h2>
+      <p class="lede">This report says exactly what it tests and does not claim more. That restraint is its strength. We found no errors. One trend in it needs a small adjustment before it is quoted, and the study would be easier to repeat if its exact setup were published alongside it.</p>
+    </div>
+    <div class="verdict green"><div class="eyebrow">Our verdict</div><h3>Sound, one request</h3><p>Safe to cite for what it claims. Two things would make it stronger.</p><ul><li>Recompute the trend across context lengths using only the models present at every length.</li><li>Publish the exact question set, settings, and per-question results.</li></ul></div>
+  </div>
+
+  <article class="issue">
+    <div class="issue-head"><h3>The average at long lengths is over fewer models</h3><span class="tag amber"><i></i>Trend needs a small fix</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 240" role="img" aria-label="Dots representing models at four document lengths; some drop out at longer lengths while an average line is drawn through the ones that remain">
+          <text x="16" y="20" class="m sm">Illustration, not the report's exact counts. Each dot is one model tested.</text>
+          <g id="cohort"></g>
+          <text x="90" y="212" text-anchor="middle" class="sm">short documents</text><text x="230" y="212" text-anchor="middle" class="sm">medium</text><text x="370" y="212" text-anchor="middle" class="sm">long</text><text x="490" y="212" text-anchor="middle" class="sm">longest</text>
+          <text x="290" y="232" text-anchor="middle" class="m sm">the "average accuracy" at each length is an average of a different group</text>
+        </svg>
+        <figcaption>Some models cannot handle the longest documents and drop out. The average then partly reflects who is left.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper says</b>It shows how accuracy changes as documents get longer. Fewer models are able to take part at the longer lengths.</p>
+        <p class="analogy">Like tracking a class's average grade across the school year while weaker students drop the course. The average can rise even if nobody learned anything.</p>
+        <p><b class="k">Why a customer will care</b>Only if the trend is quoted as "accuracy holds up at long lengths". A customer whose model is one of the drop-outs will not see that result.</p>
+        <div class="instead"><b class="k">What we would do instead</b><ul><li>Show the trend twice: once for all models that could take part, and once for the fixed group present at every length.</li><li>Publish the full per-question results and the exact setup, so anyone can rerun the study and get the same table.</li></ul></div>
+      </div>
+    </div>
+  </article>
+</div></section>
+
+<!-- Approach -->
+<section class="approach" id="approach"><div class="wrap">
+  <div class="eyebrow">How we work</div>
+  <h2 style="margin-top:8px">Three habits that would have prevented every issue above</h2>
+  <p class="lede" style="margin-top:10px">None of these problems came from bad hardware or dishonest people. They came from testing too little of the space, not knowing exactly what was running, or not leaving a trail. We build every study around the three habits that close those gaps.</p>
+  <div class="pillars">
+    <div class="pillar">
+      <svg class="glyph" viewBox="0 0 44 44" fill="none" stroke="var(--accent)" stroke-width="2"><rect x="6" y="6" width="32" height="32" rx="4"/><path d="M6 17h32M6 28h32M17 6v32M28 6v32"/></svg>
+      <h3>Thorough</h3>
+      <p class="def">We test until the answer is bracketed, and we keep every result, including the ones that failed.</p>
+      <ul>
+        <li>We push the load until the curve flattens. If we have to stop first, we say so and call the number a floor.</li>
+        <li>We test steady traffic and bursty traffic, because customers get both.</li>
+        <li>We pick a winner on a fresh set of runs, never on the best run we happened to see.</li>
+        <li>We run the finalist for hours, not minutes, and we count anything that times out or errors as work not done.</li>
+      </ul>
+    </div>
+    <div class="pillar">
+      <svg class="glyph" viewBox="0 0 44 44" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="22" cy="22" r="15"/><circle cx="22" cy="22" r="5"/><path d="M22 7v6M22 31v6M7 22h6M31 22h6"/></svg>
+      <h3>Expert</h3>
+      <p class="def">We know what is actually running, what limits it, and what a change will do, before we attribute a number to anything.</p>
+      <ul>
+        <li>We check that the model fits and confirm what the software actually loaded, before the clock starts.</li>
+        <li>We map the machine: which cores, which memory, which GPUs talk to which, and where every thread ran.</li>
+        <li>We change one thing at a time, then combine the winners. Each platform gets the same tuning effort.</li>
+        <li>We separate "the most this box can do" from "the most it can do while people are waiting on it", and we label which one we are quoting.</li>
+      </ul>
+    </div>
+    <div class="pillar">
+      <svg class="glyph" viewBox="0 0 44 44" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M10 6h18l8 8v24H10z"/><path d="M28 6v8h8M15 22h14M15 28h14M15 34h9"/></svg>
+      <h3>Reproducible</h3>
+      <p class="def">Anyone can rerun our study, regenerate every chart, and get the same conclusions, including the unflattering ones.</p>
+      <ul>
+        <li>Every run ships with its full recipe: hardware, firmware, software versions, model files, and the exact launch commands.</li>
+        <li>Every chart, table, and slide is generated from one data source, with automatic checks for reversed labels, mismatched units, and stale numbers.</li>
+        <li>Electricity is measured at the wall over the same minutes the work is counted, so efficiency figures always add up.</li>
+        <li>Raw readings, failed attempts, and a checksum index go in the evidence bundle. Nothing is quietly rerun until it looks good.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="promise">
+    <div><h3>Our standard: a customer's own engineer can check every number and find nothing to correct.</h3><p style="margin-top:8px">That is the bar each paper above was held to. It is the bar we hold our own results to, including the throughput we have already measured on our eight-GPU host, which we describe as a measurement on one setup and not as a comparison with anyone until the matched test is run.</p></div>
+  </div>
+</div></section>
+
+<!-- Offer -->
+<section class="offer" id="offer"><div class="wrap">
+  <div class="eyebrow">Proposed next step</div>
+  <h2 style="margin-top:8px">Turn the strongest of these papers into one nobody can pick apart</h2>
+  <p class="lede" style="margin-top:10px">We propose to rerun the Dell Llama workload on our own eight-GPU Dell host with capsim, our capacity-testing tool, and publish it with the full evidence chain. Same request sizes, same load levels, corrected accounting, and every setting disclosed.</p>
+  <div class="steps">
+    <div class="step"><div class="n">1</div><h4>Freeze and verify the setup</h4><p>Record the machine, confirm the model fits, confirm what is actually running. Nothing is measured until the description and the reality match.</p></div>
+    <div class="step"><div class="n">2</div><h4>Reproduce the published workload</h4><p>The same three request shapes at the same five load levels, run three times each, with the full grid published including any cell that failed.</p></div>
+    <div class="step"><div class="n">3</div><h4>Tune fairly and find the real top</h4><p>Change one setting at a time under a fixed effort budget, then raise the load until the curve flattens. Report peak capacity and people-waiting capacity separately.</p></div>
+    <div class="step"><div class="n">4</div><h4>Publish the evidence, not just the chart</h4><p>A one-page answer to the sizing question, wall-measured energy, an honest cost model, and a checksummed bundle anyone can audit.</p></div>
+  </div>
+  <div class="deliver"><b>What Dell gets.</b> A performance publication whose headline says exactly what kind of comparison it is, whose every figure regenerates from the raw data, and whose limitations are stated before a competitor states them. The optional follow-ons are a quality check on long documents, a business-workflow test with real tasks scored right or wrong, and a like-for-like CPU study once matching systems are available.</div>
+  <p class="foot">Nothing on this page forecasts a performance gain. Where we found a plausible improvement, such as a better GPU layout or a tuning change, it is listed as an experiment to run, and the result will be reported with its uncertainty whether or not it favours the platform.</p>
+</div></section>
+
+<script>
+(function(){
+  var svgNS='http://www.w3.org/2000/svg';
+  function rect(x,y,w,h,fill,cls,extra){var r=document.createElementNS(svgNS,'rect');r.setAttribute('x',x);r.setAttribute('y',y);r.setAttribute('width',w);r.setAttribute('height',h);r.setAttribute('rx',3);r.setAttribute('fill',fill);if(cls)r.setAttribute('class',cls);if(extra)for(var k in extra)r.setAttribute(k,extra[k]);return r;}
+  function txt(x,y,s,cls){var t=document.createElementNS(svgNS,'text');t.setAttribute('x',x);t.setAttribute('y',y);t.setAttribute('text-anchor','middle');t.setAttribute('class',cls||'sm');t.textContent=s;return t;}
+  function cpuGrid(id,y,selected){
+    var g=document.getElementById(id);if(!g)return;
+    for(var i=0;i<32;i++){
+      var x=16+i*15.9, sel=selected(i);
+      g.appendChild(rect(x,y,13,13,sel?'var(--s1)':'var(--surface-2)','appear'+(id==='gridB'?' d1':''),{stroke:sel?'var(--s1)':'var(--line-2)'}));
+      if(i%8===0||sel){var t=txt(x+6.5,y+10,i,'sm');t.setAttribute('font-size','8');t.setAttribute('fill',sel?'#fff':'var(--muted)');t.setAttribute('class','appear'+(id==='gridB'?' d1':''));g.appendChild(t);}
+    }
+  }
+  cpuGrid('gridA',80,function(i){return i<8;});
+  cpuGrid('gridB',170,function(i){return i===8;});
+  var gb=document.getElementById('gridB'); if(gb){var t=txt(16,220,'only CPU number 8 is reserved','sm appear d2');t.setAttribute('text-anchor','start');t.setAttribute('fill','var(--red)');gb.appendChild(t);}
+  function slots(id,y,n,color){
+    var g=document.getElementById(id);if(!g)return;
+    for(var i=0;i<n;i++){var x=16+(i%15)*34, yy=y+Math.floor(i/15)*30;
+      g.appendChild(rect(x,yy,30,24,color,'gv growv'+(i%15>7?' d1':''),{opacity:.9}));
+      var t=txt(x+15,yy+16,'job','sm');t.setAttribute('fill','#fff');t.setAttribute('font-size','9');g.appendChild(t);}
+  }
+  slots('slotsA',30,16,'var(--s1)');
+  slots('slotsB',120,30,'var(--s2)');
+  (function(){
+    var g=document.getElementById('cohort');if(!g)return;
+    var cols=[90,230,370,490];
+    var members=[[1,1,1,1,1,1,1,1],[1,1,1,1,1,1,0,1],[1,1,0,1,1,0,0,1],[1,0,0,1,0,0,0,1]];
+    for(var c=0;c<4;c++){
+      var n=0;
+      for(var m=0;m<8;m++){
+        var y=40+m*18, alive=members[c][m];
+        var d=document.createElementNS(svgNS,'circle');
+        d.setAttribute('cx',cols[c]);d.setAttribute('cy',y);d.setAttribute('r',6);
+        d.setAttribute('fill',alive?'var(--s1)':'var(--line-2)');
+        if(!alive)d.setAttribute('class','dropout'+(c===2?' d1':c===3?' d2':''));
+        g.appendChild(d); if(alive)n++;
+      }
+      var lab=txt(cols[c],196,n+' models','sm num appear d3');lab.setAttribute('fill',n<8?'var(--s2)':'var(--muted)');g.appendChild(lab);
+    }
+    var trend=document.createElementNS(svgNS,'path');
+    trend.setAttribute('d','M90 120 L230 112 L370 96 L490 84');
+    trend.setAttribute('fill','none');trend.setAttribute('stroke','var(--s2)');trend.setAttribute('stroke-width','2.5');trend.setAttribute('class','draw d1');
+    g.appendChild(trend);
+    var tl=txt(160,184,'"average" of whoever is left','sm appear d3');tl.setAttribute('fill','var(--s2)');g.appendChild(tl);
+  })();
+  var reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var vizzes=document.querySelectorAll('[data-viz]');
+  if(!reduce && 'IntersectionObserver' in window){
+    var io=new IntersectionObserver(function(entries){
+      entries.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add('play'); } else { e.target.classList.remove('play'); } });
+    },{threshold:.35});
+    vizzes.forEach(function(v){ io.observe(v); });
+  }
+  document.querySelectorAll('.replay').forEach(function(b){
+    b.addEventListener('click',function(){ var f=b.closest('[data-viz]'); f.classList.remove('play'); void f.offsetWidth; f.classList.add('play'); });
+  });
+})();
+</script>

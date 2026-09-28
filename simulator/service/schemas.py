@@ -6,6 +6,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
+from ..benchmarks.spec import BenchmarkSpec
+
 
 class StartRunRequest(BaseModel):
     profile: Optional[str] = None
@@ -130,6 +132,7 @@ class RooflineRequest(BaseModel):
     # cell afresh.
     resume: bool = True
     confirm_winners: bool = True
+    benchmarks: BenchmarkSpec | None = None
 
 
 class EnginePullRequest(BaseModel):

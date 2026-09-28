@@ -1,0 +1,65 @@
+{
+  "commit": "7ab7b48f9af4ce72d3372ad7bf5d08b6362423c4",
+  "synthetic_probes": {
+    "stream": {
+      "server_completion_tokens": 5,
+      "stream_content_chunks": 1,
+      "reported_output_tokens": 1
+    },
+    "missing_latency_is_sla_ok": true,
+    "export_supplied": {
+      "type": "vllm_cuda_multi",
+      "model_id": "audit-example",
+      "tensor_parallel_size": 1,
+      "replica_devices": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ],
+      "gpu_memory_utilization": 0.9,
+      "max_num_seqs": 256,
+      "kv_cache_dtype": "fp8",
+      "reasoning": true
+    },
+    "export_retained": {
+      "type": "vllm_cuda_multi",
+      "model_id": "audit-example",
+      "tensor_parallel_size": 1
+    },
+    "empty_outcomes": {
+      "status": "pass",
+      "sample_size": 0,
+      "violation_rate": 0.0,
+      "success_rate": null
+    }
+  },
+  "independent_arithmetic": {
+    "r770_gpu_only_tok_per_j": {
+      "8B": 8.640728476821192,
+      "27B": 3.2016666666666667,
+      "35B": 5.469354838709678
+    },
+    "bf16_weight_bytes_billions": {
+      "27B": 54,
+      "35B": 70
+    },
+    "namd_core_ratio": 1.875,
+    "namd_per_core_ratio_range": [
+      0.9813333333333334,
+      0.9973333333333334
+    ],
+    "pt_implied_billed_tokens_per_second": 36504.47460397993,
+    "pt_cost_per_million_at_1179_tokens_per_second": 1.5094721640203648,
+    "pt_cost_per_million_50pct_from_cost_table": 0.09452075737429987,
+    "pt_cost_per_million_100pct_from_cost_table": 0.0487520420629744
+  }
+}

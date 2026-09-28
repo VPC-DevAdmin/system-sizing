@@ -346,6 +346,19 @@ async def _plan_roofline(spec: dict
 
 async def _start_run_locked(app, req: StartRunRequest) -> dict:
     runs_base = app.state.paths.runs_base
+    from .benchmarks import assert_no_preparation
+    assert_no_preparation(app)
+    if (req.workload or {}).get("kind") == "roofline":
+        from pydantic import ValidationError
+
+        from ..benchmarks.spec import BenchmarkSpec
+        raw = req.workload.get("spec") or {}
+        try:
+            benchmark_spec = BenchmarkSpec.model_validate(raw.get("benchmarks") or {})
+        except ValidationError as e:
+            raise HTTPException(422, str(e)) from e
+        if benchmark_spec.harnesses and not raw.get("confirm_winners", True):
+            raise HTTPException(422, "Third-party finalist benchmarks require internal confirmation")
     active = app.state.active
     if active is not None and not active.task.done():
         raise HTTPException(
@@ -496,6 +509,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             max_tp=hw_bounds.get("max_tp"),
             vram_per_gpu_gb=hw_bounds.get("vram_per_gpu_gb"),
             domain_tp=hw_bounds.get("domain_tp"),
+            benchmarks=benchmark_spec.model_dump(),
         )
     elif kind == "headline_optimize":
         # Engine shape and request shape are coupled, so they are

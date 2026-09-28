@@ -12,7 +12,17 @@ from typing import Optional
 from fastapi import FastAPI
 
 from .. import __version__
-from . import catalog, optimizer, prepare, roofline, runs, telemetry
+from . import (
+    benchmarks,
+    catalog,
+    infrastructure,
+    optimizer,
+    prepare,
+    roofline,
+    runs,
+    telemetry,
+    workspace,
+)
 from .runs import _finalise_orphan_runs
 from .state import ActiveRun, Paths, _acquire_runs_lock, _release_runs_lock
 
@@ -67,7 +77,7 @@ def create_app(
         _rp(user_dir=catalog_dir)
 
     for r in (runs.router, catalog.router, prepare.router, roofline.router,
-              optimizer.router, telemetry.router):
+              optimizer.router, telemetry.router, workspace.router, benchmarks.router, infrastructure.router):
         app.include_router(r)
 
     # ── UI (Phase 3) ──────────────────────────────────────────────

@@ -1,0 +1,619 @@
+{
+  "schema_version": 1,
+  "source_plan_sha256": "dfddb78a0373c0eae9e4073dfe95529de5c41ef9a880bb518291b27b6d0a1513",
+  "projects": [
+    {
+      "id": "P01",
+      "title": "More document requests",
+      "recipe_id": "p01-v1",
+      "status": "planned",
+      "implementation_phase": 2,
+      "feasibility_gate": "Supported model/backend disaggregation and verified transfer path.",
+      "adapter_capabilities": [
+        "dynamo_deployment",
+        "llm_load",
+        "quality",
+        "topology"
+      ],
+      "baseline_and_treatment": "tuned aggregated LLM serving versus Dynamo prefill/decode separation with equal total GPU count, model revision, weight/KV precision, and workload. Seed from the selected Llama or Qwen result only after resolving engine support and sufficient context.",
+      "controls": "prompt/output distributions, arrival process, service targets, GPU allocation, prefill/decode split, TP/replicas, chunked prefill, transfer connector, locality, routing, and cache state. Screen feasible splits within a fixed candidate budget. Do not assume every TP size or disaggregated path works on RTX PRO. Optional prefill-count and fixed arrival-rate grids with explicit TTFT and queue-growth targets; retain every failed cell. Optional joint goal search varies document and answer lengths and GPU splits, adaptively brackets demand, and exports separate capacity and latency peaks with every measured curve.",
+      "implementation": "Dynamo deployment adapter; transfer/topology preflight; request timestamps and queue/transfer metrics; AIPerf load curves and selected GuideLLM cross-checks. Launch services as an owned dependency graph and keep a matched engine configuration available for A.",
+      "outputs": [
+        {
+          "id": "P01-O1",
+          "title": "qualified requests/hour gain",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P01-O2",
+          "title": "completed-response latency reduction at matched load",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P01-O3",
+          "title": "GPU-scaling curve with explicit baseline",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        }
+      ],
+      "output_constraints": "P01-O1 qualified requests/hour gain; P01-O2 completed-response latency reduction at matched load; P01-O3 GPU-scaling curve with explicit baseline. O3 needs additional GPU-count cells; O2 cannot be inferred from peak throughput alone.",
+      "acceptance": "measured A and B, same resource and quality contract, recorded KV transfer cost, client headroom checks, confirmed capacity boundary or clearly marked search limit. No assumed speedup from the NVIDIA B200/GB200 article."
+    },
+    {
+      "id": "P02",
+      "title": "More returning conversations",
+      "recipe_id": "p02-v1",
+      "status": "planned",
+      "implementation_phase": 2,
+      "feasibility_gate": "Pinned tiering connector and cache telemetry with reproducible session traces.",
+      "adapter_capabilities": [
+        "session_replay",
+        "dynamo_kv_tiering",
+        "cache_telemetry",
+        "quality"
+      ],
+      "baseline_and_treatment": "GPU-only prefix caching versus the same deployment with Dynamo CPU offload, then CPU plus NVMe offload as separately identified treatments. Hold routing fixed to isolate tiering; a further routing treatment requires its own comparison.",
+      "controls": "session count, active fraction, context distribution, think/return times, TTL, simultaneous-return bursts, cache sizes, routing, CPU affinity, disk location, and eviction policy. Use unique session namespaces and reproducible timed traces.",
+      "implementation": "multi-turn session replay driver; KVBM integration; hit/miss/eviction/offload counters; host and storage metrics. Verify the chosen connector's tier semantics and useful memory sizing. Persisted conversation state is not the same as reusable KV blocks.",
+      "outputs": [
+        {
+          "id": "P02-O1",
+          "title": "reusable conversation capacity",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P02-O2",
+          "title": "resume-latency reduction",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P02-O3",
+          "title": "avoided prefill/recomputation",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        }
+      ],
+      "output_constraints": "P02-O1 reusable conversation capacity; P02-O2 resume-latency reduction; P02-O3 avoided prefill/recomputation. Sustainable simultaneously active sessions are an additional independently measured curve, not a renaming of retained conversations.",
+      "acceptance": "timed return traces, full/cold misses retained, p95 resume gate, quality consistency, cache namespacing, and explicit tier occupancy. Disk and GPU capacities are not blindly summed when tiers duplicate blocks."
+    },
+    {
+      "id": "P03",
+      "title": "More context per GPU",
+      "recipe_id": "p03-v1",
+      "status": "planned",
+      "implementation_phase": 2,
+      "feasibility_gate": "Verified GPU/model/backend/cache-format path and long-context quality set.",
+      "adapter_capabilities": [
+        "llm_load",
+        "cache_capabilities",
+        "calibration",
+        "long_context_quality"
+      ],
+      "baseline_and_treatment": "the existing FP8 cache configuration versus supported calibrated/lower-bit cache or compression candidates; BF16 supplies a quality reference. Keep model weights and supported context limit fixed.",
+      "controls": "cache format, calibration artifact, attention backend, prompt and output headroom, context ladder, concurrency, GPU memory budget, and corpus/quality thresholds. Candidate formats are enabled only after a kernel smoke test and allocation verification.",
+      "implementation": "cache capability matrix keyed by GPU architecture, engine, kernel, model, and dtype; calibration preparation; context-boundary search; long-context correctness tests; memory traces. Raising the experiment request limit must not silently raise a model's context limit or the old BenchmarkSpec limit.",
+      "outputs": [
+        {
+          "id": "P03-O1",
+          "title": "maximum qualified input-length gain",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P03-O2",
+          "title": "concurrent-session gain at a fixed length",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P03-O3",
+          "title": "KV-memory reduction and quality tradeoff",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        }
+      ],
+      "output_constraints": "P03-O1 maximum qualified input-length gain; P03-O2 concurrent-session gain at a fixed length; P03-O3 KV-memory reduction and quality tradeoff. O2 requires a separate concurrency sweep; theoretical bytes/token savings do not prove it.",
+      "acceptance": "no silent fallback dtype or truncation, fresh quality corpus, metadata/scales included in memory totals, and no context-extension claim beyond the validated model limit. Mark experimental kernel paths explicitly."
+    },
+    {
+      "id": "P04",
+      "title": "Faster completed answers",
+      "recipe_id": "p04-v1",
+      "status": "planned",
+      "implementation_phase": 2,
+      "feasibility_gate": "Compatible draft or speculative method; target-model and task-quality checks.",
+      "adapter_capabilities": [
+        "llm_load",
+        "speculative_draft",
+        "task_quality"
+      ],
+      "baseline_and_treatment": "target model normal decoding versus the same target with a compatible speculative method. Include draft compute and memory in the resource budget. Do not compare against a smaller independent answering model.",
+      "controls": "draft revision/method, draft-token count, target sampling settings, output policy, offered load, and concurrency. Begin with deterministic structured tasks, tested code/SQL generation, or evidence-grounded summaries rather than arbitrary fixed tokens alone.",
+      "implementation": "draft asset lifecycle, supported model/draft pairing, effective speculative config capture, acceptance/verification counters, workload graders, and AIPerf/GuideLLM serving measurements where their request protocol fits.",
+      "outputs": [
+        {
+          "id": "P04-O1",
+          "title": "completed-answer latency reduction",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P04-O2",
+          "title": "qualified task-throughput increase",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P04-O3",
+          "title": "energy per correct answer if wall telemetry is present",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        }
+      ],
+      "output_constraints": "P04-O1 completed-answer latency reduction; P04-O2 qualified task-throughput increase; P04-O3 energy per correct answer if wall telemetry is present. Acceptance rate is diagnostic evidence, not the headline.",
+      "acceptance": "draft and target fingerprinted, output/quality validation, fixed-load latency comparison and independent capacity curve, low- and high-load coverage. A method losing at high load remains in the report; no general speedup from a single best cell."
+    },
+    {
+      "id": "P05",
+      "title": "More usable images",
+      "recipe_id": "p05-v1",
+      "status": "planned",
+      "implementation_phase": 4,
+      "feasibility_gate": "Compatible teacher/student or budgeted distillation; blind acceptance rubric.",
+      "adapter_capabilities": [
+        "diffusion",
+        "fastgen",
+        "checkpoint_preparation",
+        "blind_image_review"
+      ],
+      "baseline_and_treatment": "tuned multi-step teacher diffusion versus a corresponding compatible student through FastGen. Prefer a verified existing student for the first implementation; support explicit distillation jobs when no suitable checkpoint exists.",
+      "controls": "teacher/student revisions, method, steps, precision, image dimensions, batch/concurrency, prompts, seeds, guidance, negative prompts, generation timeout, retries, and acceptance rubric. A teacher step-count sweep prevents an inflated comparison against an unnecessarily slow baseline.",
+      "implementation": "isolated FastGen environment/container; checkpoint download or resumable training job; teacher/student inference adapter; image artifact storage and hash index; blind review UI and structured rubric import/export. Validate automatic scoring against a human-reviewed subset. Never substitute FID or a single aesthetic score for task acceptance without justification.",
+      "outputs": [
+        {
+          "id": "P05-O1",
+          "title": "accepted images/hour gain",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P05-O2",
+          "title": "generation-time reduction per accepted image",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P05-O3",
+          "title": "wall-energy reduction per accepted image",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P05-O4",
+          "title": "cost per accepted image and distillation break-even",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        }
+      ],
+      "output_constraints": "P05-O1 accepted images/hour gain; P05-O2 generation-time reduction per accepted image; P05-O3 wall-energy reduction per accepted image; P05-O4 cost per accepted image and distillation break-even. Training cost is separate from inference; break-even exists only if the measured per-image savings are positive.",
+      "acceptance": "compatible model/method, same output dimensions and prompt mix, preserved rejected samples and regeneration costs, pending-review state, and measured quality uncertainty. Training success alone does not make a usable student or a positive claim."
+    },
+    {
+      "id": "P06",
+      "title": "More business workflows per GPU",
+      "recipe_id": "p06-v1",
+      "status": "planned",
+      "implementation_phase": 3,
+      "feasibility_gate": "Supported partition profiles or explicit software sharing; tested rollback.",
+      "adapter_capabilities": [
+        "partition_manager",
+        "multi_tenant_load",
+        "tenant_contracts",
+        "host_restore"
+      ],
+      "baseline_and_treatment": "Whisper transcription plus a selected language model for structured post-call summaries: two dedicated GPUs versus one software-shared GPU and one GPU with two MIG partitions. The earlier independent-endpoint workflow remains available.",
+      "controls": "Identical audio, ASR model and precision, language model and precision, fixed call arrivals, summary grading, KV budget, stage timing and owned MIG restoration. Handoff is host-mediated text; no assumed PCIe bypass.",
+      "implementation": "partition discovery and plan; physical GPU/MIG UUID mapping; transactional create/restore with host lease; service packing; multi-endpoint traffic; per-tenant goodput and interference metrics. Only show partitions and guest/container paths supported by the exact stack.",
+      "outputs": [
+        {
+          "id": "P06-O1",
+          "title": "qualified-service density increase",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P06-O2",
+          "title": "reduction in tenant interference",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P06-O3",
+          "title": "resource or cost reduction for a fixed service set",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        }
+      ],
+      "output_constraints": "P06-O1 qualified-service density increase; P06-O2 reduction in tenant interference; P06-O3 resource or cost reduction for a fixed service set. Fixed-set cost needs equal demand and accounting, not merely the maximum-density result.",
+      "acceptance": "every counted service meets its contract concurrently; failed/starved tenants remain in totals; original GPU configuration restored; no confidential-computing claim implied by MIG isolation."
+    },
+    {
+      "id": "P07",
+      "title": "Confidential inference",
+      "recipe_id": "p07-v1",
+      "status": "planned",
+      "implementation_phase": 5,
+      "feasibility_gate": "Verified platform/guest/GPU protection combination and attestation; optional SGX/MIG independently gated.",
+      "adapter_capabilities": [
+        "confidential_vm",
+        "attestation",
+        "key_policy",
+        "llm_load",
+        "host_restore"
+      ],
+      "baseline_and_treatment": "conventional VM versus an attested confidential VM with identical assigned resources. Bare metal is an additional diagnostic arm, not a substitute for the VM baseline. Add optional SGX key/policy service and supported device protection as separately declared components.",
+      "controls": "TDX/platform firmware, guest image digest, protected transfer mechanism, GPU CC mode, attestation policy, key-release configuration, service resource budget, and optional partitioning only if explicitly supported. Distinguish Intel TDX Connect, NVIDIA Protected PCIe, and encrypted bounce-buffer transfer; no interchangeable labels.",
+      "implementation": "read-only support/firmware preflight; VM/deployment adapter; attestation verifier and policy probes; secret-reference integration; capture of public evidence and measured protection state. Test refusal of invalid attestation and unauthorized key release using controlled fixtures. SGX needs a concrete application purpose and separate evidence. Provisioning/reboot is an explicit resumable setup operation with recorded host changes, not a hidden benchmark repair.",
+      "outputs": [
+        {
+          "id": "P07-O1",
+          "title": "protected capacity retained and overhead",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P07-O2",
+          "title": "security-control evidence report",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P07-O3",
+          "title": "confidential tenant density only if the combined implementation is supported and measured",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        }
+      ],
+      "output_constraints": "P07-O1 protected capacity retained and overhead; P07-O2 security-control evidence report; P07-O3 confidential tenant density only if the combined implementation is supported and measured. O2 contains pass/fail scope and a threat model, not \u201cX% more secure.\u201d",
+      "acceptance": "validate the exact XE7740 stack rather than infer support from CPU branding. Do not automatically combine MIG with confidential GPU mode. No raw keys, credentials, or sensitive prompts in exports; offloaded KV requires its own protected-memory/storage boundary. Failed attestation blocks protected-performance claims. This is not certification or proof against all attacks."
+    },
+    {
+      "id": "P08",
+      "title": "Lower energy consumption",
+      "recipe_id": "p08-v1",
+      "status": "planned",
+      "implementation_phase": 3,
+      "feasibility_gate": "Verified wall-power boundary and supported reversible power controls.",
+      "adapter_capabilities": [
+        "wall_energy",
+        "power_controls",
+        "qualified_work",
+        "host_restore"
+      ],
+      "baseline_and_treatment": "normal power configuration versus supported power-limit/active-GPU/CPU-policy candidates. Compare the same accepted workload and completion deadline. Separate each control in screening before measuring a combined treatment.",
+      "controls": "supported power limits, active GPU count, CPU policy, warm/cold treatment, idle baseline, measurement duration, and quality/SLO requirements. Read supported ranges rather than hard-code wattages.",
+      "implementation": "wall sensor adapter for an available PDU or documented server PSU telemetry; timestamp alignment and integration; sensor coverage validation; reversible power changes; thermal/throttle records. Reuse request and quality evidence only if sensor windows cover those exact runs.",
+      "outputs": [
+        {
+          "id": "P08-O1",
+          "title": "wall-energy reduction for fixed work",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P08-O2",
+          "title": "capacity gain at a fixed wall-power budget",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P08-O3",
+          "title": "measured energy/performance frontier",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        }
+      ],
+      "output_constraints": "P08-O1 wall-energy reduction for fixed work; P08-O2 capacity gain at a fixed wall-power budget; P08-O3 measured energy/performance frontier. O2 requires a power-constrained load search; it cannot be computed by scaling O1.",
+      "acceptance": "wall boundary and uncertainty known, missing samples handled explicitly, no use of GPU package/RAPL counters as wall power, and restored original limits after failure or cancellation. Report gross and idle-adjusted energy separately if both are supplied."
+    },
+    {
+      "id": "P09",
+      "title": "Lower cost per task",
+      "recipe_id": "p09-v1",
+      "status": "planned",
+      "implementation_phase": 3,
+      "feasibility_gate": "Versioned prices, resource accounting, equal demand and quality.",
+      "adapter_capabilities": [
+        "resource_accounting",
+        "demand_replay",
+        "cost_ledger",
+        "qualified_work"
+      ],
+      "baseline_and_treatment": "fixed reservations against dynamic allocation or another declared optimized deployment under an identical recorded demand trace. CPU/NUMA changes and model/precision substitutions are named treatment differences, with quality qualification for substitutions.",
+      "controls": "acquisition and support prices, amortization period, electricity, cooling assumption, software, operations, utilization, capacity reserve, demand trace, model-quality margin, and training/setup costs. Start with on-premises scenario comparison; cloud economics are optional dated inputs rather than implied measured cloud performance.",
+      "implementation": "timestamped price/assumption ledger, allocation-time accounting, whole-host versus marginal cost modes, demand replay, and versioned deterministic calculator. An analysis-only output may consume eligible existing campaigns; a dynamic-allocation performance claim needs an actual trace replay.",
+      "outputs": [
+        {
+          "id": "P09-O1",
+          "title": "cost reduction per accepted task",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P09-O2",
+          "title": "utilization/break-even sensitivity",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P09-O3",
+          "title": "resources required for a fixed service demand",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        }
+      ],
+      "output_constraints": "P09-O1 cost reduction per accepted task; P09-O2 utilization/break-even sensitivity; P09-O3 resources required for a fixed service demand. Arithmetic freeing GPUs does not save capital unless the scenario actually avoids, removes, or productively reallocates that expense.",
+      "acceptance": "A and B cover equal demand/quality/availability assumptions, no double counting of shared hardware or allocated energy, idle costs retained, and measured inputs distinguished from prices and scenario assumptions. Updating prices creates a new analysis version, not a new measurement."
+    },
+    {
+      "id": "P10",
+      "title": "Faster long-document responses",
+      "recipe_id": "p10-v1",
+      "status": "planned",
+      "implementation_phase": 5,
+      "feasibility_gate": "Profiled bottleneck and compatible optimized kernel; unprofiled end-to-end confirmation.",
+      "adapter_capabilities": [
+        "profiler",
+        "attention_backend",
+        "numerical_validation",
+        "llm_load"
+      ],
+      "baseline_and_treatment": "current supported attention implementation versus a compatible optimized attention/softmax path. Hold everything else fixed. Kernel-level softmax, attention fusion, and Dynamo routing softmax are different mechanisms; routing belongs under P02.",
+      "controls": "backend/kernel build, dtype, shapes, context length, concurrency, model revision, and numerical tolerance. First profile representative runs. Stop with a useful \u201cno demonstrated opportunity\u201d result if the bottleneck or compatible treatment is absent.",
+      "implementation": "profiler adapter and trace inventory; minimal operator check; numerical/quality validation; controlled backend selection; end-to-end confirmation with profiling disabled. Capture fallbacks and architecture requirements.",
+      "outputs": [
+        {
+          "id": "P10-O1",
+          "title": "end-to-end latency reduction",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P10-O2",
+          "title": "qualified throughput improvement",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        },
+        {
+          "id": "P10-O3",
+          "title": "bottleneck/profile technical note",
+          "status": "planned_not_measured",
+          "export_separately": true,
+          "artifacts": [
+            "claim.json",
+            "claim-brief.md",
+            "white-paper.docx",
+            "charts",
+            "evidence.zip"
+          ]
+        }
+      ],
+      "output_constraints": "P10-O1 end-to-end latency reduction; P10-O2 qualified throughput improvement; P10-O3 bottleneck/profile technical note. A kernel microbenchmark alone only qualifies O3.",
+      "acceptance": "supported RTX PRO execution path, no silent fallback, equivalent workload quality, numerical checks appropriate to precision, and end-to-end evidence. The linked Dynamo 0.4 article establishes a disaggregation direction, not a softmax-kernel result."
+    }
+  ]
+}

@@ -83,7 +83,7 @@ def _build_app(cfg, state: dict):
         import asyncio
 
         body = await request.json()
-        max_tokens = int(body.get("max_tokens") or 64)
+        max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or 64)
         input_tokens = _estimate_tokens(body.get("messages") or [])
         rng = random.Random()
 

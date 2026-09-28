@@ -40,6 +40,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .benchmarks.storage import redact
 from .bus import BUS
 from .config import Config
 from .cpu_binding import expand_thread_binding
@@ -343,7 +344,8 @@ async def run_headline_sweep(
         cohort_id=cohort.id,
         cohort_definition={"name": cohort.name,
                            "persona_weights": cohort.persona_weights},
-        config={"mode": "headline_sweep", "ladder": ladder},
+        config={"mode": "headline_sweep", "ladder": ladder,
+                "resolved_config": redact(asdict(cfg))},
     )
     db.update_cohort_run(cohort_run_id, {"mode": "headline_sweep"})
 
@@ -366,6 +368,12 @@ async def run_headline_sweep(
     })
     log.info("headline sweep: ladder %s", ladder)
     await asyncio.to_thread(engine.launch, log_dir=run_dir)
+
+    from .benchmarks.assets import fingerprint
+    from .benchmarks.storage import write_json
+    assets = await asyncio.to_thread(fingerprint, cfg.engine)
+    write_json(run_dir / "resolved-assets.json", assets)
+
 
     bind_str = (cfg.engine.cpu_bind
                 or cfg.engine.vllm_extra_env.get("VLLM_CPU_OMP_THREADS_BIND")

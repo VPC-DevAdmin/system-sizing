@@ -24,3 +24,8 @@ doctor.json
 
 # Per-host GPU topology (copy config/arena.example.yaml)
 config/arena.yaml
+
+# Run exports, rendered one-pagers and scratch space (never source)
+exports/
+output/
+tmp/

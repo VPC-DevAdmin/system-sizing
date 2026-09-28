@@ -1,0 +1,17 @@
+#infra-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; margin:16px 0; }
+.infra-card { border-radius:14px; text-align:left; white-space:normal; padding:18px; height:100%; border:1px solid var(--border,#38434b); }
+.infra-card.selected { outline:2px solid var(--teal,#50d5bf); outline-offset:1px; }
+.infra-card h3 { margin:8px 0; } .infra-card p { font-weight:normal; line-height:1.5; }
+.infra-card small,.infra-run small { display:block; margin-top:8px; }
+#view-infrastructure .panel { margin-bottom:16px; }
+#view-infrastructure pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:500px; overflow:auto; }
+#infra-form { display:flex; flex-wrap:wrap; gap:16px; align-items:end; }
+#infra-form[hidden] { display:none; } #infra-form label { min-width:150px; flex:1; }
+#infra-form .infra-source { flex-basis:100%; }
+.infra-run { display:block; width:100%; text-align:left; margin:8px 0; white-space:normal; }
+#infra-downloads section { margin:14px 0; padding:12px; border:1px solid var(--border,#38434b); }
+
+.infra-table-scroll { overflow-x:auto; }
+#infra-tenant-results table { width:100%; border-collapse:collapse; margin:12px 0; }
+#infra-tenant-results caption { text-align:left; margin-bottom:8px; }
+#infra-tenant-results th,#infra-tenant-results td { text-align:left; padding:8px; border-bottom:1px solid var(--border,#38434b); white-space:nowrap; }

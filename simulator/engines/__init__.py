@@ -9,7 +9,7 @@ from .vllm_cuda import VllmCudaEngine
 from .vllm_dual_socket import VllmDualSocketEngine
 
 
-def make_engine(engine_type: str, config) -> Engine:
+def _make_engine(engine_type: str, config) -> Engine:
     if engine_type == "vllm":
         return VLLMEngine(config)
     if engine_type == "vllm_cuda":
@@ -50,3 +50,38 @@ __all__ = [
     "MockEngine",
     "make_engine",
 ]
+
+
+def make_engine(engine_type: str, config) -> Engine:
+    """One physical host owner across CLI and service processes."""
+    from ..benchmarks.process import Lease, hardware_lease_path
+
+    engine = _make_engine(engine_type, config)
+    if engine_type == "mock":
+        return engine
+    launch, shutdown = engine.launch, engine.shutdown
+    lease = Lease(hardware_lease_path())
+    held = False
+    def guarded_launch(*args, **kwargs):
+        nonlocal held
+        if held:
+            raise RuntimeError("Engine already owns the hardware lease")
+        lease.__enter__()
+        held = True
+        try:
+            return launch(*args, **kwargs)
+        except BaseException:
+            lease.__exit__()
+            held = False
+            raise
+    def guarded_shutdown(*args, **kwargs):
+        nonlocal held
+        try:
+            return shutdown(*args, **kwargs)
+        finally:
+            if held:
+                lease.__exit__()
+                held = False
+    engine.launch = guarded_launch
+    engine.shutdown = guarded_shutdown
+    return engine

@@ -1466,6 +1466,7 @@ async def run_roofline(
     max_tp: Optional[int] = None,
     vram_per_gpu_gb: float | None = None,
     domain_tp: Optional[int] = None,
+    benchmarks: dict | None = None,
 ) -> Path:
     """Stage, search the product, confirm each model's winner, report.
 
@@ -1489,6 +1490,12 @@ async def run_roofline(
     """
     from .headline_shapes import apply_shape_to_generation
     from .persona_loader import USER_CATALOG_DIR
+
+    if benchmarks:
+        from .benchmarks.spec import BenchmarkSpec
+        benchmark_spec = BenchmarkSpec.model_validate(benchmarks)
+        if benchmark_spec.harnesses and not confirm_winners:
+            raise ValueError("Third-party benchmarks require internal winner confirmation")
 
     shapes = shapes or dict(DEFAULT_SHAPES)
     path = Path(state_path or (Path(runs_base) / STATE_NAME))
@@ -1553,7 +1560,7 @@ async def run_roofline(
     st.input_tokens = input_tokens
     st.plan = {"models": models, "engines": engines, "shapes": shapes,
                "cells": plan_cells, "model_info": model_info or {},
-               "notes": notes}
+               "notes": notes, "benchmarks": benchmarks or {}}
     st.estimate_min = estimate_minutes(len(plan_cells) - len(done),
                                        n_models=len(models))
     if not st.models:
@@ -1691,6 +1698,11 @@ async def run_roofline(
                 log.error("roofline confirmation for %s failed: %s", mid, e)
             st.current = None
             save_state(path, st)
+
+    if benchmarks and benchmarks.get("harnesses"):
+        from .benchmarks.campaign import run_finalists
+        from .benchmarks.spec import BenchmarkSpec
+        await run_finalists(runs_base, st, BenchmarkSpec.model_validate(benchmarks), path)
 
     st.status = "finished"
     st.note = ("Search rungs rank candidates; the confirmed rows are the "

@@ -1,3 +1,4 @@
+import { Benchmarks } from "./benchmarks.js";
 import { $, api } from "./lib/api.js";
 import { C, fill, makeChart } from "./lib/theme.js";
 import { onShow } from "./lib/tabs.js";
@@ -52,6 +53,7 @@ export const Roofline = {
   charts: {},
 
   init() {
+    Benchmarks.init();
     $("#rf-start").addEventListener("click", () => this.start());
     $("#rf-stop").addEventListener("click", () => this.stop());
     // Mode and tier-size changes refetch: the pick is made on the
@@ -272,6 +274,7 @@ export const Roofline = {
         output_tokens: this.shapes.output_tokens,
         input_tokens: +$("#rf-input-tokens").value || 128,
         confirm_winners: $("#rf-confirm").checked,
+        benchmarks: Benchmarks.spec(),
         allow_cross_domain_tp: $("#rf-cross-domain").checked,
       } },
       new_run: false,

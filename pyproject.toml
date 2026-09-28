@@ -16,6 +16,7 @@ dependencies = [
     "transformers>=4.44",
     "tokenizers>=0.20",
     "numpy>=1.26",
+    "python-docx>=1.1,<2",
     "psutil>=5.9",
     # CLI + accelerated transfer for ``make ready`` model downloads.
     # Without [cli] extras the venv has no ``hf`` binary; without
@@ -42,7 +43,7 @@ simulator = "simulator.cli:app"
 include = ["simulator*"]
 
 [tool.setuptools.package-data]
-simulator = ["export_schema/*.json", "ui/*", "ui/lib/*", "ui/vendor/*", "personas_data/*.yaml", "models_data/*.yaml"]
+simulator = ["infrastructure/*.json", "export_schema/*.json", "ui/*", "ui/lib/*", "ui/vendor/*", "personas_data/*.yaml", "models_data/*.yaml"]
 
 [tool.ruff]
 line-length = 100

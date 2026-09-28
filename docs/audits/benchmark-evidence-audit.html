@@ -1,0 +1,868 @@
+<meta charset="utf-8">
+<title>Benchmark Evidence Audit</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  color-scheme:light;
+  --bg:#f5f7fa; --surface:#ffffff; --surface-2:#eef2f6; --ink:#172230; --muted:#5a6878; --line:#d9e0e8; --line-2:#c3ccd6;
+  --accent:#1d6a86; --accent-ink:#ffffff; --accent-soft:#e3f0f5;
+  --crit:#d03b3b; --serious:#ec835a; --warn:#fab219; --good:#0ca30c; --minor:#7b8794;
+  --crit-soft:#fbe9e9; --serious-soft:#fdeee7; --warn-soft:#fff5dc; --minor-soft:#eceff2;
+  --s1:#2a78d6; --s2:#eb6834; --grid:#e6ebf0;
+  --shadow:0 1px 2px rgba(23,34,48,.06),0 8px 24px rgba(23,34,48,.06);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#111518; --surface:#1a2026; --surface-2:#222a31; --ink:#eef2f5; --muted:#a6b1bc; --line:#2b343d; --line-2:#3a444f;
+    --accent:#6cc0dc; --accent-ink:#0d1a20; --accent-soft:#163038;
+    --crit:#e66767; --serious:#f0906c; --warn:#fab219; --good:#3dbb3d; --minor:#98a4b0;
+    --crit-soft:#3a1f1f; --serious-soft:#3a2820; --warn-soft:#3a3218; --minor-soft:#262d34;
+    --s1:#3987e5; --s2:#d95926; --grid:#2b343d;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#111518; --surface:#1a2026; --surface-2:#222a31; --ink:#eef2f5; --muted:#a6b1bc; --line:#2b343d; --line-2:#3a444f;
+  --accent:#6cc0dc; --accent-ink:#0d1a20; --accent-soft:#163038;
+  --crit:#e66767; --serious:#f0906c; --warn:#fab219; --good:#3dbb3d; --minor:#98a4b0;
+  --crit-soft:#3a1f1f; --serious-soft:#3a2820; --warn-soft:#3a3218; --minor-soft:#262d34;
+  --s1:#3987e5; --s2:#d95926; --grid:#2b343d;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased}
+h1,h2,h3,h4{font-family:Manrope,"IBM Plex Sans",system-ui,sans-serif;text-wrap:balance;margin:0;line-height:1.15}
+h1{font-size:clamp(2rem,5vw,3.4rem);font-weight:800;letter-spacing:-.02em}
+h2{font-size:clamp(1.5rem,3vw,2.1rem);font-weight:800;letter-spacing:-.015em}
+h3{font-size:1.25rem;font-weight:700}
+h4{font-size:1rem;font-weight:700}
+p{margin:0}
+a{color:var(--accent)}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:.92em}
+.wrap{max-width:1120px;margin:0 auto;padding-inline:20px;padding-block:0}
+.eyebrow{font-size:.74rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.lede{font-size:1.12rem;color:var(--muted);max-width:62ch}
+.num{font-variant-numeric:tabular-nums}
+
+/* nav */
+.nav{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.nav .wrap{display:flex;gap:4px;overflow-x:auto;padding-block:10px;scrollbar-width:none}
+.nav a{white-space:nowrap;text-decoration:none;color:var(--muted);font-size:.85rem;font-weight:600;padding:6px 10px;border-radius:999px}
+.nav a:hover,.nav a:focus-visible{background:var(--accent-soft);color:var(--accent);outline:none}
+.nav a.brand{color:var(--ink);font-family:Manrope;font-weight:800;padding-left:0}
+
+/* hero */
+.hero{padding-block:56px 40px;border-bottom:1px solid var(--line)}
+.hero-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:40px;align-items:end}
+.hero .lede{margin-top:18px}
+.tiles{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.tile .v{font-family:Manrope;font-size:2rem;font-weight:800;letter-spacing:-.02em;line-height:1}
+.tile .l{font-size:.8rem;color:var(--muted);margin-top:6px}
+.tile.crit .v{color:var(--crit)} .tile.serious .v{color:var(--serious)} .tile.warn .v{color:#9a6a00} .tile.minor .v{color:var(--minor)}
+:root:not([data-theme="light"]) .tile.warn .v{color:var(--warn)}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .tile.warn .v{color:var(--warn)} }
+:root[data-theme="dark"] .tile.warn .v{color:var(--warn)}
+.meta{font-size:.82rem;color:var(--muted);margin-top:22px}
+
+/* scale */
+.scale{padding-block:36px;border-bottom:1px solid var(--line)}
+.scale-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px}
+.scale-item{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px;border-top:4px solid var(--minor)}
+.scale-item.crit{border-top-color:var(--crit)} .scale-item.serious{border-top-color:var(--serious)} .scale-item.warn{border-top-color:var(--warn)}
+.scale-item b{display:block;font-family:Manrope;font-weight:800;margin-bottom:4px}
+.scale-item p{font-size:.9rem;color:var(--muted)}
+.callout{margin-top:22px;padding:16px 18px;border-left:4px solid var(--accent);background:var(--accent-soft);border-radius:0 10px 10px 0;max-width:80ch}
+.callout p{font-size:.95rem}
+
+/* pills */
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:.74rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:4px 10px;border-radius:999px;border:1px solid transparent;white-space:nowrap}
+.pill.crit{background:var(--crit-soft);color:var(--crit);border-color:color-mix(in srgb,var(--crit) 35%,transparent)}
+.pill.serious{background:var(--serious-soft);color:#b8532a;border-color:color-mix(in srgb,var(--serious) 45%,transparent)}
+.pill.warn{background:var(--warn-soft);color:#8a5b00;border-color:color-mix(in srgb,var(--warn) 55%,transparent)}
+.pill.minor{background:var(--minor-soft);color:var(--minor);border-color:var(--line-2)}
+.pill.good{background:color-mix(in srgb,var(--good) 14%,var(--surface));color:var(--good);border-color:color-mix(in srgb,var(--good) 40%,transparent)}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .pill.serious{color:var(--serious)} :root:not([data-theme="light"]) .pill.warn{color:var(--warn)} }
+:root[data-theme="dark"] .pill.serious{color:var(--serious)} :root[data-theme="dark"] .pill.warn{color:var(--warn)}
+.pill i{width:8px;height:8px;border-radius:50%;background:currentColor;display:inline-block}
+
+/* paper sections */
+.paper{padding-block:52px;border-bottom:1px solid var(--line)}
+.paper-head{display:grid;grid-template-columns:1fr auto;gap:24px;align-items:start}
+.paper-head .lede{margin-top:10px;font-size:1.02rem}
+.verdict{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-width:260px;max-width:340px;box-shadow:var(--shadow)}
+.verdict .eyebrow{margin-bottom:6px}
+.verdict b{font-family:Manrope;font-size:1.05rem;display:block;margin-bottom:4px}
+.verdict p{font-size:.88rem;color:var(--muted)}
+
+.issue{margin-top:28px;background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow)}
+.issue-head{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--line);background:var(--surface-2)}
+.issue-head .id{font-family:"IBM Plex Mono",monospace;font-weight:500;color:var(--accent);background:var(--accent-soft);padding:3px 8px;border-radius:6px;font-size:.85rem}
+.issue-head h3{flex:1 1 300px}
+.issue-body{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:0}
+.viz{margin:0;padding:20px;border-right:1px solid var(--line);position:relative;background:var(--surface)}
+.viz svg{width:100%;height:auto;display:block;max-width:100%}
+.viz figcaption{font-size:.82rem;color:var(--muted);margin-top:10px}
+.replay{position:absolute;top:12px;right:12px;font:600 .74rem "IBM Plex Sans",sans-serif;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:4px 10px;cursor:pointer}
+.replay:hover,.replay:focus-visible{color:var(--accent);border-color:var(--accent);outline:none}
+.text{padding:20px 22px;display:flex;flex-direction:column;gap:14px}
+.text p{font-size:.96rem}
+.text b.k{font-family:Manrope;font-weight:800;display:block;font-size:.8rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:3px}
+.rating{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--surface-2)}
+.rating .row{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;font-size:.85rem;margin-bottom:8px}
+.rating .row span.lbl{color:var(--muted);font-weight:600}
+.rating p{font-size:.92rem}
+.verify{display:flex;gap:10px;align-items:flex-start;font-size:.9rem;padding:10px 12px;border-radius:8px;background:var(--warn-soft);border:1px solid color-mix(in srgb,var(--warn) 45%,transparent)}
+.verify svg{flex:none;width:18px;height:18px;margin-top:2px}
+.better{border-left:3px solid var(--accent);padding-left:12px}
+
+table.findings{width:100%;border-collapse:collapse;font-size:.88rem;margin-top:14px;background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.findings th,.findings td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+.findings th{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:var(--surface-2)}
+.findings tr:last-child td{border-bottom:none}
+.findings td.id{font-family:"IBM Plex Mono",monospace;color:var(--accent);white-space:nowrap}
+.findings td.why{color:var(--muted)}
+.tablewrap{overflow-x:auto;margin-top:26px}
+details.more summary{cursor:pointer;font-weight:600;color:var(--accent);margin-top:26px;list-style:none;display:inline-flex;align-items:center;gap:8px}
+details.more summary::before{content:"";width:8px;height:8px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(-45deg);transition:transform .2s}
+details.more[open] summary::before{transform:rotate(45deg)}
+details.more .tablewrap{margin-top:12px}
+
+/* our results */
+.ours{padding-block:52px;border-bottom:1px solid var(--line)}
+.ours-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:22px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px;box-shadow:var(--shadow)}
+.card h4{margin-bottom:10px}
+.card p,.card li{font-size:.94rem}
+.card ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px}
+table.res{width:100%;border-collapse:collapse;font-size:.9rem;margin-top:8px}
+.res th,.res td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:right}
+.res th:first-child,.res td:first-child{text-align:left}
+.res th{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.quote{font-family:Manrope;font-weight:700;font-size:1.05rem;padding:14px 16px;border-radius:10px;background:var(--accent-soft);color:var(--accent);margin-top:14px}
+
+/* one page */
+.onepage{padding-block:56px 72px}
+.sheet{background:var(--surface);border:1px solid var(--line-2);border-radius:16px;padding:36px;box-shadow:var(--shadow);margin-top:24px;position:relative}
+.sheet::before{content:"";position:absolute;inset:0 0 auto 0;height:6px;border-radius:16px 16px 0 0;background:linear-gradient(90deg,var(--crit),var(--serious),var(--warn),var(--accent))}
+.pillars{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-top:26px}
+.pillar{border:1px solid var(--line);border-radius:12px;padding:18px;background:var(--surface-2)}
+.pillar .glyph{width:44px;height:44px;margin-bottom:10px}
+.pillar h3{margin-bottom:4px}
+.pillar .def{font-size:.88rem;color:var(--muted);margin-bottom:12px;min-height:3.2em}
+.pillar ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:7px;font-size:.9rem}
+.pillar li b{font-weight:600}
+.musts{margin-top:28px;display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.must{display:flex;gap:10px;align-items:flex-start;font-size:.9rem;padding:12px 14px;border:1px solid var(--line);border-radius:10px}
+.must .n{font-family:"IBM Plex Mono",monospace;color:var(--accent);font-weight:500;flex:none}
+.stages{margin-top:28px}
+.stage-strip{display:grid;grid-template-columns:repeat(9,1fr);gap:6px;margin-top:12px}
+.stage{border-radius:8px;padding:10px 8px;background:var(--surface);border:1px solid var(--line);font-size:.78rem;line-height:1.3;position:relative}
+.stage b{display:block;font-family:"IBM Plex Mono",monospace;color:var(--accent);margin-bottom:3px}
+.stage::after{content:"";position:absolute;right:-6px;top:50%;width:6px;height:2px;background:var(--line-2)}
+.stage:last-child::after{display:none}
+.gate{margin-top:20px;padding:14px 16px;border-radius:10px;border:1px dashed var(--line-2);font-size:.9rem}
+.gate b{font-family:Manrope}
+.foot{font-size:.8rem;color:var(--muted);margin-top:28px;max-width:80ch}
+
+/* animations: resting state is the final state; .play runs the keyframes */
+.viz .g{transform-box:fill-box;transform-origin:left center}
+.viz .gv{transform-box:fill-box;transform-origin:center bottom}
+.viz .fade{transform-box:fill-box}
+.play .grow{animation:grow 1.1s cubic-bezier(.2,.7,.2,1) both}
+.play .grow.d1{animation-delay:.35s}.play .grow.d2{animation-delay:.7s}.play .grow.d3{animation-delay:1.05s}.play .grow.d4{animation-delay:1.4s}
+.play .growv{animation:growv 1.1s cubic-bezier(.2,.7,.2,1) both}
+.play .growv.d1{animation-delay:.3s}.play .growv.d2{animation-delay:.6s}.play .growv.d3{animation-delay:.9s}
+.play .appear{animation:appear .6s ease-out both}
+.play .appear.d1{animation-delay:.6s}.play .appear.d2{animation-delay:1.2s}.play .appear.d3{animation-delay:1.8s}.play .appear.d4{animation-delay:2.4s}
+.play .dim{animation:dim .8s ease-out both;animation-delay:.9s}
+.play .draw{stroke-dasharray:1000;animation:draw 1.6s ease-out both}
+.play .draw.d1{animation-delay:1.5s}
+.play .swap-a{animation:swapA 1.2s ease-in-out both;animation-delay:.8s}
+.play .swap-b{animation:swapB 1.2s ease-in-out both;animation-delay:.8s}
+.play .vanish{animation:vanish 1s ease-in both;animation-delay:.9s}
+.play .blink{animation:blink 1.4s ease-in-out 2;animation-delay:.6s}
+.play .pulse{animation:pulse 1.2s ease-in-out 2}
+.play .spin{animation:spin 1.3s cubic-bezier(.3,.6,.2,1) both;transform-box:fill-box;transform-origin:center}
+.play .spin.d1{animation-delay:.25s}.play .spin.d2{animation-delay:.5s}
+.play .rise{animation:rise .7s ease-out both}
+.play .rise.d1{animation-delay:.3s}.play .rise.d2{animation-delay:.5s}.play .rise.d3{animation-delay:.7s}
+.play .dropout{animation:dropout .8s ease-in both;animation-delay:1.1s}
+.play .dropout.d1{animation-delay:1.5s}.play .dropout.d2{animation-delay:1.9s}
+.play .flow{animation:flow 1.6s linear infinite}
+@keyframes grow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes growv{from{transform:scaleY(0)}to{transform:scaleY(1)}}
+@keyframes appear{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes dim{from{opacity:1}to{opacity:.3}}
+@keyframes draw{from{stroke-dashoffset:1000}to{stroke-dashoffset:0}}
+@keyframes swapA{from{transform:translateX(0)}to{transform:translateX(150px)}}
+@keyframes swapB{from{transform:translateX(0)}to{transform:translateX(-150px)}}
+@keyframes vanish{0%{opacity:1}60%{opacity:1}100%{opacity:0}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+@keyframes spin{from{transform:rotate(-120deg)}to{transform:rotate(0)}}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@keyframes dropout{from{opacity:1;transform:none}to{opacity:.12;transform:translateY(10px)}}
+@keyframes flow{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
+@media (prefers-reduced-motion: reduce){ .play *{animation:none !important} .replay{display:none} }
+
+/* svg text */
+.viz text{font-family:"IBM Plex Sans",system-ui,sans-serif;fill:var(--ink);font-size:12px}
+.viz text.m{fill:var(--muted)} .viz text.mono{font-family:"IBM Plex Mono",monospace} .viz text.big{font-family:Manrope;font-weight:800;font-size:18px}
+.viz text.sm{font-size:10.5px}
+.viz .box{fill:var(--surface-2);stroke:var(--line-2)}
+.viz .ghost{fill:none;stroke:var(--line-2);stroke-dasharray:4 4}
+.viz .gridl{stroke:var(--grid)}
+.viz .axis{stroke:var(--line-2)}
+
+@media (max-width:860px){
+  .hero-grid,.paper-head,.issue-body,.ours-grid{grid-template-columns:1fr}
+  .viz{border-right:none;border-bottom:1px solid var(--line)}
+  .scale-grid{grid-template-columns:repeat(2,1fr)}
+  .pillars,.musts{grid-template-columns:1fr}
+  .stage-strip{grid-template-columns:repeat(3,1fr)}
+  .stage::after{display:none}
+  .sheet{padding:22px}
+  .verdict{max-width:none}
+}
+@media (max-width:480px){ .scale-grid,.tiles{grid-template-columns:1fr} .stage-strip{grid-template-columns:repeat(2,1fr)} }
+</style>
+
+<nav class="nav" aria-label="Sections"><div class="wrap">
+  <a class="brand" href="#top">Evidence audit</a>
+  <a href="#scale">How we rate</a>
+  <a href="#r770">Dell R770</a>
+  <a href="#prowess">Prowess CPU</a>
+  <a href="#pt">Principled Tech</a>
+  <a href="#llama">Dell Llama</a>
+  <a href="#signal65">Signal65</a>
+  <a href="#ours">Our results</a>
+  <a href="#better">How we do better</a>
+</div></nav>
+
+<header class="hero" id="top"><div class="wrap hero-grid">
+  <div>
+    <div class="eyebrow">Five sponsored AI performance publications · reviewed 26 September 2026</div>
+    <h1 style="margin-top:12px">Which objections hold up, and what a better report looks like</h1>
+    <p class="lede">The written audit lists 29 findings and rates most of them high. Read soberly, five are errors anyone would recognize from the papers' own numbers. The rest are limits on what the results can claim, questions the authors could answer, or points that are easy to overstate. This page separates those, shows each headline problem visually, and closes with how our own testing would avoid them.</p>
+    <p class="meta">No new benchmark runs were performed for the audit. Ratings on this page are our re-assessment of the audit's findings and each carries a one-line verification step. Sponsorship is disclosed in every publication and is not treated as evidence of wrong results.</p>
+  </div>
+  <div class="tiles">
+    <div class="tile crit"><div class="v num">5</div><div class="l">Confirmed errors in the published text or arithmetic</div></div>
+    <div class="tile serious"><div class="v num">7</div><div class="l">Real limitations on what the results can claim</div></div>
+    <div class="tile warn"><div class="v num">9</div><div class="l">Open questions the authors could resolve with data</div></div>
+    <div class="tile minor"><div class="v num">8</div><div class="l">Minor, or overstated by the audit</div></div>
+  </div>
+</div></header>
+
+<section class="scale" id="scale"><div class="wrap">
+  <div class="eyebrow">How to read the ratings</div>
+  <h2 style="margin-top:8px">Four buckets, with the audit's own rating shown beside ours</h2>
+  <div class="scale-grid">
+    <div class="scale-item crit"><b>Confirmed error</b><p>A number, unit, command, or label is inconsistent with the paper's own evidence. Verifiable without new runs.</p></div>
+    <div class="scale-item serious"><b>Real limitation</b><p>The design cannot support a claim the paper makes or invites. The measurements may still be correct.</p></div>
+    <div class="scale-item warn"><b>Open question</b><p>Two disclosed items do not reconcile, or a detail is missing. Needs an answer from the authors, not an accusation.</p></div>
+    <div class="scale-item"><b>Minor or overstated</b><p>A naming issue, a disclosed choice, or a useful extra experiment the authors never promised.</p></div>
+  </div>
+  <div class="callout"><p><strong>The bar we hold ourselves to.</strong> A critical finding can block one comparative claim without invalidating a paper. Missing tuning detail is a reproducibility problem, not proof of bad tuning. A measured gain needs a baseline and an improved configuration on the same workload, with quality and latency held to declared limits. Every objection below is stated so that it could be aimed at our own report.</p></div>
+</div></section>
+
+<!-- ============ D: Dell R770 ============ -->
+<section class="paper" id="r770"><div class="wrap">
+  <div class="paper-head">
+    <div>
+      <div class="eyebrow">Paper D · Dell PowerEdge R770 with RTX PRO 4500 · Qwen models</div>
+      <h2 style="margin-top:8px">Two errors visible from the paper's own numbers</h2>
+      <p class="lede">Useful load curves and some real placement detail. But the efficiency arithmetic mixes scopes, and the stated BF16 configuration cannot physically fit on the stated GPUs. Both must be fixed before any figure from this paper is reused.</p>
+    </div>
+    <div class="verdict"><div class="eyebrow">Sober verdict</div><b>Fix before reuse</b><p>Throughput curves may be fine. The efficiency headline is wrong by construction, and the configuration text is wrong or incomplete.</p><div style="margin-top:8px"><span class="pill crit"><i></i>2 confirmed errors</span></div></div>
+  </div>
+
+  <article class="issue">
+    <div class="issue-head"><span class="id">D2</span><h3>Aggregate throughput divided by one GPU's power</h3><span class="pill crit"><i></i>Confirmed error</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 300" role="img" aria-label="Four GPUs each producing tokens into one aggregate throughput total, but only one GPU's 151 watts counted; published 34.5 tokens per second per watt versus 8.6 with consistent scope">
+          <!-- collector -->
+          <rect x="150" y="18" width="240" height="40" rx="8" class="box"/>
+          <text x="270" y="36" text-anchor="middle" class="big num">5,219 tok/s</text>
+          <text x="270" y="51" text-anchor="middle" class="m sm">aggregate across the replicas (as the text reads)</text>
+          <!-- GPUs -->
+          <g>
+            <rect x="30" y="130" width="100" height="48" rx="6" fill="var(--s1)" opacity=".9"/>
+            <text x="80" y="150" text-anchor="middle" fill="#fff" font-weight="600">GPU 1</text>
+            <text x="80" y="167" text-anchor="middle" fill="#fff" class="num sm">151 W</text>
+            <rect x="160" y="130" width="100" height="48" rx="6" fill="var(--s1)" opacity=".9"/>
+            <text x="210" y="150" text-anchor="middle" fill="#fff" font-weight="600">GPU 2</text>
+            <text x="210" y="167" text-anchor="middle" fill="#fff" class="num sm">151 W</text>
+            <rect x="290" y="130" width="100" height="48" rx="6" fill="var(--s1)" opacity=".9"/>
+            <text x="340" y="150" text-anchor="middle" fill="#fff" font-weight="600">GPU 3</text>
+            <text x="340" y="167" text-anchor="middle" fill="#fff" class="num sm">151 W</text>
+            <rect x="420" y="130" width="100" height="48" rx="6" fill="var(--s1)" opacity=".9"/>
+            <text x="470" y="150" text-anchor="middle" fill="#fff" font-weight="600">GPU 4</text>
+            <text x="470" y="167" text-anchor="middle" fill="#fff" class="num sm">151 W</text>
+          </g>
+          <!-- token flows -->
+          <g fill="none" stroke="var(--s1)" stroke-width="2" stroke-dasharray="6 6" class="flow">
+            <path d="M80 130 C80 100 200 90 210 58"/><path d="M210 130 C210 105 240 90 245 58"/>
+            <path d="M340 130 C340 105 300 90 295 58"/><path d="M470 130 C470 100 340 90 330 58"/>
+          </g>
+          <!-- power meter -->
+          <g class="dim"><rect x="160" y="190" width="360" height="26" rx="6" class="ghost"/><text x="340" y="207" text-anchor="middle" class="m sm">power of GPUs 2 to 4: not in the denominator</text></g>
+          <rect x="30" y="190" width="100" height="26" rx="6" fill="var(--serious)" opacity=".85"/><text x="80" y="207" text-anchor="middle" fill="#fff" font-weight="600" class="sm">counted: 151 W</text>
+          <!-- result bars -->
+          <text x="30" y="243" class="m sm">Published</text>
+          <rect x="120" y="233" width="290" height="14" rx="4" fill="var(--serious)" class="g grow"/>
+          <text x="418" y="245" class="num" font-weight="600">34.5 tok/s per W</text>
+          <text x="30" y="273" class="m sm">Same scope</text>
+          <rect x="120" y="263" width="73" height="14" rx="4" fill="var(--s1)" class="g grow d1"/>
+          <text x="200" y="275" class="num appear d1" font-weight="600">8.6 tok/J  =  5,219 ÷ (4 × 151)</text>
+        </svg>
+        <figcaption>Tokens from four replicas are summed; watts from one replica are divided in. The ratio is inflated four-fold, and the paper then discusses multiplying it by four again across replicas.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper does</b>The 8B discussion divides 5,219 tokens/s by 151 W and reports 34.5 tokens/s/W, then talks about multiplying efficiency across four replicas.</p>
+        <p><b class="k">Why anyone would object</b>If the throughput is the total of four GPUs, the power must be the total of four GPUs. If both are per GPU, adding replicas cannot change the ratio at all. Either way the published figure does not follow.</p>
+        <div class="rating"><div class="row"><span class="lbl">Audit rated</span><span class="pill crit"><i></i>Critical</span><span class="lbl">We rate</span><span class="pill crit"><i></i>Confirmed error</span></div><p>We agree. It is pure arithmetic on the paper's own numbers. Scope is narrow: it breaks the efficiency claims, not the throughput curves.</p></div>
+        <div class="verify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span><strong>Verify in ten minutes.</strong> Re-divide the published token rate by the published per-GPU power times replica count. Check whether any summary table uses a different denominator than the prose.</span></div>
+        <p class="better"><b class="k">What we do instead</b>Integrate wall power over exactly the window in which tokens are counted. Keep GPU-only energy as a separate metric. Report tokens per joule, and have one script recompute every table from the raw counters.</p>
+      </div>
+    </div>
+  </article>
+
+  <article class="issue">
+    <div class="issue-head"><span class="id">D1</span><h3>BF16 weights that cannot fit the stated 32 GB GPU</h3><span class="pill crit"><i></i>Confirmed inconsistency</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 250" role="img" aria-label="A 32 gigabyte GPU memory bar compared with BF16 weight sizes of 54 and 70 gigabytes that overflow it">
+          <text x="20" y="24" class="m sm">GPU memory per replica (TP1, independent, cannot pool)</text>
+          <rect x="20" y="34" width="176" height="28" rx="5" fill="var(--s1)" class="g grow"/>
+          <text x="204" y="53" class="num" font-weight="600">32 GB</text>
+          <line x1="196" y1="30" x2="196" y2="230" stroke="var(--crit)" stroke-width="1.5" stroke-dasharray="4 4"/>
+          <text x="202" y="230" class="sm" fill="var(--crit)">card limit</text>
+          <text x="20" y="96" class="m sm">27B model at BF16: 2 bytes × parameters, weights only</text>
+          <rect x="20" y="106" width="297" height="28" rx="5" fill="var(--serious)" class="g grow d1"/>
+          <text x="325" y="125" class="num appear d1" font-weight="600">≈ 54 GB</text>
+          <text x="20" y="168" class="m sm">35B model at BF16, weights only</text>
+          <rect x="20" y="178" width="385" height="28" rx="5" fill="var(--crit)" class="g grow d2"/>
+          <text x="413" y="197" class="num appear d2" font-weight="600">≈ 70 GB</text>
+          <text x="20" y="238" class="m sm">Before KV cache, activations, and runtime overhead. Active parameters in a MoE model do not shrink the resident expert weights.</text>
+        </svg>
+        <figcaption>Independent replicas cannot combine four cards. Something not written down made this run: a lower precision, offload, or sharding.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper does</b>The methodology describes BF16 and four TP1 replicas on 32 GB GPUs, including 27B and 35B models.</p>
+        <p><b class="k">Why anyone would object</b>Two bytes per parameter puts the 27B weights at roughly 54 GB and the 35B weights at 70 GB. Neither fits one 32 GB card, and a TP1 replica cannot borrow memory from its neighbours.</p>
+        <div class="rating"><div class="row"><span class="lbl">Audit rated</span><span class="pill crit"><i></i>Critical</span><span class="lbl">We rate</span><span class="pill crit"><i></i>Confirmed inconsistency</span></div><p>The write-up is wrong as written. The most likely explanation is a documentation error and a quantized or offloaded deployment. That does not make the measured outputs invented, but it does mean nobody can say what configuration produced them.</p></div>
+        <div class="verify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span><strong>Verify in an hour.</strong> Confirm the exact wording on the methodology page, check the model cards for parameter counts, and look for any mention of offload, FP8, or NVFP4 elsewhere in the chapters.</span></div>
+        <p class="better"><b class="k">What we do instead</b>Before launch, estimate weights, KV cache, activations, and headroom, then verify against the observed allocation. Record the actual dtype and kernels from the running engine, not the model name. A mismatch blocks publication.</p>
+      </div>
+    </div>
+  </article>
+
+  <details class="more"><summary>Remaining R770 findings and our re-rating</summary>
+  <div class="tablewrap"><table class="findings">
+    <tr><th>ID</th><th>Finding</th><th>Audit</th><th>We rate</th><th>Why</th></tr>
+    <tr><td class="id">D3</td><td>A roughly 14 s first-token delay at low concurrency is blamed on lack of batching.</td><td><span class="pill serious"><i></i>High</span></td><td><span class="pill serious"><i></i>Real limitation</span></td><td class="why">Batching does not explain a 14 s wait on a short prompt. Cold load, compilation, or reasoning tokens probably do. The number is fine; the explanation is not.</td></tr>
+    <tr><td class="id">D4</td><td>Max-throughput concurrency is presented alongside interactive recommendations.</td><td><span class="pill serious"><i></i>High</span></td><td><span class="pill serious"><i></i>Real limitation</span></td><td class="why">Two different operating points. Easy to fix by naming the objective on each recommendation.</td></tr>
+    <tr><td class="id">D5</td><td>Cross-model recommendations from a published subset of the test matrix.</td><td><span class="pill serious"><i></i>Med-high</span></td><td><span class="pill warn"><i></i>Open question</span></td><td class="why">Ask for the full matrix and quality results. Nothing shown is wrong; it is just not auditable.</td></tr>
+  </table></div></details>
+</div></section>
+
+<!-- ============ C: Prowess ============ -->
+<section class="paper" id="prowess"><div class="wrap">
+  <div class="paper-head">
+    <div>
+      <div class="eyebrow">Paper C · Prowess Consulting · Xeon 6 workload comparison</div>
+      <h2 style="margin-top:8px">A wrong command, a wrong table, and an honest confounder</h2>
+      <p class="lede">Prowess published concrete commands, which is why its problems are findable. The NAMD launcher does not do what the text says, the web table disagrees with the PDF, and the platforms differ in core count and memory. None of this shows the measurements are false.</p>
+    </div>
+    <div class="verdict"><div class="eyebrow">Sober verdict</div><b>Numbers probably survive; reproduction does not</b><p>The aggregate results are likely real. The per-core story, the exact NAMD placement, and one headline percentage need repair.</p><div style="margin-top:8px"><span class="pill crit"><i></i>2 confirmed errors</span></div></div>
+  </div>
+
+  <article class="issue">
+    <div class="issue-head"><span class="id">C4</span><h3><code>numactl -C</code> takes CPU IDs, not a core count</h3><span class="pill crit"><i></i>Confirmed command error</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 250" role="img" aria-label="A grid of 32 logical CPUs; the intended run pins eight cores, the published command pins only CPU number 8">
+          <rect x="16" y="14" width="508" height="30" rx="6" fill="var(--surface-2)" stroke="var(--line-2)"/>
+          <text x="28" y="34" class="mono" font-size="12.5">numactl -C $NUM_CPU_CORES ...    <tspan fill="var(--muted)"># NUM_CPU_CORES=8</tspan></text>
+          <text x="16" y="72" class="m sm">Intended: eight cores</text>
+          <g id="gridA"></g>
+          <text x="16" y="162" class="m sm">What the option selects with the value 8: logical CPU #8, one core</text>
+          <g id="gridB"></g>
+          <text x="16" y="243" class="sm appear d3" fill="var(--crit)">NAMD's own affinity logic may re-pin threads, so the measured impact is unknown. The command is still wrong.</text>
+        </svg>
+        <figcaption>The option expects a CPU list such as <code>0-7</code>. A bare count selects one specific logical CPU.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper does</b>The published NAMD launcher binds with <code>numactl -C $NUM_CPU_CORES</code>, looping over thread counts.</p>
+        <p><b class="k">Why anyone would object</b>Anyone who has used numactl knows <code>-C</code> is a CPU list. The command as written does not allocate the intended disjoint cores, so the description of the experiment and the experiment itself disagree.</p>
+        <div class="rating"><div class="row"><span class="lbl">Audit rated</span><span class="pill crit"><i></i>High</span><span class="lbl">We rate</span><span class="pill crit"><i></i>Confirmed, impact unknown</span></div><p>Confirmed as a command error. Not confirmed as a result error: NAMD can set its own affinity, and a run genuinely squeezed onto one CPU would have been visibly terrible. Most likely the real script differed from the published one. That is a reproducibility failure, not evidence of a wrong number.</p></div>
+        <div class="verify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span><strong>Verify in an hour.</strong> Run the published loop on any Linux host and record each thread's affinity. Ask Prowess for the concurrent ensemble launcher they actually used.</span></div>
+        <p class="better"><b class="k">What we do instead</b>Generate explicit CPU lists per job, bind memory to the intended NUMA node, and capture every worker thread's effective affinity during the run. Publish the concurrent launcher, not a sequential loop.</p>
+      </div>
+    </div>
+  </article>
+
+  <article class="issue">
+    <div class="issue-head"><span class="id">C2</span><h3>More job slots, not faster cores</h3><span class="pill serious"><i></i>Real limitation</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 250" role="img" aria-label="Sixteen eight-core jobs on one system versus thirty on the other; slots grow 1.875 times, aggregate throughput grows about 1.85 times, so per-job throughput is roughly unchanged">
+          <text x="16" y="22" class="m sm">System A · 16 concurrent 8-core jobs</text>
+          <g id="slotsA"></g>
+          <text x="16" y="112" class="m sm">System B · 30 concurrent 8-core jobs</text>
+          <g id="slotsB"></g>
+          <g class="appear d2">
+            <rect x="16" y="196" width="508" height="42" rx="6" class="box"/>
+            <text x="30" y="213" class="sm">Slots: ×1.875</text>
+            <text x="30" y="230" class="sm">Aggregate throughput: ≈ ×1.84 to ×1.87</text>
+            <text x="300" y="222" class="num" font-weight="600">Per job: ≈ ×1.0</text>
+            <text x="424" y="222" class="m sm">no per-core gain shown</text>
+          </g>
+        </svg>
+        <figcaption>The paper itself notes the per-job distinction. The risk is in how the aggregate is relabelled downstream.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper does</b>Compares systems with different total cores and memory configuration, then reports an aggregate gain of roughly 84 to 87 percent.</p>
+        <p><b class="k">Why anyone would object</b>Thirty jobs against sixteen is 1.875 times the slots. An 85 percent aggregate gain is what you get from more slots at equal per-job speed. It says nothing about core architecture.</p>
+        <div class="rating"><div class="row"><span class="lbl">Audit rated</span><span class="pill crit"><i></i>High</span><span class="lbl">We rate</span><span class="pill serious"><i></i>Real limitation</span></div><p>Slightly overstated by the audit. The paper acknowledges the per-job distinction and the aggregate result is a valid full-system capacity comparison. It becomes a problem only when sales material calls it a per-core or architecture gain.</p></div>
+        <div class="verify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span><strong>Verify in ten minutes.</strong> Divide the reported aggregate gain by the ratio of job slots. Check whether any derived material drops the word "aggregate".</span></div>
+        <p class="better"><b class="k">What we do instead</b>Report full-system capacity and a matched-core, matched-job comparison side by side, with memory population stated. Throughput per job, per core, per system, and energy per unit of work must reconcile.</p>
+      </div>
+    </div>
+  </article>
+
+  <article class="issue">
+    <div class="issue-head"><span class="id">C6</span><h3>152 percent in the PDF became 52 percent on the web</h3><span class="pill crit"><i></i>Confirmed discrepancy</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 200" role="img" aria-label="The same table cell showing 152 percent in the PDF and 52 percent on the web page, the leading digit fading away">
+          <text x="60" y="30" class="m sm">Original PDF · Table 2 · INT8, batch 1, maximum</text>
+          <rect x="60" y="42" width="180" height="70" rx="8" class="box"/>
+          <text x="150" y="88" text-anchor="middle" class="big num" font-size="34">152%</text>
+          <text x="330" y="30" class="m sm">Dell web version · same cell</text>
+          <rect x="330" y="42" width="180" height="70" rx="8" class="box" stroke="var(--crit)"/>
+          <text x="410" y="88" text-anchor="middle" class="big num" font-size="34"><tspan class="vanish" fill="var(--crit)">1</tspan>52%</text>
+          <path d="M248 77 L322 77" stroke="var(--line-2)" stroke-width="2" marker-end="url(#arr)"/>
+          <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--line-2)"/></marker></defs>
+          <text x="60" y="140" class="sm appear d2">Text extraction of the PDF also drops the leading digit. The image of the table had to be checked to confirm 152.</text>
+          <text x="60" y="160" class="sm appear d3">The web version's comparison-direction labels are inconsistent as well.</text>
+          <text x="60" y="186" class="sm appear d4" fill="var(--muted)">Publishing problem. It does not show the original measurement is false.</text>
+        </svg>
+        <figcaption>Two outputs from one dataset should never disagree. They do because tables were re-typed rather than generated.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper does</b>The original PDF's Table 2 shows 152 percent for the INT8 batch-one maximum. The web version shows 52 percent, with inconsistent direction labels.</p>
+        <p><b class="k">Why anyone would object</b>A reader who sees both versions cannot know which number the vendor stands behind. If either is copied into a sales deck, the deck is wrong half the time.</p>
+        <div class="rating"><div class="row"><span class="lbl">Audit rated</span><span class="pill serious"><i></i>Medium</span><span class="lbl">We rate</span><span class="pill crit"><i></i>Confirmed error, medium impact</span></div><p>Agree with the audit. Clearly an error, clearly a publishing one. It matters because the web page is what customers find first.</p></div>
+        <div class="verify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span><strong>Verify in five minutes.</strong> Open the PDF table as an image and the web page side by side. Note which direction each label claims.</span></div>
+        <p class="better"><b class="k">What we do instead</b>Generate web, Word, and PDF tables from one calculation source with automatic direction and min/max checks. A release passes only when every format agrees with the source data.</p>
+      </div>
+    </div>
+  </article>
+
+  <details class="more"><summary>Remaining Prowess findings and our re-rating</summary>
+  <div class="tablewrap"><table class="findings">
+    <tr><th>ID</th><th>Finding</th><th>Audit</th><th>We rate</th><th>Why</th></tr>
+    <tr><td class="id">C1</td><td>"AP" presented as a third core architecture beside E-cores and P-cores.</td><td><span class="pill crit"><i></i>High</span></td><td><span class="pill minor"><i></i>Overstated</span></td><td class="why">A taxonomy slip. The 6978P is a P-core part on the 6900P platform. Fix the wording; it changes no measurement.</td></tr>
+    <tr><td class="id">C3</td><td>WRK2 offered rate capped, client limited to four CPUs; server capacity may be hidden.</td><td><span class="pill serious"><i></i>High</span></td><td><span class="pill warn"><i></i>Open question</span></td><td class="why">Plausible client bottleneck, not established. Similar results below a rate cap simply do not prove similar maxima.</td></tr>
+    <tr><td class="id">C5</td><td>Backend description and the Intel TensorFlow wrapper need reconciliation; oversubscription possible.</td><td><span class="pill serious"><i></i>High</span></td><td><span class="pill warn"><i></i>Open question</span></td><td class="why">Testable. Ask for the effective environment and instance counts before calling it a tuning mistake.</td></tr>
+    <tr><td class="id">C7</td><td>"Simulated results" wording against described physical tests; power sensor boundary unclear.</td><td><span class="pill serious"><i></i>High</span></td><td><span class="pill warn"><i></i>Open question</span></td><td class="why">Needs a label per quantity: measured, calculated, or simulated. Not grounds for a fabrication claim.</td></tr>
+  </table></div></details>
+</div></section>
+
+<!-- ============ E: PT ============ -->
+<section class="paper" id="pt"><div class="wrap">
+  <div class="paper-head">
+    <div>
+      <div class="eyebrow">Paper E · Principled Technologies · agentic AI on Dell hardware</div>
+      <h2 style="margin-top:8px">A reversed chart label and cost arithmetic that needs a bridge</h2>
+      <p class="lede">PT discloses workflow structure, software versions, topology, and cost assumptions, and some workflows are genuinely agentic. The headline economics chart contradicts its own appendix, and the token counts behind the cost and energy figures do not reconcile without information the report does not give.</p>
+    </div>
+    <div class="verdict"><div class="eyebrow">Sober verdict</div><b>Ask for the workbook</b><p>One confirmed labelling error. The larger accounting questions are exactly that: questions. The audit is right to say they are not evidence of fraud.</p><div style="margin-top:8px"><span class="pill crit"><i></i>1 confirmed error</span> <span class="pill warn"><i></i>2 open questions</span></div></div>
+  </div>
+
+  <article class="issue">
+    <div class="issue-head"><span class="id">E1</span><h3>The cost chart and the appendix table point in opposite directions</h3><span class="pill crit"><i></i>Confirmed contradiction</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 250" role="img" aria-label="Two bars of cost per million tokens; the chart labels the cheaper bar as lower utilization while the appendix labels it higher utilization, the labels swap places">
+          <text x="16" y="22" class="m sm">Figure 5 in the report · cost per million tokens</text>
+          <line x1="70" y1="40" x2="70" y2="170" class="axis"/>
+          <line x1="70" y1="170" x2="360" y2="170" class="axis"/>
+          <rect x="110" y="70" width="80" height="100" rx="4" fill="var(--s1)" class="gv growv"/>
+          <rect x="230" y="120" width="80" height="50" rx="4" fill="var(--s1)" class="gv growv d1"/>
+          <text x="150" y="62" text-anchor="middle" class="sm num">higher cost</text>
+          <text x="270" y="112" text-anchor="middle" class="sm num">lower cost</text>
+          <g class="swap-a"><rect x="110" y="178" width="120" height="20" rx="10" fill="var(--crit-soft)" stroke="var(--crit)"/><text x="170" y="192" text-anchor="middle" class="sm" fill="var(--crit)">chart: higher util</text></g>
+          <g class="swap-b"><rect x="260" y="178" width="120" height="20" rx="10" fill="var(--crit-soft)" stroke="var(--crit)"/><text x="320" y="192" text-anchor="middle" class="sm" fill="var(--crit)">chart: lower util</text></g>
+          <g class="appear d2">
+            <rect x="390" y="60" width="134" height="110" rx="8" class="box"/>
+            <text x="457" y="82" text-anchor="middle" class="sm" font-weight="600">Appendix Table 3</text>
+            <text x="457" y="106" text-anchor="middle" class="sm">lower cost ↔</text>
+            <text x="457" y="122" text-anchor="middle" class="sm" font-weight="600">higher utilization</text>
+            <text x="457" y="150" text-anchor="middle" class="sm m">consistent with spreading</text>
+            <text x="457" y="163" text-anchor="middle" class="sm m">fixed cost over more output</text>
+          </g>
+          <text x="16" y="228" class="sm appear d3">The appendix direction is the one that makes economic sense. The chart is the one customers see.</text>
+        </svg>
+        <figcaption>Same numbers, opposite captions. The chart was not generated from the table it summarises.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper does</b>Figure 5 labels the lower per-token cost with lower utilization. Appendix Table 3 assigns the values the other way round.</p>
+        <p><b class="k">Why anyone would object</b>Spreading a fixed acquisition cost over more output lowers cost per token. A chart that says the opposite of its own appendix undermines the headline economic claim regardless of which is right.</p>
+        <div class="rating"><div class="row"><span class="lbl">Audit rated</span><span class="pill crit"><i></i>High</span><span class="lbl">We rate</span><span class="pill crit"><i></i>Confirmed error, likely cosmetic</span></div><p>Confirmed, and the appendix is almost certainly the correct version. The underlying numbers probably stand. The damage is to credibility, which for a headline economics figure is the point.</p></div>
+        <div class="verify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span><strong>Verify in five minutes.</strong> Report page 10 against appendix page 5. Confirm the direction that matches the cost formula.</span></div>
+        <p class="better"><b class="k">What we do instead</b>Every chart is generated from the same calculation table as the appendix. A stale caption or reversed label fails an automated check before release.</p>
+      </div>
+    </div>
+  </article>
+
+  <article class="issue">
+    <div class="issue-head"><span class="id">E2</span><h3>The cost total implies 31 times the headline token rate</h3><span class="pill warn"><i></i>Open question</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 230" role="img" aria-label="Headline throughput of 1,179 tokens per second drawn next to the 36,504 tokens per second implied by the five-year cloud cost, about 31 times larger">
+          <text x="16" y="22" class="m sm">Diagnostic: $5,180,423 ÷ $0.90 per million tokens ≈ 5.76 trillion tokens over five years</text>
+          <text x="16" y="60" class="sm">Headline throughput</text>
+          <rect x="190" y="48" width="11" height="18" rx="3" fill="var(--s1)" class="g grow"/>
+          <text x="208" y="62" class="num" font-weight="600">1,179 tok/s</text>
+          <text x="16" y="110" class="sm">Implied by the cost figure</text>
+          <rect x="190" y="98" width="330" height="18" rx="3" fill="var(--s2)" class="g grow d1"/>
+          <text x="190" y="136" class="num appear d2" font-weight="600">36,504 tok/s continuous, 365-day years  ·  ≈ 31×</text>
+          <g class="appear d3">
+            <rect x="16" y="158" width="508" height="56" rx="8" class="box"/>
+            <text x="30" y="178" class="sm" font-weight="600">Explanations that would close the gap, none of them stated:</text>
+            <text x="30" y="196" class="sm m">total tokens vs output tokens · a different workload mix · a different operating point · cached input</text>
+            <text x="30" y="210" class="sm m">Until one is published, the savings figure cannot be checked.</text>
+          </g>
+        </svg>
+        <figcaption>A gap this size is not automatically an error. It is a missing bridge between two disclosed numbers.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper does</b>Publishes a five-year cloud cost of $5,180,423 at $0.90 per million tokens, and a headline rate of 1,179 tokens/s.</p>
+        <p><b class="k">Why anyone would object</b>The two numbers describe very different token volumes. A reader trying to reproduce the savings claim cannot get from one to the other.</p>
+        <div class="rating"><div class="row"><span class="lbl">Audit rated</span><span class="pill crit"><i></i>High</span><span class="lbl">We rate</span><span class="pill warn"><i></i>Open question</span></div><p>The audit says itself this is "not necessarily an error", and we agree. Input plus output tokens across a mixed workload can easily be an order of magnitude above an output-only headline. It becomes a finding only if PT cannot produce the bridge. The same applies to E3, where 0.1816 kWh beside 144 J per million tokens implies about 4.5 billion tokens with no stated window.</p></div>
+        <div class="verify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span><strong>Verify by asking.</strong> Request input, cached input, reasoning, and output token counts by workflow, plus the utilization and availability assumptions in the cost model.</span></div>
+        <p class="better"><b class="k">What we do instead</b>Publish token counts by category and workload, show capacity, utilization, and availability assumptions, and label a calculated cloud bill as a calculation. Every total reconciles to the workload within rounding.</p>
+      </div>
+    </div>
+  </article>
+
+  <details class="more"><summary>Remaining PT findings and our re-rating</summary>
+  <div class="tablewrap"><table class="findings">
+    <tr><th>ID</th><th>Finding</th><th>Audit</th><th>We rate</th><th>Why</th></tr>
+    <tr><td class="id">E3</td><td>0.1816 kWh paired with 144 J per million tokens; window and token population unstated.</td><td><span class="pill serious"><i></i>High</span></td><td><span class="pill warn"><i></i>Open question</span></td><td class="why">Same shape as E2. Ask for the native count, unit, and window.</td></tr>
+    <tr><td class="id">E4</td><td>Six-GPU layout includes one TP2 pair crossing NUMA nodes.</td><td><span class="pill serious"><i></i>High</span></td><td><span class="pill minor"><i></i>Hypothesis, not an error</span></td><td class="why">A disclosed placement choice. Whether a 4+2 layout is better is our experiment to run, not their mistake.</td></tr>
+    <tr><td class="id">E5</td><td>Estimated agent counts derived from fixed concurrency and ordered workflows.</td><td><span class="pill serious"><i></i>High</span></td><td><span class="pill minor"><i></i>Claim boundary</span></td><td class="why">Reasonable as an estimate if labelled one. Only a problem if sold as observed user capacity.</td></tr>
+    <tr><td class="id">E6</td><td>High CPU utilization used to explain the bottleneck.</td><td><span class="pill serious"><i></i>Med-high</span></td><td><span class="pill minor"><i></i>Optimization hypothesis</span></td><td class="why">Utilization does not locate a bottleneck in a pipeline with databases and tools. An opportunity for us, not an error for them.</td></tr>
+    <tr><td class="id">E7</td><td>Testing end date precedes a listed OS update date.</td><td><span class="pill warn"><i></i>Medium</span></td><td><span class="pill warn"><i></i>Open question</span></td><td class="why">Reporting slip or later inventory. Ask.</td></tr>
+  </table></div></details>
+</div></section>
+
+<!-- ============ A: Dell Llama ============ -->
+<section class="paper" id="llama"><div class="wrap">
+  <div class="paper-head">
+    <div>
+      <div class="eyebrow">Paper A · Dell · Llama inference comparison across GPU platforms</div>
+      <h2 style="margin-top:8px">No errors found. Several variables move at once.</h2>
+      <p class="lede">A useful configuration comparison across request lengths and load levels, and unusually candid about which repeats were selected. The problem is causal: precision, serving profile, placement, and hardware all change together, so the results compare configurations rather than isolating a GPU.</p>
+    </div>
+    <div class="verdict"><div class="eyebrow">Sober verdict</div><b>Read as a configuration comparison</b><p>Sound measurements with a narrower meaning than a reader might take from them. Whether that is a problem depends on the exact claim Dell makes.</p><div style="margin-top:8px"><span class="pill serious"><i></i>2 real limitations</span> <span class="pill good"><i></i>0 confirmed errors</span></div></div>
+  </div>
+
+  <article class="issue">
+    <div class="issue-head"><span class="id">A1</span><h3>Precision, platform, and parallelism change together</h3><span class="pill serious"><i></i>Real limitation</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 230" role="img" aria-label="Three dials labelled precision, GPU platform, and tensor parallelism all turning at once, with one result arrow credited to the GPU alone">
+          <g>
+            <circle cx="90" cy="90" r="46" class="box"/><line x1="90" y1="90" x2="90" y2="52" stroke="var(--s2)" stroke-width="4" stroke-linecap="round" class="spin"/><circle cx="90" cy="90" r="5" fill="var(--ink)"/>
+            <text x="90" y="156" text-anchor="middle" font-weight="600">Precision</text><text x="90" y="172" text-anchor="middle" class="m sm">FP8 → NVFP4</text>
+            <circle cx="270" cy="90" r="46" class="box"/><line x1="270" y1="90" x2="270" y2="52" stroke="var(--s2)" stroke-width="4" stroke-linecap="round" class="spin d1"/><circle cx="270" cy="90" r="5" fill="var(--ink)"/>
+            <text x="270" y="156" text-anchor="middle" font-weight="600">GPU platform</text><text x="270" y="172" text-anchor="middle" class="m sm">different generation</text>
+            <circle cx="450" cy="90" r="46" class="box"/><line x1="450" y1="90" x2="450" y2="52" stroke="var(--s2)" stroke-width="4" stroke-linecap="round" class="spin d2"/><circle cx="450" cy="90" r="5" fill="var(--ink)"/>
+            <text x="450" y="156" text-anchor="middle" font-weight="600">Tensor parallel</text><text x="450" y="172" text-anchor="middle" class="m sm">explicitly not controlled</text>
+          </g>
+          <g class="appear d2"><rect x="120" y="190" width="300" height="30" rx="15" fill="var(--serious-soft)" stroke="var(--serious)"/><text x="270" y="210" text-anchor="middle" class="sm" font-weight="600">one result, three knobs turned: nothing to attribute to the GPU alone</text></g>
+        </svg>
+        <figcaption>Each knob can plausibly explain the gain. A controlled track would turn one at a time.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper does</b>Compares NVFP4 and FP8 configurations across different GPU platforms, with tensor parallelism left uncontrolled.</p>
+        <p><b class="k">Why anyone would object</b>You changed the precision and the hardware and the parallelism, and you are crediting one of them. Any engineer will ask which one.</p>
+        <div class="rating"><div class="row"><span class="lbl">Audit rated</span><span class="pill crit"><i></i>High</span><span class="lbl">We rate</span><span class="pill serious"><i></i>Real limitation</span></div><p>High only if Dell claims a hardware-architecture gain. As a "best qualified configuration per platform" comparison it is legitimate and useful. The fix is a sentence naming which kind of claim it is, plus the unavoidable differences listed beside the result.</p></div>
+        <div class="verify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span><strong>Verify in twenty minutes.</strong> Read the exact claim wording on the software-stack and cross-metric pages. Note also that the NVFP4 label does not prove native FP4 execution: NVIDIA documents an emulation path on earlier GPUs.</span></div>
+        <p class="better"><b class="k">What we do instead</b>Two tracks. A controlled track fixes model revision, precision, workload, serving stack, and quality gates. A deployment track gives each platform the same tuning budget and compares its best qualified configuration. Every claim names its track.</p>
+      </div>
+    </div>
+  </article>
+
+  <article class="issue">
+    <div class="issue-head"><span class="id">A4</span><h3>The curve is still rising at the last tested point</h3><span class="pill serious"><i></i>Real limitation</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 240" role="img" aria-label="Throughput against concurrency, rising through the last measured point with a dashed unknown extension beyond it">
+          <g class="gridl"><line x1="60" y1="40" x2="500" y2="40"/><line x1="60" y1="85" x2="500" y2="85"/><line x1="60" y1="130" x2="500" y2="130"/><line x1="60" y1="175" x2="500" y2="175"/></g>
+          <line x1="60" y1="20" x2="60" y2="180" class="axis"/><line x1="60" y1="180" x2="500" y2="180" class="axis"/>
+          <text x="20" y="100" class="m sm" transform="rotate(-90 20 100)" text-anchor="middle">throughput</text>
+          <text x="280" y="204" class="m sm" text-anchor="middle">concurrency (short context)</text>
+          <path d="M60 176 C120 170 160 150 200 120 S280 60 340 44" fill="none" stroke="var(--s1)" stroke-width="2.5" class="draw"/>
+          <g fill="var(--s1)"><circle cx="60" cy="176" r="4"/><circle cx="130" cy="164" r="4"/><circle cx="200" cy="120" r="4"/><circle cx="270" cy="80" r="4"/><circle cx="340" cy="44" r="5" stroke="var(--surface)" stroke-width="2"/></g>
+          <path d="M340 44 C380 34 430 32 500 40" fill="none" stroke="var(--serious)" stroke-width="2.5" stroke-dasharray="6 5" class="draw d1"/>
+          <text x="340" y="30" text-anchor="middle" class="sm" font-weight="600">last tested point</text>
+          <text x="440" y="60" class="sm appear d3" fill="var(--serious)" font-weight="600">saturation not bracketed</text>
+          <text x="60" y="226" class="sm appear d4">A best observed point within the sweep, not the maximum the system supports.</text>
+        </svg>
+        <figcaption>Capacity planning from this curve would under-size or over-size depending on where the unseen plateau is.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper does</b>Short-context throughput curves stop at the top tested concurrency while still climbing. A decline on another profile is attributed to hardware.</p>
+        <p><b class="k">Why anyone would object</b>If the line is still going up when you stop, you have not found the top. And a decline needs queue, memory, and client telemetry before it is blamed on the GPU.</p>
+        <div class="rating"><div class="row"><span class="lbl">Audit rated</span><span class="pill crit"><i></i>High</span><span class="lbl">We rate</span><span class="pill serious"><i></i>Real limitation</span></div><p>A boundary problem, not an error. Only critical if the figure is repeated as "maximum" in sizing guidance. The remaining Llama findings (selection of representative repeats, missing NIM profile, average latency) are disclosure matters; the disclosed run selection in particular is honesty, not cherry-picking.</p></div>
+        <div class="verify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span><strong>Verify in ten minutes.</strong> Check the slope between the last two concurrency points on each chart and whether any text uses "maximum" or "peak".</span></div>
+        <p class="better"><b class="k">What we do instead</b>Extend the load sweep adaptively until two successive steps gain under 3 percent, or state that the search boundary was reached and report a lower bound. Mark the highest load that still meets the latency target as a separate point.</p>
+      </div>
+    </div>
+  </article>
+
+  <details class="more"><summary>Remaining Dell Llama findings and our re-rating</summary>
+  <div class="tablewrap"><table class="findings">
+    <tr><th>ID</th><th>Finding</th><th>Audit</th><th>We rate</th><th>Why</th></tr>
+    <tr><td class="id">A2</td><td>Resolved NIM profile, effective parallelism, replica routing, and kernel path not published.</td><td><span class="pill crit"><i></i>High</span></td><td><span class="pill warn"><i></i>Open question</span></td><td class="why">Needed to reproduce. Absence is a gap, not an error. Treating the L40S NVFP4 label as impossible would itself be a mistake.</td></tr>
+    <tr><td class="id">A3</td><td>Different representative repeats selected, one to avoid a degraded run.</td><td><span class="pill serious"><i></i>Med-high</span></td><td><span class="pill minor"><i></i>Disclosed choice</span></td><td class="why">Disclosed, so not cherry-picking. Missing only a common selection rule and the retained repeats.</td></tr>
+    <tr><td class="id">A5</td><td>Mean latency and synthetic token throughput presented without tails or quality.</td><td><span class="pill serious"><i></i>High if used for users</span></td><td><span class="pill minor"><i></i>Scope extension</span></td><td class="why">A better study, not a defect in this one, unless the figures are converted into supported users.</td></tr>
+  </table></div></details>
+</div></section>
+
+<!-- ============ B: Signal65 ============ -->
+<section class="paper" id="signal65"><div class="wrap">
+  <div class="paper-head">
+    <div>
+      <div class="eyebrow">Paper B · Signal65 · long-context accuracy evaluation</div>
+      <h2 style="margin-top:8px">The least concerning of the five</h2>
+      <p class="lede">The report limits itself to answers from supplied context and does not claim to validate a production RAG system or isolate the network. That restraint should be preserved in any critique. Its weaknesses are statistical and about reproducibility, not errors.</p>
+    </div>
+    <div class="verdict"><div class="eyebrow">Sober verdict</div><b>Ask for the manifest, then move on</b><p>The audit itself says a blanket critique would be unfair. Two statistical limitations are worth raising; the rest are extra experiments we would run, not faults.</p><div style="margin-top:8px"><span class="pill serious"><i></i>2 real limitations</span> <span class="pill good"><i></i>0 confirmed errors</span></div></div>
+  </div>
+
+  <article class="issue">
+    <div class="issue-head"><span class="id">B2</span><h3>The cohort shrinks as context grows, so the average changes meaning</h3><span class="pill serious"><i></i>Real limitation</span></div>
+    <div class="issue-body">
+      <figure class="viz" data-viz>
+        <button class="replay" type="button">Replay</button>
+        <svg viewBox="0 0 540 240" role="img" aria-label="Schematic: dots representing evaluated model configurations at four context lengths; some drop out at longer contexts while a mean line is drawn through the survivors">
+          <text x="16" y="20" class="m sm">Schematic, not the report's counts. Each dot is one evaluated configuration.</text>
+          <g id="cohort"></g>
+          <text x="90" y="212" text-anchor="middle" class="sm">short</text><text x="230" y="212" text-anchor="middle" class="sm">medium</text><text x="370" y="212" text-anchor="middle" class="sm">long</text><text x="490" y="212" text-anchor="middle" class="sm">longest</text>
+          <text x="290" y="232" text-anchor="middle" class="m sm">context length →   the "mean accuracy" at each step averages a different set of models</text>
+        </svg>
+        <figcaption>A mean over changing membership mixes two things: how context hurts, and which models were still eligible.</figcaption>
+      </figure>
+      <div class="text">
+        <p><b class="k">What the paper does</b>Reports accuracy trends across context lengths while the number of evaluated configurations decreases as context grows. Variants of one family are counted as separate samples.</p>
+        <p><b class="k">Why anyone would object</b>A trend line through a shrinking group can rise or fall purely because weaker or stronger models dropped out. That is a familiar survivorship trap.</p>
+        <div class="rating"><div class="row"><span class="lbl">Audit rated</span><span class="pill crit"><i></i>High</span><span class="lbl">We rate</span><span class="pill serious"><i></i>Real limitation</span></div><p>Genuine, and cheap to fix with a paired common-cohort analysis. It limits the degradation-with-length conclusion, not the per-model scores. Closely related is B3: a leaderboard without intervals cannot show whether close rankings mean anything.</p></div>
+        <div class="verify"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span><strong>Verify in twenty minutes.</strong> Count configurations per context length on physical pages 7 and 16. Recompute the trend on the subset present at every length.</span></div>
+        <p class="better"><b class="k">What we do instead</b>Publish a paired common-cohort analysis beside the all-eligible one. Bootstrap by corpus or seed, report intervals and ties, and use the same document bytes for paired comparisons. Unsupported context lengths are marked unsupported, not scored.</p>
+      </div>
+    </div>
+  </article>
+
+  <details class="more"><summary>Remaining Signal65 findings and our re-rating</summary>
+  <div class="tablewrap"><table class="findings">
+    <tr><th>ID</th><th>Finding</th><th>Audit</th><th>We rate</th><th>Why</th></tr>
+    <tr><td class="id">B1</td><td>The earlier RIKER methodology does not freeze this September experiment's seeds, temperature, or repeats.</td><td><span class="pill crit"><i></i>High</span></td><td><span class="pill warn"><i></i>Open question</span></td><td class="why">A study-specific manifest would settle it. Standard reproducibility request.</td></tr>
+    <tr><td class="id">B3</td><td>Close rankings without uncertainty or per-item outcomes.</td><td><span class="pill serious"><i></i>Med-high</span></td><td><span class="pill serious"><i></i>Real limitation</span></td><td class="why">Correlated questions from one generated document are not independent samples. Intervals needed before rank claims.</td></tr>
+    <tr><td class="id">B4</td><td>Synthetic ground truth; grader accuracy not separately measured.</td><td><span class="pill serious"><i></i>High for transfer</span></td><td><span class="pill minor"><i></i>Scope extension</span></td><td class="why">A better study we would run. Not a flaw in a study that declared its scope.</td></tr>
+    <tr><td class="id">B5</td><td>Token and reasoning budgets not on a common basis.</td><td><span class="pill warn"><i></i>Medium</span></td><td><span class="pill minor"><i></i>Scope extension</span></td><td class="why">Worth recording. Does not change the accuracy result.</td></tr>
+  </table></div></details>
+</div></section>
+
+<!-- ============ Our results ============ -->
+<section class="ours" id="ours"><div class="wrap">
+  <div class="eyebrow">Held to the same standard</div>
+  <h2 style="margin-top:8px">What our current XE7740 results do and do not establish</h2>
+  <p class="lede" style="margin-top:10px">Before proposing to do better, the same objections have to be aimed at our own numbers. They survive as measurements. They do not survive as a comparison to any of these papers.</p>
+  <div class="ours-grid">
+    <div class="card">
+      <h4>Measured, three windows each, median output tokens/s</h4>
+      <table class="res">
+        <tr><th>Model</th><th>AIPerf</th><th>GuideLLM</th></tr>
+        <tr><td>Llama 3.3 70B NVFP4</td><td class="num">50,652</td><td class="num">51,242</td></tr>
+        <tr><td>Qwen 3.6 35B A3B NVFP4</td><td class="num">55,885</td><td class="num">55,995</td></tr>
+      </table>
+      <p style="margin-top:12px;font-size:.88rem;color:var(--muted)">Eight RTX PRO 6000 Blackwell 96 GB GPUs, Xeon 6787P, eight TP1 replicas, FP8 KV cache, 2,048-token context, 128-token prompts, 256 output tokens, 8,192 in-flight requests, a reused 256-prompt corpus. The two harnesses count tokens differently and are not interchangeable proof of the same rate.</p>
+    </div>
+    <div class="card">
+      <h4>Why this is not a hardware speedup against anyone</h4>
+      <ul>
+        <li><b>Different model and precision.</b> PT uses Llama 3.1 FP8; the Dell comparison mixes GPUs and precisions. We ran Llama 3.3 NVFP4.</li>
+        <li><b>Different workload.</b> A reused short-prompt corpus may benefit from prefix caching. Nobody else ran it.</li>
+        <li><b>Not interactive capacity.</b> Llama p95 end-to-end latency was 44.9 to 46.7 seconds. That is batch throughput, not users served.</li>
+        <li><b>No quality or wall-energy result.</b> Nothing here qualifies answers or measures joules. The Llama source's steady-state status is still unresolved.</li>
+      </ul>
+      <div class="quote">"We measured this throughput on this configuration and workload. A matched comparison remains to be run." Any earlier raw-ratio claim against the Dell headline is withdrawn.</div>
+    </div>
+  </div>
+</div></section>
+
+<!-- ============ One page ============ -->
+<section class="onepage" id="better"><div class="wrap">
+  <div class="eyebrow">One page</div>
+  <h2 style="margin-top:8px">How we do better</h2>
+  <p class="lede" style="margin-top:10px">Every problem above falls into one of three failures: not testing enough of the space, not understanding what was actually running, or not leaving a trail others can follow. Our report is built to pass each test.</p>
+  <div class="sheet">
+    <div class="pillars">
+      <div class="pillar">
+        <svg class="glyph" viewBox="0 0 44 44" fill="none" stroke="var(--accent)" stroke-width="2"><rect x="6" y="6" width="32" height="32" rx="4"/><path d="M6 17h32M6 28h32M17 6v32M28 6v32"/></svg>
+        <h3>Thoroughness</h3>
+        <p class="def">Test enough of the space that the claim is bracketed, and keep every cell, including the ones that failed.</p>
+        <ul>
+          <li><b>Sweep to saturation or say so.</b> Load rises until two steps gain under 3 percent; otherwise report a lower bound, never a maximum. <span class="mono">A4</span></li>
+          <li><b>Both loop types.</b> Closed-loop concurrency and open-loop arrival rates at 25 to 110 percent of pilot capacity, plus bursts. <span class="mono">A5 · E5</span></li>
+          <li><b>Adequate samples for tails.</b> At least 10,000 requests behind any headline p99, with its uncertainty. Percentiles are never averaged across runs.</li>
+          <li><b>Confirmation, not best-of.</b> Screen at most 24 candidates, confirm the best two on fresh seeds in three randomized paired blocks, five if variance exceeds 5 percent. <span class="mono">A3</span></li>
+          <li><b>Full matrix published.</b> Failed cells, below-sample cells, and infeasible configurations stay in the evidence index. <span class="mono">D5</span></li>
+          <li><b>Sustained runs.</b> Two hours for a finalist, 24 hours when reliability is part of the claim, with controlled replica loss and recovery timing.</li>
+        </ul>
+      </div>
+      <div class="pillar">
+        <svg class="glyph" viewBox="0 0 44 44" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="22" cy="22" r="15"/><circle cx="22" cy="22" r="5"/><path d="M22 7v6M22 31v6M7 22h6M31 22h6"/></svg>
+        <h3>Understanding</h3>
+        <p class="def">Expert knowledge of what is actually running, what limits it, and what a change would do, before any number is attributed to anything.</p>
+        <ul>
+          <li><b>Know it fits before it runs.</b> Estimate weights, KV cache, activations, and headroom; verify against observed allocation; record the real dtype and kernels, not the model name. <span class="mono">D1 · A2</span></li>
+          <li><b>Map the machine.</b> Logical CPU to core to NUMA node, PCIe width and generation, GPU peer access, NIC placement, effective affinity of every worker. <span class="mono">C4 · E4</span></li>
+          <li><b>One knob at a time.</b> Change one factor, then combine winners. Equal tuning budgets per platform. A changed precision belongs to the deployment track, not a hardware gain. <span class="mono">A1</span></li>
+          <li><b>Diagnose before blaming.</b> Split cold load, compilation, warm prefill, queue delay, first token, and reasoning tokens before calling a delay "batching". Trace stages before calling CPU utilization "the bottleneck". <span class="mono">D3 · E6</span></li>
+          <li><b>Name the operating point.</b> Peak throughput and interactive service are different points on the same curve. Every recommendation says which one it is. <span class="mono">D4</span></li>
+          <li><b>Respect the model's limits.</b> TP divisibility, supported context, tokenizer differences, and what active parameters do and do not mean in a MoE model.</li>
+        </ul>
+      </div>
+      <div class="pillar">
+        <svg class="glyph" viewBox="0 0 44 44" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M10 6h18l8 8v24H10z"/><path d="M28 6v8h8M15 22h14M15 28h14M15 34h9"/></svg>
+        <h3>Reproducibility</h3>
+        <p class="def">Another operator can launch the same configuration, regenerate every chart, and get the same conclusions, including the unflattering ones.</p>
+        <ul>
+          <li><b>Frozen manifest per run.</b> Server, BIOS, firmware, GPU power limits, driver, container digest, engine revision, model and tokenizer hashes, launch command, environment. A repair that changes any of these is a new experiment. <span class="mono">E7 · B1</span></li>
+          <li><b>Checksummed evidence bundle.</b> Raw request records, sensor logs, search history, failed attempts, native harness output, an independent recalculation script, SHA-256 index.</li>
+          <li><b>One source for every table.</b> Web, Word, PDF, and UI charts regenerate from the same workbook. Automated checks reject unit mismatches, mismatched windows, reversed directions, min/max ordering, and stale labels. <span class="mono">C6 · E1 · D2</span></li>
+          <li><b>Matching denominators.</b> Wall energy integrated over the exact token window, GPU-only energy kept separate, tokens split into input, cached, reasoning, and output. <span class="mono">D2 · E2 · E3</span></li>
+          <li><b>Every quantity labelled.</b> Measured, calculated, or simulated, with the sensor, interval, and boundary. <span class="mono">C7</span></li>
+          <li><b>The headline names its track.</b> Controlled comparison, optimized deployment, or workload reproduction, with unavoidable differences listed beside the result.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="musts">
+      <div class="must"><span class="n">1</span><span>Reproduce a disclosed workload and explain every material mismatch.</span></div>
+      <div class="must"><span class="n">2</span><span>Improve one factor at a time before combining improvements.</span></div>
+      <div class="must"><span class="n">3</span><span>Confirm the selected configuration on fresh data and repeated runs.</span></div>
+      <div class="must"><span class="n">4</span><span>Measure useful work that meets quality and latency limits, not token volume alone.</span></div>
+      <div class="must"><span class="n">5</span><span>Reconcile request counts, time windows, wall energy, costs, and every chart.</span></div>
+      <div class="must"><span class="n">6</span><span>Publish an editable report and a checksummed evidence bundle, including unsuccessful attempts.</span></div>
+    </div>
+
+    <div class="stages">
+      <div class="eyebrow">Staged plan, in execution order</div>
+      <div class="stage-strip">
+        <div class="stage"><b>T0</b>Freeze config, prove it fits</div>
+        <div class="stage"><b>T1</b>Reproduce the Dell Llama surface, 15 cells × 3</div>
+        <div class="stage"><b>T2</b>Search topology fairly, ≤24 candidates</div>
+        <div class="stage"><b>T3</b>Usable capacity and saturation</div>
+        <div class="stage"><b>T4</b>Quality and long-context gates</div>
+        <div class="stage"><b>T5</b>Useful agentic work</div>
+        <div class="stage"><b>T6</b>CPU methodology, when hardware exists</div>
+        <div class="stage"><b>T7</b>Wall energy and auditable cost</div>
+        <div class="stage"><b>T8</b>Stability without erasing failures</div>
+      </div>
+      <div class="gate"><b>Publication gate.</b> A release contains a one-page answer to the sizing question, the exact workload and service contract, configuration and topology, all comparison curves, quality results, uncertainty, energy and cost accounting, limitations, and reproduction instructions. Until the planned tests run, the results section says "proposed experiment" and "expected diagnostic value". It is never filled with forecast improvements.</div>
+    </div>
+    <p class="foot">Proposed interactive gates for our own runs: p95 time to first token at most 2 s, p95 time per output token at most 50 ms, at least 99 percent successful requests. These are test contracts, not customer-approved requirements. Nominal floor for the first AIPerf matrix is 9 hours per configuration, 12.6 hours with the GuideLLM cross-check, before launch, drain, and processing. Budgeting figures, not promises.</p>
+  </div>
+</div></section>
+
+<script>
+(function(){
+  var svgNS='http://www.w3.org/2000/svg';
+  function rect(x,y,w,h,fill,cls,extra){var r=document.createElementNS(svgNS,'rect');r.setAttribute('x',x);r.setAttribute('y',y);r.setAttribute('width',w);r.setAttribute('height',h);r.setAttribute('rx',3);r.setAttribute('fill',fill);if(cls)r.setAttribute('class',cls);if(extra)for(var k in extra)r.setAttribute(k,extra[k]);return r;}
+  function txt(x,y,s,cls){var t=document.createElementNS(svgNS,'text');t.setAttribute('x',x);t.setAttribute('y',y);t.setAttribute('text-anchor','middle');t.setAttribute('class',cls||'sm');t.textContent=s;return t;}
+
+  // C4: CPU grids (32 logical CPUs)
+  function cpuGrid(id,y,selected){
+    var g=document.getElementById(id);if(!g)return;
+    for(var i=0;i<32;i++){
+      var x=16+i*15.9, sel=selected(i);
+      g.appendChild(rect(x,y,13,13,sel?'var(--s1)':'var(--surface-2)','appear'+(id==='gridB'?' d1':''),{stroke:sel?'var(--s1)':'var(--line-2)'}));
+      if(i%8===0||sel){var t=txt(x+6.5,y+10,i,'sm');t.setAttribute('font-size','8');t.setAttribute('fill',sel?'#fff':'var(--muted)');t.setAttribute('class','appear'+(id==='gridB'?' d1':''));g.appendChild(t);}
+    }
+    var lab=txt(16,y+30,'',''); // spacer
+  }
+  cpuGrid('gridA',80,function(i){return i<8;});
+  cpuGrid('gridB',170,function(i){return i===8;});
+  var gb=document.getElementById('gridB'); if(gb){var t=txt(16,220,'only CPU #8 selected; NAMD then spreads or re-pins threads unpredictably','sm appear d2');t.setAttribute('text-anchor','start');t.setAttribute('fill','var(--crit)');gb.appendChild(t);}
+
+  // C2: job slots
+  function slots(id,y,n,color,delayCls){
+    var g=document.getElementById(id);if(!g)return;
+    for(var i=0;i<n;i++){var x=16+(i%15)*34, yy=y+Math.floor(i/15)*30;
+      g.appendChild(rect(x,yy,30,24,color,'gv growv'+(i%15>7?' d1':''),{opacity:.9}));
+      var t=txt(x+15,yy+16,'8c','sm');t.setAttribute('fill','#fff');t.setAttribute('font-size','9');g.appendChild(t);}
+  }
+  slots('slotsA',30,16,'var(--s1)');
+  slots('slotsB',120,30,'var(--s2)');
+
+  // B2: cohort schematic
+  (function(){
+    var g=document.getElementById('cohort');if(!g)return;
+    var cols=[90,230,370,490];
+    var members=[[1,1,1,1,1,1,1,1],[1,1,1,1,1,1,0,1],[1,1,0,1,1,0,0,1],[1,0,0,1,0,0,0,1]];
+    var base=[60,72,84,68,90,78,95,66];
+    for(var c=0;c<4;c++){
+      var sum=0,n=0;
+      for(var m=0;m<8;m++){
+        var y=40+m*18, alive=members[c][m];
+        var d=document.createElementNS(svgNS,'circle');
+        d.setAttribute('cx',cols[c]);d.setAttribute('cy',y);d.setAttribute('r',6);
+        d.setAttribute('fill',alive?'var(--s1)':'var(--line-2)');
+        if(!alive)d.setAttribute('class','dropout'+(c===2?' d1':c===3?' d2':''));
+        g.appendChild(d);
+        if(alive){sum+=base[m];n++;}
+      }
+      var lab=txt(cols[c],196,'n = '+n,'sm num');lab.setAttribute('fill',n<8?'var(--serious)':'var(--muted)');lab.setAttribute('class','sm num appear d3');g.appendChild(lab);
+    }
+    var trend=document.createElementNS(svgNS,'path');
+    trend.setAttribute('d','M90 120 L230 112 L370 96 L490 84');
+    trend.setAttribute('fill','none');trend.setAttribute('stroke','var(--serious)');trend.setAttribute('stroke-width','2.5');trend.setAttribute('class','draw d1');
+    g.appendChild(trend);
+    var tl=txt(160,184,'"mean" through survivors only','sm appear d3');tl.setAttribute('fill','var(--serious)');g.appendChild(tl);
+  })();
+
+  // play animations on entry, replay on button
+  var reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var vizzes=document.querySelectorAll('[data-viz]');
+  if(!reduce && 'IntersectionObserver' in window){
+    var io=new IntersectionObserver(function(entries){
+      entries.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add('play'); } else { e.target.classList.remove('play'); } });
+    },{threshold:.35});
+    vizzes.forEach(function(v){ io.observe(v); });
+  }
+  document.querySelectorAll('.replay').forEach(function(b){
+    b.addEventListener('click',function(){ var f=b.closest('[data-viz]'); f.classList.remove('play'); void f.offsetWidth; f.classList.add('play'); });
+  });
+})();
+</script>

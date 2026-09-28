@@ -275,6 +275,13 @@ async def models_discover(orgs: Optional[str] = None) -> dict:
 
 @router.post("/api/models/download", status_code=202)
 async def models_download(req: ModelDownloadRequest, request: Request) -> dict:
+    async with request.app.state.start_lock:
+        from .benchmarks import assert_idle
+        assert_idle(request.app)
+        return await _models_download_locked(req, request)
+
+
+async def _models_download_locked(req: ModelDownloadRequest, request: Request) -> dict:
     from ..models import download_command, referenced_models
     known = {m["model"]: m for m in await asyncio.to_thread(referenced_models)}
     if req.model not in known:
@@ -374,6 +381,13 @@ async def engines_status(request: Request) -> dict:
 
 @router.post("/api/engines/pull", status_code=202)
 async def engines_pull(req: EnginePullRequest, request: Request) -> dict:
+    async with request.app.state.start_lock:
+        from .benchmarks import assert_idle
+        assert_idle(request.app)
+        return await _engines_pull_locked(req, request)
+
+
+async def _engines_pull_locked(req: EnginePullRequest, request: Request) -> dict:
     from ..engine_runtimes import RUNTIMES, image_store_root
     meta = RUNTIMES.get(req.engine)
     if meta is None:

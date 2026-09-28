@@ -10,8 +10,10 @@ from pathlib import Path
 import typer
 from rich.logging import RichHandler
 
+from .benchmarks.cli import app as benchmark_app
 from .config import apply_cli_overrides, load_config
 from .engines import make_engine
+from .infrastructure.cli import app as infrastructure_app
 from .personas import (
     COHORTS,
     PERSONAS,
@@ -24,6 +26,9 @@ app = typer.Typer(
     help="capsim — AI sizing and capacity engine. Open-loop capacity benchmarks for LLM "
          "inference engines; `capsim serve` starts the web UI.",
 )
+
+app.add_typer(benchmark_app, name="benchmark")
+app.add_typer(infrastructure_app, name="infrastructure")
 
 
 def _setup_logging(verbose: bool) -> None:

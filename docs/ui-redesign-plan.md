@@ -1,5 +1,7 @@
 # capsim UI and UX redesign plan
 
+Superseded by [the comprehensive redesign specification](ui-comprehensive-redesign-plan.md), which inventories system preparation, assets, all measurement/search methods, telemetry, workloads, and evidence workflows before defining the UI.
+
 Reviewed 22 September 2026. Audience: technical operators and solutions architects equally, with guided defaults and expert controls in the same workflow.
 
 ## Product direction

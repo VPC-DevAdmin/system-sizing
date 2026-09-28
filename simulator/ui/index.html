@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>capsim</title>
 <link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="infrastructure.css">
 <!-- Vendored: benchmark boxes are often offline; no CDN dependency. -->
 <script src="vendor/chart.umd.min.js"></script>
 </head>
@@ -27,8 +28,10 @@
       aria-selected="false" aria-controls="view-results" tabindex="-1">Results</button>
     <button role="tab" id="tab-personas" data-view="personas"
       aria-selected="false" aria-controls="view-personas" tabindex="-1">Edit&nbsp;workloads</button>
+    <button role="tab" id="tab-infrastructure" data-view="infrastructure" aria-selected="false" aria-controls="view-infrastructure" tabindex="-1">Infrastructure Tests</button>
   </nav>
   <div id="status-pill" class="pill idle" role="status" aria-live="polite">idle</div>
+  <a href="workspace.html" onclick="this.hash=location.hash" style="color:var(--teal);font-size:.85rem;white-space:nowrap">Try new UI ↗</a>
 </header>
 
 <!-- ── 1 · Prepare ─────────────────────────────────────────────── -->
@@ -868,6 +871,107 @@
   </section>
 </main>
 
+<main id="view-infrastructure" class="view" role="tabpanel" aria-labelledby="tab-infrastructure">
+  <section class="panel"><h2>Infrastructure Tests</h2><p>Compare a controlled baseline and treatment. Each project preserves evidence and produces separate outputs for its claims.</p>
+  <button id="infra-refresh">Refresh experiments</button> <button id="infra-check">Check host readiness</button>
+  <button id="infra-stop" class="danger" disabled>Stop infrastructure experiment</button>
+  <p id="infra-message" role="status" aria-live="polite"></p>
+  <details><summary>Host readiness evidence</summary><pre id="infra-readiness">Not checked yet.</pre></details></section>
+  <div id="infra-cards"></div>
+  <section class="panel"><h2 id="infra-project-title"></h2><p id="infra-method"></p>
+  <details><summary>Controls and acceptance criteria</summary><p id="infra-controls"></p><p id="infra-acceptance"></p></details>
+  <h3>Separate report outputs</h3><ul id="infra-outputs"></ul>
+  <p id="infra-pending">This adapter is still being implemented. Its measurements and outputs are not available yet.</p>
+  <form id="infra-form" hidden>
+    <label class="infra-source">Recorded source configuration<select id="infra-source" required></select></label>
+    <label>Run purpose<select id="infra-mode"><option value="pilot">Pilot (exploratory)</option><option value="confirmation">Confirmation</option></select></label>
+    <label>Randomized blocks<input id="infra-blocks" type="number" min="1" max="20" value="2" required></label>
+    <label>Measurement seconds per window<input id="infra-duration" type="number" min="10" max="3600" value="60" required></label>
+    <label>Warmup seconds<input id="infra-warmup" type="number" min="0" max="600" value="15" required></label>
+    <label>Concurrency<input id="infra-concurrency" type="number" min="1" max="512" value="4" required></label>
+    <label>GPU indices (comma separated)<input id="infra-gpus" value="0" pattern="[0-9]+(,[0-9]+)*" required></label>
+    <div id="infra-attention-settings" hidden>
+      <p>Separate CUDA profile, then unprofiled paired measurements. Runtime backend and next-token numerical checks must pass. This compares attention backends, not a standalone softmax kernel.</p>
+      <label>Baseline backend<select id="infra-attention-baseline"><option>FLASHINFER</option><option>TRITON_ATTN</option></select></label>
+      <label>Treatment backend<select id="infra-attention-treatment"><option>TRITON_ATTN</option><option>FLASHINFER</option></select></label>
+      <label>KV precision in both arms<select id="infra-attention-kv"><option value="fp8">FP8</option><option value="bfloat16">BF16</option></select></label>
+      <label>Maximum logprob difference<input id="infra-attention-tolerance" type="number" min="0.01" max="0.5" step="0.01" value="0.1"></label>
+    </div>
+    <div id="infra-tenant-settings" hidden>
+      <label>Workflow<select id="infra-tenant-workflow"><option value="independent">Two independent language endpoints</option><option value="post_call">Transcription plus structured call summary</option></select></label>
+      <label>Post-call arrival rates per second<input id="infra-call-rates" value="0.1,0.25,0.5"></label>
+      <label>Maximum transcription word error rate<input id="infra-call-wer" type="number" min="0" max="1" step="0.01" value="0.15"></label>
+      <p id="infra-call-note">Post-call compares Whisper plus the selected language model on two dedicated GPUs, one shared GPU and two MIG partitions. Synthetic audio pilot; transcript text passes through the host in every placement. No PCIe bypass claim. Eight frozen synthetic calls are measured; two calls from a separate recording warm up each placement.</p>
+      <p>Placements: two dedicated GPUs, software sharing, and MIG in randomized order. Select two GPUs; the last is temporarily partitioned into two 48 GB instances and restored. Requires an initially idle, unpartitioned GPU and passwordless nvidia-smi administration.</p>
+      <label>Requests/second per tenant<input id="infra-tenant-rate" type="number" min="0.01" max="10" step="0.01" value="0.5"></label>
+      <label>Noisy-neighbor rate multiplier<input id="infra-tenant-noise" type="number" min="2" max="10" value="4"></label>
+      <label>LLM KV cache GiB per endpoint<input id="infra-tenant-kv" type="number" min="1" max="16" value="8"></label>
+    </div>
+    <div id="infra-diffusion-settings" hidden>
+      <p>Qwen-Image teacher versus the released FastGen-distilled Qwen-Image-Flash student. 1024 × 1024, BF16, one image at a time. First run prepares pinned model revisions and an isolated image. Human acceptance review follows generation.</p>
+      <label>Images per cell<input id="infra-diffusion-samples" type="number" min="4" max="64" value="8"></label>
+      <label>Teacher step counts<input id="infra-diffusion-steps" value="20,50" pattern="[0-9]+(,[0-9]+)*"></label>
+    </div>
+    <div id="infra-session-settings" hidden>
+      <label>Session tier<select id="infra-session-tier"><option value="cpu">GPU and CPU</option><option value="cpu_disk">GPU, CPU and disk</option></select></label>
+      <label>Resume p95 TTFT target seconds<input id="infra-session-ttft" type="number" min="0.1" max="600" step="0.1" value="5"></label>
+      <label>Returning sessions<input id="infra-session-count" type="number" min="4" max="256" value="8"></label>
+      <label>Cache pressure documents<input id="infra-session-churn" type="number" min="4" max="512" value="16"></label>
+      <label>GPU KV GiB<input id="infra-session-gpu" type="number" min="1" max="64" value="4"></label>
+      <label>CPU cache GB<input id="infra-session-cpu" type="number" min="4" max="256" value="32"></label>
+      <label>Disk cache GB<input id="infra-session-disk" type="number" min="8" max="256" value="64"></label>
+      <p>Each session returns once after cache pressure. Resume latency requires measured tier reloads. This pilot does not establish maximum session capacity.</p>
+    </div>
+    <div id="infra-search-settings" hidden>
+      <label><input id="infra-goal-seek" type="checkbox">Find the best document shape and GPU split</label>
+      <div id="infra-goal-settings" hidden>
+        <label>GPU placement<select id="infra-goal-placement"><option value="socket_local">Keep each request within its CPU socket</option><option value="both">Compare socket-local and cross-socket transfers</option><option value="cross_socket">Force cross-socket transfers as a control</option><option value="pooled">Unrestricted shared GPU pool</option></select></label>
+        <label>Document sizes in records<input id="infra-goal-documents" value="64,128,192"></label>
+        <label>Answer sizes in extracted records<input id="infra-goal-answers" value="4,8"></label>
+        <label>Answer safety cap in tokens<input id="infra-goal-cap" type="number" min="128" max="8192" value="1024"></label>
+        <label>Rate precision in requests per second<input id="infra-goal-resolution" type="number" min="0.1" max="10" step="0.1" value="1"></label>
+        <label>Search time limit in hours<input id="infra-goal-hours" type="number" min="0.1" max="168" step="0.1" value="12"></label>
+        <p>About 60 input tokens per document record and 65 output tokens per answer record; actual token ranges are recorded. Search tests demand endpoints and narrows the passing boundary. Reports separate capacity uplift, absolute capacity and latency peaks. Use a rate range wide enough to reach failure.</p>
+      </div>
+      <label>Prefill GPU search counts (blank for single split)<input id="infra-search-splits" placeholder="2,3,4,5"></label>
+      <label>Fixed arrival rates per second<input id="infra-search-rates" placeholder="2,4,6"></label>
+      <label>Search first-token target seconds<input id="infra-search-ttft" type="number" min="0.1" step="0.1" value="5"></label>
+      <label>Maximum client queue growth seconds<input id="infra-search-queue" type="number" min="0" max="60" step="0.1" value="2"></label>
+      <p>Every split uses the same workload and rate range as the aggregate baseline. Goal search adaptively chooses which rates to measure. All failures are retained; a passing upper limit means the range should be expanded.</p>
+    </div>
+    <label id="infra-prefill-label" hidden>Prefill GPUs<input id="infra-prefill" type="number" min="1" max="7" value="1"></label>
+    <fieldset id="infra-transfer-settings" hidden><legend>Prefill and decode transfer diagnostics</legend>
+      <label>KV block size<select id="infra-transfer-block"><option value="">Engine default</option><option>16</option><option>32</option><option>64</option><option>128</option></select></label>
+      <label>Transport selection<select id="infra-transfer-mode"><option value="local">Local CUDA IPC candidate</option><option value="auto">UCX automatic selection</option></select></label>
+      <label>CUDA IPC GET<select id="infra-transfer-get"><option value="default">Runtime default</option><option value="enabled">Enable PCIe peer reads (validate on host)</option></select></label>
+      <label>UCX memory type cache<select id="infra-transfer-memtype"><option value="default">Runtime default</option><option value="disabled">Disabled diagnostic</option></select></label>
+      <label>KV layout<select id="infra-transfer-layout"><option value="standard">Standard</option><option value="cross">Cross-layer blocks (experimental)</option></select></label>
+      <label>Maximum batched tokens<input id="infra-transfer-tokens" type="number" min="1024" max="131072" placeholder="Engine default"></label>
+      <p>Block size and token limits apply to both arms. Unsupported layouts fail the run. A transport selection is not proof of the actual data path; inspect transfer evidence.</p>
+    </fieldset>
+    <p id="infra-dynamo-note" hidden>Same total GPU budget in both arms. Baseline: one aggregated worker per GPU. Treatment: the first selected GPUs prefill and the rest decode through NIXL. Requires the pinned Dynamo image locally. Reports compare fixed concurrency, not maximum capacity.</p>
+    <label>Speculative method<select id="infra-spec-method"><option value="ngram">Prompt n-gram</option><option value="mtp">Native MTP (checkpoint required)</option></select></label>
+    <label>Draft tokens<input id="infra-draft-tokens" type="number" min="1" max="16" value="5" required></label>
+    <label>Document records<input id="infra-records" type="number" min="4" max="1024" value="16" required></label>
+    <label>Response-time target (seconds)<input id="infra-slo" type="number" min="0.1" max="600" step="0.1" value="60" required></label>
+    <label>Request timeout (seconds)<input id="infra-timeout" type="number" min="1" max="600" value="120" required></label>
+    <label>Minimum correct fraction<input id="infra-quality" type="number" min="0.01" max="1" step="0.01" value="0.95" required></label>
+    <label>Minimum correct and on-time fraction<input id="infra-slo-fraction" type="number" min="0.01" max="1" step="0.01" value="0.95" required></label>
+    <label>Minimum requests per window<input id="infra-min-requests" type="number" min="1" max="1000000" value="30" required></label>
+    <label>Context limit<input id="infra-context" type="number" min="2048" max="131072" value="8192" required></label>
+    <label id="infra-spec-loads-label" hidden>Speculative load grid (optional, comma separated)<input id="infra-spec-loads" placeholder="1,4,16,64" pattern="[0-9]+(,[0-9]+)*"></label>
+    <label id="infra-cache-records-label" hidden>Document sizes (records, comma separated)<input id="infra-cache-records" value="16,64,256" pattern="[0-9]+(,[0-9]+)*"></label>
+    <label id="infra-cache-concurrency-label" hidden>Concurrency grid (comma separated)<input id="infra-cache-concurrency" value="1,4,16" pattern="[0-9]+(,[0-9]+)*"></label>
+    <label id="infra-cache-samples-label" hidden>Matched documents per cell<input id="infra-cache-samples" type="number" min="16" max="256" value="32"></label>
+    <p id="infra-cache-note" hidden>Exploratory FP8 versus INT4 cache grid, with a BF16 quality reference and the same Triton attention backend. Largest passing points are tested lower bounds, not established capacity maxima. Cache memory savings require separate allocation evidence.</p>
+    <p id="infra-spec-note">Uses one TP1 replica per selected GPU. Both arms use the same selected resources and workload. Choose a compatible speculative method. Both arms use the same JSON schema constraints; answers are graded against the source document. This is a new experiment seeded from your roofline configuration.</p>
+    <button id="infra-start" class="primary" type="submit">Run paired experiment</button>
+  </form></section>
+  <section class="panel"><h2>Experiment history</h2><div id="infra-history"></div><button id="infra-recover" hidden>Recover resources from interrupted experiment</button><pre id="infra-result"></pre><div id="infra-downloads"></div><div id="infra-image-review"></div></section>
+</main>
+
 <script type="module" src="app.js"></script>
+
+
 </body>
 </html>

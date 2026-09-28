@@ -21,6 +21,7 @@ import { Storage } from "./storage.js";
 import { Engines } from "./engines.js";
 import { Roofline } from "./roofline.js";
 import { Models } from "./models.js";
+import { Infrastructure } from "./infrastructure.js";
 import { Editor } from "./editor.js";
 
 /* ── boot ─────────────────────────────────────────────────────── */
@@ -38,6 +39,7 @@ Engines.init();
 Roofline.init();
 Models.init();
 Editor.init();
+Infrastructure.init();
 
 // Land on the tab in the URL (a reload keeps the operator where
 // they were; a pasted #results link opens Results). Goes through

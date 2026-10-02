@@ -79,6 +79,11 @@ async def _amain(config: dict) -> bool:
         out.write(json.dumps(obj, separators=(",", ":")) + "\n")
         out.flush()
 
+    if config.get("persona_specs"):
+        from .personas import PERSONAS
+        from .persona_loader import parse_persona
+        for identity, definition in config["persona_specs"].items():
+            PERSONAS[identity] = parse_persona(identity, definition)
     state = SharedState()
     corpus = TokenCorpus(config["model_id"])
     clients = [

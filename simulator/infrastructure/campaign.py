@@ -89,6 +89,25 @@ def create(base, row, spec, idempotency_key):
             )
             rng.shuffle(arms)
             schedule.extend({"block": block, "arm": arm} for arm in arms)
+        if spec.project_id == "P02" and spec.session_mode == "capacity":
+            schedule = []
+            for block in range(spec.paired_blocks):
+                for population in spec.session_population_grid:
+                    for rate in spec.session_arrival_rates or spec.session_rate_grid:
+                        arms = ["baseline", "treatment"]
+                        rng.shuffle(arms)
+                        schedule.extend(
+                            dict(
+                                block=block,
+                                arm=arm,
+                                population=population,
+                                rate=rate if spec.session_arrival_rates else rate * population,
+                                per_session_rate=rate / population
+                                if spec.session_arrival_rates
+                                else rate,
+                            )
+                            for arm in arms
+                        )
         if spec.project_id == "P05":
             schedule = []
             for block in range(spec.paired_blocks):
@@ -101,7 +120,11 @@ def create(base, row, spec, idempotency_key):
         if spec.project_id == "P01" and spec.p01_prefill_grid:
             schedule = []
             for block in range(spec.paired_blocks):
-                placements = spec.p01_placement_grid if spec.p01_goal_seek else [spec.p01_placement]
+                placements = (
+                    spec.p01_placement_grid
+                    if (spec.p01_goal_seek or spec.p01_token_search)
+                    else [spec.p01_placement]
+                )
                 cells = [
                     {"block": block, "arm": "baseline", "prefill": 0, "placement": placements[0]}
                 ] + [
@@ -279,6 +302,46 @@ def create(base, row, spec, idempotency_key):
             manifest["load_policy"] = (
                 "Fixed finite cohort with bounded concurrency; resume throughput excludes prime and pressure phases"
             )
+        if spec.project_id == "P02" and spec.session_mode == "capacity":
+            manifest.update(
+                harness="capsim scheduled document-capacity replay v1",
+                session_hot_diagnostic=False,
+                cache_policy="Fresh deployment per cell; natural document reuse; GPU-only prefix caching versus CPU offload; automatic GPU KV allocation",
+                load_policy="Frozen Poisson arrivals, sticky session routing, all cold turns included, bounded admission and deadline; full declared rate grid",
+                quality_scope="Synthetic exact-match document extraction; representative document-analysis validation remains required",
+            )
+            for output, title in zip(
+                manifest["project"]["outputs"],
+                [
+                    "Document-analysis capacity",
+                    "Matched-load latency",
+                    "Cache and prefill evidence",
+                ],
+                strict=True,
+            ):
+                output["title"] = title
+        if spec.p01_token_search:
+            manifest.update(
+                harness="capsim roofline saturation sweep with persistent Dynamo allocations v1",
+                quality_scope="Fixed token-shape generation; no semantic-quality claim",
+                load_policy="Closed-loop saturation; native counter rates after convergence; TTFT reported without a latency gate",
+            )
+            manifest["schedule"].sort(key=lambda c: (c["block"], c["prefill"] != 0))
+            for output, title in zip(
+                manifest["project"]["outputs"],
+                [
+                    "Peak output-token throughput uplift",
+                    "TTFT at matched concurrency",
+                    "Throughput and latency curves",
+                ],
+                strict=True,
+            ):
+                output["title"] = title
+        if spec.project_id == "P02" and spec.session_prime_documents:
+            manifest["load_policy"] = (
+                "Scored priming followed by fixed-corpus returns; Poisson times with shuffled round-robin document assignment; bounded open-loop rate sweep"
+            )
+            manifest["cache_policy"] += "; priming billed separately, no forced eviction"
         write_json(path / "manifest.json", manifest)
         (path / "manifest.sha256").write_text(sha256(path / "manifest.json"))
         write_json(

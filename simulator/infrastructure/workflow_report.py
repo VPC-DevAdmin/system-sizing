@@ -54,7 +54,21 @@ def render_outputs(path, manifest, state, comparison, headers, rows, methods, va
         elif not manifest["spec"].get("p01_goal_seek"):
             doc.add_paragraph("No complete passing matched comparison is available.")
         # Distinct output interpretation without concealing shared evidence.
-        if manifest["spec"].get("p01_goal_seek"):
+        if manifest["spec"].get("p01_token_search"):
+            value = values[index]
+            if index == 0 and value:
+                doc.add_paragraph(
+                    f"Best observed matched uplift: {value['uplift_percent']:.1f}%. Aggregate {value['baseline']['out_tok_s']:,.1f} output tokens/s; split {value['treatment']['out_tok_s']:,.1f} output tokens/s. Shape {value['shape']}, {value['prefill']} prefill GPUs. TTFT at each peak and all losses remain in the evidence."
+                )
+            elif index == 1 and value:
+                doc.add_paragraph(
+                    f"At {value['concurrency']} concurrent streams, p95 TTFT changed from {value['baseline_p95_ms']:.1f} to {value['treatment_p95_ms']:.1f} ms. This is a matched concurrency comparison, not matched arrival rate."
+                )
+            else:
+                doc.add_paragraph(
+                    "Full measured curves are included below; incomplete or unsettled results cannot support an uplift claim."
+                )
+        elif manifest["spec"].get("p01_goal_seek"):
             from .goal_report import peak_text
 
             for text in peak_text(index, values[index], manifest["spec"]):

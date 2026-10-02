@@ -54,6 +54,15 @@ def render(path, manifest, state, comparison):
         "placement",
         "rate",
         "qualified_per_hour",
+        "completed_requests_per_s",
+        "correct_requests_per_s",
+        "output_tokens_per_s",
+        "input_tokens_per_s",
+        "total_tokens_per_s",
+        "output_usage_coverage",
+        "input_usage_coverage",
+        "request_ttft_p95_s",
+        "queue_p95_s",
         "ttft_p50_s",
         "ttft_p95_s",
         "latency_p50_s",
@@ -62,6 +71,7 @@ def render(path, manifest, state, comparison):
         "prompt_tokens_max",
         "output_tokens_min",
         "output_tokens_max",
+        "deployment_attempt",
         "effective_client_concurrency",
         "client_limit_detected",
         "gates_passed",
@@ -148,6 +158,14 @@ def render(path, manifest, state, comparison):
     svg.append("</svg>")
     (path / "goal-search-curves.svg").write_text("".join(svg))
     methods = [
+        (
+            "Recovery",
+            f"Recorded serving failures: {len(state.get('attempts', []))}. Each allocation permits one retry after owned cleanup. Successful windows are retained; failed attempt files remain in their original directories. Settings are unchanged across retries.",
+        ),
+        (
+            "Execution",
+            f"Mode {spec.get('p01_execution', 'default')}; CUDA launch blocking {spec.get('p01_cuda_launch_blocking', False)}. Diagnostic timings must not be used as production performance claims.",
+        ),
         ("Model", manifest["configuration"]["engine"]["model_id"]),
         (
             "Goal",
@@ -176,11 +194,11 @@ def render(path, manifest, state, comparison):
         ),
         (
             "Load generator",
-            "Client concurrency scales with arrival rate and the shorter of measurement duration and completion target, up to 512. Per-cell concurrency and client-queue measurements are recorded. Failed cells with p95 client queue above 0.1 seconds cannot define an aggregate server-capacity boundary.",
+            f"Client concurrency ceiling: {spec.get('p01_client_max_concurrency', 512)}. Above the legacy ceiling of 512, headroom covers arrivals within the shorter of measurement duration and request timeout; otherwise the completion target is used. Engine concurrency and closed-loop warmup retain the configured concurrency. Per-cell concurrency and queue measurements are retained. Client-limited cells cannot establish server capacity. Throughput includes drain time and counts completed responses; correct requests/s separately counts exact-graded answers. Token rates require usage on every completed response. TTFT includes client queue; request TTFT excludes it. These are finite-cohort rates, not steady-state capacity measurements.",
         ),
         (
             "Peak selection",
-            "Compare passing rates within the identical shape. Conservative uplift uses the baseline failing rate above its passing boundary; a baseline still passing at the grid ceiling cannot establish a capacity advantage. Highest tested points are not global maxima. Capacity bracketing assumes a monotonic load boundary and can miss irregular pass islands.",
+            "Compare passing rates within the identical shape. Conservative uplift uses the baseline failing rate above its passing boundary; a baseline still passing at the grid ceiling cannot establish a capacity advantage. Highest tested points are not global maxima. Declared arrival rates are shared measured curve points before boundary refinement. A failed lower rate followed by a passing higher rate is flagged non_monotonic and excluded from capacity peak selection. Bracketing can still miss unmeasured pass islands.",
         ),
         (
             "Evidence",

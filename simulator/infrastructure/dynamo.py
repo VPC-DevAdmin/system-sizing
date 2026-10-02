@@ -24,17 +24,19 @@ def arm_config(configuration, spec, arm):
     e = cfg["engine"]
     e.update(
         type="vllm_cuda",
-        gpu_image=DYNAMO_IMAGE,
+        gpu_image=spec.p01_runtime_image or DYNAMO_IMAGE,
         gpu_device_ids=spec.gpu_ids,
         tensor_parallel_size=1,
         replica_devices=[spec.gpu_ids],
         port=19200,
         max_model_len=spec.context_limit,
-        max_num_seqs=max(32, spec.concurrency),
+        max_num_seqs=spec.p01_engine_max_seqs or max(32, spec.concurrency),
         docker_network="host",
         vllm_extra_flags=[],
         kv_cache_dtype=e.get("kv_cache_dtype") or "fp8",
     )
+    if spec.project_id == "P02" and spec.session_kv_cache_dtype != "source":
+        e["kv_cache_dtype"] = spec.session_kv_cache_dtype
     # This is a matched Dynamo comparison, not a replay of arbitrary roofline flags.
     return cfg
 

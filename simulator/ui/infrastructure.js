@@ -42,16 +42,21 @@ function render() {
   workflowControls();
 }
 function workflowControls(){
+  $('#infra-token-settings').hidden=selected!=='P01';
   const goal=selected==='P01'&&$('#infra-goal-seek').checked;
   $('#infra-goal-settings').hidden=!goal;
   $('#infra-prefill-label').hidden=selected!=='P01'||goal;
   $('#infra-dynamo-note').textContent=goal?'Equal total GPU budget. Aggregate uses every GPU; split serving dedicates the first selected GPUs to prefill and the rest to decode. Capacity is searched within the chosen rate range.':'Same total GPU budget in both arms. Baseline uses one aggregate worker per GPU. Treatment separates prefill and decode with measured KV transfer.';
+  const capacity=selected==='P02'&&$('#infra-session-mode').value==='capacity';
+  $('#infra-session-capacity').hidden=!capacity;
+  for(const id of ['tier','count','churn','gpu','disk','intervals']) $('#infra-session-'+id).closest('label').hidden=capacity;
+  $('#infra-session-settings').lastElementChild.hidden=capacity;
   const calls=selected==='P06'&&$('#infra-tenant-workflow').value==='post_call';
   for(const id of ['infra-call-rates','infra-call-wer']) $('#'+id).closest('label').hidden=!calls;
   $('#infra-call-note').hidden=!calls;
   for(const id of ['infra-tenant-rate','infra-tenant-noise']) $('#'+id).closest('label').hidden=calls;
   $('#infra-records').closest('label').hidden=goal||calls||['P03','P05'].includes(selected);
-  $('#infra-warmup').closest('label').hidden=calls||selected==='P05';
+  $('#infra-warmup').closest('label').hidden=calls||selected==='P05'||capacity;
 }
 async function refresh() {
   try {
@@ -77,6 +82,7 @@ async function detail(id) {
     $('#infra-recover').dataset.run=id;
     $('#infra-result').textContent=JSON.stringify({state:data.state,comparison:data.comparison},null,2);
     tenantSummary(data);
+    sessionCapacitySummary(data);
     if(data.state.outcome==='invalidated') {
       $('#infra-downloads').innerHTML=`<p>This comparison was invalidated. See the review above. Claim reports are disabled.</p><a href="/api/infrastructure/campaigns/${id}/export/zip">Original evidence ZIP (audit only)</a>`;
       return;
@@ -88,6 +94,14 @@ async function detail(id) {
     if(data.manifest.spec.project_id==='P04' && data.state.phase==='complete') $('#infra-downloads').innerHTML+=`<p><a href="/api/infrastructure/campaigns/${id}/export/yaml">Download treatment configuration for a separate matched roofline test</a></p>`;
   } catch(e) {message(e.message);}
 }
+function sessionCapacitySummary(data) {
+  let panel=$('#infra-session-results');
+  if(!panel){panel=document.createElement('section');panel.id='infra-session-results';$('#infra-result').before(panel);}
+  panel.hidden=data.manifest.spec.session_mode!=='capacity';if(panel.hidden)return;
+  const rows=data.state.results||[];
+  const num=x=>typeof x==='number'?x.toFixed(2):'—';
+  panel.innerHTML='<h3>Document-analysis capacity</h3><p>Arrival-rate sweep through saturation for each document working set. Mean in-flight requests exclude the drain. Stable points and SLO thresholds are reported separately. Offered documents are not a verified physical cache-residency count.</p><div style="overflow:auto"><table><thead><tr>'+['Block','Arm','Documents','Offered /s','Mean in-flight','Correct /s','Output tokens/s','TTFT median s','TTFT p95 s','Stable','CPU reload'].map(x=>`<th>${x}</th>`).join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+[r.block+1,r.arm,r.population,num(r.rate),num(r.metrics.mean_outstanding_requests),num(r.metrics.sustained_correct_requests_s),num(r.metrics.sustained_output_tokens_s),num(r.metrics.ttft_p50_s),num(r.metrics.ttft_p95_s),r.metrics.stable_capacity?'Yes':'No',r.arm==='baseline'?'—':r.metrics.cpu_reload_observed?'Yes':'No'].map(x=>`<td>${esc(String(x))}</td>`).join('')+'</tr>').join('')+'</tbody></table></div>';
+}
 function tenantSummary(data) {
   let panel=$('#infra-tenant-results');
   if(!panel){panel=document.createElement('section');panel.id='infra-tenant-results';$('#infra-result').before(panel);}
@@ -95,13 +109,20 @@ function tenantSummary(data) {
   if(panel.hidden){panel.replaceChildren();return;}
   const rows=data.state.results||[];
   const latency=value=>Number.isFinite(value)?value.toFixed(3):'Unavailable';
+  if(data.manifest.spec.p01_token_search){
+    const c=data.comparison||{},peak=c.peak_uplift;
+    const heading=peak?`${peak.uplift_percent.toFixed(1)}% best observed throughput change · ${peak.shape} · ${peak.prefill} prefill GPUs`:'Matched throughput comparison pending';
+    panel.innerHTML='<h3>Token throughput and TTFT search</h3><p>'+esc(heading)+'</p><p>Same token shape and GPU budget. Latency is reported alongside throughput. Historical roofline numbers require compatible settings before reuse.</p><div class="infra-table-scroll"><table><thead><tr>'+['Shape','Split','Streams','Output tokens / s','TTFT p50 ms','TTFT p95 ms','Stable','Errors'].map(x=>'<th>'+x+'</th>').join('')+'</tr></thead><tbody>'+rows.flatMap(r=>(r.rungs||[]).map(m=>'<tr>'+[r.shape,r.prefill?`${r.prefill}P${data.manifest.spec.gpu_ids.length-r.prefill}D`:'Aggregate',m.concurrency,latency(m.out_tok_s),latency(m.ttft_p50_ms),latency(m.ttft_p95_ms),m.steady_state?'Yes':'No',m.errors].map(x=>'<td>'+esc(String(x))+'</td>').join('')+'</tr>')).join('')+'</tbody></table></div>';
+    return;
+  }
   if(data.manifest.spec.p01_goal_seek){
     const c=data.comparison||{};
     const peak=c.peak_capacity_uplift;
     const absolute=c.peak_absolute_capacity, latencyPeak=c.peak_latency_reduction;
     const otherPeaks=[absolute?`Split-serving peak: ${absolute.passing_rate} requests/s · ${absolute.shape} · ${absolute.prefill} prefill GPUs · ${(absolute.placement||'pooled').replaceAll('_',' ')}`:'Split-serving peak not established yet',latencyPeak?`Latency peak: ${latencyPeak.reduction_percent.toFixed(1)}% lower p95 completion at ${latencyPeak.rate} requests/s · ${latencyPeak.shape}`:'Matched latency peak not established yet'];
     const headline=peak?`${peak.conservative_uplift_percent.toFixed(1)}% measured capacity advantage beyond the aggregate failing boundary · ${peak.shape} · ${peak.prefill} prefill GPUs · ${(peak.placement||'pooled').replaceAll('_',' ')}`:'Capacity peak not established yet';
-    panel.innerHTML='<h3>Document shape and GPU allocation search</h3><p>'+esc(headline)+'</p>'+otherPeaks.map(x=>'<p>'+esc(x)+'</p>').join('')+'<p>Measured peaks within the selected workload and rate range. d = document records; a = extracted answer records. All failures remain visible.</p><div class="infra-table-scroll"><table><thead><tr>'+['Shape','Split','Rate / s','Qualified','Input tokens','Output tokens','p95 total s','Gate'].map(x=>'<th>'+x+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>{const m=r.metrics;return '<tr>'+[r.shape,r.prefill===0?'Aggregate':r.prefill+'P'+(data.manifest.spec.gpu_ids.length-r.prefill)+'D · '+(r.placement||'pooled').replaceAll('_',' '),r.rate,`${m.qualified}/${m.attempted}`,`${m.prompt_tokens_min??'?'}–${m.prompt_tokens_max??'?'}`,`${m.output_tokens_min??'?'}–${m.output_tokens_max??'?'}`,latency(m.latency_p95_s),m.gates_passed?'Pass':'Fail'].map(x=>'<td>'+esc(String(x))+'</td>').join('')+'</tr>';}).join('')+'</tbody></table></div>'+goalCurves(rows)+'<p>Full curves are included as CSV and SVG in the evidence ZIP.</p>';return;
+    const failures=(data.state.attempts||[]).map(a=>`<li>${esc(a.allocation?.arm||'Serving')} · ${esc(String(a.allocation?.prefill??'?'))} prefill · attempt ${Number(a.attempt)+1}: ${esc(a.error)}. ${a.will_retry?'Retried with the same settings.':'Retry exhausted; remaining configurations continue.'}</li>`).join('');
+    panel.innerHTML='<h3>Document shape and GPU allocation search</h3><p>'+esc(headline)+'</p>'+(failures?'<h4>Recorded serving failures</h4><ul>'+failures+'</ul>':'')+otherPeaks.map(x=>'<p>'+esc(x)+'</p>').join('')+'<p>Measured peaks within the selected workload and rate range. d = document records; a = extracted answer records. All failures remain visible.</p><div class="infra-table-scroll"><table><thead><tr>'+['Shape','Split','Rate / s','Qualified','Completed / s','Correct / s','Output tokens / s','TTFT p50 s','TTFT p95 s','Client queue p95 s','Input tokens','Output tokens','p95 total s','Gate'].map(x=>'<th>'+x+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>{const m=r.metrics;return '<tr>'+[r.shape,r.prefill===0?'Aggregate':r.prefill+'P'+(data.manifest.spec.gpu_ids.length-r.prefill)+'D · '+(r.placement||'pooled').replaceAll('_',' '),r.rate,`${m.qualified}/${m.attempted}`,latency(m.completed_requests_per_s),latency(m.correct_requests_per_s),latency(m.output_tokens_per_s),latency(m.ttft_p50_s),latency(m.ttft_p95_s),latency(m.queue_p95_s),`${m.prompt_tokens_min??'?'}–${m.prompt_tokens_max??'?'}`,`${m.output_tokens_min??'?'}–${m.output_tokens_max??'?'}`,latency(m.latency_p95_s),m.gates_passed?'Pass':'Fail'].map(x=>'<td>'+esc(String(x))+'</td>').join('')+'</tr>';}).join('')+'</tbody></table></div>'+goalCurves(rows)+'<p>Full curves are included as CSV and SVG in the evidence ZIP.</p>';return;
   }
   if(data.manifest.spec.tenant_workflow==='post_call'||data.manifest.spec.p01_prefill_grid?.length){
     const calls=data.manifest.spec.tenant_workflow==='post_call';
@@ -139,7 +160,11 @@ async function reviewImages(id) {
   }catch(e){message(e.message);}
 }
 export const Infrastructure={init() {
-  $('#infra-cards').addEventListener('click',e=>{const b=e.target.closest('[data-project]');if(b){selected=b.dataset.project;requestKey=null;if(selected==='P10'){$('#infra-gpus').value='0';$('#infra-context').value=32768;$('#infra-records').value=64;}if(selected==='P06'){$('#infra-gpus').value='6,7';$('#infra-mode').value='pilot';$('#infra-blocks').value=1;$('#infra-records').value=16;$('#infra-context').value=8192;}if(selected==='P05'){$('#infra-gpus').value='0';$('#infra-mode').value='pilot';$('#infra-blocks').value=1;}if(selected==='P01'){$('#infra-gpus').value='0,1';$('#infra-context').value=32768;$('#infra-records').value=64;}if(selected==='P02'){$('#infra-gpus').value='0';$('#infra-context').value=8192;$('#infra-records').value=64;$('#infra-mode').value='pilot';$('#infra-mode').dispatchEvent(new Event('change'));}if(selected==='P03'){if($('#infra-mode').value==='confirmation'){$('#infra-mode').value='pilot';$('#infra-mode').dispatchEvent(new Event('change'));}$('#infra-context').value=65536;$('#infra-min-requests').value=32;}else{$('#infra-min-requests').value=selected==='P02'?8:30;if(selected==='P04')$('#infra-context').value=8192;}render();}});
+  const tokenSettings=document.createElement('fieldset');tokenSettings.id='infra-token-settings';tokenSettings.innerHTML='<legend>Roofline token throughput search</legend><label><input id="infra-token-search" type="checkbox"> Search GPU splits and token shapes for output throughput</label><label>Input:output token pairs<input id="infra-token-shapes" value="128:256,4096:256,16384:256,4096:1024"></label><label>Concurrent streams<input id="infra-token-streams" value="128,512,2048,8192"></label><label>Maximum sequences per GPU<input id="infra-token-seqs" type="number" min="32" max="4096" value="256"></label><p>Uses the split and placement settings below. Keeps each allocation loaded across shapes. TTFT is reported alongside throughput.</p>';
+  $('#infra-goal-seek').closest('label').before(tokenSettings);
+  $('#infra-token-search').onchange=()=>{if($('#infra-token-search').checked){$('#infra-goal-seek').checked=false;$('#infra-mode').value='pilot';$('#infra-gpus').value='0,4,1,5,2,6,3,7';$('#infra-search-splits').value='2,4,6';}workflowControls();};
+
+  $('#infra-cards').addEventListener('click',e=>{const b=e.target.closest('[data-project]');if(b){selected=b.dataset.project;requestKey=null;if(selected==='P10'){$('#infra-gpus').value='0';$('#infra-context').value=32768;$('#infra-records').value=64;}if(selected==='P06'){$('#infra-gpus').value='6,7';$('#infra-mode').value='pilot';$('#infra-blocks').value=1;$('#infra-records').value=16;$('#infra-context').value=8192;}if(selected==='P05'){$('#infra-gpus').value='0';$('#infra-mode').value='pilot';$('#infra-blocks').value=1;}if(selected==='P01'){$('#infra-gpus').value='0,1';$('#infra-context').value=32768;$('#infra-records').value=64;}if(selected==='P02'){$('#infra-gpus').value='0';$('#infra-context').value=8192;$('#infra-records').value=64;$('#infra-mode').value='pilot';$('#infra-mode').dispatchEvent(new Event('change'));$('#infra-duration').value=300;$('#infra-concurrency').value=2048;$('#infra-timeout').value=600;$('#infra-context').value=32768;$('#infra-records').value=192;$('#infra-session-cpu').value=128;}if(selected==='P03'){if($('#infra-mode').value==='confirmation'){$('#infra-mode').value='pilot';$('#infra-mode').dispatchEvent(new Event('change'));}$('#infra-context').value=65536;$('#infra-min-requests').value=32;}else{$('#infra-min-requests').value=selected==='P02'?8:30;if(selected==='P04')$('#infra-context').value=8192;}render();}});
   $('#infra-history').addEventListener('click',e=>{const b=e.target.closest('[data-run]');if(b)detail(b.dataset.run);});
   $('#infra-refresh').onclick=refresh;
   $('#infra-goal-seek').onchange=()=>{if($('#infra-goal-seek').checked){$('#infra-mode').value='pilot';if(!$('#infra-search-splits').value.trim())$('#infra-search-splits').value='1';if(!$('#infra-search-rates').value.trim())$('#infra-search-rates').value='1,2,4,6,8,10,12';}workflowControls();};
@@ -150,6 +175,20 @@ export const Infrastructure={init() {
   $('#infra-spec-method').onchange=()=>{$('#infra-draft-tokens').value=$('#infra-spec-method').value==='mtp'?3:5;};
   $('#infra-mode').onchange=()=>{const confirm=$('#infra-mode').value==='confirmation';$('#infra-blocks').value=confirm?5:2;$('#infra-duration').value=confirm?600:60;$('#infra-warmup').value=confirm?120:15;};
   $('#infra-tenant-workflow').onchange=()=>{if($('#infra-tenant-workflow').value==='post_call'){$('#infra-min-requests').value=10;$('#infra-duration').value=120;}workflowControls();};
+  $('#infra-session-mode').onchange=workflowControls;
+  $('#infra-session-shape').onchange=()=>{
+    const ladder=$('#infra-session-shape').value==='knowledge_worker_ladder';
+    $('#infra-session-ladder').hidden=!ladder;
+    for(const id of ['intervals','turns']) $('#infra-session-'+id).closest('label').hidden=ladder;
+    if(ladder){
+      // Preset used for the XE7740 KV-offload density measurements: 8 GPUs, 96 users, 96K-token padded contexts.
+      $('#infra-gpus').value='0,4,1,5,2,6,3,7';$('#infra-mode').value='pilot';$('#infra-blocks').value=1;
+      $('#infra-duration').value=1500;$('#infra-timeout').value=300;$('#infra-concurrency').value=8192;$('#infra-min-requests').value=30;
+      $('#infra-context').value=131072;$('#infra-records').value=16;$('#infra-session-cpu').value=48;
+      $('#infra-session-populations').value='96';$('#infra-session-arrivals').value='0.3';$('#infra-session-ceiling').value=64;
+      $('#infra-session-slos').value='5,10,30,60,120,300';$('#infra-session-pending').value=16384;$('#infra-session-answers').value=2;
+    }
+  };
   $('#infra-form').onsubmit=async e=>{
     e.preventDefault();const button=$('#infra-start');button.disabled=true;
     try {
@@ -161,12 +200,31 @@ export const Infrastructure={init() {
       if(selected==='P05'){spec.diffusion_samples=Number($('#infra-diffusion-samples').value);spec.diffusion_teacher_steps=$('#infra-diffusion-steps').value.split(',').map(x=>Number(x.trim()));}
       if(selected==='P04' && $('#infra-spec-loads').value.trim()) spec.speculative_concurrencies=$('#infra-spec-loads').value.split(',').map(x=>Number(x.trim()));
       if(selected==='P02') {spec.session_tier=$('#infra-session-tier').value;for(const [key,id] of Object.entries({session_ttft_slo_s:'ttft',session_count:'count',session_churn:'churn',session_gpu_gb:'gpu',session_cpu_gb:'cpu',session_disk_gb:'disk'}))spec[key]=Number($('#infra-session-'+id).value);}
+      if(selected==='P02' && $('#infra-session-mode').value==='capacity') {
+        spec.session_mode='capacity';spec.session_tier='cpu';spec.session_gpu_gb=null;spec.warmup_s=0;
+        spec.session_arrival_rates=$('#infra-session-arrivals').value.split(',').map(Number);
+        spec.session_max_arrival_rate=Number($('#infra-session-ceiling').value);
+        spec.session_slo_grid_s=$('#infra-session-slos').value.split(',').map(Number);
+        spec.session_population_grid=$('#infra-session-populations').value.split(',').map(Number);
+        spec.session_rate_grid=$('#infra-session-intervals').value.split(',').map(x=>1/Number(x)).sort((a,b)=>a-b);
+        spec.session_turns=Number($('#infra-session-turns').value);
+        spec.session_answer_records=Number($('#infra-session-answers').value);
+        spec.session_max_pending=Number($('#infra-session-pending').value);
+        if($('#infra-session-shape').value==='knowledge_worker_ladder'){
+          spec.session_workload='document';spec.session_cpu_backend='simple_cpu';spec.session_prime_documents=true;spec.session_document_padding=true;
+          spec.session_context_tokens=Number($('#infra-session-context-tokens').value);spec.session_min_returns=Number($('#infra-session-min-returns').value);
+          spec.session_refinement_rounds=Number($('#infra-session-refinement').value);spec.session_client_lag_s=Number($('#infra-session-client-lag').value);
+          spec.session_engine_max_seqs=Number($('#infra-session-max-seqs').value);spec.max_output_tokens=1024;spec.max_hours=20;
+          spec.session_rate_grid=[1/60];
+        }
+      }
       if(selected==='P01') {
         spec.p01_goal_seek=$('#infra-goal-seek').checked;
         if(spec.p01_goal_seek){spec.p01_placement_grid=$('#infra-goal-placement').value==='both'?['socket_local','cross_socket']:[$('#infra-goal-placement').value];spec.p01_rate_resolution=Number($('#infra-goal-resolution').value);spec.max_output_tokens=Number($('#infra-goal-cap').value);spec.max_hours=Number($('#infra-goal-hours').value);spec.p01_document_grid=$('#infra-goal-documents').value.split(',').map(x=>Number(x.trim()));spec.p01_answer_grid=$('#infra-goal-answers').value.split(',').map(x=>Number(x.trim()));}
 
         if($('#infra-search-splits').value.trim()){spec.p01_prefill_grid=$('#infra-search-splits').value.split(',').map(x=>Number(x.trim()));spec.p01_request_rates=$('#infra-search-rates').value.split(',').map(x=>Number(x.trim()));spec.p01_ttft_slo_s=Number($('#infra-search-ttft').value);spec.p01_queue_growth_s=Number($('#infra-search-queue').value);}
         spec.prefill_workers=Number($('#infra-prefill').value);
+        if($('#infra-token-search').checked){spec.p01_token_search=true;spec.p01_goal_seek=false;spec.p01_request_rates=[];spec.p01_token_shapes=$('#infra-token-shapes').value.split(',').map(x=>x.trim().split(':').map(Number));spec.p01_streams=$('#infra-token-streams').value.split(',').map(Number);spec.p01_engine_max_seqs=Number($('#infra-token-seqs').value);spec.p01_placement_grid=$('#infra-goal-placement').value==='both'?['socket_local','cross_socket']:[$('#infra-goal-placement').value];spec.max_hours=Number($('#infra-goal-hours').value);}
         spec.p01_block_size=$('#infra-transfer-block').value?Number($('#infra-transfer-block').value):null;
         spec.p01_transport=$('#infra-transfer-mode').value;
         spec.p01_cuda_ipc_get=$('#infra-transfer-get').value;

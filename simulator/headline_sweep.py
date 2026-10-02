@@ -73,6 +73,7 @@ class Rung:
     tpot_p50_ms: float | None = None
     tpot_p95_ms: float | None = None
     samples: int = 0                 # completed turns with an answer
+    error_counts: dict[str, int] = field(default_factory=dict)
     errors: int = 0                  # failed turns
     no_content: int = 0              # reasoning-only completions
     scrape_gaps: int = 0             # chunks discarded for a missing replica
@@ -250,6 +251,7 @@ class _Acc:
     tpot: list[float] = field(default_factory=list)
     completed: int = 0                                # turns finished
     errors: int = 0
+    error_counts: dict[str, int] = field(default_factory=dict)
     no_content: int = 0
     # SGLang's gen_throughput readings during the rung, from the first
     # one that changed (the value standing at the rung's start was the
@@ -283,6 +285,8 @@ class _Acc:
                     self.no_content += 1
                 else:
                     self.errors += 1
+                    label = str(t["error"])
+                    self.error_counts[label] = self.error_counts.get(label, 0) + 1
                 continue
             if t.get("ttft_ms") is not None:
                 self.ttft.append(float(t["ttft_ms"]))
@@ -321,6 +325,8 @@ async def run_headline_sweep(
     # RANK candidates in a joint engine/shape search; the winner then
     # earns a full-resolution sweep.
     ladder_override: list[int] | None = None,
+    existing_engine=None,
+    persona_specs: dict | None = None,
 ) -> Path:
     """Sweep concurrency at saturation. Returns the summary JSON path."""
     sim = cfg.simulation
@@ -350,7 +356,7 @@ async def run_headline_sweep(
     db.update_cohort_run(cohort_run_id, {"mode": "headline_sweep"})
 
     preflight_check(cfg.engine.hardware_requirements)
-    engine = make_engine(cfg.engine.type, cfg.engine)
+    engine = existing_engine or make_engine(cfg.engine.type, cfg.engine)
     if progress is not None:
         progress.update({
             "model": cfg.engine.model_id,
@@ -367,7 +373,8 @@ async def run_headline_sweep(
         "model": cfg.engine.model_id, "run_dir": str(run_dir),
     })
     log.info("headline sweep: ladder %s", ladder)
-    await asyncio.to_thread(engine.launch, log_dir=run_dir)
+    if existing_engine is None:
+        await asyncio.to_thread(engine.launch, log_dir=run_dir)
 
     from .benchmarks.assets import fingerprint
     from .benchmarks.storage import write_json
@@ -389,6 +396,7 @@ async def run_headline_sweep(
     pool = WorkerPool(
         base_config={
             "persona_weights": cohort.persona_weights,
+            "persona_specs": persona_specs,
             "replica_urls": engine.replica_urls,
             "api_key": engine.api_key,
             "api_model_name": engine.api_model_name,
@@ -630,6 +638,7 @@ async def run_headline_sweep(
                 tpot_p50_ms=round(_percentile(acc.tpot, 0.50), 2) or None,
                 tpot_p95_ms=round(_percentile(acc.tpot, 0.95), 2) or None,
                 samples=len(acc.ttft), errors=acc.errors,
+                error_counts=dict(acc.error_counts),
                 no_content=acc.no_content, scrape_gaps=scrape_gaps,
                 kv_cache_pct=(round(sum(kv_vals) / len(kv_vals), 2)
                               if kv_vals else None),
@@ -683,7 +692,8 @@ async def run_headline_sweep(
         log.error("headline sweep aborted: %s", e)
     finally:
         await pool.stop()
-        await asyncio.to_thread(engine.shutdown)
+        if existing_engine is None:
+            await asyncio.to_thread(engine.shutdown)
         peak = peak_rung(rungs)
         summary = {
             "kind": "headline_sweep",

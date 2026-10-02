@@ -130,6 +130,7 @@ async def consume_with_tiers(
     pre_ttft_timeout_s: float,
     inter_token_timeout_s: float,
     hard_timeout_s: float,
+    stream_open_timeout_s: float | None = None,
     capture_token_timestamps: bool = False,
     # Invoked exactly once, at the prefill→decode transition (first
     # streamed chunk, reasoning or content). Drives the live
@@ -154,12 +155,13 @@ async def consume_with_tiers(
     token_timestamps: list = []
     t_last_chunk = submitted_at
 
-    # Stream creation: bounded by CONNECT_TIMEOUT_S, separate from the
-    # tier policy. A failure here is a connection-level problem, not
-    # a stuck-stream problem.
+    # SDK stream creation includes waiting for HTTP response headers.
+    # Saturation callers can allow queued prefill within their request budget;
+    # the default retains the ordinary persona stream-opening policy.
     try:
         stream = await asyncio.wait_for(
-            create_stream(), timeout=CONNECT_TIMEOUT_S,
+            create_stream(), timeout=(CONNECT_TIMEOUT_S if stream_open_timeout_s is None
+                                      else min(stream_open_timeout_s, hard_timeout_s)),
         )
     except asyncio.TimeoutError:
         return StreamResult(

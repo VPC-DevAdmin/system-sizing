@@ -419,6 +419,12 @@ async def run_virtual_user(
                             extra_body=eb,
                         )
                     ),
+                    # Fixed-token saturation may wait for queued prefill before headers.
+                    # Preserve the ordinary persona stream-opening policy.
+                    stream_open_timeout_s=(
+                        min(persona.pre_ttft_timeout_s, persona.hard_timeout_s, request_timeout_s)
+                        if getattr(persona, "ignore_eos", False) else None
+                    ),
                     pre_ttft_timeout_s=persona.pre_ttft_timeout_s,
                     inter_token_timeout_s=persona.inter_token_timeout_s,
                     hard_timeout_s=min(persona.hard_timeout_s, request_timeout_s),

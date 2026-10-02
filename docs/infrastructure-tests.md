@@ -205,3 +205,109 @@ per-request pool, CPU affinity and allowed KV-transfer pairs are retained.
 The cross-socket control exchanges decode-pool membership while keeping physical
 GPU roles unchanged. Odd splits also change the role ratio inside each control
 pool; they are deployment comparisons, not an isolated measurement of link latency.
+
+### Shared A/B points in goal search
+
+Every declared arrival rate is measured for each workload shape and allocation before finer rate-grid bisection. This preserves matched latency comparisons even when aggregate serving passes at the upper limit. Each window drains before the next warmup. A failed lower rate followed by a passing higher rate is marked `non_monotonic`; its capacity boundary cannot generate a capacity headline. The measured rows remain available for investigation.
+
+### Worker failure recovery
+
+Goal-search allocations allow one retry with identical serving settings after all owned processes are cleaned up. Completed measurement rows remain; retries skip them and store new evidence under `retry-01`. Failures remain in `state.attempts` and `failure.json`, with point, error, traceback and evidence location. After a second serving failure, the runner moves to the next allocation and keeps the incomplete search visible. Cleanup failures and cancellation always stop the campaign. The container supervisor records the first exited service and exit code in `service-exit.json`.
+
+Diagnostic `p01_cuda_launch_blocking` enables synchronous CUDA error reporting and suppresses performance peaks. `p01_execution` can request `sync` (disable async scheduling) or `eager` (also disable CUDA graphs); the same setting applies to both arms and remains fixed across retries.
+
+## P01 token throughput search
+
+`p01_token_search` runs the existing roofline `run_headline_sweep` against persistent Dynamo aggregate/disaggregate allocations. It is separate from the document extraction/arrival-rate mode. Use `p01_token_shapes` for input/output content-token pairs, `p01_streams` for the closed-loop concurrency ladder, `p01_engine_max_seqs` for engine batch width, and the existing split/placement grids. The UI exposes token-search controls and reports output tokens/s plus median/p95 TTFT. Prompt template overhead remains part of actual model input; the requested shape uses the roofline persona convention.
+
+Each allocation launches once for all shapes. The shared roofline sweep applies its convergence and plateau rules, uses multiple load-generator processes, and leaves the caller-owned engine running between shapes. Per-shape load generators are stopped before the next shape. The worker raises its own open-file soft limit within the existing hard limit before GPU work; insufficient hard limits fail preflight. Failed serving allocations retry once after owned cleanup, preserving completed shape measurements. Editor-provided orphan cleanup remains intact.
+
+All worker metrics must be scraped; missing workers cannot become a lower throughput result. Aggregate output counters sum all workers; disaggregated output counters sum decode workers so intermediate prefill computation is not counted twice. Prefill counters, transfer evidence and all-worker activity are retained separately. Uplift ranking requires convergence, at least 30 finished requests, at most 1% errors, and no discarded scrape chunks. It is the best observed result in the tested grid, not proof of global optimality. Same-concurrency TTFT is explicitly not same-arrival-rate TTFT. The controller records historical roofline entries as context unless their full measurement contract permits reuse.
+
+Three editable output reports and a checksummed evidence ZIP retain the measured curves and methods. The first production batch uses Gemma, Mistral Small 3.2, GPT-OSS-120B and Qwen3.6. Legacy-only sources require a one-cell roofline refresh to record resolved configuration before campaign creation. Model-specific compatibility and kernel failures remain visible; a large MoE model is not a dense-model substitute.
+
+### Token-search recovery and runtime compatibility
+
+P01 records optional immutable runtime images, attention backend, chat processor,
+and NIXL KV lease duration in the experiment specification. Apply each runtime
+choice to both aggregate and disaggregated arms. A changed runtime requires a
+fresh matched comparison; prior measurements remain historical evidence.
+
+Token-search connection and timeout failures receive the same bounded allocation
+retry as serving failures. Cleanup finishes before relaunch, and completed shapes
+are retained. A failed aggregate baseline stops the campaign; missing treatment
+shapes mark the search failed rather than complete. Cancellation and cleanup
+failures remain terminal. Workers must drain before the next shape begins.
+
+A faster aggregate rung that has not converged blocks a peak-uplift claim until
+that baseline is resolved. Short recovery grids are exploratory; extend the load
+ladder if throughput is still increasing before calling the result a roofline.
+
+
+## P02 document-analysis capacity mode
+
+In Infrastructure tests, select **P02 → Document-analysis capacity**. Select a cached roofline model that fits one GPU; this mode uses one TP1 replica per selected GPU. A single-GPU run is a feasibility test. Select all eight XE7740 GPUs to measure the server directly; do not multiply a single-GPU result by eight.
+
+Baseline is GPU-only prefix caching. Treatment adds Dynamo CPU KV offload. Both use automatic GPU KV allocation and the same pinned model, image, precision, context, GPU memory utilization, sequence limit and sticky document routing. It does not disable baseline caching or reduce its GPU memory to force an advantage. CPU cache size is **per replica**; host and NUMA-node free-memory checks reserve additional headroom.
+
+### Demand and scoring
+
+- Choose a grid of document populations and mean seconds between questions per document. Both arms receive the same seeded Poisson trace at each point. Total offered rate is population divided by the mean interval.
+- Each document has its own unique prefix. Independent questions reuse that document until the configured question count replaces it. Questions may overlap; this is document Q&A, not sequential multi-turn conversation.
+- All first touches and replacements count. No artificial pressure/eviction phase is inserted. Readiness probing uses unrelated content; there is no corpus warmup.
+- Initial fixtures ask for exact records from synthetic documents and require valid, correct JSON. This is an objective harness fixture, **not evidence of general legal, clinical or code-review quality**.
+- Documents are tokenized locally with the pinned model before launch; context/output-budget violations stop the run. Structured-output support must be available in the chosen runtime/model.
+
+### Reading results
+
+Every declared load is measured in randomized paired order. There is no local-plateau early stop. The final half of each arrival window measures sustained correct requests/s, output tokens/s and outstanding-queue slope. All-window totals include the drain. TTFT median/p95 and service-target capacity are separate from unconstrained stable capacity.
+
+The capacity metric is the largest **tested active document population at an equal per-document question cadence** that passes correctness/error gates without growing backlog. It is not the number of simultaneous decoding streams or the number of documents that fit in memory. A passing highest population means the grid needs extension. Client scheduling lag, admission rejection or persistent client queue saturation cannot establish a GPU capacity boundary.
+
+Three separate DOCX/claim outputs share an evidence ZIP:
+
+1. Document-analysis capacity and passing populations.
+2. Matched-load TTFT and latency-target results.
+3. Cache/prefill evidence and queue behavior.
+
+CPU reloads must be observed to attribute a benefit to CPU memory. Native cache counters and raw per-GPU telemetry are retained; logical prompt-token counts must not be described as recomputed tokens. Review cache occupancy, prefix hits, CPU reloads, GPU activity, queue slopes and preemptions together. An absence of reloads is a legitimate negative/control result.
+
+### Recommended execution sequence
+
+1. One-GPU feasibility using a supported model, normal GPU memory settings, 300-second windows, document populations 32/64/128/256, mean question intervals 60/30 seconds and eight questions per document. These are discovery settings, not a promised winning workload.
+2. Check actual token lengths, scored-answer correctness, CPU reloads and client headroom. Adjust document size or population using realistic document-use assumptions. Preserve failed and non-winning measurements.
+3. Tune the GPU-only baseline and give both arms comparable tuning effort; the selected source supplies model/memory settings, but its arbitrary extra engine flags are not replayed by this Dynamo adapter.
+4. Run all eight GPUs directly. Keep per-replica CPU allocations within each socket's available memory. Compare identical populations and cadence; increase client concurrency if it limits the trace.
+5. Extend passing upper boundaries, refine between passing/failing populations, and independently repeat the selected comparison and a no-benefit control. Longer windows should include multiple document replacements.
+6. Validate representative document tasks before publishing the intended headline. The current exporter deliberately marks synthetic discovery results exploratory; it does not automatically approve marketing claims.
+
+API uses `session_mode: "capacity"`, `session_gpu_gb: null`, `session_tier: "cpu"`, `session_population_grid` and `session_rate_grid` (**questions/second per document**, not total server rate). Set `warmup_s: 0`; `duration_s` must allow at least four expected questions per document. `session_turns`, `session_answer_records`, `session_max_pending`, `session_cpu_gb`, generic concurrency, timeouts and latency targets are editable. The default UI is a single-GPU discovery run. Existing `session_mode: "resume"` preserves the earlier latency pilot and optional disk-tier diagnostic.
+
+No GPU campaign is started by installing these changes. Earlier stopped queues and automation remain stopped.
+
+
+### Knowledge-worker density ladder (UI preset)
+
+In **P02 → Document-analysis capacity → Test shape**, choose **Knowledge-worker density ladder**. It is the configuration behind the Intel Xeon KV-offload white paper: all eight GPUs, a fixed population of users, each primed once with a 16-record reference document padded with neutral working notes to a stated context size (default 96,000 tokens), no document replacement, open-loop Poisson arrivals over the population, and the total rate doubled from the initial grid until both arms show two failing windows, then one knee refinement. Sets `session_prime_documents`, `session_document_padding`, `session_context_tokens`, `session_min_returns`, `session_refinement_rounds`, `session_client_lag_s`, `session_engine_max_seqs`, the native CPU backend and a 48 GB host tier per replica. The lowest arrival rate must give every user at least the minimum returns inside the window (rate ≥ users × returns ÷ duration); the spec rejects grids that do not. Measured 2 October 2026 at 96 users (campaign 2ce1867b), 80 users and, as separate plans, 56 users, 48K-token contexts at 192 users and 288 users with a 128 GB tier.
+
+### P02 saturation refinement (current default)
+
+The capacity mode now accepts `session_arrival_rates` as total server requests/second for each fixed document working set. The legacy per-document cadence grid remains available when this list is empty. The full initial rate grid is followed by bounded doubling up to `session_max_arrival_rate`, then paired midpoint refinement (`session_refinement_rounds`). Both arms must show two successive overloaded points; the native queue-time curve must support the knee. Reaching the rate ceiling, client saturation, missing metrics or invalid answers leaves the saturation conclusion unresolved.
+
+The headline concurrency is the exact time-weighted outstanding-request count in the final measurement half, integrated from request lifetimes. Dispatched concurrency and client waiting are separate. A larger backlog alone does not qualify. Both completed throughput and the same response-time SLO must pass. SLO scoring uses the final-half **arrival cohort**, including failed and timed-out requests after drain, rather than selecting only responses that happened to finish inside the measurement window.
+
+`session_slo_grid_s` records multiple response-time views. `request_timeout_s` is the measurement deadline; thresholds beyond it are rejected because censored responses cannot be recovered. Native vLLM queue histograms and running/waiting gauges are recorded alongside cache telemetry. Native p95 queue values are histogram bucket upper bounds. TTFT is never substituted for queue time.
+
+The same evidence also supports a separate reusable-document-population curve at common per-document cadence. The selected population is a workload count, not a verified count of contexts physically resident in cache. The current connector exposes block counters and transfers, not unique document residency; `resident_document_count` therefore remains null. No conversion from cache bytes to resident users is made.
+
+Recalculate response SLOs after the run without changing original evidence:
+
+```sh
+python -m simulator.infrastructure.session_reanalyze /path/to/campaign --slo-seconds 5,10,20,60,120
+```
+
+This writes a new analysis JSON with hashes of source evidence under the campaign's `analyses` directory. Original reports, manifest, results and request records stay unchanged.
+
+Prepared XE7740 discovery profile: prior working P02 Llama-3.3-70B-Instruct-NVFP4 source; all eight GPUs; 128 and 512 distinct document-session slots; 192-record documents, two-record answers; eight questions per document; 128 GB CPU cache per GPU; 300-second arrival windows plus bounded drain; 600-second measurement deadline; 8192 client streams and 256 engine sequences per GPU; initial total rates 0.5/1/2/4/8/16 requests/s extending up to 128; one exploratory paired block, followed by two refinement rounds. Independent confirmation remains a separate follow-up before publishing a claim. This profile is bounded to 24 hours.
+
+Deferred launch uses a separate immutable source release, so the current service and unrelated tests need no restart. Readiness requires the existing named GPU workload containers to stop, zero GPU compute processes, low GPU memory/utilization, no active capsim run, an available hardware lease, and two idle observations at least 120 seconds apart. The worker checks GPU idleness again before every deployment and holds the hardware lease. A `hold` file beside the deferred plan prevents launch. The controller never removes other workloads and never restarts a failed or terminal campaign automatically.

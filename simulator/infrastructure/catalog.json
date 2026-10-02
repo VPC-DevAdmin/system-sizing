@@ -64,20 +64,20 @@
     },
     {
       "id": "P02",
-      "title": "More returning conversations",
+      "title": "More document-analysis capacity",
       "recipe_id": "p02-v1",
       "status": "planned",
       "implementation_phase": 2,
-      "feasibility_gate": "Pinned tiering connector and cache telemetry with reproducible session traces.",
+      "feasibility_gate": "Measure sustainable document populations, CPU reloads and queue pressure at fixed per-session activity.",
       "adapter_capabilities": [
         "session_replay",
         "dynamo_kv_tiering",
         "cache_telemetry",
         "quality"
       ],
-      "baseline_and_treatment": "GPU-only prefix caching versus the same deployment with Dynamo CPU offload, then CPU plus NVMe offload as separately identified treatments. Hold routing fixed to isolate tiering; a further routing treatment requires its own comparison.",
-      "controls": "session count, active fraction, context distribution, think/return times, TTL, simultaneous-return bursts, cache sizes, routing, CPU affinity, disk location, and eviction policy. Use unique session namespaces and reproducible timed traces.",
-      "implementation": "multi-turn session replay driver; KVBM integration; hit/miss/eviction/offload counters; host and storage metrics. Verify the chosen connector's tier semantics and useful memory sizing. Persisted conversation state is not the same as reusable KV blocks.",
+      "baseline_and_treatment": "GPU-only prefix caching versus the same deployment with CPU KV offload. Normal automatic GPU cache sizing, identical sticky routing and question schedules. A separate resume diagnostic remains available.",
+      "controls": "Same model revision, precision, runtime, GPU count, context, document sizes and question cadence. Include cold starts and natural document replacement; preserve all load points and errors.",
+      "implementation": "Scheduled document-capacity replay with exact extraction scoring, NUMA-local replicas, bounded queues and CPU cache counters. Synthetic fixtures require representative validation before broad document-analysis claims.",
       "outputs": [
         {
           "id": "P02-O1",

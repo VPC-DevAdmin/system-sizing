@@ -55,6 +55,7 @@ async def measure_tenant(engine, corpus, spec, path, start_at, offset=0, rate=No
                         )
                     finally:
                         route_pending[route] -= 1
+                    row["request_ttft_s"] = row["ttft_s"]
                     row["serving_pool"] = route
                     row["queue_s"] = queue
                     row["scheduled_offset_s"] = index / rate

@@ -181,3 +181,89 @@ def test_placement_cells_do_not_collide_or_share_a_search_boundary():
     assert result["complete_search"]
     assert result["peak_capacity_uplift"]["placement"] == "socket_local"
     assert len(result["envelopes"]) == 3
+
+
+def test_shared_curve_points_are_measured_even_when_upper_limit_passes():
+    spec = settings(p01_answer_grid=[4], p01_prefill_grid=[1])
+    rows = []
+    seen = []
+    for point in windows(spec, dict(block=0, prefill=0), rows):
+        seen.append(point["rate"])
+        rows.append(
+            dict(
+                block=0,
+                prefill=0,
+                shape=point["id"],
+                rate=point["rate"],
+                metrics=dict(gates_passed=True, latency_p95_s=10),
+            )
+        )
+    assert seen == spec.p01_request_rates
+    assert len(seen) == len(set(seen))
+
+
+def test_non_monotonic_baseline_cannot_produce_capacity_headline():
+    spec = settings()
+    rows = measured_rows(spec)
+    for row in rows:
+        if row["prefill"] == 0 and row["rate"] == 6:
+            row["metrics"]["gates_passed"] = True
+    comparison = compare_goal(rows, spec)
+    assert comparison["peak_capacity_uplift"] is None
+    assert all(
+        e["boundary"] == "non_monotonic" for e in comparison["envelopes"] if not e["prefill"]
+    )
+
+
+def test_cuda_diagnostics_cannot_generate_performance_peaks():
+    spec = settings(p01_cuda_launch_blocking=True)
+    result = compare_goal(measured_rows(spec), spec)
+    assert result["diagnostic_only"]
+    assert result["peak_capacity_uplift"] is None
+    assert result["peak_absolute_capacity"] is None
+    assert result["peak_latency_reduction"] is None
+
+
+def test_expanded_client_headroom_keeps_engine_concurrency():
+    from simulator.infrastructure.goal_search import client_concurrency
+
+    spec = settings(
+        concurrency=128, duration_s=180, request_timeout_s=120, p01_client_max_concurrency=8192
+    )
+    assert client_concurrency(spec, 40) == 4800
+    assert spec.concurrency == 128
+    assert client_concurrency(spec, 100) == 8192
+
+
+def test_throughput_counts_correct_work_and_requires_complete_usage():
+    from simulator.infrastructure.driver import summarize
+
+    rows = [
+        dict(
+            transport_ok=True,
+            correct=True,
+            elapsed_s=3,
+            ttft_s=0.2,
+            usage=dict(prompt_tokens=100, completion_tokens=20),
+        ),
+        dict(
+            transport_ok=True,
+            correct=False,
+            elapsed_s=4,
+            ttft_s=0.3,
+            usage=dict(prompt_tokens=200, completion_tokens=40),
+        ),
+        dict(transport_ok=False, correct=False, elapsed_s=5, ttft_s=None, usage=None),
+    ]
+    m = summarize(rows, 10, settings())
+    assert m["completed_requests_per_s"] == 0.2
+    assert m["correct_requests_per_s"] == 0.1
+    assert m["output_tokens_per_s"] == 6
+    assert m["total_tokens_per_s"] == 36
+    assert m["attempted"] == 3
+    rows[1]["usage"]["completion_tokens"] = True
+    m = summarize(rows, 10, settings())
+    assert m["output_usage_coverage"] == 0.5
+    assert m["output_tokens_per_s"] is None
+    assert m["total_tokens_per_s"] is None
+    assert m["input_tokens_per_s"] == 30

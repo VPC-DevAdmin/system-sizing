@@ -17,8 +17,10 @@ def rate_grid(spec):
 def client_concurrency(spec, rate):
     # Admit all arrivals that could be simultaneously inside the completion SLO.
     # Preserve the explicit user floor and bound sockets at the adapter limit.
-    required = math.ceil(rate * min(spec.duration_s, spec.response_slo_s))
-    return min(512, max(spec.concurrency, required))
+    ceiling = spec.p01_client_max_concurrency
+    horizon = spec.request_timeout_s if ceiling > 512 else spec.response_slo_s
+    required = math.ceil(rate * min(spec.duration_s, horizon))
+    return min(ceiling, max(spec.concurrency, required))
 
 
 def shapes(spec):
@@ -46,6 +48,21 @@ def next_rate(grid, measured):
     return grid[(low + high) // 2]
 
 
+def non_monotonic(measured):
+    passing = [rate for rate, passed in measured.items() if passed]
+    return bool(passing) and any(not ok and rate < max(passing) for rate, ok in measured.items())
+
+
+def next_search_rate(spec, measured):
+    """Measure shared curve points before refining each capacity boundary."""
+    for rate in spec.p01_request_rates:
+        if rate not in measured:
+            return rate
+    if non_monotonic(measured):
+        return None
+    return next_rate(rate_grid(spec), measured)
+
+
 def windows(spec, cell, rows):
     ordered = shapes(spec)
     random.Random(spec.seed + cell["block"]).shuffle(ordered)
@@ -59,7 +76,7 @@ def windows(spec, cell, rows):
                 and r.get("shape") == shape["id"]
                 and r.get("placement", "pooled") == cell.get("placement", "pooled")
             }
-            rate = next_rate(rate_grid(spec), observed)
+            rate = next_search_rate(spec, observed)
             if rate is None:
                 break
             yield dict(shape, rate=rate)
@@ -91,7 +108,7 @@ def compare_goal(rows, spec):
                     and (prefill == 0 or r.get("placement", "pooled") == placement)
                 ]
                 observed = {r["rate"]: r["metrics"]["gates_passed"] for r in cells}
-                done = next_rate(rate_grid(spec), observed) is None
+                done = next_search_rate(spec, observed) is None
                 complete &= done
                 passed = [rate for rate, ok in observed.items() if ok]
                 low = max(passed) if passed else None
@@ -112,9 +129,13 @@ def compare_goal(rows, spec):
                         passing_rate=low,
                         failing_rate=min(failed_above) if failed_above else None,
                         search_finished=done,
+                        non_monotonic=non_monotonic(observed),
                     )
                 )
-            valid = all(b["passing_rate"] is not None and b["search_finished"] for b in blocks)
+            irregular = any(b["non_monotonic"] for b in blocks)
+            valid = not irregular and all(
+                b["passing_rate"] is not None and b["search_finished"] for b in blocks
+            )
             passing = min(b["passing_rate"] for b in blocks) if valid else None
             bounded = valid and all(b["failing_rate"] is not None for b in blocks)
             env = dict(
@@ -125,7 +146,9 @@ def compare_goal(rows, spec):
                 placement=placement,
                 passing_rate=passing,
                 failing_rate=max(b["failing_rate"] for b in blocks) if bounded else None,
-                boundary="bracketed"
+                boundary="non_monotonic"
+                if irregular
+                else "bracketed"
                 if bounded
                 else "client_limited"
                 if valid and passing < rate_grid(spec)[-1]
@@ -204,7 +227,7 @@ def compare_goal(rows, spec):
             lows = [m[key + "_min"] for m in matching if m.get(key + "_min") is not None]
             highs = [m[key + "_max"] for m in matching if m.get(key + "_max") is not None]
             candidate[key + "_range"] = [min(lows), max(highs)] if lows and highs else None
-    return dict(
+    result = dict(
         qualified=False,
         reason="Exploratory measured peaks within the declared search; token lengths and service targets apply to every claim.",
         metrics={},
@@ -222,3 +245,13 @@ def compare_goal(rows, spec):
             default=None,
         ),
     )
+
+    if spec.p01_cuda_launch_blocking:
+        result.update(
+            diagnostic_only=True,
+            reason="CUDA launch blocking is enabled for fault localization. These timings are diagnostic only.",
+            peak_capacity_uplift=None,
+            peak_absolute_capacity=None,
+            peak_latency_reduction=None,
+        )
+    return result

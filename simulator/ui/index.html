@@ -888,7 +888,7 @@
     <label>Randomized blocks<input id="infra-blocks" type="number" min="1" max="20" value="2" required></label>
     <label>Measurement seconds per window<input id="infra-duration" type="number" min="10" max="3600" value="60" required></label>
     <label>Warmup seconds<input id="infra-warmup" type="number" min="0" max="600" value="15" required></label>
-    <label>Concurrency<input id="infra-concurrency" type="number" min="1" max="512" value="4" required></label>
+    <label>Concurrency<input id="infra-concurrency" type="number" min="1" max="16384" value="4" required></label>
     <label>GPU indices (comma separated)<input id="infra-gpus" value="0" pattern="[0-9]+(,[0-9]+)*" required></label>
     <div id="infra-attention-settings" hidden>
       <p>Separate CUDA profile, then unprofiled paired measurements. Runtime backend and next-token numerical checks must pass. This compares attention backends, not a standalone softmax kernel.</p>
@@ -913,12 +913,35 @@
       <label>Teacher step counts<input id="infra-diffusion-steps" value="20,50" pattern="[0-9]+(,[0-9]+)*"></label>
     </div>
     <div id="infra-session-settings" hidden>
+      <label>Test<select id="infra-session-mode"><option value="capacity">Document-analysis capacity</option><option value="resume">Resume latency diagnostic</option></select></label>
+      <div id="infra-session-capacity">
+        <label>Test shape<select id="infra-session-shape"><option value="document">Document-analysis capacity (documents replaced after a fixed number of questions)</option><option value="knowledge_worker_ladder">Knowledge-worker density ladder (fixed users, primed 96K-token contexts, rate doubled to saturation)</option></select></label>
+        <div id="infra-session-ladder" hidden>
+          <p>Each user holds a padded reference document of the chosen context size, primed once and never replaced. Arrivals are open-loop over the fixed population and the total rate doubles until both arms fail. Use all server GPUs; the host tier is sized per replica. Measured on the XE7740 as the KV-offload density test behind the Intel Xeon white paper.</p>
+          <label>Context tokens per user<input id="infra-session-context-tokens" type="number" min="1024" max="120000" value="96000"></label>
+          <label>Minimum returns per user in the window<input id="infra-session-min-returns" type="number" min="4" max="64" value="4"></label>
+          <label>Knee refinement rounds<input id="infra-session-refinement" type="number" min="0" max="5" value="1"></label>
+          <label>Client lag tolerance (seconds)<input id="infra-session-client-lag" type="number" min="0.1" max="5" step="0.1" value="2"></label>
+          <label>Sequences per GPU replica<input id="infra-session-max-seqs" type="number" min="32" max="2048" value="256"></label>
+        </div>
+        <p>Compare active document sessions at the same question cadence. Both arms keep normal GPU prefix caching; treatment adds CPU memory. First-touch work is included. Choose all server GPUs for a server result; one GPU is a feasibility test.</p>
+        <label>Initial total arrival rates per second<input id="infra-session-arrivals" value="0.5,1,2,4,8,16"></label>
+        <label>Maximum arrival rate per second<input id="infra-session-ceiling" type="number" min="0.1" max="1000" step="0.1" value="128"></label>
+        <label>Response-time thresholds for reporting (seconds)<input id="infra-session-slos" value="5,10,30,60,120,300"></label>
+        <p>Increase arrivals through saturation. After the initial grid, extend paired loads until both arms show two overloaded points or reach the safety ceiling, then refine the knee. A ceiling without saturation remains unresolved.</p>
+        <label>Active document populations<input id="infra-session-populations" value="128,512"></label>
+        <label>Mean seconds between questions per document<input id="infra-session-intervals" value="60,30"></label>
+        <label>Questions before replacing a document<input id="infra-session-turns" type="number" min="2" max="64" value="8"></label>
+        <label>Records requested per answer<input id="infra-session-answers" type="number" min="1" max="8" value="2"></label>
+        <label>Maximum outstanding requests<input id="infra-session-pending" type="number" min="16" max="16384" value="2048"></label>
+        <p>GPU cache allocation remains automatic. Reports separate capacity, latency and cache evidence. A passing highest population requires expanding the range. Fixtures measure exact extraction; broader document-analysis claims require representative validation.</p>
+      </div>
       <label>Session tier<select id="infra-session-tier"><option value="cpu">GPU and CPU</option><option value="cpu_disk">GPU, CPU and disk</option></select></label>
-      <label>Resume p95 TTFT target seconds<input id="infra-session-ttft" type="number" min="0.1" max="600" step="0.1" value="5"></label>
+      <label>First-token p95 target seconds<input id="infra-session-ttft" type="number" min="0.1" max="600" step="0.1" value="5"></label>
       <label>Returning sessions<input id="infra-session-count" type="number" min="4" max="256" value="8"></label>
       <label>Cache pressure documents<input id="infra-session-churn" type="number" min="4" max="512" value="16"></label>
       <label>GPU KV GiB<input id="infra-session-gpu" type="number" min="1" max="64" value="4"></label>
-      <label>CPU cache GB<input id="infra-session-cpu" type="number" min="4" max="256" value="32"></label>
+      <label>CPU cache GB per GPU replica<input id="infra-session-cpu" type="number" min="4" max="256" value="32"></label>
       <label>Disk cache GB<input id="infra-session-disk" type="number" min="8" max="256" value="64"></label>
       <p>Each session returns once after cache pressure. Resume latency requires measured tier reloads. This pilot does not establish maximum session capacity.</p>
     </div>

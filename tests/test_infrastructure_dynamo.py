@@ -48,6 +48,8 @@ def test_same_budget_same_precision_only_role_changes():
         assert json.loads(flags[-1])["kv_role"] == ("kv_producer" if i == 1 else "kv_consumer")
         assert b[i][2]["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "127.0.0.1"
         assert b[i][2]["UCX_NET_DEVICES"] == "lo"
+        assert a[i][2]["VLLM_SSM_CONV_STATE_LAYOUT"] == "DS"
+        assert b[i][2]["VLLM_SSM_CONV_STATE_LAYOUT"] == "DS"
 
 
 def test_transfer_requires_bytes_on_decode_and_positive_delta(tmp_path):
@@ -296,3 +298,24 @@ def test_gpu_placement_preserves_requested_order(monkeypatch):
     rows = commands(plan)
     assert rows[1][0] == "prefill-0" and rows[1][2]["CUDA_VISIBLE_DEVICES"] == b
     assert rows[2][0] == "decode-1" and rows[2][2]["CUDA_VISIBLE_DEVICES"] == a
+
+
+def test_diagnostic_execution_settings_apply_to_both_arms():
+    plan = dict(
+        port=19200,
+        model="m",
+        served_model_name="m",
+        context_limit=8192,
+        max_num_seqs=32,
+        gpu_memory_utilization=0.9,
+        kv_cache_dtype="fp8",
+        namespace="test",
+        gpu_ids=[0, 1],
+        prefill_workers=1,
+        transfer_settings=dict(p01_execution="eager", p01_cuda_launch_blocking=True),
+    )
+    for arm in ("baseline", "treatment"):
+        for _, argv, env in commands(dict(plan, arm=arm))[1:]:
+            assert "--no-async-scheduling" in argv
+            assert "--enforce-eager" in argv
+            assert env["CUDA_LAUNCH_BLOCKING"] == "1"

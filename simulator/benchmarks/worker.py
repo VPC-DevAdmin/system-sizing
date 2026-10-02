@@ -149,6 +149,7 @@ async def probe(engine, timeout_s: float):
                 headers={"Authorization": f"Bearer {engine.api_key}"},
                 json={
                     "model": engine.api_model_name,
+                    **({"reasoning_effort": "medium"} if "gpt-oss" in engine.api_model_name.lower() else {}),
                     "messages": [{"role": "user", "content": "Hello"}],
                     "max_tokens": 1,
                     "stream": False,

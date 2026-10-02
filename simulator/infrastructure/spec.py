@@ -13,11 +13,11 @@ class ExperimentSpec(BaseModel):
     paired_blocks: int = Field(default=2, ge=1, le=20)
     duration_s: int = Field(default=60, ge=10, le=3600)
     warmup_s: int = Field(default=15, ge=0, le=600)
-    concurrency: int = Field(default=4, ge=1, le=512)
+    concurrency: int = Field(default=4, ge=1, le=16384)
     request_timeout_s: int = Field(default=120, ge=1, le=600)
     max_output_tokens: int = Field(default=1024, ge=128, le=8192)
     corpus_size: int = Field(default=256, ge=16, le=4096)
-    document_records: int = Field(default=16, ge=4, le=1024)
+    document_records: int = Field(default=16, ge=4, le=4096)
     gpu_ids: list[int] = Field(default_factory=lambda: [0], min_length=1, max_length=8)
     context_limit: int = Field(default=8192, ge=2048, le=131072)
     min_requests: int = Field(default=30, ge=1, le=1000000)
@@ -62,11 +62,42 @@ class ExperimentSpec(BaseModel):
         default_factory=lambda: [0.1, 0.25, 0.5], min_length=1, max_length=8
     )
     call_max_wer: float = Field(default=0.15, ge=0, le=1)
+    session_mode: Literal["resume", "capacity"] = "resume"
+    session_workload: Literal["document", "knowledge_worker"] = "document"
+    session_prime_documents: bool = False
+    session_min_returns: int = Field(default=4, ge=4, le=64)
+    session_gpu_capacity_documents: int | None = Field(default=None, ge=1, le=4096)
+    session_capacity_evidence: str | None = None
+    session_capacity_multiples: list[int] = Field(default_factory=list, max_length=2)
+    session_kv_cache_dtype: Literal["source", "auto", "bfloat16", "fp8"] = "source"
+    session_active_records: int | None = Field(default=None, ge=2, le=4096)
+    session_context_tokens: int = Field(default=96000, ge=1024, le=120000)
+    session_new_input_tokens: int = Field(default=512, ge=32, le=2048)
+    session_think_s: float = Field(default=60, gt=0, le=3600)
+    session_population_grid: list[int] = Field(
+        default_factory=lambda: [32, 64, 128, 256], min_length=1, max_length=6
+    )
+    session_rate_grid: list[float] = Field(
+        default_factory=lambda: [1 / 60, 1 / 30], min_length=1, max_length=10
+    )
+    session_engine_max_seqs: int = Field(default=256, ge=32, le=2048)
+    session_arrival_rates: list[float] = Field(default_factory=list, max_length=12)
+    session_max_arrival_rate: float = Field(default=128, gt=0, le=1000)
+    session_refinement_rounds: int = Field(default=2, ge=0, le=5)
+    session_slo_grid_s: list[float] = Field(
+        default_factory=lambda: [5, 10, 30, 60, 120], min_length=1, max_length=12
+    )
+    session_turns: int = Field(default=8, ge=2, le=64)
+    session_answer_records: int = Field(default=2, ge=1, le=8)
+    session_max_pending: int = Field(default=2048, ge=16, le=16384)
+    session_queue_growth_fraction: float = Field(default=0.05, ge=0, le=0.2)
+    session_client_lag_s: float = Field(default=0.5, gt=0, le=5)
     session_tier: Literal["cpu", "cpu_disk"] = "cpu"
+    session_cpu_backend: Literal["kvbm", "simple_cpu"] = "kvbm"
     session_ttft_slo_s: float = Field(default=5, gt=0, le=600)
     session_count: int = Field(default=8, ge=4, le=256)
     session_churn: int = Field(default=16, ge=4, le=512)
-    session_gpu_gb: int = Field(default=4, ge=1, le=64)
+    session_gpu_gb: int | None = Field(default=4, ge=1, le=64)
     session_cpu_gb: int = Field(default=32, ge=4, le=256)
     session_disk_gb: int = Field(default=64, ge=8, le=256)
     attention_baseline: Literal["FLASHINFER", "TRITON_ATTN"] = "FLASHINFER"
@@ -84,6 +115,10 @@ class ExperimentSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_contract(self):
+        if self.concurrency > 512 and not (
+            self.project_id == "P02" and self.session_mode == "capacity"
+        ):
+            raise ValueError("Concurrency above 512 is only supported by P02 capacity")
         if len(set(self.gpu_ids)) != len(self.gpu_ids) or any(
             g < 0 or g > 255 for g in self.gpu_ids
         ):
@@ -159,10 +194,15 @@ class ExperimentSpec(BaseModel):
                     "Post-call workflow requires P06 and enough arrivals in every window"
                 )
         if self.mode == "confirmation" and (
-            self.paired_blocks < 5 or self.duration_s < 600 or self.warmup_s < 120
+            self.paired_blocks < 5
+            or self.duration_s < 600
+            or (
+                self.warmup_s < 120
+                and not (self.project_id == "P02" and self.session_mode == "capacity")
+            )
         ):
             raise ValueError(
-                "Confirmation requires at least five pairs, 600 s measurement, 120 s warmup"
+                "Confirmation requires five pairs, 600 s measurement, and warmup (P02 capacity uses explicit priming)"
             )
         for values, low, high in (
             (self.cache_record_counts, 4, 1024),
@@ -212,7 +252,34 @@ class ExperimentSpec(BaseModel):
                 s < 10 or s > 100 for s in self.diffusion_teacher_steps
             ):
                 raise ValueError("Teacher steps must be increasing, from 10 to 100")
-        if self.project_id == "P02":
+        if self.session_cpu_backend == "simple_cpu" and (
+            self.project_id != "P02"
+            or self.session_mode != "capacity"
+            or self.session_tier != "cpu"
+        ):
+            raise ValueError("Native CPU offload currently requires P02 CPU capacity mode")
+        if self.session_active_records is not None and (
+            self.session_workload != "knowledge_worker"
+            or not self.session_answer_records
+            <= self.session_active_records
+            <= self.document_records
+        ):
+            raise ValueError(
+                "Active references require knowledge workers and a valid record subset"
+            )
+        if self.session_workload == "knowledge_worker":
+            if self.project_id != "P02" or self.session_mode != "capacity":
+                raise ValueError("Knowledge workers require P02 capacity mode")
+            if (
+                self.session_context_tokens + self.session_new_input_tokens + self.max_output_tokens
+                >= self.context_limit
+            ):
+                raise ValueError("Knowledge-worker context lacks output headroom")
+            if self.concurrency < max(self.session_population_grid):
+                raise ValueError("Knowledge-worker population exceeds client streams")
+        if self.project_id == "P02" and self.session_mode == "resume":
+            if self.session_gpu_gb is None:
+                raise ValueError("Resume pilot requires explicit GPU cache budget")
             if len(self.gpu_ids) != 1 or self.mode != "pilot":
                 raise ValueError("P02 currently requires one GPU and pilot mode")
             if self.session_count + self.session_churn > self.corpus_size:
@@ -223,6 +290,105 @@ class ExperimentSpec(BaseModel):
                 raise ValueError("Disk session cache must be at least the CPU cache size")
             if self.min_requests > self.session_count:
                 raise ValueError("Minimum requests must not exceed the finite resume cohort")
+        if self.project_id == "P02" and self.session_mode == "capacity":
+            if self.warmup_s != 0:
+                raise ValueError("Capacity mode includes cold work; set warmup_s to zero")
+            if self.session_tier != "cpu":
+                raise ValueError("Document capacity currently supports CPU offload only")
+            if (
+                self.mode == "confirmation"
+                and self.session_workload == "document"
+                and not self.session_prime_documents
+            ):
+                raise ValueError("Document confirmation requires separate priming")
+            if self.session_gpu_gb is not None:
+                raise ValueError("Capacity mode requires automatic production GPU cache sizing")
+            if self.session_answer_records > self.document_records:
+                raise ValueError("Answer records exceed document size")
+            if self.session_max_pending < self.concurrency:
+                raise ValueError("Pending request limit must cover client concurrency")
+            for grid, upper in [(self.session_population_grid, 4096), (self.session_rate_grid, 10)]:
+                if grid != sorted(set(grid)) or any(x <= 0 or x > upper for x in grid):
+                    raise ValueError("Session grids must be increasing, unique and bounded")
+            if len(self.session_population_grid) < 2 and not self.session_arrival_rates:
+                raise ValueError("Capacity needs at least two session populations")
+            if self.session_arrival_rates:
+                if (
+                    self.session_arrival_rates != sorted(set(self.session_arrival_rates))
+                    or min(self.session_arrival_rates) <= 0
+                ):
+                    raise ValueError("Arrival rates must be positive, unique and increasing")
+                if (
+                    max(self.session_arrival_rates) > self.session_max_arrival_rate
+                    or self.duration_s * self.session_max_arrival_rate > 100000
+                ):
+                    raise ValueError("Saturation ceiling exceeds rate or trace budget")
+                if self.duration_s * min(self.session_arrival_rates) / 2 < self.min_requests:
+                    raise ValueError("Arrival rate needs enough final-window samples")
+            if (
+                self.session_slo_grid_s != sorted(set(self.session_slo_grid_s))
+                or min(self.session_slo_grid_s) <= 0
+                or max(self.session_slo_grid_s) > self.request_timeout_s
+            ):
+                raise ValueError("SLO thresholds must be increasing and within measurement timeout")
+            if self.session_workload == "document":
+                expected = self.duration_s * (
+                    min(self.session_arrival_rates) / max(self.session_population_grid)
+                    if self.session_arrival_rates
+                    else min(self.session_rate_grid)
+                )
+                if (
+                    not self.session_prime_documents
+                    and self.session_turns <= self.session_min_returns
+                ):
+                    raise ValueError(
+                        "Document lifetime must allow minimum returns after first touch"
+                    )
+                needed = self.session_min_returns + (0 if self.session_prime_documents else 1)
+                if expected < needed:
+                    raise ValueError(
+                        "Capacity needs at least four expected returns per session; increase duration or rate"
+                    )
+                if self.session_capacity_multiples:
+                    if (
+                        self.session_capacity_multiples
+                        != sorted(set(self.session_capacity_multiples))
+                        or any(m not in (2, 4) for m in self.session_capacity_multiples)
+                        or not self.session_gpu_capacity_documents
+                        or not self.session_capacity_evidence
+                        or not self.session_prime_documents
+                        or not self.session_arrival_rates
+                    ):
+                        raise ValueError(
+                            "Capacity multiples require measured GPU capacity evidence, priming and open-loop arrivals"
+                        )
+                    if self.session_population_grid != [
+                        self.session_gpu_capacity_documents * m
+                        for m in self.session_capacity_multiples
+                    ]:
+                        raise ValueError("Populations must match measured GPU capacity multiples")
+            elif self.session_prime_documents or self.session_capacity_multiples:
+                raise ValueError(
+                    "Document priming and capacity multiples apply to document workloads only"
+                )
+            if (
+                self.duration_s < 60
+                or self.duration_s * max(self.session_rate_grid) * max(self.session_population_grid)
+                > 100000
+            ):
+                raise ValueError(
+                    "Capacity windows need at least 60 seconds and at most 100000 expected arrivals"
+                )
+            if (
+                not self.session_arrival_rates
+                and self.session_workload == "document"
+                and self.duration_s
+                * min(self.session_rate_grid)
+                * min(self.session_population_grid)
+                / 2
+                < self.min_requests
+            ):
+                raise ValueError("Lowest arrival rate cannot meet final-window minimum samples")
         if self.project_id == "P03" and (
             self.cache_samples > self.corpus_size
             or self.min_requests > self.cache_samples

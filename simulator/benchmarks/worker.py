@@ -117,7 +117,9 @@ def assert_gpu_idle(engine):
             timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"Cannot verify exclusive GPU access before benchmark launch: {exc}") from exc
+        raise RuntimeError(
+            f"Cannot verify exclusive GPU access before benchmark launch: {exc}"
+        ) from exc
     if proc.returncode:
         raise RuntimeError("Cannot verify exclusive GPU access before benchmark launch")
     if proc.stdout.strip():
@@ -149,6 +151,11 @@ async def probe(engine, timeout_s: float):
                 headers={"Authorization": f"Bearer {engine.api_key}"},
                 json={
                     "model": engine.api_model_name,
+                    **(
+                        {"reasoning_effort": "medium"}
+                        if "gpt-oss" in engine.api_model_name.lower()
+                        else {}
+                    ),
                     "messages": [{"role": "user", "content": "Hello"}],
                     "max_tokens": 1,
                     "stream": False,

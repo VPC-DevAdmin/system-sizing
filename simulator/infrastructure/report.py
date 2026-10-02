@@ -424,6 +424,12 @@ def export(path, comparison):
     manifest = read_json(path / "manifest.json")
     state = read_json(path / "state.json")
     spec = manifest["spec"]
+    if spec["project_id"] == "P02" and spec.get("session_mode") == "capacity":
+        from .session_capacity_report import render
+
+        render(path, manifest, state, comparison)
+        archive_evidence(path, state)
+        return
     if spec.get("p01_goal_seek"):
         from .goal_report import render
 

@@ -97,6 +97,10 @@ async def campaign(path):
         from .tenant_worker import run
 
         return await run(path, manifest, spec)
+    if spec.project_id == "P02" and spec.session_mode == "capacity":
+        from .session_capacity_worker import run
+
+        return await run(path, manifest, spec)
     if spec.project_id == "P05":
         from .diffusion_worker import run
 

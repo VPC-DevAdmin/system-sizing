@@ -35,6 +35,8 @@ def arm_config(configuration, spec, arm):
         vllm_extra_flags=[],
         kv_cache_dtype=e.get("kv_cache_dtype") or "fp8",
     )
+    if spec.project_id == "P02" and spec.session_kv_cache_dtype != "source":
+        e["kv_cache_dtype"] = spec.session_kv_cache_dtype
     # This is a matched Dynamo comparison, not a replay of arbitrary roofline flags.
     return cfg
 

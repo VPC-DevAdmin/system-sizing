@@ -45,7 +45,28 @@ def summarize(rows, elapsed_s, spec):
     prompt_tokens = [v for v in prompt_tokens if isinstance(v, int) and v > 0]
     output_tokens = [(r.get("usage") or {}).get("completion_tokens") for r in complete]
     output_tokens = [v for v in output_tokens if isinstance(v, int) and v > 0]
+
+    def token_rate(key):
+        values = [(r.get("usage") or {}).get(key) for r in complete]
+        valid = [v for v in values if type(v) is int and v >= 0]
+        coverage = len(valid) / len(complete) if complete else 0
+        return (sum(valid) / elapsed_s if coverage == 1 and elapsed_s > 0 else None), coverage
+
+    output_rate, output_coverage = token_rate("completion_tokens")
+    input_rate, input_coverage = token_rate("prompt_tokens")
     return {
+        "completed_requests_per_s": len(complete) / elapsed_s if elapsed_s > 0 else None,
+        "correct_requests_per_s": len(correct) / elapsed_s if elapsed_s > 0 else None,
+        "output_tokens_per_s": output_rate,
+        "input_tokens_per_s": input_rate,
+        "total_tokens_per_s": input_rate + output_rate
+        if input_rate is not None and output_rate is not None
+        else None,
+        "output_usage_coverage": output_coverage,
+        "input_usage_coverage": input_coverage,
+        "request_ttft_p95_s": percentile(
+            [r["request_ttft_s"] for r in complete if r.get("request_ttft_s") is not None], 0.95
+        ),
         "output_tokens_min": min(output_tokens) if output_tokens else None,
         "output_tokens_max": max(output_tokens) if output_tokens else None,
         "latency_p50_s": percentile([r["elapsed_s"] for r in complete], 0.5),
@@ -81,12 +102,14 @@ async def request_one(client, url, model, item, spec, request_id, api_key="EMPTY
         "correct": False,
         "ttft_s": None,
         "output": "",
+        "reasoning_output": "",
+        "final_answer_ttft_s": None,
         "finish_reason": None,
         "usage": None,
     }
     body = {
         "model": model,
-        "messages": [{"role": "user", "content": item["prompt"]}],
+        "messages": item.get("messages") or [{"role": "user", "content": item["prompt"]}],
         "temperature": 0,
         "seed": spec.seed,
         "max_tokens": spec.max_output_tokens,
@@ -94,6 +117,11 @@ async def request_one(client, url, model, item, spec, request_id, api_key="EMPTY
         "stream_options": {"include_usage": True},
         "chat_template_kwargs": {"enable_thinking": False},
     }
+    if "gpt-oss" in model.lower():
+        body["reasoning_effort"] = "medium"
+        # GPT-OSS always uses Harmony reasoning; this generic hint makes
+        # the frontend disable parsing without disabling model reasoning.
+        body.pop("chat_template_kwargs", None)
     if spec.structured_output:
         # Schema constrains format only. It contains no correct record IDs or answers.
         fields = {
@@ -141,11 +169,16 @@ async def request_one(client, url, model, item, spec, request_id, api_key="EMPTY
                 if chunk.get("usage"):
                     row["usage"] = chunk["usage"]
                 for choice in chunk.get("choices", []):
-                    content = choice.get("delta", {}).get("content") or ""
-                    if content and row["ttft_s"] is None:
+                    delta = choice.get("delta", {})
+                    content = delta.get("content") or ""
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                    row["reasoning_output"] += reasoning
+                    if content and row["final_answer_ttft_s"] is None:
+                        row["final_answer_ttft_s"] = time.monotonic() - start
+                    if (content or reasoning) and row["ttft_s"] is None:
                         row["ttft_s"] = time.monotonic() - start
                     row["output"] += content
-                    if len(row["output"]) > 1024 * 1024:
+                    if len(row["output"]) + len(row["reasoning_output"]) > 1024 * 1024:
                         raise ValueError("Response exceeds one MiB evidence limit")
                     if choice.get("finish_reason"):
                         row["finish_reason"] = choice["finish_reason"]

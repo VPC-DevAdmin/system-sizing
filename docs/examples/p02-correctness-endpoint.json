@@ -1,0 +1,11 @@
+{
+  "model": "openai/gpt-oss-120b",
+  "model_revision": "REPLACE_WITH_PINNED_REVISION",
+  "runtime_digest": "REPLACE_WITH_PINNED_RUNTIME_DIGEST",
+  "kv_dtype": "bfloat16",
+  "prefix_caching": false,
+  "mode": "isolated",
+  "url": "http://127.0.0.1:19200/v1",
+  "concurrency": 4,
+  "seeds": [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+}

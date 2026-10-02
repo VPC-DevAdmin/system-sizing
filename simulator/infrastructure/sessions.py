@@ -20,7 +20,7 @@ class OwnedSessions(OwnedDynamo):
     def launch(self, log_dir):
         self.storage_root = None
         if self.arm == "treatment":
-            for offset in (20, 30, 31):
+            for offset in (20, 30, 31) if self.spec.session_cpu_backend == "kvbm" else ():
                 with socket.socket() as sock:
                     if sock.connect_ex((self.cfg.host, self.cfg.port + offset)) == 0:
                         raise RuntimeError(
@@ -52,6 +52,12 @@ class OwnedSessions(OwnedDynamo):
 
     def _build_docker_command(self):
         argv = super()._build_docker_command()
+        if self.spec.session_cpu_backend == "simple_cpu":
+            pos = argv.index(self.cfg.gpu_image)
+            argv[pos:pos] = [
+                "-v",
+                f"{Path(__file__).with_name('native_cpu_connector.py')}:/capsim_native_cpu.py:ro",
+            ]
         if self.arm == "treatment" and self.spec.session_tier == "cpu_disk":
             if not Path("/run/udev").is_dir():
                 raise RuntimeError(
@@ -74,7 +80,12 @@ class OwnedSessions(OwnedDynamo):
 
     async def capture_metrics(self, directory, label):
         await super().capture_metrics(directory, label)
-        if self.arm == "treatment":
+        if self.arm == "treatment" and self.spec.session_cpu_backend == "simple_cpu":
+            records = [json.loads(p.read_text()) for p in self.directory.glob("native-cpu-*.json")]
+            if not records:
+                raise RuntimeError("Native CPU completion evidence missing")
+            write_json(directory / f"{label}-native-cpu.json", records)
+        if self.arm == "treatment" and self.spec.session_cpu_backend == "kvbm":
             async with httpx.AsyncClient(timeout=15) as client:
                 response = await client.get(f"http://{self.cfg.host}:{self.cfg.port + 20}/metrics")
                 response.raise_for_status()

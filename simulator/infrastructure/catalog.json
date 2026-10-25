@@ -439,7 +439,8 @@
       "id": "P08",
       "title": "Lower energy consumption",
       "recipe_id": "p08-v1",
-      "status": "planned",
+      "status": "deprioritized",
+      "deprioritized_reason": "Deprioritized 2026-10-25. Measured on XE7740: an idle GPU holding any CUDA context stays in P0 at about 86 W; locking clocks while the context is held parks it at about 32 W and unparks in 0.26 s. Standard autoscaling already releases idle GPUs to about 30 W, so parking adds almost nothing. Pack routing on top of autoscaling saves about 15-30% of GPU-board power in a model built from roofline sweeps (less at the wall). The savings are modest and only count where the customer pays per kWh, not per provisioned kW.",
       "implementation_phase": 3,
       "feasibility_gate": "Verified wall-power boundary and supported reversible power controls.",
       "adapter_capabilities": [

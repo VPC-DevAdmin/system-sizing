@@ -5,7 +5,7 @@ import {escapeHTML as esc} from './lib/workspace-data.js';
 let projects=[], campaigns=[], selected='P04', requestKey=null, timer=null;
 function message(text) { $('#infra-message').textContent=text; }
 function render() {
-  $('#infra-cards').innerHTML=projects.map(p=>`<button type="button" class="infra-card ${p.id===selected?'selected':''}" data-project="${esc(p.id)}" aria-pressed="${p.id===selected}"><span>${esc(p.id)}</span><h3>${esc(p.title)}</h3><p>${esc(p.feasibility_gate)}</p><strong>${p.implementation_status==='pilot_available'?'Pilot available':'Implementation pending'}</strong><small>${p.outputs.length} separate outputs</small></button>`).join('');
+  $('#infra-cards').innerHTML=projects.map(p=>`<button type="button" class="infra-card ${p.id===selected?'selected':''}" data-project="${esc(p.id)}" aria-pressed="${p.id===selected}"><span>${esc(p.id)}</span><h3>${esc(p.title)}</h3><p>${esc(p.feasibility_gate)}</p><strong>${p.implementation_status==='pilot_available'?'Pilot available':p.status==='deprioritized'?'Deprioritized':'Implementation pending'}</strong><small>${p.outputs.length} separate outputs</small></button>`).join('');
   const p=projects.find(p=>p.id===selected);
   if (!p) return;
   $('#infra-project-title').textContent=`${p.id} · ${p.title}`;

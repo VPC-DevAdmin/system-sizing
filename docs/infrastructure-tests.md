@@ -4,7 +4,7 @@ The Infrastructure Tests tab appears in both Classic and Workspace. It contains 
 
 ## Current implementation
 
-P01 runs matched Dynamo aggregated/disaggregated pilots. P02 runs finite document-session replay against CPU or CPU-plus-disk cache tiers. P03 runs exploratory KV precision grids. P04 runs paired speculative decoding on a recorded vLLM CUDA roofline configuration. P05 implements pinned teacher/student image generation and explicit acceptance review. P06 implements dedicated, software-shared and MIG service placements. P10 implements separate CUDA profiling and a matched attention-backend comparison. These seven adapters can launch exploratory tests; real-host validation status and results are recorded separately. P07, P08 and P09 remain unavailable and cannot launch placeholder measurements.
+P01 runs matched Dynamo aggregated/disaggregated pilots. P02 runs finite document-session replay against CPU or CPU-plus-disk cache tiers. P03 runs exploratory KV precision grids. P04 runs paired speculative decoding on a recorded vLLM CUDA roofline configuration. P05 implements pinned teacher/student image generation and explicit acceptance review. P06 implements dedicated, software-shared and MIG service placements. P10 implements separate CUDA profiling and a matched attention-backend comparison. These seven adapters can launch exploratory tests; real-host validation status and results are recorded separately. P07, P08 and P09 remain unavailable and cannot launch placeholder measurements; P08 is deprioritized (see below).
 
 For P04, choose a recorded model configuration, GPU indices, concurrency, document size and run purpose. Both arms use the same resources, generated documents, JSON schema and exact-answer grader. The treatment adds either prompt n-gram speculation or native MTP decoding. MTP requires declared draft layers and indexed MTP tensors in the selected checkpoint. This experiment tests structured extraction from synthetic logistics documents. It does not establish maximum server capacity or broad model quality.
 
@@ -55,6 +55,16 @@ Example pilot settings:
 P01/P02 require a pinned Dynamo deployment and verified transfer/cache semantics. P03 requires cache capability and quality sweeps. P05 prepares the pinned released teacher/student pair and requires explicit image acceptance review for accepted-image measurements. P06 requires an idle GPU with the supported 48 GB partition profile and passwordless nvidia-smi administration; every run verifies restoration and tenant contracts. P07 requires a supported attested confidential VM and protection path. P08 requires a validated whole-system power source. P09 requires a dated cost ledger and equal-demand accounting. P10 requires profiling, numerical validation and a compatible backend comparison.
 
 GPU board power cannot substitute for whole-system input power. The power-control and cost-calculation utilities are unit tested but are not yet wired into completed P08/P09 experiment adapters.
+
+## P08 deprioritized (2026-10-25)
+
+P08 is deprioritized. Scoping found no comparison that gives a buyer a real reason to choose the system:
+
+- **Idle and parking power (measured on XE7740, GPU board):** any held CUDA context keeps the GPU in P0 at about 86 W, even with no work. Locking SM and memory clocks to their minimum while the context is held parks the GPU at about 32 W, and unlocking restores full speed in 0.26 s. A GPU with no process idles at about 30 W.
+- **Against standard autoscaling:** autoscaling already releases idle GPUs to about 30 W, so parking adds almost nothing. Packing load onto the fewest active replicas (for example HAProxy `balance first`) saves about 15-30% of GPU-board power compared with spreading across autoscaled replicas. That figure is modeled from roofline sweeps and shrinks toward zero with a tightly tuned scheduled autoscaler. Savings at the wall are lower.
+- **Value:** at roughly $0.13-0.20/kWh the savings are modest per server. They only count where the customer pays per kWh; colocation billed per provisioned kW sees close to none. A rack still has to carry the true peak, so packing creates no rack headroom.
+
+Keeping KV and sessions alive across scale-down belongs with the P02 KV tier, not P08.
 
 ## Cache grid pilot
 

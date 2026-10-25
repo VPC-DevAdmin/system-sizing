@@ -618,24 +618,23 @@
     },
     {
       "id": "P11",
-      "title": "All-US model and software stack",
+      "title": "US model survey",
       "recipe_id": "p11-v1",
       "status": "planned",
       "implementation_phase": 3,
-      "feasibility_gate": "Each candidate model loads and serves on the SM120 RTX PRO path under a US-stewarded engine with no silent fallback, using only pinned, offline-installable containers.",
+      "feasibility_gate": "Each model loads and serves on the SM120 RTX PRO path under vLLM or SGLang with no silent fallback.",
       "adapter_capabilities": [
         "llm_load",
         "quality",
-        "topology",
-        "provenance"
+        "topology"
       ],
-      "baseline_and_treatment": "US-only showcase, not a comparison with non-US models. Per tier (frontier, mid, small), every US-origin candidate runs on the same XE7740, workload, and service target, each at its own best supported engine and parallelism. The winner of each tier is the measured headline. Frontier candidates: Reflection Beam 1.0 501B-A23B NVFP4 (about 255 GB; tp4 x2 replicas versus tp8), with its DFlash2 drafter on and off; NVIDIA Nemotron 3 Ultra 550B-A55B NVFP4 (about 330 GB, tp8); Arcee Trinity Large if a fitting build exists. Mid: Nemotron 3 Super and gpt-oss-120b. Small: Gemma 4 26B and gpt-oss-20b.",
-      "controls": "model revision and checkpoint digest, precision, engine and container digest (vLLM, SGLang, TensorRT-LLM, Dynamo; LMCache for any KV tier), TP/replicas, speculative decoding, context length, prompt/output distributions, arrival process, and service targets. Excluded components: KTransformers and Mooncake, along with any trust_remote_code loader code not pinned and reviewed. Reuse the open-loop roofline harness and the existing quality adapter with identical prompts for every candidate.",
-      "implementation": "per-model preflight (load, short serve, numerical sanity) before any campaign; open-loop capacity curves per candidate configuration; quality suite (coding, long-context recall, tool use); provenance capture of model license and origin, container digests, and an SBOM for every image; offline install from a local mirror through the ssh deploy branch path with outbound network blocked.",
+      "baseline_and_treatment": "Quick survey, no baseline and no comparison with non-US models. Four US model families on the same XE7740, workload, and service target, each on vLLM or SGLang, whichever serves it better: OpenAI gpt-oss (120b, 20b), Google Gemma 4, Reflection Beam 1.0 501B-A23B NVFP4 (about 255 GB, tp4 or tp8, DFlash2 drafter on/off), and NVIDIA Nemotron 3 (Ultra 550B-A55B NVFP4 at about 330 GB on tp8, plus Super).",
+      "controls": "model revision, precision, engine (vLLM or SGLang) and container digest, TP/replicas, speculative decoding (Beam only), context length, prompt/output distributions, and service targets. AIPerf generates the load. The same quality prompts are used for every model.",
+      "implementation": "per-model preflight (load, short serve); AIPerf load sweep per model and configuration; short quality check; record image digests and model revisions. Uses existing engine adapters, so no new adapter is needed.",
       "outputs": [
         {
           "id": "P11-O1",
-          "title": "US-only capacity per XE7740 at SLO, frontier tier",
+          "title": "capacity per XE7740 at SLO for each US model",
           "status": "planned_not_measured",
           "export_separately": true,
           "artifacts": [
@@ -648,20 +647,7 @@
         },
         {
           "id": "P11-O2",
-          "title": "best US model per tier: capacity and quality table",
-          "status": "planned_not_measured",
-          "export_separately": true,
-          "artifacts": [
-            "claim.json",
-            "claim-brief.md",
-            "white-paper.docx",
-            "charts",
-            "evidence.zip"
-          ]
-        },
-        {
-          "id": "P11-O3",
-          "title": "provenance and air-gapped deployment evidence report",
+          "title": "US model survey table: capacity, quality, GPUs used",
           "status": "planned_not_measured",
           "export_separately": true,
           "artifacts": [
@@ -673,8 +659,8 @@
           ]
         }
       ],
-      "output_constraints": "P11-O1 US-only capacity per XE7740 at SLO, frontier tier; P11-O2 best US model per tier: capacity and quality table; P11-O3 provenance and air-gapped deployment evidence report. O3 contains pass/fail scope and a threat model, not \u201cX% more secure.\u201d No claims about non-US models.",
-      "acceptance": "every reported model is US-origin, every serving component is US-stewarded and pinned, the deploy completes offline, quality passes the shared suite at the reported context, and capacity comes from the measured open-loop curves. A model that fails preflight is reported as unsupported on this platform, not dropped silently. Open-source projects have contributors from around the world; \u201cUS-stewarded\u201d means US governance plus pinned, auditable code."
+      "output_constraints": "P11-O1 capacity per XE7740 at SLO for each US model; P11-O2 US model survey table: capacity, quality, GPUs used. No claims about non-US models, and no \u201cX% more secure\u201d claims.",
+      "acceptance": "every model is US-origin and served by vLLM or SGLang with pinned images; capacity comes from AIPerf runs at the stated SLO; a model that fails preflight is reported as unsupported on this platform, not dropped silently."
     }
   ]
 }

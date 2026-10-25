@@ -24,7 +24,7 @@ def spec(**kwargs):
 def test_catalog_has_eleven_projects_and_separate_outputs():
     projects = listing()
     assert len(projects) == 11
-    assert len({o["id"] for p in projects for o in p["outputs"]}) == 34
+    assert len({o["id"] for p in projects for o in p["outputs"]}) == 33
     assert [p["id"] for p in projects if p["implementation_status"] == "pilot_available"] == [
         "P01",
         "P02",

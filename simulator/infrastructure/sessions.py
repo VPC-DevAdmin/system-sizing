@@ -78,7 +78,9 @@ class OwnedSessions(OwnedDynamo):
     async def capture_metrics(self, directory, label):
         await super().capture_metrics(directory, label)
         if self.arm == "treatment" and self.spec.session_cpu_backend == "simple_cpu":
-            records = [json.loads(p.read_text()) for p in self.directory.glob("native-cpu-*.json")]
+            from .session_native import native_cpu_records
+
+            records = native_cpu_records(self.directory)
             if not records:
                 raise RuntimeError("Native CPU completion evidence missing")
             write_json(directory / f"{label}-native-cpu.json", records)

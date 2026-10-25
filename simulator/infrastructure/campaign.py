@@ -94,10 +94,22 @@ def create(base, row, spec, idempotency_key):
             for block in range(spec.paired_blocks):
                 for population in spec.session_population_grid:
                     for rate in spec.session_arrival_rates or spec.session_rate_grid:
-                        arms = ["baseline", "treatment"]
+                        arms = [
+                            (arm, compaction)
+                            for arm in (
+                                spec.session_cache_arms
+                                if spec.session_workload == "knowledge_worker"
+                                else ["baseline", "treatment"]
+                            )
+                            for compaction in (
+                                spec.session_compaction_arms
+                                if spec.session_workload == "knowledge_worker"
+                                else ["none"]
+                            )
+                        ]
                         rng.shuffle(arms)
-                        schedule.extend(
-                            dict(
+                        for arm, compaction in arms:
+                            cell = dict(
                                 block=block,
                                 arm=arm,
                                 population=population,
@@ -106,8 +118,9 @@ def create(base, row, spec, idempotency_key):
                                 if spec.session_arrival_rates
                                 else rate,
                             )
-                            for arm in arms
-                        )
+                            if spec.session_workload == "knowledge_worker":
+                                cell["compaction"] = compaction
+                            schedule.append(cell)
         if spec.project_id == "P05":
             schedule = []
             for block in range(spec.paired_blocks):

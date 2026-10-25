@@ -11,7 +11,7 @@ class ExperimentSpec(BaseModel):
     mode: Literal["pilot", "confirmation"] = "pilot"
     seed: int = Field(default=42, ge=0, le=2**32 - 1)
     paired_blocks: int = Field(default=2, ge=1, le=20)
-    duration_s: int = Field(default=60, ge=10, le=3600)
+    duration_s: int = Field(default=60, ge=10, le=10800)
     warmup_s: int = Field(default=15, ge=0, le=600)
     concurrency: int = Field(default=4, ge=1, le=16384)
     request_timeout_s: int = Field(default=120, ge=1, le=600)
@@ -94,7 +94,35 @@ class ExperimentSpec(BaseModel):
     session_kv_cache_dtype: Literal["source", "auto", "bfloat16", "fp8"] = "source"
     session_active_records: int | None = Field(default=None, ge=2, le=4096)
     session_context_tokens: int = Field(default=96000, ge=1024, le=120000)
-    session_new_input_tokens: int = Field(default=512, ge=32, le=2048)
+    session_new_input_tokens: int = Field(default=512, ge=32, le=8192)
+    # Stage 2 (docs/p02-stage2-compaction.md): growing sessions, probes, compaction.
+    session_growth_tokens: int = Field(default=0, ge=0, le=16384)
+    session_probe_mix: list[
+        Literal["reference", "session_recall", "knowledge_update", "abstention"]
+    ] = Field(default_factory=lambda: ["reference"], min_length=1, max_length=8)
+    session_limit_policy: Literal["fail", "new_session"] = "fail"
+    # Context budget for the new-session policy; None means the engine limit.
+    session_limit_tokens: int | None = Field(default=None, ge=4096, le=131072)
+    # Start each worker at a uniformly random point of its steady-state cycle by priming a
+    # synthetic prior history (fabricated correct answers), so a window shows steady state.
+    session_prime_phase: bool = False
+    session_compaction_arms: list[Literal["none", "xeon"]] = Field(
+        default_factory=lambda: ["none"], min_length=1, max_length=2
+    )
+    session_compaction_trigger_tokens: int = Field(default=96000, ge=4096, le=131072)
+    session_compaction_target_tokens: int = Field(default=32000, ge=1024, le=131072)
+    session_compaction_budget_tokens: int = Field(default=4096, ge=256, le=16384)
+    session_compaction_url: str | None = None
+    session_compaction_model: str | None = None
+    session_compaction_timeout_s: int = Field(default=900, ge=10, le=3600)
+    session_compaction_ledger: bool = True
+    session_compaction_chunk_turns: int = Field(default=3, ge=1, le=64)
+    # blocking: the next turn waits for the summary (the pause is the measured cost).
+    # async: the session keeps growing while the Xeon works (future optimization).
+    session_compaction_mode: Literal["blocking", "async"] = "blocking"
+    session_cache_arms: list[Literal["baseline", "treatment"]] = Field(
+        default_factory=lambda: ["baseline", "treatment"], min_length=1, max_length=2
+    )
     session_think_s: float = Field(default=60, gt=0, le=3600)
     session_population_grid: list[int] = Field(
         default_factory=lambda: [32, 64, 128, 256], min_length=1, max_length=6
@@ -323,6 +351,38 @@ class ExperimentSpec(BaseModel):
         if self.session_workload == "knowledge_worker":
             if self.project_id != "P02" or self.session_mode != "capacity":
                 raise ValueError("Knowledge workers require P02 capacity mode")
+            if "xeon" in self.session_compaction_arms:
+                if not self.session_compaction_url or not self.session_compaction_model:
+                    raise ValueError("Xeon compaction requires a summarizer endpoint and model")
+                if not (
+                    self.session_compaction_target_tokens
+                    < self.session_compaction_trigger_tokens
+                    <= self.context_limit - self.max_output_tokens - self.session_growth_tokens
+                ):
+                    raise ValueError(
+                        "Compaction target must be below the trigger, and the trigger must leave output and growth headroom"
+                    )
+                if self.session_growth_tokens == 0:
+                    raise ValueError("Compaction arms require growing sessions")
+            if self.session_prime_phase and self.session_growth_tokens == 0:
+                raise ValueError("Phase priming requires growing sessions")
+            if self.session_limit_policy == "new_session" and self.session_growth_tokens == 0:
+                raise ValueError("A new-session limit policy only applies to growing sessions")
+            if self.session_limit_tokens is not None and not (
+                self.session_context_tokens
+                + self.session_growth_tokens
+                + self.session_new_input_tokens
+                < self.session_limit_tokens
+                <= self.context_limit - self.max_output_tokens
+            ):
+                raise ValueError(
+                    "Session context budget must exceed the initial context plus one turn and fit the engine limit"
+                )
+            if (
+                any(p != "reference" for p in self.session_probe_mix)
+                and self.session_growth_tokens == 0
+            ):
+                raise ValueError("Session-history probes require growing sessions")
             if (
                 self.session_context_tokens + self.session_new_input_tokens + self.max_output_tokens
                 >= self.context_limit

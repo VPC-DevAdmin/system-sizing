@@ -5,7 +5,9 @@ Private worker fields are checked explicitly because this adapter is image-pinne
 """
 import json
 import os
+import threading
 import time
+import uuid
 from pathlib import Path
 
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
@@ -18,6 +20,7 @@ class ObservedCPUOffloadConnector(SimpleCPUOffloadConnector):
         super().__init__(*args, **kwargs)
         self._evidence_pending = {"load": {}, "store": {}}
         self._evidence_totals = {"load_blocks": 0, "store_blocks": 0}
+        self._evidence_lock = threading.Lock()
         if self.worker_handler is not None:
             for name in ("_load_hwm", "_store_hwm"):
                 if not hasattr(self.worker_handler, name):
@@ -54,6 +57,16 @@ class ObservedCPUOffloadConnector(SimpleCPUOffloadConnector):
         record = dict(self._evidence_totals, pid=os.getpid(), timestamp=time.time(),
                       scope="Completed physical cache block copies; not distinct documents",
                       source="Pinned worker CUDA event completion watermarks")
-        temporary = target.with_suffix(".tmp")
-        temporary.write_text(json.dumps(record))
-        temporary.replace(target)
+        # Unique temporary per write and a lock: concurrent completions must never race
+        # on one temp name, and an evidence write failure must never stop the engine.
+        temporary = path / f".native-cpu-{os.getpid()}-{uuid.uuid4().hex}.tmp"
+        with self._evidence_lock:
+            try:
+                temporary.write_text(json.dumps(record))
+                temporary.replace(target)
+            except OSError as exc:
+                print(f"capsim native CPU evidence write failed: {exc}", flush=True)
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass

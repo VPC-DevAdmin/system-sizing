@@ -185,6 +185,8 @@ async def run(path, manifest, spec):
                     path
                     / f"block-{cell['block']:02d}-{cell['arm']}-users-{cell['population']}-rate-{cell['rate']:g}"
                 )
+                if cell.get("compaction"):
+                    directory = directory.with_name(directory.name + f"-compaction-{cell['compaction']}")
                 directory.mkdir()
                 cfgdoc = arm_config(manifest["configuration"], spec, cell["arm"])
                 cfgdoc["engine"]["max_num_seqs"] = spec.session_engine_max_seqs
@@ -306,7 +308,13 @@ async def run(path, manifest, spec):
                         from .knowledge_workers import replay_workers
 
                         work = replay_workers(
-                            engine, spec, cell["population"], cell["block"], directory, tokenizer
+                            engine,
+                            spec,
+                            cell["population"],
+                            cell["block"],
+                            directory,
+                            tokenizer,
+                            cell.get("compaction", "none"),
                         )
                     else:
                         work = replay(engine, spec, trace, cell["block"], directory)

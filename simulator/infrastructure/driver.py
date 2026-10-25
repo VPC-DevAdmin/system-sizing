@@ -122,7 +122,13 @@ async def request_one(client, url, model, item, spec, request_id, api_key="EMPTY
         # GPT-OSS always uses Harmony reasoning; this generic hint makes
         # the frontend disable parsing without disabling model reasoning.
         body.pop("chat_template_kwargs", None)
-    if spec.structured_output:
+    if item.get("schema"):
+        # Probe answers (session recall, knowledge update, abstention) have their own shape.
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "probe_answer", "strict": True, "schema": item["schema"]},
+        }
+    elif spec.structured_output:
         # Schema constrains format only. It contains no correct record IDs or answers.
         fields = {
             k: {"type": "integer" if k == "quantity" else "string"}

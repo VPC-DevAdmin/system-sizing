@@ -66,12 +66,24 @@ async def monitor_native(engine, directory):
                         )
                 output.write(
                     json.dumps(
-                        dict(at_s=time.monotonic() - start, timestamp=time.time(), samples=samples, host=host_snapshot(), cpu_offload=[json.loads(p.read_text()) for child in engine.children for p in child.directory.glob("native-cpu-*.json")])
+                        dict(at_s=time.monotonic() - start, timestamp=time.time(), samples=samples, host=host_snapshot(), cpu_offload=[r for child in engine.children for r in native_cpu_records(child.directory)])
                     )
                     + "\n"
                 )
                 output.flush()
                 await asyncio.sleep(2)
+
+
+def native_cpu_records(directory, attempts=5):
+    """Connector evidence files are replaced atomically by the engine; tolerate the swap."""
+    for attempt in range(attempts):
+        try:
+            return [json.loads(p.read_text()) for p in sorted(directory.glob("native-cpu-*.json"))]
+        except (FileNotFoundError, json.JSONDecodeError):
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05)
+    return []
 
 
 def queue_delta(directory, prefix=""):

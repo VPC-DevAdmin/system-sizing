@@ -321,3 +321,19 @@ This writes a new analysis JSON with hashes of source evidence under the campaig
 Prepared XE7740 discovery profile: prior working P02 Llama-3.3-70B-Instruct-NVFP4 source; all eight GPUs; 128 and 512 distinct document-session slots; 192-record documents, two-record answers; eight questions per document; 128 GB CPU cache per GPU; 300-second arrival windows plus bounded drain; 600-second measurement deadline; 8192 client streams and 256 engine sequences per GPU; initial total rates 0.5/1/2/4/8/16 requests/s extending up to 128; one exploratory paired block, followed by two refinement rounds. Independent confirmation remains a separate follow-up before publishing a claim. This profile is bounded to 24 hours.
 
 Deferred launch uses a separate immutable source release, so the current service and unrelated tests need no restart. Readiness requires the existing named GPU workload containers to stop, zero GPU compute processes, low GPU memory/utilization, no active capsim run, an available hardware lease, and two idle observations at least 120 seconds apart. The worker checks GPU idleness again before every deployment and holds the hardware lease. A `hold` file beside the deferred plan prevents launch. The controller never removes other workloads and never restarts a failed or terminal campaign automatically.
+
+
+### P02 stage 2: growing sessions and Xeon context compaction
+
+Knowledge-worker sessions can grow by a work item per turn
+(`session_growth_tokens`). Probes then sample each worker's whole history
+(reference recall, session recall, knowledge update, abstention); a probe about
+a fact the worker has lost is scored wrong, never skipped. No-compaction arms
+start a new session at the engine limit when `session_limit_policy` is
+`new_session`. With `session_compaction_arms` including `xeon`, the client
+summarizes raw turns on an operator-provided summarizer endpoint between a
+trigger and a target, keeps the reference prefix byte-identical, carries a
+structured ledger forward, and never re-summarizes a summary. The schedule holds
+four arms per population: GPU-only, Xeon KV tier, each with and without
+compaction. Reports add whole-history recall per turn, resets, compactions and
+lag beside the density table. Design and gates: docs/p02-stage2-compaction.md.

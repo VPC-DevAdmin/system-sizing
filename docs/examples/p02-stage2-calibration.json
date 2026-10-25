@@ -1,0 +1,11 @@
+{
+  "url": "http://127.0.0.1:18000/v1",
+  "model": "Qwen/Qwen3-4B",
+  "raw_tokens": 64000,
+  "budget_tokens": 4096,
+  "concurrencies": [1, 4, 8, 16],
+  "population": 96,
+  "cycle_minutes": 8,
+  "seed": 42,
+  "timeout_s": 900
+}

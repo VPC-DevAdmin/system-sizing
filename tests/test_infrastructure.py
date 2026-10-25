@@ -21,10 +21,10 @@ def spec(**kwargs):
     return ExperimentSpec(project_id="P04", **kwargs)
 
 
-def test_catalog_has_ten_projects_and_separate_outputs():
+def test_catalog_has_eleven_projects_and_separate_outputs():
     projects = listing()
-    assert len(projects) == 10
-    assert len({o["id"] for p in projects for o in p["outputs"]}) == 31
+    assert len(projects) == 11
+    assert len({o["id"] for p in projects for o in p["outputs"]}) == 34
     assert [p["id"] for p in projects if p["implementation_status"] == "pilot_available"] == [
         "P01",
         "P02",
@@ -167,7 +167,7 @@ def test_service_catalog_and_both_ui_entrypoints(tmp_path):
     with TestClient(create_app(runs_base=tmp_path, catalog_dir=tmp_path / "catalog")) as client:
         response = client.get("/api/infrastructure")
         assert response.status_code == 200
-        assert len(response.json()["projects"]) == 10
+        assert len(response.json()["projects"]) == 11
         assert response.json()["readiness"] is None
         assert "tab-infrastructure" in client.get("/").text
         assert "infrastructure.css" in client.get("/workspace.html").text

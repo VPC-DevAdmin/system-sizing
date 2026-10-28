@@ -70,6 +70,7 @@ DFLASH = json.dumps(_dflash)
 
 def cfg(model, engine, tp, replicas, image=None, args=(), env=None, reasoning=None):
     return {
+        "unique_prompts": False,  # see UNIQUE_PROMPTS
         "model": model,
         "engine": engine,
         "tp": tp,
@@ -80,6 +81,17 @@ def cfg(model, engine, tp, replicas, image=None, args=(), env=None, reasoning=No
         "reasoning_effort": reasoning,
     }
 
+# Prefix caching is switched off in both engines (see docker_cmd), so every request
+# computes its prefill. SGLang v0.5.20 refuses to start these four without its radix
+# cache (it then sizes the SWA / Mamba pools from --max-running-requests and runs out
+# of memory), so they keep the cache on and defeat it instead: a 20,000-prompt
+# AIPerf dataset per shard, a different seed per rung, and /flush_cache before each
+# rung. P11_UNIQUE_PROMPTS=cid,cid forces that mode on other configs (used to check
+# the two methods agree on gpt-oss-20b-sglang).
+UNIQUE_PROMPTS = {
+    "gpt-oss-120b-sglang", "gemma-4-31b-sglang", "nemotron-3-super-sglang", "nemotron-3-ultra-sglang",
+}
+DATASET_ENTRIES = 20000
 
 # SGLang's default MoE runner refuses NVFP4 experts on SM120 and names this one.
 SGL_NVFP4_MOE = ["--moe-runner-backend", "flashinfer_cutlass"]
@@ -124,6 +136,9 @@ def log(msg):
 def sh(cmd, check=True, timeout=None):
     return subprocess.run(cmd, capture_output=True, text=True, check=check, timeout=timeout)
 
+for _cid in UNIQUE_PROMPTS | set(filter(None, os.environ.get("P11_UNIQUE_PROMPTS", "").split(","))):
+    CONFIGS[_cid]["unique_prompts"] = True
+
 
 def max_seqs(c):
     # Engines size warm-up activations by this, so a single 8-GPU copy of a giant
@@ -158,6 +173,12 @@ def docker_cmd(name, c, gpus, port):
             "--max-running-requests", str(max_seqs(c)), "--enable-metrics",
             "--nccl-port", str(port + 1000),  # replicas share the host network
         ]
+    # AIPerf cycles a small synthetic prompt set, so the engine's prefix cache
+    # served most of the 1,024-token prefill (vLLM logged 89-99% hit rates in the
+    # 2026-10-26 run; Nemotron's hybrid Mamba stack cannot cache, so it alone paid
+    # for its prefill). Disable the cache so every request computes its prefill.
+    if not c["unique_prompts"]:
+        cmd += ["--no-enable-prefix-caching"] if c["engine"] == "vllm" else ["--disable-radix-cache"]
     return cmd + c["args"]
 
 
@@ -275,6 +296,11 @@ def aiperf_rung(c, urls, concurrency, rung_dir):
     timing manager pins a core), so the load is split over SHARDS processes,
     each driving its own replicas, and per-request records are merged."""
     rung_dir.mkdir(parents=True, exist_ok=True)
+    if c["unique_prompts"]:
+        for u in urls:  # drop whatever the radix cache kept from the previous rung
+            req = urllib.request.Request(u + "/flush_cache", data=b"{}", method="POST",
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=60).read()  # SGLang answers plain text
     k = min(SHARDS, concurrency)
     procs = []
     env = dict(os.environ, HF_HUB_OFFLINE="1", HF_HOME=HF_CACHE)
@@ -290,9 +316,12 @@ def aiperf_rung(c, urls, concurrency, rung_dir):
             "--concurrency", str(concurrency // k + (i < concurrency % k)),
             "--benchmark-duration", str(RUNG_S),
             "--benchmark-grace-period", str(GRACE_S), "--warmup-duration", str(WARMUP_S),
-            "--random-seed", str(42 + i), "--artifact-dir", str(shard_dir), "--ui", "none",
+            "--random-seed", str(42 + i + (concurrency if c["unique_prompts"] else 0)),
+            "--artifact-dir", str(shard_dir), "--ui", "none",
             "--no-gpu-telemetry", "--workers-max", "16",
         ]
+        if c["unique_prompts"]:
+            cmd += ["--num-dataset-entries", str(DATASET_ENTRIES)]
         for u in (urls[i::k] if len(urls) >= k else urls):
             cmd += ["--url", u]
         log_f = open(shard_dir / "aiperf.log", "w")
@@ -431,6 +460,7 @@ def run(cid, ladder, do_quality, label, keep=False, resume=False):
     prior = json.loads((run_dir / "result.json").read_text()) if resume and (run_dir / "result.json").is_file() else {}
     done = {r["concurrency"] for r in prior.get("rungs", []) if not r.get("error")}
     result = {"config": cid, **c, "isl": ISL, "osl": OSL, "rung_s": RUNG_S,
+              "prefix_cache": "on, defeated by unique prompts" if c["unique_prompts"] else "disabled",
               "provenance": provenance(c), "started": time.strftime("%Y-%m-%dT%H:%M:%S")}
     if prior:
         result["quality"] = prior.get("quality")

@@ -38,6 +38,9 @@ CPU_START = 0.02
 HF = {"/data2/capsim/huggingface": "/root/.cache/huggingface",
       "/data3/capsim/hf-overflow": "/data3/capsim/hf-overflow"}
 
+TUNED_GPU_KEYS = {"qwen30b", "gemma26b", "gptoss120b", "nemosuper", "gptoss20b", "qwen36",
+                  "nemonano", "kimilinear", "glm47", "gemma31b", "qwen35", "minimax"}
+
 GPU_MODELS = {
     "qwen30b": {"model": "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8", "tp": 1},
     "gemma26b": {"model": "nvidia/Gemma-4-26B-A4B-NVFP4", "tp": 1},
@@ -66,6 +69,35 @@ GPU_MODELS = {
 }
 
 
+TUNE_SIM = {"open_loop_backfill_factor": None, "open_loop_resolution_pct": 20.0}
+TUNE_WORKLOADS = ["conversational", "document_qa"]
+GPU_TUNE_FULL = {
+    "default": {},
+    "seqs512-mbt8k": {"max_num_seqs": 512, "max_num_batched_tokens": 8192},
+    "seqs512-mbt32k": {"max_num_seqs": 512, "max_num_batched_tokens": 32768},
+    "seqs2048-mbt8k": {"max_num_seqs": 2048, "max_num_batched_tokens": 8192},
+    "seqs2048-mbt32k": {"max_num_seqs": 2048, "max_num_batched_tokens": 32768},
+    "kvfp8": {"kv_cache_dtype": "fp8"},
+    "mem95": {"gpu_memory_utilization": 0.95},
+    "combined": {"max_num_seqs": 2048, "max_num_batched_tokens": 16384,
+                 "kv_cache_dtype": "fp8", "gpu_memory_utilization": 0.95},
+}
+GPU_TUNE_LIGHT = {k: GPU_TUNE_FULL[k] for k in ("default", "seqs2048-mbt32k", "kvfp8", "combined")}
+GPU_TUNE_TP4 = {"default": {}, "seqs2048-kvfp8": {"max_num_seqs": 2048, "kv_cache_dtype": "fp8"}}
+
+
+def gtune(key, grid, prefix):
+    tp = GPU_MODELS[key]["tp"]
+    out = []
+    for name, ov in grid.items():
+        j = gjob(f"{prefix}-{key}-{tp}gpu-{name}", key, list(TUNE_WORKLOADS), tp,
+                 simulation=dict(TUNE_SIM), tune_group=f"{key}-gpu", tune_name=name,
+                 tune_overrides=ov, **ov)
+        out.append(j)
+    out[0]["barrier"] = True
+    return out
+
+
 def gjob(jid, key, workloads, gpus=None, **kw):
     m = dict(GPU_MODELS[key])
     extra = m.pop("engine_extra", {})
@@ -78,7 +110,11 @@ def gjob(jid, key, workloads, gpus=None, **kw):
     ee = {**ee, **kw.pop("engine_extra", {})}
     j = {"id": jid, **m, "devices": gpus, "workloads": wl,
          "initial_rate_per_s": round(start, 4), "engine_extra": ee}
+    if key in TUNED_GPU_KEYS:
+        j["tune_key"] = f"{key}-gpu"
     j.update(kw)
+    if j.get("tune_group"):
+        j.pop("tune_key", None)
     return j
 
 
@@ -92,17 +128,20 @@ def xe7740() -> dict:
     for i in range(8):
         jobs.append(gjob(f"G0.3b-qwen30b-1gpu-conversational-lane{i}", q, "conversational", 1,
                          barrier=(i == 0)))
+    # T: engine tuning for the Qwen3-30B anchor; G1 waits for the pick.
+    jobs += gtune("qwen30b", GPU_TUNE_FULL, "T1")
     # G1: Qwen3-30B anchor.
     for w in ALL16:
         if w == "conversational":
             continue  # G0.3a
-        jobs.append(gjob(f"G1.1-qwen30b-1gpu-{w}", q, w, 1, barrier=(w == ALL16[0])))
+        jobs.append(gjob(f"G1.1-qwen30b-1gpu-{w}", q, w, 1))
     for w in HISTORY:
         for h in HISTORY_SETTINGS:
             jobs.append(gjob(f"G1.4-qwen30b-1gpu-{w}-hist{h}", q, w, 1,
                              simulation={"history_window_turns": h}))
     for w in ["quick_lookup", "conversational", "document_qa"]:
-        jobs.append(gjob(f"G1.5-qwen30b-1gpu-{w}-kvfp8", q, w, 1, kv_cache_dtype="fp8"))
+        jobs.append(gjob(f"G1.5-qwen30b-1gpu-{w}-kvauto", q, w, 1, kv_cache_dtype="auto",
+                         pin=["kv_cache_dtype"]))
     for w in ["document_qa", "agent_task_runner", "meeting_summary"]:
         jobs.append(gjob(f"G1.5-qwen30b-1gpu-{w}-ctx128k", q, w, 1, max_model_len=131072))
     for mix in MIX6:
@@ -117,6 +156,10 @@ def xe7740() -> dict:
         jobs.append(gjob(f"G1.2-qwen30b-8gpu-{w}", q, w, 8))
     for mix in ["general_knowledge", "contact_centre"]:
         jobs.append(gjob(f"G1.6-qwen30b-8gpu-{mix}", q, mix, 8))
+    # T: tuning for the other anchors and the remaining models.
+    jobs += gtune("gemma26b", GPU_TUNE_FULL, "T2")
+    jobs += gtune("gptoss120b", GPU_TUNE_FULL, "T2")
+    jobs += gtune("nemosuper", GPU_TUNE_FULL, "T2")
     # G2: other class anchors at their smallest copy.
     for key in ["gemma26b", "gptoss120b", "nemosuper"]:
         tp = GPU_MODELS[key]["tp"]
@@ -133,6 +176,10 @@ def xe7740() -> dict:
                 for w in ["conversational", "document_qa", "knowledge_search"]:
                     jobs.append(gjob(f"G2-{key}-{tp}gpu-{w}-reason{eff}", key, w, tp,
                                      reasoning_effort=eff))
+    for key in ["gptoss20b", "qwen36", "nemonano", "kimilinear", "glm47", "gemma31b"]:
+        jobs += gtune(key, GPU_TUNE_LIGHT, "T3")
+    for key in ["qwen35", "minimax"]:
+        jobs += gtune(key, GPU_TUNE_TP4, "T3")
     # G3: remaining models, core six at the smallest copy.
     for key in ["gptoss20b", "qwen36", "nemonano", "kimilinear", "glm47", "gemma31b",
                 "qwen35", "minimax"]:
@@ -205,8 +252,23 @@ def cjob(jid, model, local, quant, workloads, sockets=1, engine="sglang", **kw):
     j = {"id": jid, "model": model, "devices": sockets, "workloads": wl,
          "initial_rate_per_s": CPU_START * sockets, "cpu_engine": ce,
          "workers_per_device": 4}
+    if engine == "sglang" and model == "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8":
+        j["tune_key"] = "qwen30b-cpu"
     j.update(kw)
+    if j.get("tune_group") or j["id"].startswith("C0"):
+        j.pop("tune_key", None)
     return j
+
+
+CPU_TUNE = {
+    "default": {},
+    "chunk2k": {"cpu_engine": {"chunked_prefill_size": 2048}},
+    "chunk8k": {"cpu_engine": {"chunked_prefill_size": 8192}},
+    "run64": {"cpu_engine": {"sglang_extra_flags": ["--max-running-requests", "64"]}},
+    "run128": {"cpu_engine": {"sglang_extra_flags": ["--max-running-requests", "128"]}},
+    "overlap": {"cpu_engine": {"disable_overlap_schedule": False}},
+    "cores84": {"socket_cores": 84},
+}
 
 
 def r770() -> dict:
@@ -219,6 +281,16 @@ def r770() -> dict:
     for i in range(2):
         jobs.append(cjob(f"C0.3b-qwen30b-1s-conversational-lane{i}", m, loc, qn,
                          "conversational", 1, barrier=(i == 0)))
+    # T: SGLang CPU tuning; the SGLang persona jobs wait for the pick.
+    for i, (name, ov) in enumerate(CPU_TUNE.items()):
+        j = cjob(f"TC1-qwen30b-1s-{name}", m, loc, qn, list(TUNE_WORKLOADS), 1,
+                 simulation=dict(TUNE_SIM), tune_group="qwen30b-cpu", tune_name=name,
+                 tune_overrides=ov, barrier=(i == 0))
+        if "cpu_engine" in ov:
+            j["cpu_engine"].update(ov["cpu_engine"])
+        if "socket_cores" in ov:
+            j["socket_cores"] = ov["socket_cores"]
+        jobs.append(j)
     for w in ALL16:
         if w in ("quick_lookup", "conversational"):
             continue

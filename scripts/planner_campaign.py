@@ -159,8 +159,8 @@ def gpu_config(job: dict, devices: list[int], lane: str, rundir: Path) -> dict:
         "max_model_len": job.get("max_model_len"),
         "gpu_memory_utilization": job.get("gpu_memory_utilization", 0.90),
     }
-    for k in ("kv_cache_dtype", "max_num_seqs", "trust_remote_code",
-              "served_model_name"):
+    for k in ("kv_cache_dtype", "max_num_seqs", "max_num_batched_tokens",
+              "expert_parallel", "trust_remote_code", "served_model_name"):
         if job.get(k) is not None:
             custom[k] = job[k]
     hw = {"count": len(devices), "device_groups": [devices],
@@ -183,11 +183,15 @@ def cpu_config(job: dict, devices: list[int], lane: str, rundir: Path) -> dict:
     engine = copy.deepcopy(job.get("cpu_engine") or {})
     if not engine:
         raise SystemExit(f"job {job['id']}: r770 jobs need cpu_engine")
+    cores = int(job.get("socket_cores") or 86)
+
+    def socket_cpus(d: int) -> str:
+        return ",".join(R770_SOCKET_CPUS[d].split(",")[:cores])
     if engine.get("type") == "sglang":
         if len(devices) > 1 and int(engine.get("tensor_parallel_size", 1)) > 1:
-            engine["cpu_bind"] = "|".join(R770_SOCKET_CPUS[d] for d in devices)
+            engine["cpu_bind"] = "|".join(socket_cpus(d) for d in devices)
         else:
-            engine["cpu_bind"] = R770_SOCKET_CPUS[devices[0]]
+            engine["cpu_bind"] = socket_cpus(devices[0])
         engine["port"] = BASE_PORT + LANE_PORTS * int(devices[0])
         engine.setdefault("docker_extra_env", {})
     else:  # vllm_dual_socket: a replica per socket
@@ -266,38 +270,163 @@ def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
                             env=env, start_new_session=True)
 
 
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _job_outcome(q: Queue, jid: str) -> str:
+    """For a job whose process is not our child (adopted after a runner
+    restart): done when its last run folder has tiers.json."""
+    rds = sorted((q.runs_dir / jid).glob("run_*"))
+    return "done" if rds and (rds[-1] / "tiers.json").exists() else "failed"
+
+
+# ── Engine tuning ──────────────────────────────────────────────────────
+# Tuning jobs carry tune_group (one per model and box) and tune_name;
+# persona jobs carry tune_key. When every job of a group has finished,
+# the runner scores them and writes <state_dir>/tuned/<group>.json; a
+# job with tune_key starts only once that file exists and runs with
+# the winner's settings merged in.
+
+def _tiers(q: Queue, jid: str) -> dict | None:
+    rds = sorted((q.runs_dir / jid).glob("run_*"))
+    if not rds or not (rds[-1] / "tiers.json").exists():
+        return None
+    return json.loads((rds[-1] / "tiers.json").read_text())
+
+
+def pick_tuned(q: Queue, group: str) -> dict:
+    """Winner = highest mean knee across the group's workloads,
+    relative to the group's baseline (tune_name 'default'). The
+    Standard-tier leader is recorded too; when it differs by more than
+    10% it is kept as the latency alternative."""
+    jobs = [j for j in q.jobs if j.get("tune_group") == group]
+    rows = []
+    for j in jobs:
+        t = _tiers(q, j["id"])
+        if not t:
+            rows.append({"name": j.get("tune_name"), "job": j["id"], "ok": False})
+            continue
+        knees, std = {}, {}
+        for wl, e in t["workloads"].items():
+            knees[wl] = e.get("knee_per_min")
+            st = (e.get("tiers") or {}).get("standard") or {}
+            std[wl] = st.get("rate_per_min")
+        rows.append({"name": j.get("tune_name"), "job": j["id"], "ok": True,
+                     "knees": knees, "standard": std,
+                     "overrides": j.get("tune_overrides") or {}})
+    ok = [r for r in rows if r["ok"] and all(v for v in r["knees"].values())]
+    base = next((r for r in ok if r["name"] == "default"), ok[0] if ok else None)
+
+    def rel(r, key):
+        vals = []
+        for wl, v in r[key].items():
+            b = (base or {}).get(key, {}).get(wl)
+            if v and b:
+                vals.append(v / b)
+        return sum(vals) / len(vals) if vals else 0.0
+
+    for r in ok:
+        r["knee_score"] = round(rel(r, "knees"), 3)
+        r["standard_score"] = round(rel(r, "standard"), 3)
+    best = max(ok, key=lambda r: r["knee_score"], default=None)
+    lat = max(ok, key=lambda r: r["standard_score"], default=None)
+    out = {"group": group, "picked_at": now(), "candidates": rows,
+           "winner": best["name"] if best else None,
+           "job_overrides": (best or {}).get("overrides", {})}
+    if lat and best and lat is not best and lat["standard_score"] > 1.1 * best["standard_score"]:
+        out["latency_alternative"] = {"name": lat["name"], "job_overrides": lat["overrides"]}
+    tdir = q.state_dir / "tuned"
+    tdir.mkdir(exist_ok=True)
+    (tdir / f"{group}.json").write_text(json.dumps(out, indent=1))
+    return out
+
+
+def _tuned_overrides(q: Queue, job: dict) -> dict | None:
+    key = job.get("tune_key")
+    if not key:
+        return {}
+    f = q.state_dir / "tuned" / f"{key}.json"
+    if not f.exists():
+        return None
+    return json.loads(f.read_text()).get("job_overrides") or {}
+
+
+def _maybe_pick(q: Queue) -> None:
+    groups = {j["tune_group"] for j in q.jobs if j.get("tune_group")}
+    for g in groups:
+        if (q.state_dir / "tuned" / f"{g}.json").exists():
+            continue
+        states = [q.status.get(j["id"], {}).get("state")
+                  for j in q.jobs if j.get("tune_group") == g]
+        if states and all(s in ("done", "failed") for s in states):
+            pick_tuned(q, g)
+
+
 def run(q: Queue) -> None:
     free = q.total_devices()
-    running: dict[str, tuple[subprocess.Popen, list[int]]] = {}
+    running: dict[str, tuple[subprocess.Popen | None, list[int]]] = {}
+    adopted: dict[str, int] = {}
     stop = {"flag": False}
+    hold = q.state_dir / "HOLD"
+    qmtime = q.path.stat().st_mtime
 
     def _sig(*_):
         stop["flag"] = True
     signal.signal(signal.SIGTERM, _sig)
     signal.signal(signal.SIGINT, _sig)
 
-    for j in q.jobs:  # jobs left "running" by a dead runner start over
+    # A job left "running" by a dead runner: adopt it while its process
+    # lives (it was started in its own session and survives the
+    # runner), else start it over.
+    for j in q.jobs:
         st = q.status.get(j["id"])
         if st and st.get("state") == "running":
-            st["state"] = "pending"
+            if _alive(st.get("pid")):
+                adopted[j["id"]] = int(st["pid"])
+                running[j["id"]] = (None, list(st.get("devices") or []))
+                free = [d for d in free if d not in (st.get("devices") or [])]
+            else:
+                st["state"] = "pending"
     q.save()
 
     while True:
+        # Pick up queue edits (new or reordered jobs) without a restart.
+        try:
+            m = q.path.stat().st_mtime
+            if m != qmtime:
+                qmtime = m
+                fresh = Queue(q.path)
+                q.jobs, q.doc = fresh.jobs, fresh.doc
+        except Exception as e:  # noqa: BLE001 - a bad edit must not kill the runner
+            print(f"{now()} queue reload failed: {e}", flush=True)
         # Reap.
         for jid, (proc, devs) in list(running.items()):
-            rc = proc.poll()
-            if rc is None:
-                continue
-            st = q.status[jid]
-            st.update({"state": "done" if rc == 0 else "failed", "rc": rc,
-                       "finished": now()})
+            if proc is None:
+                if _alive(adopted[jid]):
+                    continue
+                state, rc = _job_outcome(q, jid), None
+            else:
+                rc = proc.poll()
+                if rc is None:
+                    continue
+                state = "done" if rc == 0 else "failed"
+            q.status[jid].update({"state": state, "rc": rc, "finished": now()})
             free = sorted(set(free) | set(devs))
             del running[jid]
             q.save()
+        _maybe_pick(q)
         if stop["flag"]:
-            for proc, _ in running.values():
-                os.killpg(proc.pid, signal.SIGINT)
-            for proc, _ in running.values():
+            for jid, (proc, _) in running.items():
+                if proc is not None:
+                    os.killpg(proc.pid, signal.SIGINT)
+            for jid, (proc, _) in running.items():
+                if proc is None:
+                    continue
                 try:
                     proc.wait(timeout=300)
                 except subprocess.TimeoutExpired:
@@ -305,12 +434,21 @@ def run(q: Queue) -> None:
             return
         # Start in queue order; a job that does not fit blocks those
         # behind it (no back-filling), so whole-box jobs are not starved.
+        # HOLD in the state dir: start nothing new.
         pending = [j for j in q.jobs
                    if q.status.get(j["id"], {}).get("state") in (None, "pending")]
-        for job in pending:
+        for job in ([] if hold.exists() else pending):
             # barrier: wait until everything before it has finished.
             if job.get("barrier") and running:
                 break
+            tuned = _tuned_overrides(q, job)
+            if tuned is None:
+                break  # its model's tuning has not been picked yet
+            # The winner's settings apply except where the job pins its
+            # own (a job that tests one setting keeps its value).
+            pins = set(job.get("pin") or [])
+            tuned = {k: v for k, v in tuned.items() if k not in pins}
+            job = deep_merge(job, tuned)
             need = int(job.get("devices") or 1)
             devs = pick_devices(free, need, q.box)
             if devs is None:
@@ -319,10 +457,12 @@ def run(q: Queue) -> None:
             free = [d for d in free if d not in devs]
             running[job["id"]] = (proc, devs)
             q.status[job["id"]] = {"state": "running", "devices": devs,
-                                   "started": now(), "pid": proc.pid}
+                                   "started": now(), "pid": proc.pid,
+                                   "tuned": tuned or None}
             q.save()
-        if not running and not [j for j in q.jobs
-                                if q.status.get(j["id"], {}).get("state") in (None, "pending")]:
+        if not running and not hold.exists() and not [
+                j for j in q.jobs
+                if q.status.get(j["id"], {}).get("state") in (None, "pending")]:
             return
         time.sleep(10)
 

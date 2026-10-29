@@ -113,8 +113,8 @@ def gjob(jid, key, workloads, gpus=None, **kw):
     if key in TUNED_GPU_KEYS:
         j["tune_key"] = f"{key}-gpu"
     j.update(kw)
-    if j.get("tune_group"):
-        j.pop("tune_key", None)
+    if j.get("tune_group") or jid.startswith("G0"):
+        j.pop("tune_key", None)  # setup runs use engine defaults
     return j
 
 
@@ -144,6 +144,12 @@ def xe7740() -> dict:
                          pin=["kv_cache_dtype"]))
     for w in ["document_qa", "agent_task_runner", "meeting_summary"]:
         jobs.append(gjob(f"G1.5-qwen30b-1gpu-{w}-ctx128k", q, w, 1, max_model_len=131072))
+    # G1.7: prefix cache off on the multi-turn personas -- what reuse
+    # of a session's own history is worth (cross-user reuse is
+    # prevented by unique prompt text).
+    for w in HISTORY:
+        jobs.append(gjob(f"G1.7-qwen30b-1gpu-{w}-nocache", q, w, 1,
+                         engine_extra={"vllm_extra_flags": ["--no-enable-prefix-caching"]}))
     for mix in MIX6:
         jobs.append(gjob(f"G1.6-qwen30b-1gpu-{mix}", q, mix, 1))
     for eng in ["sglang_cuda", "trtllm"]:
@@ -306,6 +312,10 @@ def r770() -> dict:
         jobs.append(cjob(f"C1.6-qwen30b-1s-{w}-ctx128k", m, loc, qn, w, 1,
                          max_model_len=131072,
                          cpu_engine_extra={"context_length": 131072}))
+    for w in HISTORY:
+        jobs.append(cjob(f"C1.8-qwen30b-1s-{w}-nocache", m, loc, qn, w, 1,
+                         cpu_engine_extra={"sglang_extra_flags": ["--disable-radix-cache"]},
+                         pin=["cpu_engine"]))
     # Two sockets: one instance per socket (TP2 and SNC layouts run as
     # separate jobs once the per-socket baseline is in).
     for w in ["quick_lookup", "document_qa", "long_form_generator"]:

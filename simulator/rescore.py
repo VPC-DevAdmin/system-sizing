@@ -57,7 +57,7 @@ PROMPT_FREE_TOKENS = 2000
 # Window values carried to each capacity point.
 CARRIED = ("rate_per_min", "sessions", "in_flight", "turns_per_s",
            "prompt_tok_per_s", "output_tok_per_s", "power_w", "gpu_power_w",
-           "wall_power_w", "kv_cache_pct", "error_rate")
+           "wall_power_w", "kv_cache_pct", "error_rate", "prefix_hit_rate")
 
 
 def load_wall_power(path: str | None) -> list[tuple[float, float]]:
@@ -93,7 +93,8 @@ def _load_windows(conn: sqlite3.Connection, cohort_run_id: str,
                   wall: list[tuple[float, float]] | None = None) -> list[Window]:
     import datetime as _dt
     rows = conn.execute(
-        """SELECT measurement_id, arrival_rate_per_min, stability, measurement_started_at,
+        """SELECT measurement_id, arrival_rate_per_min, stability, stability_detail,
+                  measurement_started_at,
                   measured_avg_pool_size, measured_avg_in_flight,
                   measurement_duration_s, power_w_avg, gpu_power_w_avg,
                   avg_kv_cache_pct
@@ -103,7 +104,11 @@ def _load_windows(conn: sqlite3.Connection, cohort_run_id: str,
         (cohort_run_id,),
     ).fetchall()
     out = []
-    for mid, rate, stab, started, sessions, inflight, dur, pw, gpw, kv in rows:
+    for mid, rate, stab, detail, started, sessions, inflight, dur, pw, gpw, kv in rows:
+        try:
+            phit = json.loads(detail or "{}").get("prefix_hit_rate")
+        except ValueError:
+            phit = None
         turns = conn.execute(
             """SELECT ttft_ms, ttfct_ms, tpot_ms, input_tokens, history_tokens,
                       output_tokens, error
@@ -128,6 +133,7 @@ def _load_windows(conn: sqlite3.Connection, cohort_run_id: str,
             "power_w": pw,
             "gpu_power_w": gpw,
             "wall_power_w": wall_w,
+            "prefix_hit_rate": phit,
             "kv_cache_pct": kv,
             "error_rate": (sum(1 for t in turns if t[6]) / n) if n else 0.0,
             "measurement_id": mid,

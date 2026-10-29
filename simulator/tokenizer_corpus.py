@@ -58,9 +58,16 @@ class TokenCorpus:
 
     def make_text(self, target_tokens: int, rng: random.Random) -> str:
         target_tokens = max(1, int(target_tokens))
-        # Build by repeating shuffled paragraphs until we exceed target,
-        # then trim from the end at word boundaries.
-        chunks: list[str] = []
+        # Every text opens with a reference no other text shares. The
+        # paragraphs come from a small fixed set, so without it two
+        # sessions' prompts often share their first few paragraphs and
+        # the engine serves that prefix from cache across users -- a
+        # hit no real deployment gets. The reference comes from the OS,
+        # not ``rng``: seeded generators repeat across workers, runs
+        # and workloads on the same engine. Reuse of a session's own
+        # history (its earlier turns, sent again verbatim) is untouched.
+        import uuid as _uuid
+        chunks: list[str] = [f"Ref {_uuid.uuid4().hex[:16]}."]
         current_tokens = 0
         guard = 0
         while current_tokens < target_tokens and guard < 1000:

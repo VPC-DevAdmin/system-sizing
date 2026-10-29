@@ -984,6 +984,12 @@ class OpenLoopRunner:
         self.telemetry.start(measurement_id)
 
         turns: list[dict] = []
+        # Engine prefix-cache counters at the first and last tick of
+        # the window (vLLM), or the hit-rate gauge (SGLang): how much
+        # prompt work the cache served in THIS window.
+        pc_first: tuple[float, float] | None = None
+        pc_last: tuple[float, float] | None = None
+        pc_gauge: list[float] = []
         queue_series: list[float] = []
         inflight_series: list[float] = []
         running_series: list[float] = []   # engine num_running gauge
@@ -1006,6 +1012,13 @@ class OpenLoopRunner:
                 tick_end = time.monotonic() + 1.0
                 m = await self._sample_engine()
                 agg = self.pool.aggregate()
+                if m.get("prefix_cache_queries") is not None:
+                    pc = (float(m.get("prefix_cache_hits") or 0.0),
+                          float(m["prefix_cache_queries"]))
+                    pc_first = pc_first or pc
+                    pc_last = pc
+                elif m.get("prefix_cache_hit_rate") is not None:
+                    pc_gauge.append(float(m["prefix_cache_hit_rate"]))
                 qd = m.get("queue_depth")
                 if qd is not None:
                     queue_series.append(float(qd))
@@ -1111,6 +1124,11 @@ class OpenLoopRunner:
         verdict_dict["served_basis"] = served_basis
         verdict_dict["warmup_s"] = round(warmup_s, 1)
         verdict_dict["settled"] = settled
+        if pc_first and pc_last and pc_last[1] > pc_first[1]:
+            verdict_dict["prefix_hit_rate"] = round(
+                (pc_last[0] - pc_first[0]) / (pc_last[1] - pc_first[1]), 4)
+        elif pc_gauge:
+            verdict_dict["prefix_hit_rate"] = round(statistics.fmean(pc_gauge), 4)
 
         agg1 = self.pool.aggregate()
         d_arrivals = max(0, (agg1.get("arrivals_total", 0) if agg1 else 0)
@@ -1167,7 +1185,14 @@ class OpenLoopRunner:
         # construction whatever the in-window samples happened to say.
         if stability == DIVERGENT and self.cfg.simulation.open_loop_sla_gate:
             sla_pass = False
-        if summary.get("sample_size", 0) > 0:
+        # Only a stable window's reply times describe the sessions a
+        # seeded population should resemble: near and past the knee
+        # they stretch with the backlog, and seeding the next step from
+        # them over-fills it (the XE7740 shakedown seeded 2.8x the
+        # sessions on its bisection steps).
+        if (summary.get("sample_size", 0) > 0 and stability == STABLE
+                and (summary.get("error_rate") or 0.0)
+                < self.cfg.simulation.open_loop_error_ceiling):
             ok_turns = [t for t in turns if not t.get("error")]
             if ok_turns:
                 ttft_med = statistics.median(t["ttft_ms"] for t in ok_turns)

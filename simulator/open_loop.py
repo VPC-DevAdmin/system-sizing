@@ -425,6 +425,20 @@ class WorkerPool:
         for w in self._workers:
             await self._send(w, {"cmd": "trim", "target": per})
 
+    async def seed(self, target_total: int, weights: dict[str, float]) -> None:
+        """Bring the active population to ``target_total`` sessions
+        across workers (evenly split): new ones join mid-session, with
+        persona odds ``weights`` (share x mean session length, i.e. the
+        mix of an equilibrium population, not of arrivals)."""
+        if not self._workers:
+            return
+        k = len(self._workers)
+        base, rem = divmod(max(0, int(target_total)), k)
+        for i, w in enumerate(self._workers):
+            await self._send(w, {"cmd": "seed",
+                                 "target": base + (1 if i < rem else 0),
+                                 "weights": weights})
+
     async def set_outstanding(self, total: int) -> None:
         """Saturation mode: hold ``total`` sessions active across the
         workers (each respawns as its sessions finish)."""
@@ -527,6 +541,35 @@ class _WindowResult:
     measurement_id: int | None
     active_sessions_mean: float = 0.0
     inflight_mean: float = 0.0
+    error_rate: float = 0.0
+
+
+def _session_length_model(cohort, ttft_s: float, tpot_s: float,
+                          samples: int = 2000) -> dict[str, float]:
+    """Expected session length per persona, in seconds: turns x (first
+    token + reply at ``tpot_s`` per token) plus the think gaps between
+    turns. Sampled from the persona's own distributions, seeded, so it
+    is stable across calls. Used to size the seeded population."""
+    import random as _random
+
+    from .personas import PERSONAS
+    rng = _random.Random(1234)
+    out: dict[str, float] = {}
+    for pid in cohort.persona_weights:
+        p = PERSONAS.get(pid)
+        if p is None:
+            continue
+        total = 0.0
+        for _ in range(samples):
+            n = p.turns_per_session.sample_int(rng)
+            busy = sum(ttft_s + p.output_tokens.sample(rng) * tpot_s
+                       for _ in range(n))
+            gaps = sum(p.read_time_seconds.sample(rng)
+                       + p.active_think_seconds.sample(rng)
+                       for _ in range(max(0, n - 1)))
+            total += busy + gaps
+        out[pid] = total / samples
+    return out
 
 
 def _summarize_turns(turns: list[dict]) -> dict:
@@ -581,6 +624,7 @@ def _summarize_turns(turns: list[dict]) -> dict:
         "capacity_status": _classify_status(comb_v, n),
         "target_status": _classify_status(comb_m, n),
         "combined_violations": comb_v,
+        "error_rate": sum(1 for t in turns if t.get("error")) / n,
     }
 
 
@@ -663,6 +707,11 @@ class OpenLoopRunner:
             max_rate_per_s=sim.open_loop_max_rate_per_s,
             resolution_ratio=1.0 + max(
                 0.5, getattr(sim, "open_loop_resolution_pct", 5.0)) / 100.0,
+            sla_gate=sim.open_loop_sla_gate,
+            step_factor=sim.open_loop_step_factor,
+            error_ceiling=sim.open_loop_error_ceiling,
+            backfill_factor=sim.open_loop_backfill_factor,
+            backfill_floor_ratio=sim.open_loop_backfill_floor_ratio,
         )
         self.pool = WorkerPool(
             base_config={
@@ -677,6 +726,16 @@ class OpenLoopRunner:
                     else None
                 ),
                 "seed": 0xC0FFEE,
+                "history_window_turns": sim.history_window_turns,
+                "context_limit_tokens": (
+                    sim.context_limit_tokens
+                    or getattr(cfg.engine, "max_model_len", None)
+                ),
+                "planner_timeouts": (
+                    {"ttft_s": sim.planner_ttft_timeout_s,
+                     "gap_s": sim.planner_gap_timeout_s}
+                    if sim.planner_timeouts else None
+                ),
             },
             log_dir=run_dir,
             max_workers=sim.open_loop_max_workers,
@@ -707,6 +766,9 @@ class OpenLoopRunner:
         self._last_inflight_mean: float | None = None
         self._last_stable: dict | None = None  # {rate, sessions}
         self._queue_gauge_seen = False
+        # Last window's median first-token and per-token times, for
+        # the seeded-population estimate.
+        self._lat_guess: tuple[float, float] = (1.0, 0.05)
 
     # ── Engine pressure sampling ────────────────────────────────────
 
@@ -777,7 +839,9 @@ class OpenLoopRunner:
         base = float(sim.open_loop_warmup_s)
         agg = self.pool.aggregate()
         mean_sess = float(agg.get("mean_session_s") or 0.0) if agg else 0.0
-        minimum = max(base, min(300.0, mean_sess)) if mean_sess else base
+        minimum = (max(base, min(300.0, mean_sess))
+                   if mean_sess and sim.open_loop_warmup_follows_sessions
+                   else base)
         cap = sim.open_loop_settle_max_s
         cap_s = (
             max(300.0, 1.5 * mean_sess) if cap is None else float(cap)
@@ -787,6 +851,9 @@ class OpenLoopRunner:
             SETTLE_WINDOW_CAP_S,
             max(sim.open_loop_settle_window_s, 0.2 * mean_sess),
         ))
+        # A trailing window longer than the cap can never fill before
+        # the cap ends warmup, so it would never read settled.
+        window_n = min(window_n, max(2, int(cap_s) - 1))
         return minimum, cap_s, max(2, window_n)
 
     async def _measure_window(
@@ -794,6 +861,19 @@ class OpenLoopRunner:
     ) -> _WindowResult:
         self.current_rate = rate_per_s
         await self.pool.set_rate(rate_per_s)
+        if self.cfg.simulation.open_loop_seed_sessions:
+            lengths = _session_length_model(self.cohort, *self._lat_guess)
+            w = self.cohort.persona_weights
+            mean_len = sum(w[p] * lengths.get(p, 0.0) for p in w) / max(
+                1e-9, sum(w.values()))
+            agg_s = self.pool.aggregate()
+            measured = float(agg_s.get("mean_session_s") or 0.0) if agg_s else 0.0
+            target = int(round(rate_per_s * max(mean_len, measured)))
+            log.info("rate %.3g/s: seeding the population to %d sessions "
+                     "(mean session %.0fs)", rate_per_s, target,
+                     max(mean_len, measured))
+            await self.pool.seed(
+                target, {p: w[p] * lengths.get(p, 0.0) for p in w})
 
         self.phase = "warmup"
         warmup_min, settle_cap, settle_n = self._warmup_plan()
@@ -1080,12 +1160,22 @@ class OpenLoopRunner:
         # of the combined violation rate is below 5 % — a "marginal"
         # window is an SLA fail for the search.
         sla_pass: bool | None = None
-        if stability == STABLE and summary["sample_size"] > 0:
+        if (stability == STABLE and summary["sample_size"] > 0
+                and self.cfg.simulation.open_loop_sla_gate):
             sla_pass = summary["capacity_status"] == "pass"
         # A divergent window means unbounded latency — SLA fails by
         # construction whatever the in-window samples happened to say.
-        if stability == DIVERGENT:
+        if stability == DIVERGENT and self.cfg.simulation.open_loop_sla_gate:
             sla_pass = False
+        if summary.get("sample_size", 0) > 0:
+            ok_turns = [t for t in turns if not t.get("error")]
+            if ok_turns:
+                ttft_med = statistics.median(t["ttft_ms"] for t in ok_turns)
+                tp = [t["tpot_ms"] for t in ok_turns if t.get("tpot_ms")]
+                self._lat_guess = (
+                    ttft_med / 1000.0,
+                    (statistics.median(tp) / 1000.0) if tp else self._lat_guess[1],
+                )
 
         active_mean = (
             statistics.fmean(active_series) if active_series else 0.0
@@ -1125,7 +1215,7 @@ class OpenLoopRunner:
         if summary["sample_size"] > 0:
             final_row.update({
                 k: v for k, v in summary.items()
-                if k not in ("combined_violations",)
+                if k not in ("combined_violations", "error_rate")
             })
         else:
             final_row.update({
@@ -1179,6 +1269,7 @@ class OpenLoopRunner:
             measurement_id=measurement_id,
             active_sessions_mean=active_mean,
             inflight_mean=inflight_mean,
+            error_rate=summary.get("error_rate", 0.0) or 0.0,
         )
 
     def _mark_superseded(self, measurement_id: int | None) -> None:
@@ -1345,18 +1436,18 @@ class OpenLoopRunner:
                     self.phase = "starting load workers"
                     await self.pool.scale_to(target)
                     result = await self._measure_window(rate, window_s)
-                self.stepper.record(RateStep(
+                step = RateStep(
                     rate_per_s=rate,
                     stability=result.stability,
                     sla_pass=result.sla_pass,
                     violation_rate=result.violation_rate,
                     target_miss_rate=result.target_miss_rate,
                     sample_size=result.sample_size,
-                ))
+                    error_rate=result.error_rate,
+                )
+                self.stepper.record(step)
                 last_rate = rate
-                from .rate_search import HOPELESS_VIOLATION
-                hopeless = (result.stability == STABLE and result.sla_pass is False
-                            and result.violation_rate >= HOPELESS_VIOLATION)
+                hopeless = self.stepper.is_ceiling_step(step)
                 if result.stability == STABLE and not hopeless:
                     self._last_stable = {
                         "rate": rate,

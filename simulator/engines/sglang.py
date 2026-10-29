@@ -34,6 +34,8 @@ from typing import Optional
 
 import httpx
 
+from .docker_replica import lane_tag
+
 from ..cpu_binding import derive_sglang_thread_binding, flatten_for_taskset
 from .base import Engine
 
@@ -192,7 +194,7 @@ class SGLangEngine(Engine):
 
     def _build_docker_command(self) -> list[str]:
         cfg = self.cfg
-        name = f"sglang-{uuid.uuid4().hex[:12]}"
+        name = f"sglang-{lane_tag()}{uuid.uuid4().hex[:12]}"
 
         # cpuset for the container is the flat union of cpu_bind groups;
         # the per-worker thread binding goes into SGLANG_CPU_OMP_THREADS_BIND.

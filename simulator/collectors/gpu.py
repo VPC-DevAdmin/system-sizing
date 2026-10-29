@@ -20,6 +20,7 @@ the GPU telemetry columns.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -188,11 +189,19 @@ class GpuCollector:
             return None
         try:
             if self._mode == "nvml":
-                return self._sample_nvml_devices()
-            return self._sample_smi_devices()
+                devices = self._sample_nvml_devices()
+            else:
+                devices = self._sample_smi_devices()
         except Exception as e:  # noqa: BLE001
             log.debug("gpu sample failed: %s", e)
             return None
+        # A lane (one of several runs sharing the box) reads only its
+        # own GPUs: CAPSIM_GPU_INDEXES="0,1".
+        allowed = os.environ.get("CAPSIM_GPU_INDEXES", "").strip()
+        if allowed and devices:
+            keep = {int(x) for x in allowed.split(",") if x.strip().isdigit()}
+            devices = [d for d in devices if d.get("index") in keep]
+        return devices
 
     def _sample_nvml_devices(self) -> list[dict]:
         nv = self._nvml

@@ -39,6 +39,7 @@ PHASE_DOUBLING = "doubling"
 PHASE_DOWNWARD = "downward"
 PHASE_BISECT_STABILITY = "bisect_stability"
 PHASE_BISECT_SLA = "bisect_sla"
+PHASE_BACKFILL = "backfill"
 PHASE_DONE = "done"
 
 
@@ -54,6 +55,9 @@ class RateStep:
     violation_rate: float = 0.0
     target_miss_rate: float = 0.0
     sample_size: int = 0
+    # Share of the window's turns that errored or timed out. The
+    # ceiling signal when the SLA gate is off.
+    error_rate: float = 0.0
 
 
 # A stable window whose violation rate is at least this is a ceiling,
@@ -96,11 +100,24 @@ class RateStepper:
         # Each bisection halves the bracket in log space, so tightening
         # from 30% to 5% costs ~3 extra windows.
         resolution_ratio: float = 1.05,
+        # Planner campaign mode: no SLA bisection, ceilings from errors
+        # and timeouts instead of SLA violations, configurable growth
+        # per step, and a backfill pass of stable rates below the knee.
+        sla_gate: bool = True,
+        step_factor: float = 2.0,
+        error_ceiling: float = 0.05,
+        backfill_factor: Optional[float] = None,
+        backfill_floor_ratio: float = 8.0,
     ):
         self.initial_rate = _round_rate(initial_rate_per_s)
         self.max_rate = max_rate_per_s
         self.min_rate = min_rate_per_s
         self.resolution_ratio = resolution_ratio
+        self.sla_gate = sla_gate
+        self.step_factor = max(1.05, float(step_factor))
+        self.error_ceiling = error_ceiling
+        self.backfill_factor = backfill_factor
+        self.backfill_floor_ratio = backfill_floor_ratio
         self.history: list[RateStep] = []
         self.phase = PHASE_DOUBLING
 
@@ -121,6 +138,8 @@ class RateStepper:
                 nxt = self._next_bisect_stability()
             elif self.phase == PHASE_BISECT_SLA:
                 nxt = self._next_bisect_sla()
+            elif self.phase == PHASE_BACKFILL:
+                nxt = self._next_backfill()
             else:
                 return None
             if nxt is not None:
@@ -136,11 +155,23 @@ class RateStepper:
 
     # ── Phase logic ──────────────────────────────────────────────────
 
+    def is_ceiling_step(self, step: RateStep) -> bool:
+        """A "stable" window that still bounds the search from above:
+        timeouts are draining the queue. Without the SLA gate the
+        evidence is the error and timeout share, not SLA violations."""
+        if self.sla_gate:
+            return _hopeless(step)
+        return step.stability == STABLE and step.error_rate >= self.error_ceiling
+
+    def _after_stability(self) -> str:
+        return PHASE_BISECT_SLA if self.sla_gate else PHASE_BACKFILL
+
     def _measured(self) -> set[float]:
         return {_round_rate(s.rate_per_s) for s in self.history}
 
     def _stable(self) -> list[RateStep]:
-        return [s for s in self.history if s.stability == STABLE and not _hopeless(s)]
+        return [s for s in self.history
+                if s.stability == STABLE and not self.is_ceiling_step(s)]
 
     def _ceilings(self) -> list[RateStep]:
         """Steps that bound the search from above: divergent (the
@@ -148,21 +179,21 @@ class RateStepper:
         hopeless "stable" window (timeouts draining the queue)."""
         return [
             s for s in self.history
-            if s.stability in (DIVERGENT, CLIENT_LIMITED) or _hopeless(s)
+            if s.stability in (DIVERGENT, CLIENT_LIMITED) or self.is_ceiling_step(s)
         ]
 
     def _next_doubling(self) -> Optional[float]:
         last = self.history[-1]
-        if last.stability != STABLE or _hopeless(last):
+        if last.stability != STABLE or self.is_ceiling_step(last):
             if len(self.history) == 1:
                 self.phase = PHASE_DOWNWARD
             else:
                 self.phase = PHASE_BISECT_STABILITY
             return None
         if last.rate_per_s >= self.max_rate:
-            self.phase = PHASE_BISECT_SLA  # capped — no upper bracket
+            self.phase = self._after_stability()  # capped — no upper bracket
             return None
-        nxt = min(self.max_rate, last.rate_per_s * 2.0)
+        nxt = min(self.max_rate, last.rate_per_s * self.step_factor)
         if _round_rate(nxt) in self._measured():
             self.phase = PHASE_BISECT_STABILITY
             return None
@@ -174,7 +205,7 @@ class RateStepper:
             s for s in self.history
             if _round_rate(s.rate_per_s) == _round_rate(smallest)
         )
-        if smallest_step.stability == STABLE and not _hopeless(smallest_step):
+        if smallest_step.stability == STABLE and not self.is_ceiling_step(smallest_step):
             self.phase = PHASE_BISECT_STABILITY
             return None
         if smallest <= self.min_rate:
@@ -207,9 +238,35 @@ class RateStepper:
             [s.rate_per_s for s in self._ceilings()],
         )
         if mid is None:
-            self.phase = PHASE_BISECT_SLA
+            self.phase = self._after_stability()
             return None
         return mid
+
+    def _next_backfill(self) -> Optional[float]:
+        """Lowest missing point of the geometric grid below the knee:
+        knee / f, knee / f^2, ... down to knee / floor_ratio. A grid
+        point counts as measured when a stable rate lies within half a
+        grid step of it. Ascending, so each window adds sessions."""
+        f = self.backfill_factor
+        stable = self._stable()
+        if not f or f <= 1.0 or not stable:
+            self.phase = PHASE_DONE
+            return None
+        knee = max(s.rate_per_s for s in stable)
+        floor = knee / max(1.0, self.backfill_floor_ratio)
+        half = f ** 0.5
+        grid = []
+        r = knee / f
+        while r >= floor * 0.999 and r >= self.min_rate:
+            grid.append(r)
+            r /= f
+        rates = [s.rate_per_s for s in self.history]
+        missing = [g for g in sorted(grid)
+                   if not any(g / half <= x <= g * half for x in rates)]
+        if not missing:
+            self.phase = PHASE_DONE
+            return None
+        return missing[0]
 
     def _next_bisect_sla(self) -> Optional[float]:
         stable = self._stable()
@@ -236,7 +293,7 @@ class RateStepper:
 
         rate_max = max((s.rate_per_s for s in stable), default=None)
         passes = [s.rate_per_s for s in stable if s.sla_pass]
-        rate_sla = max(passes, default=None)
+        rate_sla = max(passes, default=None) if self.sla_gate else None
 
         # Coverage semantics (mirrors the closed-loop labels):
         #   full_curve      — stability boundary bracketed by real

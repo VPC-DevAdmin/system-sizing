@@ -35,7 +35,7 @@ from .base import Engine, redact_argv
 # Stale-container sweep is shared: a leftover trtllm-* container would
 # hold port 9100 and answer health checks for the WRONG engine, so it
 # must be swept before a vLLM launch too.
-from .docker_replica import remove_stale_engine_containers  # noqa: F401
+from .docker_replica import lane_tag, remove_stale_engine_containers  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -187,7 +187,7 @@ class VllmCudaEngine(Engine):
 
     def _build_docker_command(self) -> list[str]:
         cfg = self.cfg
-        name = f"vllm-cuda-{uuid.uuid4().hex[:12]}"
+        name = f"vllm-cuda-{lane_tag()}{uuid.uuid4().hex[:12]}"
 
         if cfg.gpu_device_ids:
             gpus_arg = "device=" + ",".join(str(i) for i in cfg.gpu_device_ids)

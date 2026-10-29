@@ -1,0 +1,267 @@
+# Planner campaign personas and team mixes (site additions, merged over
+# simulator/personas_data/default.yaml at load).
+#
+# The planner campaign runs open loop with the SLA gate off
+# (simulation.open_loop_sla_gate: false), so the sla blocks below only
+# set the informational flags in turn_events. Service levels are
+# applied after the run by simulator.rescore. Values here are the
+# Relaxed tier.
+
+personas:
+  knowledge_search:
+    name: "Knowledge search"
+    description: "Intranet search with retrieved passages in the prompt (RAG)"
+    input_tokens: {lognormal: {median: 6000, sigma: 0.35}}
+    output_tokens: {lognormal: {median: 300, sigma: 0.4}}
+    turns_per_session: {discrete: {1: 0.6, 2: 0.3, 3: 0.1}}
+    sessions_before_leaving: {discrete: {3: 0.3, 6: 0.4, 12: 0.3}}
+    inter_session_gap_seconds: {lognormal: {median: 600, sigma: 1.0}}
+    read_time_seconds: {lognormal: {median: 25, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 30, sigma: 0.6}}
+    sla:
+      ttft_target_seconds: 12.0
+      ttft_failure_seconds: 36.0
+      tpot_target_ms: 143.0
+      tpot_failure_ms: 225.0
+
+  agent_task_runner:
+    name: "Agent task runner"
+    description: "Tool-calling agent, machine-paced; context grows every step"
+    input_tokens: {lognormal: {median: 1500, sigma: 0.5}}
+    output_tokens: {lognormal: {median: 150, sigma: 0.5}}
+    turns_per_session: {discrete: {8: 0.3, 15: 0.4, 30: 0.3}}
+    sessions_before_leaving: {discrete: {5: 0.4, 10: 0.4, 20: 0.2}}
+    inter_session_gap_seconds: {lognormal: {median: 900, sigma: 1.0}}
+    # Tool execution between steps, not human reading.
+    read_time_seconds: {lognormal: {median: 0.5, sigma: 0.3}}
+    active_think_seconds: {lognormal: {median: 2, sigma: 0.5}}
+    sla:
+      ttft_target_seconds: 10.0
+      ttft_failure_seconds: 30.0
+      tpot_target_ms: 143.0
+      tpot_failure_ms: 225.0
+
+  meeting_summary:
+    name: "Meeting summaries"
+    description: "Transcripts and call notes summarised"
+    input_tokens: {lognormal: {median: 12000, sigma: 0.5}}
+    output_tokens: {lognormal: {median: 600, sigma: 0.4}}
+    turns_per_session: {discrete: {1: 0.7, 2: 0.3}}
+    sessions_before_leaving: {discrete: {1: 0.5, 2: 0.3, 4: 0.2}}
+    inter_session_gap_seconds: {lognormal: {median: 1800, sigma: 1.0}}
+    read_time_seconds: {lognormal: {median: 60, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 60, sigma: 0.6}}
+    sla:
+      ttft_target_seconds: 20.0
+      ttft_failure_seconds: 60.0
+      tpot_target_ms: 143.0
+      tpot_failure_ms: 225.0
+
+  translation:
+    name: "Translation"
+    description: "Documents and messages translated; reply about as long as the prompt"
+    input_tokens: {lognormal: {median: 800, sigma: 0.6}}
+    output_tokens: {lognormal: {median: 900, sigma: 0.6}}
+    turns_per_session: {discrete: {1: 0.5, 2: 0.3, 3: 0.2}}
+    sessions_before_leaving: {discrete: {2: 0.4, 5: 0.4, 10: 0.2}}
+    inter_session_gap_seconds: {lognormal: {median: 900, sigma: 1.0}}
+    read_time_seconds: {lognormal: {median: 30, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 30, sigma: 0.6}}
+    sla:
+      ttft_target_seconds: 10.0
+      ttft_failure_seconds: 30.0
+      tpot_target_ms: 143.0
+      tpot_failure_ms: 225.0
+
+  customer_assistant:
+    name: "Customer-facing assistant"
+    description: "External customers; policy context in every prompt"
+    input_tokens: {lognormal: {median: 600, sigma: 0.3}}
+    output_tokens: {lognormal: {median: 120, sigma: 0.4}}
+    turns_per_session: {discrete: {4: 0.3, 6: 0.4, 10: 0.3}}
+    sessions_before_leaving: {discrete: {1: 0.7, 2: 0.3}}
+    inter_session_gap_seconds: {lognormal: {median: 3600, sigma: 1.0}}
+    read_time_seconds: {lognormal: {median: 8, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 15, sigma: 0.6}}
+    sla:
+      ttft_target_seconds: 5.0
+      ttft_failure_seconds: 15.0
+      tpot_target_ms: 67.0
+      tpot_failure_ms: 143.0
+
+  voice_assistant:
+    name: "Voice assistant"
+    description: "Spoken turns; scored at Responsive only"
+    input_tokens: {lognormal: {median: 150, sigma: 0.4}}
+    output_tokens: {lognormal: {median: 60, sigma: 0.4}}
+    turns_per_session: {discrete: {5: 0.3, 8: 0.4, 15: 0.3}}
+    sessions_before_leaving: {discrete: {1: 0.6, 3: 0.4}}
+    inter_session_gap_seconds: {lognormal: {median: 1800, sigma: 1.0}}
+    # Listening to the spoken reply, then speaking the next turn.
+    read_time_seconds: {lognormal: {median: 3, sigma: 0.4}}
+    active_think_seconds: {lognormal: {median: 4, sigma: 0.5}}
+    sla:
+      ttft_target_seconds: 0.8
+      ttft_failure_seconds: 3.0
+      tpot_target_ms: 29.0
+      tpot_failure_ms: 67.0
+
+  coding_agent:
+    name: "Coding agent"
+    description: "Repository-aware agent; context grows to the limit over a session"
+    input_tokens: {lognormal: {median: 3000, sigma: 0.6}}
+    output_tokens: {lognormal: {median: 800, sigma: 0.5}}
+    turns_per_session: {discrete: {10: 0.3, 20: 0.4, 40: 0.3}}
+    sessions_before_leaving: {discrete: {2: 0.4, 4: 0.4, 8: 0.2}}
+    inter_session_gap_seconds: {lognormal: {median: 1200, sigma: 1.0}}
+    read_time_seconds: {lognormal: {median: 1, sigma: 0.4}}
+    active_think_seconds: {lognormal: {median: 5, sigma: 0.6}}
+    sla:
+      ttft_target_seconds: 20.0
+      ttft_failure_seconds: 60.0
+      tpot_target_ms: 143.0
+      tpot_failure_ms: 225.0
+
+  reasoning_analysis:
+    name: "Analysis with reasoning"
+    description: "Reasoning models: hidden reasoning before a 600-token answer"
+    input_tokens: {lognormal: {median: 1500, sigma: 0.5}}
+    output_tokens: {lognormal: {median: 600, sigma: 0.4}}
+    turns_per_session: {discrete: {1: 0.5, 2: 0.3, 3: 0.2}}
+    sessions_before_leaving: {discrete: {2: 0.5, 5: 0.5}}
+    inter_session_gap_seconds: {lognormal: {median: 1800, sigma: 1.0}}
+    read_time_seconds: {lognormal: {median: 60, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 90, sigma: 0.6}}
+    sla:
+      ttft_target_seconds: 20.0
+      ttft_failure_seconds: 60.0
+      tpot_target_ms: 143.0
+      tpot_failure_ms: 225.0
+
+  document_extraction:
+    name: "Document extraction"
+    description: "Back-office JSON extraction; batch tier"
+    input_tokens: {lognormal: {median: 4000, sigma: 0.5}}
+    output_tokens: {lognormal: {median: 250, sigma: 0.3}}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {discrete: {50: 1.0}}
+    inter_session_gap_seconds: {lognormal: {median: 5, sigma: 0.5}}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    sla:
+      ttft_target_seconds: 60.0
+      ttft_failure_seconds: 180.0
+      tpot_target_ms: 143.0
+      tpot_failure_ms: 300.0
+
+  inbox_triage:
+    name: "Inbox triage"
+    description: "Classify and route messages; high volume, batch tier"
+    input_tokens: {lognormal: {median: 700, sigma: 0.5}}
+    output_tokens: {lognormal: {median: 20, sigma: 0.4}}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {discrete: {100: 1.0}}
+    inter_session_gap_seconds: {lognormal: {median: 2, sigma: 0.5}}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    sla:
+      ttft_target_seconds: 60.0
+      ttft_failure_seconds: 180.0
+      tpot_target_ms: 143.0
+      tpot_failure_ms: 300.0
+
+cohorts:
+  contact_centre:
+    name: "Contact centre"
+    description: "Customer chat and voice, triage and call notes"
+    persona_weights:
+      customer_assistant: 0.40
+      voice_assistant: 0.25
+      quick_lookup: 0.15
+      inbox_triage: 0.10
+      meeting_summary: 0.10
+
+  helpdesk:
+    name: "IT and HR help desk"
+    description: "Knowledge search, chat and simple agents"
+    persona_weights:
+      knowledge_search: 0.40
+      conversational: 0.25
+      quick_lookup: 0.20
+      agent_task_runner: 0.15
+
+  legal:
+    name: "Legal"
+    description: "Long documents, research and drafting"
+    persona_weights:
+      document_qa: 0.40
+      knowledge_search: 0.20
+      writer: 0.15
+      reasoning_analysis: 0.15
+      meeting_summary: 0.10
+
+  sales:
+    name: "Sales and account teams"
+    description: "Drafting, research, call notes and translation"
+    persona_weights:
+      writer: 0.30
+      knowledge_search: 0.20
+      meeting_summary: 0.20
+      quick_lookup: 0.15
+      translation: 0.15
+
+  engineering_agents:
+    name: "Engineering with agents"
+    description: "Coding agents alongside editor assistance"
+    persona_weights:
+      coding_agent: 0.35
+      code_assist: 0.30
+      agent_task_runner: 0.20
+      knowledge_search: 0.10
+      quick_lookup: 0.05
+
+  finance_ops:
+    name: "Finance operations"
+    description: "Back-office extraction and triage with analysis"
+    persona_weights:
+      document_extraction: 0.40
+      inbox_triage: 0.20
+      document_qa: 0.20
+      reasoning_analysis: 0.10
+      writer: 0.10
+
+  multilingual_ops:
+    name: "Multilingual operations"
+    description: "Translation-heavy operations"
+    persona_weights:
+      translation: 0.40
+      conversational: 0.25
+      knowledge_search: 0.20
+      writer: 0.15
+
+  healthcare_admin:
+    name: "Healthcare administration"
+    description: "Visit notes, form extraction and policy search"
+    persona_weights:
+      meeting_summary: 0.40
+      document_extraction: 0.25
+      knowledge_search: 0.20
+      writer: 0.15
+
+  whole_company:
+    name: "Whole company"
+    description: "Headcount blend: knowledge work 40, support 15, engineering 15, sales 10, finance 10, legal 5, help desk 5"
+    persona_weights:
+      quick_lookup: 0.2575
+      conversational: 0.2
+      writer: 0.1625
+      long_form_generator: 0.0625
+      document_qa: 0.0675
+      code_assist: 0.075
+      knowledge_search: 0.05
+      meeting_summary: 0.025
+      translation: 0.015
+      document_extraction: 0.04
+      inbox_triage: 0.02
+      reasoning_analysis: 0.0175
+      agent_task_runner: 0.0075

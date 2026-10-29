@@ -298,10 +298,24 @@ async def run_virtual_user(
     capture_token_timestamps: bool = False,
     initial_phase_offset_enabled: bool = True,
     reasoning_effort: str | None = None,
+    start_mid_session: bool = False,
+    history_window_turns: int | None = None,
+    context_limit_tokens: int | None = None,
+    planner_timeouts: dict | None = None,
 ) -> None:
-    """Run one virtual user to completion (or until cancelled)."""
+    """Run one virtual user to completion (or until cancelled).
+
+    ``start_mid_session``: join at a random turn of a session drawn in
+    proportion to its length (how sessions appear in a running
+    population), with the earlier turns' history already built.
+    ``history_window_turns`` keeps only the last N exchanges in each
+    request; ``context_limit_tokens`` drops the oldest exchanges so
+    history + prompt + reply fit. ``planner_timeouts`` replaces the
+    persona's SLA-scaled abort tiers with fixed patience."""
     history_messages: list[dict] = []
     history_token_count = 0
+    # Tokens per exchange, parallel to history_messages pairs.
+    exchange_tokens: list[int] = []
 
     try:
         # Random initial phase offset: sleep for a uniform-random
@@ -345,10 +359,27 @@ async def run_virtual_user(
         if not cancel_event.is_set():
             history_messages = []
             history_token_count = 0
+            exchange_tokens = []
             session_id = uuid.uuid4().hex
             n_turns = persona.turns_per_session.sample_int(rng)
+            first_turn = 0
+            if start_mid_session:
+                draws = [persona.turns_per_session.sample_int(rng)
+                         for _ in range(8)]
+                n_turns = rng.choices(draws, weights=[max(1, d) for d in draws],
+                                      k=1)[0]
+                first_turn = rng.randrange(max(1, n_turns))
+                for _ in range(first_turn):
+                    q_tok = persona.input_tokens.sample_int(rng)
+                    a_tok = persona.output_tokens.sample_int(rng)
+                    history_messages.append(
+                        {"role": "user", "content": corpus.make_text(q_tok, rng)})
+                    history_messages.append(
+                        {"role": "assistant", "content": corpus.make_text(a_tok, rng)})
+                    exchange_tokens.append(q_tok + a_tok)
+                    history_token_count += q_tok + a_tok
 
-            for turn in range(n_turns):
+            for turn in range(first_turn, n_turns):
                 if cancel_event.is_set():
                     return
 
@@ -364,9 +395,25 @@ async def run_virtual_user(
                     output_tokens_target += REASONING_OVERHEAD_TOKENS.get(
                         reasoning_effort, 250,
                     )
+                # History actually sent: the window, then the context
+                # limit (oldest exchanges dropped first).
+                keep = len(exchange_tokens)
+                if history_window_turns is not None:
+                    keep = min(keep, max(0, int(history_window_turns)))
+                if context_limit_tokens:
+                    budget = int(context_limit_tokens) - 64
+                    if input_tokens_target + output_tokens_target > budget:
+                        input_tokens_target = max(
+                            16, budget - output_tokens_target)
+                    room = budget - input_tokens_target - output_tokens_target
+                    while keep > 0 and sum(exchange_tokens[-keep:]) > room:
+                        keep -= 1
+                sent_history = history_messages[len(history_messages) - 2 * keep:] \
+                    if keep else []
+                sent_history_tokens = sum(exchange_tokens[-keep:]) if keep else 0
                 query_text = corpus.make_text(input_tokens_target, rng)
 
-                messages = list(history_messages) + [
+                messages = list(sent_history) + [
                     {"role": "user", "content": query_text}
                 ]
 
@@ -425,9 +472,15 @@ async def run_virtual_user(
                         min(persona.pre_ttft_timeout_s, persona.hard_timeout_s, request_timeout_s)
                         if getattr(persona, "ignore_eos", False) else None
                     ),
-                    pre_ttft_timeout_s=persona.pre_ttft_timeout_s,
-                    inter_token_timeout_s=persona.inter_token_timeout_s,
-                    hard_timeout_s=min(persona.hard_timeout_s, request_timeout_s),
+                    pre_ttft_timeout_s=(
+                        float(planner_timeouts["ttft_s"]) if planner_timeouts
+                        else persona.pre_ttft_timeout_s),
+                    inter_token_timeout_s=(
+                        float(planner_timeouts["gap_s"]) if planner_timeouts
+                        else persona.inter_token_timeout_s),
+                    hard_timeout_s=(
+                        120.0 + 0.25 * output_tokens_target if planner_timeouts
+                        else min(persona.hard_timeout_s, request_timeout_s)),
                     capture_token_timestamps=capture_token_timestamps,
                     on_first_token=_on_first_token,
                 ), cancel_event)
@@ -500,7 +553,7 @@ async def run_virtual_user(
                         tpot_ms=partial_tpot_ms,
                         end_to_end_ms=e2e_ms,
                         input_tokens=corpus.count(query_text),
-                        history_tokens=history_token_count,
+                        history_tokens=sent_history_tokens,
                         output_tokens=output_tokens,
                         in_flight_at_submit=in_flight_at_submit,
                         persona=persona,
@@ -549,7 +602,7 @@ async def run_virtual_user(
                     tpot_ms=tpot_ms,
                     end_to_end_ms=e2e_ms,
                     input_tokens=corpus.count(query_text),
-                    history_tokens=history_token_count,
+                    history_tokens=sent_history_tokens,
                     output_tokens=output_tokens,
                     in_flight_at_submit=in_flight_at_submit,
                     persona=persona,
@@ -565,6 +618,7 @@ async def run_virtual_user(
                 history_messages.append({"role": "user", "content": query_text})
                 history_messages.append({"role": "assistant", "content": response_text})
                 history_token_count += event.input_tokens + output_tokens
+                exchange_tokens.append(event.input_tokens + output_tokens)
                 stats.turns_total += 1
 
                 if turn < n_turns - 1:

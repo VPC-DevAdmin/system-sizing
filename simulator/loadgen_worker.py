@@ -99,6 +99,9 @@ async def _amain(config: dict) -> bool:
         request_timeout_s=int(config.get("request_timeout_s") or 300),
         rng_seed=int(config.get("seed") or 0xC0FFEE),
         reasoning_effort=config.get("reasoning_effort"),
+        history_window_turns=config.get("history_window_turns"),
+        context_limit_tokens=config.get("context_limit_tokens"),
+        planner_timeouts=config.get("planner_timeouts"),
     )
     launcher.start()
     emit({"t": "ready", "worker": config.get("worker_index", 0)})
@@ -127,6 +130,9 @@ async def _amain(config: dict) -> bool:
                 launcher.cancel_active_sessions()
             elif cmd == "trim":
                 launcher.trim_active(int(msg.get("target") or 0))
+            elif cmd == "seed":
+                launcher.seed_to(int(msg.get("target") or 0),
+                                 msg.get("weights") or None)
             elif cmd == "mark":
                 launcher.mark_window()
             elif cmd == "outstanding":

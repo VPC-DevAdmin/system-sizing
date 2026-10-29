@@ -73,6 +73,16 @@ CAPSIM_CONTAINER_PREFIXES = ("vllm-", "trtllm-", "sglang-",
                              "ktransformers-", "llamacpp-")
 
 
+def lane_tag() -> str:
+    """``<lane>x`` when CAPSIM_LANE is set, else "". Parallel runs on
+    one box (one per GPU group or socket) each set their own lane, put
+    the tag in their container names, and sweep only their own stale
+    containers, so one lane's launch never removes another's engine."""
+    lane = "".join(c for c in os.environ.get("CAPSIM_LANE", "")
+                   if c.isalnum()).lower()
+    return f"{lane}x" if lane else ""
+
+
 def gpus_arg_for(device_ids: list[int]) -> str:
     """Docker ``--gpus`` value for a device list. Docker parses the
     value as CSV, so multi-device lists need EMBEDDED quotes
@@ -95,6 +105,9 @@ def container_name_filter(prefixes=CAPSIM_CONTAINER_PREFIXES) -> list[str]:
     # The prefixes are letters and a hyphen, literal in a Go regexp
     # outside a character class -- no escaping, which would only add
     # a "\-" for the daemon to puzzle over.
+    tag = lane_tag()
+    if tag:
+        return [f"name=^/?{p}(.*-)?{tag}" for p in prefixes]
     return [f"name=^/?{p}" for p in prefixes]
 
 
@@ -269,7 +282,7 @@ class DockerReplicaEngine(Engine):
 
         log_dir = Path(log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
-        run_id = uuid.uuid4().hex[:8]
+        run_id = lane_tag() + uuid.uuid4().hex[:8]
         # Exposed so a subclass can derive per-LAUNCH resources from it.
         # Fixed ports are safe within one launch and unsafe across
         # consecutive ones: a sweep tears down eight replicas and

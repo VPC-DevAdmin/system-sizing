@@ -486,6 +486,47 @@ class SimulationConfig:
     # quick_lookup sweep superseded 9 of 20 windows that way.
     open_loop_min_workers: int = 1
 
+    # ── Planner campaign: capacity without a service level ──
+    # With the SLA gate off the search decides on queue stability,
+    # errors and timeouts only, and service levels are applied after
+    # the run from turn_events (simulator.rescore). Default True keeps
+    # the original two-knee search.
+    open_loop_sla_gate: bool = True
+    # A stable window where at least this share of turns errored or
+    # timed out is a ceiling (timeouts drain the queue, so it can read
+    # stable while almost nothing is served). Only used with the gate
+    # off; with it on, the SLA violation rate plays this role.
+    open_loop_error_ceiling: float = 0.05
+    # Growth per step before the knee is bracketed (2.0 = doubling).
+    open_loop_step_factor: float = 2.0
+    # After the knee is pinned, fill in stable rates below it on this
+    # geometric grid (e.g. 1.414) down to knee / backfill_floor_ratio,
+    # so service levels applied afterwards have nearby rates to
+    # interpolate between. None = no backfill.
+    open_loop_backfill_factor: float | None = None
+    open_loop_backfill_floor_ratio: float = 8.0
+    # False: the warmup minimum stays at open_loop_warmup_s instead of
+    # stretching toward the mean session length (seeding below makes
+    # the wait unnecessary).
+    open_loop_warmup_follows_sessions: bool = True
+    # At each new rate, start (or trim to) the Little's-law population
+    # rate x mean session length, with seeded sessions joining at a
+    # random turn with their earlier history already built.
+    open_loop_seed_sessions: bool = False
+    # Chat history sent with each turn: None = the whole session, 0 =
+    # none, N = the last N exchanges.
+    history_window_turns: int | None = None
+    # Oldest exchanges are dropped so history + prompt + reply fit this
+    # many tokens. None = engine.max_model_len when set.
+    context_limit_tokens: int | None = None
+    # Fixed client patience instead of SLA-scaled abort tiers: no reply
+    # start within planner_ttft_timeout_s, a token gap over
+    # planner_gap_timeout_s, or a turn over 120 s + 0.25 s per output
+    # token is an error.
+    planner_timeouts: bool = False
+    planner_ttft_timeout_s: float = 300.0
+    planner_gap_timeout_s: float = 120.0
+
     # ── Headline shape search ──
     # Hill-climb over (input, output) firehose shapes at SATURATION:
     # the engine is kept fully fed (fixed outstanding requests), the

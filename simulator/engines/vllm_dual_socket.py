@@ -86,7 +86,8 @@ class VllmDualSocketEngine(Engine):
 
         self._log_dir = Path(log_dir)
         self._log_dir.mkdir(parents=True, exist_ok=True)
-        run_id = uuid.uuid4().hex[:8]
+        from .docker_replica import lane_tag
+        run_id = lane_tag() + uuid.uuid4().hex[:8]
         self._log_path = self._log_dir / f"engine_vllm_dual_{run_id}.log"
 
         try:

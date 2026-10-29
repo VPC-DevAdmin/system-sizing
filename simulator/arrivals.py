@@ -102,6 +102,9 @@ class SessionArrivalLauncher:
         rng_seed: int = 0xC0FFEE,
         reasoning_effort: str | None = None,
         capture_token_timestamps: bool = False,
+        history_window_turns: int | None = None,
+        context_limit_tokens: int | None = None,
+        planner_timeouts: dict | None = None,
     ):
         if not clients:
             raise ValueError("SessionArrivalLauncher requires at least one client")
@@ -114,6 +117,9 @@ class SessionArrivalLauncher:
         self._rng = random.Random(rng_seed)
         self._reasoning_effort = reasoning_effort
         self._capture = capture_token_timestamps
+        self._history_window_turns = history_window_turns
+        self._context_limit_tokens = context_limit_tokens
+        self._planner_timeouts = planner_timeouts
 
         self._rate_per_s: float = 0.0
         self._outstanding: int = 0
@@ -153,6 +159,26 @@ class SessionArrivalLauncher:
         while not self._stopped and len(self._sessions) < target:
             self.stats.tardiness_ms.append(0.0)
             self._spawn_session()
+
+    def seed_to(self, target: int, weights: dict[str, float] | None = None) -> None:
+        """Bring the active population to ``target`` now: start the
+        shortfall as sessions already part-way through (random turn,
+        earlier history built), or cancel the newest beyond it. The
+        Poisson arrivals keep running alongside, so the population
+        starts at its Little's-law size instead of ramping to it."""
+        short = int(target) - len(self._sessions)
+        if short < 0:
+            self.trim_active(int(target))
+            return
+        for _ in range(short):
+            pid = None
+            if weights:
+                items = [(k, v) for k, v in weights.items() if v > 0]
+                if items:
+                    pid = self._rng.choices([k for k, _ in items],
+                                            weights=[v for _, v in items],
+                                            k=1)[0]
+            self._spawn_session(persona_id=pid, mid_session=True)
 
     def mark_window(self) -> None:
         """A measurement window opened: scope the tardiness percentile
@@ -247,8 +273,9 @@ class SessionArrivalLauncher:
             self._spawn_session()
             next_at += self._rng.expovariate(rate)
 
-    def _spawn_session(self) -> None:
-        persona_id = self._pick_persona_id()
+    def _spawn_session(self, persona_id: str | None = None,
+                       mid_session: bool = False) -> None:
+        persona_id = persona_id or self._pick_persona_id()
         persona = PERSONAS[persona_id]
         user_id = uuid.uuid4().hex
         stats = UserStats(
@@ -281,8 +308,14 @@ class SessionArrivalLauncher:
                     # already exponentially spaced — an extra random
                     # sleep would just blur the arrival process we're
                     # deliberately shaping.
-                    initial_phase_offset_enabled=False,
+                    # Seeded sessions join mid-cycle, so they get the
+                    # offset; Poisson arrivals are already spread.
+                    initial_phase_offset_enabled=mid_session,
                     reasoning_effort=self._reasoning_effort,
+                    start_mid_session=mid_session,
+                    history_window_turns=self._history_window_turns,
+                    context_limit_tokens=self._context_limit_tokens,
+                    planner_timeouts=self._planner_timeouts,
                 )
             finally:
                 self.stats.sessions_done += 1

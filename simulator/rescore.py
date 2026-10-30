@@ -54,6 +54,8 @@ DEFAULT_OVERRIDES = {
 TTFT_SHARE = 0.95
 SPEED_SHARE = 0.90
 PROMPT_FREE_TOKENS = 2000
+# Matches simulation.open_loop_error_ceiling in the planner campaign.
+ERROR_CEILING = 0.05
 # Window values carried to each capacity point.
 CARRIED = ("rate_per_min", "sessions", "in_flight", "turns_per_s",
            "prompt_tok_per_s", "output_tok_per_s", "power_w", "gpu_power_w",
@@ -180,7 +182,7 @@ def _point(w: Window) -> dict:
 
 
 def tier_capacity(windows: list[Window], limits: dict | None) -> dict | None:
-    stable = [w for w in windows if w.stable and w.values["error_rate"] < 0.05]
+    stable = [w for w in windows if w.stable and w.values["error_rate"] < ERROR_CEILING]
     if not stable:
         return None
     knee = max(stable, key=lambda w: w.rate_per_min)
@@ -227,10 +229,14 @@ def rescore_run(run_dir: Path, tiers: dict | None = None,
         result = {"run_dir": str(run_dir), "tiers": tiers, "workloads": {}}
         for crid, cohort, model, engine, status, cfg_json, started in runs:
             windows = _load_windows(conn, crid, wall)
-            stable = [w for w in windows if w.stable]
-            divergent = [w for w in windows if not w.stable]
+            # The knee is the stepper's: a "stable" window where turns
+            # time out faster than the queue grows is a ceiling, not a
+            # stable point (rate_search.RateStepper.is_ceiling_step).
+            stable = [w for w in windows
+                      if w.stable and w.values["error_rate"] < ERROR_CEILING]
+            ceilings = [w for w in windows if w not in stable]
             knee = max((w.rate_per_min for w in stable), default=None)
-            above = [w.rate_per_min for w in divergent
+            above = [w.rate_per_min for w in ceilings
                      if knee is not None and w.rate_per_min > knee]
             entry = {
                 "model_id": model, "engine": engine, "final_status": status,

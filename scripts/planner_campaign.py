@@ -64,6 +64,7 @@ R770_SOCKET_CPUS = {
     0: ",".join(str(c) for c in range(0, 172, 2)),
     1: ",".join(str(c) for c in range(1, 172, 2)),
 }
+R770_HT_CPUS = "172-343"
 BASE_PORT = 9100
 LANE_PORTS = 128
 
@@ -257,9 +258,13 @@ def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
     if q.box == "xe7740":
         env["CAPSIM_GPU_INDEXES"] = ",".join(str(d) for d in devices)
     workloads = ",".join(job["workloads"])
+    # On the R770 the engine's OpenMP threads own every physical core of
+    # their socket and stall whenever another process is scheduled on
+    # one; the load generator runs on the hyper-thread siblings instead.
+    pin = f"taskset -c {R770_HT_CPUS} " if q.box == "r770" else ""
     script = (
         f"set -o pipefail; cd {REPO} && "
-        f"{UV} run -q python -m simulator.cli sweep --config {cfg} "
+        f"{pin}{UV} run -q python -m simulator.cli sweep --config {cfg} "
         f"--type {workloads} --mode open && "
         f"rd=$(ls -d {rundir}/run_* | sort -V | tail -1) && "
         f"{UV} run -q python -m simulator.cli export --input-dir $rd "

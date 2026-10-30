@@ -177,7 +177,10 @@ def xe7740() -> dict:
                          simulation={"system_prompt_tokens": None}))
     for mix in MIX6:
         jobs.append(gjob(f"G1.6-qwen30b-1gpu-{mix}", q, mix, 1))
-    for eng in ["sglang_cuda", "trtllm"]:
+    # TensorRT-LLM is left out: its MoE GEMMs go through DeepGEMM,
+    # which is Hopper-only, so Qwen3-30B-A3B never starts on SM120
+    # (b2aed30). SGLang is the second engine.
+    for eng in ["sglang_cuda"]:
         for w in CORE6:
             jobs.append(gjob(f"G1.3-qwen30b-1gpu-{w}-{eng}", q, w, 1, engine=eng))
     for n in (2, 4):

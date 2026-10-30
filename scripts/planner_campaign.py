@@ -588,7 +588,10 @@ def run(q: Queue) -> None:
 def status(q: Queue) -> None:
     for j in q.jobs:
         st = q.status.get(j["id"], {})
-        print(f"{j['id']:<48} {st.get('state', 'pending'):<8} "
+        state = st.get("state", "pending")
+        if j.get("manual") and state == "pending":
+            state = "manual"
+        print(f"{j['id']:<48} {state:<8} "
               f"{st.get('devices', '')!s:<14} {st.get('started', '')} {st.get('finished', '')}")
 
 

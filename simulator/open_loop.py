@@ -1086,7 +1086,8 @@ class OpenLoopRunner:
                     # the fallback pressure signal — in overload it
                     # grows exactly like the queue (arrivals outpace
                     # completions).
-                    if len(series) < len(inflight_series) // 2:
+                    if (len(series) < len(inflight_series) // 2
+                            or self.cfg.simulation.open_loop_stability_basis == "client_in_flight"):
                         series = inflight_series
                         basis = "client_in_flight"
                     verdict = assess_queue_stability(
@@ -1137,6 +1138,7 @@ class OpenLoopRunner:
         verdict_dict["basis"] = (
             "engine_queue"
             if len(queue_series) >= len(inflight_series) // 2
+            and self.cfg.simulation.open_loop_stability_basis != "client_in_flight"
             else "client_in_flight"
         )
         verdict_dict["served_basis"] = served_basis

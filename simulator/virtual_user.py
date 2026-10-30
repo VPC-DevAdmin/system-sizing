@@ -478,8 +478,12 @@ async def run_virtual_user(
                     ),
                     # Fixed-token saturation may wait for queued prefill before headers.
                     # Preserve the ordinary persona stream-opening policy.
+                    # Planner patience covers the wait for headers too:
+                    # SGLang sends none until prefill ends, so a 30 s
+                    # connect limit would cut long prompts on CPU.
                     stream_open_timeout_s=(
-                        min(persona.pre_ttft_timeout_s, persona.hard_timeout_s, request_timeout_s)
+                        float(planner_timeouts["ttft_s"]) if planner_timeouts
+                        else min(persona.pre_ttft_timeout_s, persona.hard_timeout_s, request_timeout_s)
                         if getattr(persona, "ignore_eos", False) else None
                     ),
                     pre_ttft_timeout_s=(

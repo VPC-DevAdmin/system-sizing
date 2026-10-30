@@ -511,6 +511,12 @@ class SimulationConfig:
     # otherwise judge a window on a handful of turns. None = off.
     open_loop_min_window_turns: int | None = None
     open_loop_max_window_s: int = 600
+    # Pressure signal for the stability test: "auto" uses the engine's
+    # waiting queue and falls back to the client's in-flight count when
+    # there is no gauge; "client_in_flight" always uses the latter, for
+    # engines that admit every request to the running batch (SGLang on
+    # CPU) so overload never shows as a queue.
+    open_loop_stability_basis: str = "auto"
     # False: the warmup minimum stays at open_loop_warmup_s instead of
     # stretching toward the mean session length (seeding below makes
     # the wait unnecessary).

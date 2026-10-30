@@ -312,6 +312,7 @@ def cjob(jid, model, local, quant, workloads, sockets=1, engine="sglang", **kw):
 CPU_START = 0.01
 CPU_SHAPE_START = 0.05
 CPU_SIM = {"open_loop_min_window_turns": 30, "open_loop_max_window_s": 600,
+           "open_loop_stability_basis": "client_in_flight",
            "open_loop_backfill_floor_ratio": 16.0}
 QWEN30B_CPU = ("Qwen/Qwen3-30B-A3B-Instruct-2507-FP8", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 SHAPES = ["shape_chat", "shape_rag", "shape_gen"]

@@ -16,6 +16,11 @@ asks, per service tier, which arrival rates met it:
     its turns meet the first-token limit and ``speed_share`` meet the
     speed limit.
 
+The knee is the highest passing window (stable, error rate under
+``ERROR_CEILING``) below the first failing one. A passing window above
+a failure (a warm-up window before the queue built, or a fluke) does
+not count; the run is flagged ``knee_nonmonotone`` for a re-test.
+
 A tier's capacity is the arrival rate where the pass margin crosses
 zero, interpolated in log rate between the last passing window and the
 first failing one above it. A tier that still passes at the knee gets
@@ -181,11 +186,27 @@ def _point(w: Window) -> dict:
     return {k: w.values.get(k) for k in CARRIED}
 
 
+def _passes(w: Window) -> bool:
+    return w.stable and w.values["error_rate"] < ERROR_CEILING
+
+
+def find_knee(windows: list[Window]) -> tuple[Window | None, Window | None]:
+    """(knee, highest passing window above the first failure or None).
+    ``windows`` is sorted by rate."""
+    knee = None
+    for i, w in enumerate(windows):
+        if not _passes(w):
+            above = [x for x in windows[i + 1:] if _passes(x)]
+            return knee, (above[-1] if above else None)
+        knee = w
+    return knee, None
+
+
 def tier_capacity(windows: list[Window], limits: dict | None) -> dict | None:
-    stable = [w for w in windows if w.stable and w.values["error_rate"] < ERROR_CEILING]
-    if not stable:
+    knee, _ = find_knee(windows)
+    if knee is None:
         return None
-    knee = max(stable, key=lambda w: w.rate_per_min)
+    windows = [w for w in windows if w.rate_per_min <= knee.rate_per_min]
     if limits is None or limits.get("batch"):
         return {"basis": "knee", **_point(knee)}
     margins = [(w, _margin(w, limits)) for w in windows]
@@ -229,22 +250,20 @@ def rescore_run(run_dir: Path, tiers: dict | None = None,
         result = {"run_dir": str(run_dir), "tiers": tiers, "workloads": {}}
         for crid, cohort, model, engine, status, cfg_json, started in runs:
             windows = _load_windows(conn, crid, wall)
-            # The knee is the stepper's: a "stable" window where turns
-            # time out faster than the queue grows is a ceiling, not a
-            # stable point (rate_search.RateStepper.is_ceiling_step).
-            stable = [w for w in windows
-                      if w.stable and w.values["error_rate"] < ERROR_CEILING]
-            ceilings = [w for w in windows if w not in stable]
-            knee = max((w.rate_per_min for w in stable), default=None)
-            above = [w.rate_per_min for w in ceilings
-                     if knee is not None and w.rate_per_min > knee]
+            # A "stable" window where turns time out faster than the
+            # queue grows is a ceiling, not a stable point
+            # (rate_search.RateStepper.is_ceiling_step).
+            knee_w, stray = find_knee(windows)
+            knee = knee_w.rate_per_min if knee_w else None
+            above = [w.rate_per_min for w in windows
+                     if not _passes(w) and knee is not None and w.rate_per_min > knee]
             entry = {
                 "model_id": model, "engine": engine, "final_status": status,
                 "started_at": started, "windows": len(windows),
                 "knee_per_min": knee,
                 "ceiling_per_min": min(above) if above else None,
-                "knee_point": _point(max(stable, key=lambda w: w.rate_per_min))
-                if stable else None,
+                "knee_nonmonotone": stray.rate_per_min if stray else None,
+                "knee_point": _point(knee_w) if knee_w else None,
                 "tiers": {},
             }
             for tier, limits in tiers.items():

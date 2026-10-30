@@ -31,7 +31,11 @@ HISTORY_SETTINGS = [0, 2, 8]   # full history is the default run
 GPU_START = {"quick_lookup": 1.0, "inbox_triage": 4.0, "document_extraction": 1.0,
              "voice_assistant": 0.5, "customer_assistant": 0.5,
              "knowledge_search": 0.5, "meeting_summary": 0.25, "translation": 0.5,
-             "writer": 0.5}
+             "writer": 0.5,
+             # Long agent sessions hold huge contexts; one GPU saturates
+             # below 2 sessions/min, and a higher start gives a warm-up
+             # window that looks stable before the queue builds.
+             "coding_agent": 0.02}
 GPU_START_DEFAULT = 0.25
 CPU_START = 0.02
 

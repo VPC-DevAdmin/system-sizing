@@ -71,7 +71,8 @@ def main() -> int:
         for wl, e in res["workloads"].items():
             row = {**base, "workload": wl, "windows": e.get("windows"),
                    "knee_per_min": e.get("knee_per_min"),
-                   "ceiling_per_min": e.get("ceiling_per_min")}
+                   "ceiling_per_min": e.get("ceiling_per_min"),
+                   "knee_nonmonotone": e.get("knee_nonmonotone")}
             kp = e.get("knee_point") or {}
             for f in FIELDS:
                 row[f"knee_{f}"] = kp.get(f)

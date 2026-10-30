@@ -35,7 +35,7 @@ GPU_START = {"quick_lookup": 1.0, "inbox_triage": 4.0, "document_extraction": 1.
              # Long agent sessions hold huge contexts; one GPU saturates
              # below 2 sessions/min, and a higher start gives a warm-up
              # window that looks stable before the queue builds.
-             "coding_agent": 0.02}
+             "coding_agent": 0.02, "agent_task_runner": 0.05}
 GPU_START_DEFAULT = 0.25
 CPU_START = 0.02
 

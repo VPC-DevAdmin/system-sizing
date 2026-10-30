@@ -65,6 +65,7 @@ R770_SOCKET_CPUS = {
     1: ",".join(str(c) for c in range(1, 172, 2)),
 }
 R770_HT_CPUS = "172-343"
+R770_HT_OFFSET = 172
 BASE_PORT = 9100
 LANE_PORTS = 128
 
@@ -209,7 +210,11 @@ def cpu_config(job: dict, devices: list[int], lane: str, rundir: Path) -> dict:
     cores = int(job.get("socket_cores") or 86)
 
     def socket_cpus(d: int) -> str:
-        return ",".join(R770_SOCKET_CPUS[d].split(",")[:cores])
+        cpus = R770_SOCKET_CPUS[d].split(",")[:cores]
+        if int(job.get("socket_threads") or 1) == 2:
+            # Hyper-threads too: each core's sibling is CPU n + 172.
+            cpus += [str(int(c) + R770_HT_OFFSET) for c in cpus]
+        return ",".join(cpus)
     if engine.get("type") == "sglang":
         if len(devices) > 1 and int(engine.get("tensor_parallel_size", 1)) > 1:
             engine["cpu_bind"] = "|".join(socket_cpus(d) for d in devices)
@@ -284,6 +289,12 @@ def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
     # their socket and stall whenever another process is scheduled on
     # one; the load generator runs on the hyper-thread siblings instead.
     pin = f"taskset -c {R770_HT_CPUS} " if q.box == "r770" else ""
+    if q.box == "r770" and int(job.get("socket_threads") or 1) == 2:
+        # The engine has every thread of devices[0]; the generator
+        # takes the second socket the job reserved.
+        other = devices[1]
+        pin = (f"taskset -c {R770_SOCKET_CPUS[other]},"
+               f"{','.join(str(int(c) + R770_HT_OFFSET) for c in R770_SOCKET_CPUS[other].split(','))} ")
     # A deliberate re-run (status "fresh") starts a new run folder; the
     # default resumes the latest one, which is right after a crash but
     # would skip a workload that already finished.
@@ -303,6 +314,32 @@ def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
     log.flush()
     return subprocess.Popen(["bash", "-c", script], stdout=log, stderr=subprocess.STDOUT,
                             env=env, start_new_session=True)
+
+
+def _load_box_setting(q: Queue) -> dict:
+    f = q.state_dir / "box_setting.json"
+    return json.loads(f.read_text()) if f.exists() else {"name": None}
+
+
+def _switch_box_setting(q: Queue, current: dict, name: str | None) -> None:
+    """Reset the setting in force (if any), apply ``name`` (if any).
+    Settings live in the queue file: box_settings: {name: {apply, reset}}."""
+    settings = q.doc.get("box_settings") or {}
+    if current.get("name") == name:
+        return
+    if current.get("name"):
+        cmd = (settings.get(current["name"]) or {}).get("reset")
+        if cmd:
+            subprocess.run(["bash", "-c", cmd], check=False)
+        print(f"{now()} box setting {current['name']} reset", flush=True)
+    if name:
+        cmd = (settings.get(name) or {}).get("apply")
+        if cmd:
+            subprocess.run(["bash", "-c", cmd], check=True)
+        print(f"{now()} box setting {name} applied", flush=True)
+    current.clear()
+    current["name"] = name
+    (q.state_dir / "box_setting.json").write_text(json.dumps(current))
 
 
 def _alive(pid: int) -> bool:
@@ -415,6 +452,8 @@ def run(q: Queue) -> None:
     stop = {"flag": False}
     hold = q.state_dir / "HOLD"
     fast_fails = 0
+    # The host-wide setting in force, kept across runner restarts.
+    box_setting = _load_box_setting(q)
     qmtime = q.path.stat().st_mtime
 
     def _sig(*_):
@@ -491,11 +530,33 @@ def run(q: Queue) -> None:
         # behind it (no back-filling), so whole-box jobs are not starved.
         # HOLD in the state dir: start nothing new.
         pending = [j for j in q.jobs
-                   if q.status.get(j["id"], {}).get("state") in (None, "pending")]
+                   if q.status.get(j["id"], {}).get("state") in (None, "pending")
+                   and not j.get("manual")]
         for job in ([] if hold.exists() else pending):
             # barrier: wait until everything before it has finished.
             if job.get("barrier") and running:
                 break
+            # after: run only once that job is done (a model's load
+            # probe); skipped if it failed. Others may start meanwhile.
+            dep = job.get("after")
+            if dep:
+                dstate = q.status.get(dep, {}).get("state")
+                if dstate in ("failed", "skipped"):
+                    q.status[job["id"]] = {"state": "skipped", "reason": f"{dep} {dstate}",
+                                           "finished": now()}
+                    q.save()
+                    continue
+                if dstate != "done":
+                    continue
+            # box_setting: a host-wide change (CPU clock cap). Jobs
+            # under one setting run together; switching waits for the
+            # box to empty, then resets the old setting and applies the
+            # new one.
+            setting = job.get("box_setting")
+            if setting != box_setting.get("name"):
+                if running:
+                    break
+                _switch_box_setting(q, box_setting, setting)
             tuned = _tuned_overrides(q, job)
             if tuned is None:
                 break  # its model's tuning has not been picked yet
@@ -517,7 +578,9 @@ def run(q: Queue) -> None:
             q.save()
         if not running and not hold.exists() and not [
                 j for j in q.jobs
-                if q.status.get(j["id"], {}).get("state") in (None, "pending")]:
+                if q.status.get(j["id"], {}).get("state") in (None, "pending")
+                and not j.get("manual")]:
+            _switch_box_setting(q, box_setting, None)
             return
         time.sleep(10)
 

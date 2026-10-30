@@ -544,6 +544,23 @@ class _WindowResult:
     error_rate: float = 0.0
 
 
+def _mean_turns_per_session(cohort, samples: int = 2000) -> float:
+    """Weighted mean turns per session across the cohort's personas."""
+    import random as _random
+
+    from .personas import PERSONAS
+    rng = _random.Random(1234)
+    total = weight = 0.0
+    for pid, w in cohort.persona_weights.items():
+        p = PERSONAS.get(pid)
+        if p is None or w <= 0:
+            continue
+        total += w * sum(p.turns_per_session.sample_int(rng)
+                         for _ in range(samples)) / samples
+        weight += w
+    return total / weight if weight else 1.0
+
+
 def _session_length_model(cohort, ttft_s: float, tpot_s: float,
                           samples: int = 2000) -> dict[str, float]:
     """Expected session length per persona, in seconds: turns x (first
@@ -1424,6 +1441,12 @@ class OpenLoopRunner:
                     if self.stepper.in_refinement
                     else sim.open_loop_window_s
                 )
+                if sim.open_loop_min_window_turns:
+                    turns_per_s = rate * _mean_turns_per_session(self.cohort)
+                    if turns_per_s > 0:
+                        wanted = sim.open_loop_min_window_turns / turns_per_s
+                        cap = max(window_s, sim.open_loop_max_window_s)
+                        window_s = int(min(cap, max(window_s, wanted)))
                 planned = self._plan_workers(rate, last_rate)
                 if planned > self.pool.size:
                     self.phase = "starting load workers"

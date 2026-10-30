@@ -505,6 +505,12 @@ class SimulationConfig:
     # interpolate between. None = no backfill.
     open_loop_backfill_factor: float | None = None
     open_loop_backfill_floor_ratio: float = 8.0
+    # Lengthen a window until it is expected to hold this many turns
+    # (rate x mean turns per session x window), up to
+    # open_loop_max_window_s. Low arrival rates on slow engines
+    # otherwise judge a window on a handful of turns. None = off.
+    open_loop_min_window_turns: int | None = None
+    open_loop_max_window_s: int = 600
     # False: the warmup minimum stays at open_loop_warmup_s instead of
     # stretching toward the mean session length (seeding below makes
     # the wait unnecessary).

@@ -267,6 +267,8 @@ def sglang_cpu(model: str, local: str, quant: str | None, max_total_tokens: int 
         "docker_image": "sglang-cpu:xeon-fixed", "docker_shm_size": "64g",
         "docker_network": "host",
         "docker_volumes": {"/mnt/xeonlab-data1/capsim/models": "/models",
+                           "/mnt/xeonlab-data2/capsim/models": "/models2",
+                           "/mnt/xeonlab-data3/capsim/models": "/models3",
                            "/mnt/xeonlab-data1/capsim/huggingface": "/root/.cache/huggingface"},
     }
 
@@ -287,15 +289,64 @@ def cjob(jid, model, local, quant, workloads, sockets=1, engine="sglang", **kw):
     wl = workloads if isinstance(workloads, list) else [workloads]
     ce = sglang_cpu(model, local, quant) if engine == "sglang" else vllm_cpu(model, local)
     ce.update(kw.pop("cpu_engine_extra", {}))
+    start = CPU_SHAPE_START if wl[0].startswith("shape_") else CPU_START
     j = {"id": jid, "model": model, "devices": sockets, "workloads": wl,
-         "initial_rate_per_s": CPU_START * sockets, "cpu_engine": ce,
+         "initial_rate_per_s": start * sockets, "cpu_engine": ce,
          "workers_per_device": 4}
-    if engine == "sglang" and model == "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8":
+    if engine == "sglang" and model in QWEN30B_CPU:
         j["tune_key"] = "qwen30b-cpu"
+    j["simulation"] = {**CPU_SIM, **(kw.pop("simulation", None) or {})}
     j.update(kw)
     if j.get("tune_group") or j["id"].startswith("C0"):
         j.pop("tune_key", None)
     return j
+
+
+# CPU runs: start low (one socket misses the Standard tier near
+# 1 session/min), reach further below the knee, and hold each window
+# open until it should contain 30 turns (up to 10 minutes).
+CPU_START = 0.01
+CPU_SHAPE_START = 0.05
+CPU_SIM = {"open_loop_min_window_turns": 30, "open_loop_max_window_s": 600,
+           "open_loop_backfill_floor_ratio": 16.0}
+QWEN30B_CPU = ("Qwen/Qwen3-30B-A3B-Instruct-2507-FP8", "Qwen/Qwen3-30B-A3B-Instruct-2507")
+SHAPES = ["shape_chat", "shape_rag", "shape_gen"]
+CPU_CLOCKS_GHZ = [2.0, 2.4, 2.8, 3.2]
+CPU_CORES = [16, 24, 32, 48, 64]
+
+# C3 ladder: (key, hf id, path in the engine container, quantization,
+# extra SGLang flags). BF16 unless the model ships a block-FP8 or MXFP4
+# checkpoint SGLang's CPU path reads (Nemotron's FP8 is ModelOpt).
+GPTOSS_FLAGS = ["--reasoning-parser", "gpt-oss"]
+CPU_LADDER = [
+    ("qwen4b", "Qwen/Qwen3-4B-Instruct-2507-FP8", "/models2/Qwen3-4B-Instruct-2507-FP8", "fp8", []),
+    ("gptoss20b", "openai/gpt-oss-20b", "/models/gpt-oss-20b", None, GPTOSS_FLAGS),
+    ("qwen36", "Qwen/Qwen3.6-35B-A3B-FP8", "/models/Qwen3.6-35B-A3B-FP8", "fp8", []),
+    ("gemma26b", "google/gemma-4-26B-A4B-it", "/models2/gemma-4-26B-A4B-it", None, []),
+    ("nemonano", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+     "/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", None, []),
+    ("kimilinear", "moonshotai/Kimi-Linear-48B-A3B-Instruct",
+     "/models/Kimi-Linear-48B-A3B-Instruct", None, []),
+    ("glm47", "zai-org/GLM-4.7-Flash", "/models3/GLM-4.7-Flash", None, []),
+    ("gemma31b", "google/gemma-4-31B-it", "/models2/gemma-4-31B-it", None, []),
+    ("nemosuper", "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+     "/models2/NVIDIA-Nemotron-3-Super-120B-A12B-BF16", None, []),
+]
+GPTOSS120B_CPU = ("openai/gpt-oss-120b", "/models/gpt-oss-120b", None, GPTOSS_FLAGS)
+MINIMAX_CPU = ("MiniMaxAI/MiniMax-M2.7", "/models3/MiniMax-M2.7", "fp8", [])
+
+
+def clock_settings() -> dict:
+    """box_settings for the clock caps (cpupower, both sockets)."""
+    reset = ("sudo cpupower frequency-set -u "
+             "$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq) >/dev/null")
+    return {f"clock{g}": {"apply": f"sudo cpupower frequency-set -u {g}GHz >/dev/null",
+                          "reset": reset} for g in CPU_CLOCKS_GHZ}
+
+
+def bios(jid, what, *a, **kw):
+    """A run that needs a BIOS change and reboot: queued as manual."""
+    return cjob(jid, *a, manual=what, **kw)
 
 
 CPU_TUNE = {
@@ -360,8 +411,76 @@ def r770() -> dict:
     for mix in MIX6:
         jobs.append(cjob(f"C1.7-qwen30b-2s-{mix}-tp2", m, loc, qn, mix, 2,
                          cpu_engine_extra={"tensor_parallel_size": 2}))
+    # ── C1.2 and C2: fixed shapes for precision and other Xeon SKUs ──
+    bf = "/models/Qwen3-30B-A3B-Instruct-2507"
+    for w in SHAPES:
+        jobs.append(cjob(f"C1.2-qwen30b-1s-{w}-fp8", m, loc, qn, w, 1))
+        jobs.append(cjob(f"C1.2-qwen30b-1s-{w}-bf16", QWEN30B_CPU[1], bf, None, w, 1))
+    for c in CPU_CORES:  # 86 cores is C1.2 fp8
+        for w in SHAPES:
+            jobs.append(cjob(f"C2.1-qwen30b-1s-{w}-cores{c}", m, loc, qn, w, 1,
+                             socket_cores=c, pin=["socket_cores"]))
+    # Hyper-threads used by the engine: every thread of socket 0, the
+    # load generator on socket 1 (the job holds both).
+    for w in SHAPES:
+        jobs.append(cjob(f"C2.5-qwen30b-1s-{w}-ht", m, loc, qn, w, 2, socket_threads=2,
+                         initial_rate_per_s=CPU_SHAPE_START))
+    # Clock caps last among the runnable C2 work: each cap holds the box.
+    for g in CPU_CLOCKS_GHZ:
+        for w in SHAPES:
+            jobs.append(cjob(f"C2.2-qwen30b-1s-{w}-clock{g}", m, loc, qn, w, 1,
+                             box_setting=f"clock{g}"))
+        if g == 2.4:  # C2.6 corner: 32 cores at 2.4 GHz, three personas
+            for w in ["quick_lookup", "document_qa", "long_form_generator"]:
+                jobs.append(cjob(f"C2.6-qwen30b-1s-{w}-cores32-clock2.4", m, loc, qn, w, 1,
+                                 socket_cores=32, pin=["socket_cores"], box_setting="clock2.4"))
+    # BIOS-dependent runs: queued as manual until the box is reconfigured.
+    for mts in (4800, 4400):
+        for w in SHAPES:
+            jobs.append(bios(f"C2.3-qwen30b-1s-{w}-mem{mts}", f"BIOS: memory at {mts} MT/s",
+                             m, loc, qn, w, 1))
+    for w in SHAPES:
+        jobs.append(bios(f"C2.4-qwen30b-snc-{w}", "BIOS: SNC on (one instance per SNC domain)",
+                         m, loc, qn, w, 2))
+        jobs.append(bios(f"C2.5-qwen30b-1s-{w}-amxoff", "BIOS or kernel: AMX disabled",
+                         m, loc, qn, w, 1, cpu_engine_extra={"attention_backend": "torch_native"}))
+    for w in ["quick_lookup", "document_qa", "long_form_generator"]:
+        jobs.append(bios(f"C2.6-qwen30b-1s-{w}-mem4400", "BIOS: memory at 4400 MT/s",
+                         m, loc, qn, w, 1))
+    # ── C3: model ladder on one socket ──
+    # Each model's first run is its load probe; the rest wait for it.
+    for key, hf, path, quant, flags in CPU_LADDER:
+        ex = {"sglang_extra_flags": list(flags)} if flags else {}
+        reason = {"reasoning_effort": "low"} if flags is GPTOSS_FLAGS else {}
+        probe = f"C3.1-{key}-1s-shape_chat"
+        jobs.append(cjob(probe, hf, path, quant, "shape_chat", 1, cpu_engine_extra=dict(ex), **reason))
+        for w in SHAPES[1:] + CORE6:
+            jobs.append(cjob(f"C3.1-{key}-1s-{w}", hf, path, quant, w, 1, after=probe,
+                             cpu_engine_extra=dict(ex), **reason))
+        if key == "gptoss20b":
+            for eff in ["medium", "high"]:
+                for w in ["conversational", "document_qa", "knowledge_search"]:
+                    jobs.append(cjob(f"C3.3-{key}-1s-{w}-reason{eff}", hf, path, quant, w, 1,
+                                     after=probe, cpu_engine_extra=dict(ex), reasoning_effort=eff))
+    hf, path, quant, flags = GPTOSS120B_CPU
+    probe = "C3.2-gptoss120b-1s-shape_chat"
+    jobs.append(cjob(probe, hf, path, quant, "shape_chat", 1,
+                     cpu_engine_extra={"sglang_extra_flags": list(flags)}, reasoning_effort="low"))
+    for w in SHAPES[1:] + ALL16:
+        jobs.append(cjob(f"C3.2-gptoss120b-1s-{w}", hf, path, quant, w, 1, after=probe,
+                         cpu_engine_extra={"sglang_extra_flags": list(flags)},
+                         reasoning_effort="low"))
+    # MiniMax-M2.7 (FP8, 230 GB) across both sockets.
+    hf, path, quant, _ = MINIMAX_CPU
+    probe = "C3.4-minimax-2s-quick_lookup-tp2"
+    jobs.append(cjob(probe, hf, path, quant, "quick_lookup", 2,
+                     cpu_engine_extra={"tensor_parallel_size": 2}, barrier=True))
+    for w in ["conversational", "document_qa"]:
+        jobs.append(cjob(f"C3.4-minimax-2s-{w}-tp2", hf, path, quant, w, 2, after=probe,
+                         cpu_engine_extra={"tensor_parallel_size": 2}))
     return {
         "box": "r770",
+        "box_settings": clock_settings(),
         "state_dir": "/mnt/xeonlab-data1/capsim/planner/state",
         "runs_dir": "/mnt/xeonlab-data1/capsim/planner/runs",
         "wall_power_csv": "/mnt/xeonlab-data1/capsim/planner/power/r770-wall.csv",

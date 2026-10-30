@@ -170,6 +170,60 @@ personas:
       tpot_target_ms: 143.0
       tpot_failure_ms: 300.0
 
+  # Fixed request shapes for hardware comparisons (precision, cores,
+  # clock, model ladder): one turn, exact lengths, no think time and no
+  # system prompt, so a change in the knee is the hardware or engine.
+  shape_chat:
+    name: "Shape: chat"
+    description: "Fixed 1K-token prompt, 256-token reply"
+    ignore_eos: true
+    input_tokens: {constant: 1024}
+    output_tokens: {constant: 256}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 1}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    sla:
+      ttft_target_seconds: 30.0
+      ttft_failure_seconds: 120.0
+      tpot_target_ms: 500.0
+      tpot_failure_ms: 2000.0
+
+  shape_rag:
+    name: "Shape: retrieval"
+    description: "Fixed 4K-token prompt, 256-token reply"
+    ignore_eos: true
+    input_tokens: {constant: 4096}
+    output_tokens: {constant: 256}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 1}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    sla:
+      ttft_target_seconds: 30.0
+      ttft_failure_seconds: 120.0
+      tpot_target_ms: 500.0
+      tpot_failure_ms: 2000.0
+
+  shape_gen:
+    name: "Shape: generation"
+    description: "Fixed 256-token prompt, 1K-token reply"
+    ignore_eos: true
+    input_tokens: {constant: 256}
+    output_tokens: {constant: 1024}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 1}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    sla:
+      ttft_target_seconds: 30.0
+      ttft_failure_seconds: 120.0
+      tpot_target_ms: 500.0
+      tpot_failure_ms: 2000.0
+
 cohorts:
   contact_centre:
     name: "Contact centre"

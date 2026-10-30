@@ -248,6 +248,10 @@ def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
     cfg = build_config(q, job, devices, lane, rundir)
     env = dict(os.environ)
     env["CAPSIM_LANE"] = lane
+    # The simulator's hardware lease is one lock per host by default;
+    # lanes own disjoint devices, so each takes its own.
+    (q.state_dir / "locks").mkdir(exist_ok=True)
+    env["CAPSIM_HARDWARE_LOCK"] = str(q.state_dir / "locks" / f"{lane}.lock")
     if q.doc.get("wall_power_csv"):
         env["CAPSIM_WALL_POWER_CSV"] = q.doc["wall_power_csv"]
     if q.box == "xe7740":
@@ -320,7 +324,13 @@ def pick_tuned(q: Queue, group: str) -> dict:
                      "knees": knees, "standard": std,
                      "overrides": j.get("tune_overrides") or {}})
     ok = [r for r in rows if r["ok"] and all(v for v in r["knees"].values())]
-    base = next((r for r in ok if r["name"] == "default"), ok[0] if ok else None)
+    base = next((r for r in ok if r["name"] == "default"), None)
+    if base is None or len(ok) * 2 < len(rows):
+        # Too few candidates finished to compare; leave the group
+        # unpicked so its persona jobs wait for a re-run.
+        print(f"{now()} tuning {group}: {len(ok)}/{len(rows)} usable, not picking",
+              flush=True)
+        return {}
 
     def rel(r, key):
         vals = []
@@ -373,6 +383,7 @@ def run(q: Queue) -> None:
     adopted: dict[str, int] = {}
     stop = {"flag": False}
     hold = q.state_dir / "HOLD"
+    fast_fails = 0
     qmtime = q.path.stat().st_mtime
 
     def _sig(*_):
@@ -416,6 +427,19 @@ def run(q: Queue) -> None:
                     continue
                 state = "done" if rc == 0 else "failed"
             q.status[jid].update({"state": state, "rc": rc, "finished": now()})
+            # Several jobs failing within seconds of starting means the
+            # rig is broken, not the job: hold the queue instead of
+            # burning through it.
+            try:
+                started = dt.datetime.strptime(q.status[jid]["started"], "%Y-%m-%dT%H:%M:%SZ")
+                quick = state == "failed" and (
+                    dt.datetime.utcnow() - started).total_seconds() < 120
+            except (KeyError, ValueError):
+                quick = False
+            fast_fails = fast_fails + 1 if quick else 0
+            if fast_fails >= 4 and not hold.exists():
+                hold.write_text(f"{now()} auto-hold: {fast_fails} jobs failed within 2 min of start\n")
+                print(f"{now()} auto-hold after {fast_fails} fast failures", flush=True)
             free = sorted(set(free) | set(devs))
             del running[jid]
             q.save()

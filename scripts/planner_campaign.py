@@ -303,15 +303,18 @@ def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
     # default resumes the latest one, which is right after a crash but
     # would skip a workload that already finished.
     new_run = " --new-run" if q.status.get(job["id"], {}).get("fresh") else ""
+    # Re-score even after a failed sweep (partial windows are worth
+    # keeping), but exit with the sweep's status so a cancelled or
+    # broken run is not marked done.
     script = (
         f"set -o pipefail; cd {REPO} && "
         f"{pin}{UV} run -q python -m simulator.cli sweep --config {cfg} "
         f"--type {workloads} --mode open{new_run} && "
         f"rd=$(ls -d {rundir}/run_* | sort -V | tail -1) && "
         f"{UV} run -q python -m simulator.cli export --input-dir $rd "
-        f"--output $rd/export_slim.json --slim ; "
+        f"--output $rd/export_slim.json --slim ; rc=$? ; "
         f"rd=$(ls -d {rundir}/run_* | sort -V | tail -1) && "
-        f"{UV} run -q python -m simulator.rescore $rd"
+        f"{UV} run -q python -m simulator.rescore $rd ; exit $rc"
     )
     log = open(rundir / "job.log", "a")
     log.write(f"\n=== {now()} start lane={lane} devices={devices}\n")
@@ -354,11 +357,28 @@ def _alive(pid: int) -> bool:
         return False
 
 
+def _sweeps_ok(q: Queue, jid: str) -> bool:
+    """Every open-loop workload in the job's last run folder finished
+    with status ok (a cancelled or broken sweep still gets re-scored,
+    so tiers.json alone proves nothing)."""
+    import sqlite3
+    rds = sorted((q.runs_dir / jid).glob("run_*"), key=lambda p: int(p.name.split("_")[-1]))
+    if not rds or not (rds[-1] / "tiers.json").exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(rds[-1] / "run.db"))
+        rows = conn.execute("SELECT final_status FROM cohort_run "
+                            "WHERE mode = 'open_loop'").fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return False
+    return bool(rows) and all(r[0] == "ok" for r in rows)
+
+
 def _job_outcome(q: Queue, jid: str) -> str:
     """For a job whose process is not our child (adopted after a runner
-    restart): done when its last run folder has tiers.json."""
-    rds = sorted((q.runs_dir / jid).glob("run_*"))
-    return "done" if rds and (rds[-1] / "tiers.json").exists() else "failed"
+    restart): done when its sweeps finished and were re-scored."""
+    return "done" if _sweeps_ok(q, jid) else "failed"
 
 
 # ── Engine tuning ──────────────────────────────────────────────────────
@@ -499,7 +519,7 @@ def run(q: Queue) -> None:
                 rc = proc.poll()
                 if rc is None:
                     continue
-                state = "done" if rc == 0 else "failed"
+                state = "done" if rc == 0 and _sweeps_ok(q, jid) else "failed"
             q.status[jid].update({"state": state, "rc": rc, "finished": now()})
             # Several jobs failing within seconds of starting means the
             # rig is broken, not the job: hold the queue instead of

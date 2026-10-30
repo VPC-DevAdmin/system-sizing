@@ -262,10 +262,14 @@ def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
     # their socket and stall whenever another process is scheduled on
     # one; the load generator runs on the hyper-thread siblings instead.
     pin = f"taskset -c {R770_HT_CPUS} " if q.box == "r770" else ""
+    # A deliberate re-run (status "fresh") starts a new run folder; the
+    # default resumes the latest one, which is right after a crash but
+    # would skip a workload that already finished.
+    new_run = " --new-run" if q.status.get(job["id"], {}).get("fresh") else ""
     script = (
         f"set -o pipefail; cd {REPO} && "
         f"{pin}{UV} run -q python -m simulator.cli sweep --config {cfg} "
-        f"--type {workloads} --mode open && "
+        f"--type {workloads} --mode open{new_run} && "
         f"rd=$(ls -d {rundir}/run_* | sort -V | tail -1) && "
         f"{UV} run -q python -m simulator.cli export --input-dir $rd "
         f"--output $rd/export_slim.json --slim ; "

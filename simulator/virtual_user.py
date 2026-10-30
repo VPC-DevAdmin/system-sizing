@@ -302,6 +302,7 @@ async def run_virtual_user(
     history_window_turns: int | None = None,
     context_limit_tokens: int | None = None,
     planner_timeouts: dict | None = None,
+    system_prompt: tuple[str, int] | None = None,
 ) -> None:
     """Run one virtual user to completion (or until cancelled).
 
@@ -311,7 +312,13 @@ async def run_virtual_user(
     ``history_window_turns`` keeps only the last N exchanges in each
     request; ``context_limit_tokens`` drops the oldest exchanges so
     history + prompt + reply fit. ``planner_timeouts`` replaces the
-    persona's SLA-scaled abort tiers with fixed patience."""
+    persona's SLA-scaled abort tiers with fixed patience.
+    ``system_prompt`` is (text, tokens) sent first on every turn; its
+    tokens count toward the context limit and are recorded with the
+    history tokens."""
+    sys_messages = ([{"role": "system", "content": system_prompt[0]}]
+                    if system_prompt else [])
+    sys_tokens = system_prompt[1] if system_prompt else 0
     history_messages: list[dict] = []
     history_token_count = 0
     # Tokens per exchange, parallel to history_messages pairs.
@@ -401,7 +408,7 @@ async def run_virtual_user(
                 if history_window_turns is not None:
                     keep = min(keep, max(0, int(history_window_turns)))
                 if context_limit_tokens:
-                    budget = int(context_limit_tokens) - 64
+                    budget = int(context_limit_tokens) - 64 - sys_tokens
                     if input_tokens_target + output_tokens_target > budget:
                         input_tokens_target = max(
                             16, budget - output_tokens_target)
@@ -410,10 +417,13 @@ async def run_virtual_user(
                         keep -= 1
                 sent_history = history_messages[len(history_messages) - 2 * keep:] \
                     if keep else []
-                sent_history_tokens = sum(exchange_tokens[-keep:]) if keep else 0
+                # Recorded as history_tokens: everything sent before the
+                # new input (system prompt + earlier exchanges).
+                sent_history_tokens = (
+                    sum(exchange_tokens[-keep:]) if keep else 0) + sys_tokens
                 query_text = corpus.make_text(input_tokens_target, rng)
 
-                messages = list(sent_history) + [
+                messages = sys_messages + list(sent_history) + [
                     {"role": "user", "content": query_text}
                 ]
 

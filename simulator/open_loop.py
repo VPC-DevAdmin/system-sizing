@@ -727,6 +727,7 @@ class OpenLoopRunner:
                 ),
                 "seed": 0xC0FFEE,
                 "history_window_turns": sim.history_window_turns,
+                "system_prompt_tokens": sim.system_prompt_tokens,
                 "context_limit_tokens": (
                     sim.context_limit_tokens
                     or getattr(cfg.engine, "max_model_len", None)

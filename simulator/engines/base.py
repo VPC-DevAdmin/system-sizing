@@ -318,6 +318,10 @@ class Engine:
             "vllm:num_requests_waiting": "queue_depth",
             "vllm:prefix_cache_hits_total": "prefix_cache_hits",
             "vllm:prefix_cache_queries_total": "prefix_cache_queries",
+            # Hits served by a KV connector (CPU offload, LMCache) for
+            # tokens the GPU cache missed; folded into the hit count
+            # below so the rate covers every cache tier.
+            "vllm:external_prefix_cache_hits_total": "external_prefix_cache_hits",
             # Monotonic token counters — the telemetry loop turns their
             # deltas into prefill tok/s and decode tok/s.
             "vllm:prompt_tokens_total": "prompt_tokens_total",
@@ -392,6 +396,8 @@ class Engine:
                         out["kv_cache_used_pct"] = float(value_str)
                     except ValueError:
                         pass
+        if "external_prefix_cache_hits" in out and "prefix_cache_hits" in out:
+            out["prefix_cache_hits"] += out["external_prefix_cache_hits"]
         # Compute hit rate if components present
         if "prefix_cache_hits" in out and "prefix_cache_queries" in out:
             q = out["prefix_cache_queries"]

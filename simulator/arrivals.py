@@ -105,6 +105,7 @@ class SessionArrivalLauncher:
         history_window_turns: int | None = None,
         context_limit_tokens: int | None = None,
         planner_timeouts: dict | None = None,
+        system_prompt_tokens: dict[str, int] | None = None,
     ):
         if not clients:
             raise ValueError("SessionArrivalLauncher requires at least one client")
@@ -120,6 +121,8 @@ class SessionArrivalLauncher:
         self._history_window_turns = history_window_turns
         self._context_limit_tokens = context_limit_tokens
         self._planner_timeouts = planner_timeouts
+        self._system_prompt_tokens = dict(system_prompt_tokens or {})
+        self._system_prompts: dict[str, tuple[str, int]] = {}
 
         self._rate_per_s: float = 0.0
         self._outstanding: int = 0
@@ -128,8 +131,23 @@ class SessionArrivalLauncher:
         self._sessions: dict[str, asyncio.Task] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._next_client = 0
+
         self._task: asyncio.Task | None = None
         self.stats = ArrivalStats()
+
+    def _system_prompt(self, persona_id: str) -> tuple[str, int] | None:
+        """(text, tokens) shared by every session of the persona; built
+        once and identical across workers (seeded by the persona id)."""
+        n = int(self._system_prompt_tokens.get(persona_id) or 0)
+        if n <= 0:
+            return None
+        if persona_id not in self._system_prompts:
+            import zlib
+            rng = random.Random(zlib.crc32(persona_id.encode()))
+            text = f"You are the {persona_id.replace('_', ' ')} assistant.\n" + \
+                self._corpus.make_text(n, rng, unique=False)
+            self._system_prompts[persona_id] = (text, self._corpus.count(text))
+        return self._system_prompts[persona_id]
 
     # ── Control ──────────────────────────────────────────────────────
 
@@ -316,6 +334,7 @@ class SessionArrivalLauncher:
                     history_window_turns=self._history_window_turns,
                     context_limit_tokens=self._context_limit_tokens,
                     planner_timeouts=self._planner_timeouts,
+                    system_prompt=self._system_prompt(persona.id),
                 )
             finally:
                 self.stats.sessions_done += 1

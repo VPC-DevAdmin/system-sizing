@@ -516,6 +516,12 @@ class SimulationConfig:
     # Chat history sent with each turn: None = the whole session, 0 =
     # none, N = the last N exchanges.
     history_window_turns: int | None = None
+    # Shared system prompt per persona, in tokens ({persona_id: n}): the
+    # same text for every session of that persona, as an application's
+    # instructions and tool definitions are, so the engine may serve it
+    # from its prefix cache. Each persona's text differs. None or a
+    # missing persona = no system prompt.
+    system_prompt_tokens: dict[str, int] | None = None
     # Oldest exchanges are dropped so history + prompt + reply fit this
     # many tokens. None = engine.max_model_len when set.
     context_limit_tokens: int | None = None

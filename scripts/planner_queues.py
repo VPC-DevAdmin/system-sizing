@@ -86,6 +86,22 @@ GPU_TUNE_LIGHT = {k: GPU_TUNE_FULL[k] for k in ("default", "seqs2048-mbt32k", "k
 GPU_TUNE_TP4 = {"default": {}, "seqs2048-kvfp8": {"max_num_seqs": 2048, "kv_cache_dtype": "fp8"}}
 
 
+# Personas whose no-system-prompt controls are run (G1.8, C1.9).
+SYS_CONTROL = ["conversational", "knowledge_search", "customer_assistant", "agent_task_runner"]
+# Multi-turn work, where a session's own history is worth keeping.
+KV_OFFLOAD_WORKLOADS = HISTORY + ["coding_agent", "contact_centre", "engineering_agents"]
+# Host memory per GPU for offloaded KV. 8 lanes x 128 GiB fits the
+# XE7740's 2 TB beside the page cache.
+KV_OFFLOAD_GIB_PER_GPU = 128
+
+
+def kv_offload(tp: int) -> dict:
+    """vLLM flags for native CPU KV offload; the size is the total
+    across a replica's TP ranks."""
+    return {"vllm_extra_flags": ["--kv-offloading-size", str(KV_OFFLOAD_GIB_PER_GPU * tp),
+                                 "--kv-offloading-backend", "native"]}
+
+
 def gtune(key, grid, prefix):
     tp = GPU_MODELS[key]["tp"]
     out = []
@@ -150,6 +166,11 @@ def xe7740() -> dict:
     for w in HISTORY:
         jobs.append(gjob(f"G1.7-qwen30b-1gpu-{w}-nocache", q, w, 1,
                          engine_extra={"vllm_extra_flags": ["--no-enable-prefix-caching"]}))
+    # G1.8: no shared system prompt -- what the per-persona application
+    # prompt (served from cache) is worth.
+    for w in SYS_CONTROL:
+        jobs.append(gjob(f"G1.8-qwen30b-1gpu-{w}-sys0", q, w, 1,
+                         simulation={"system_prompt_tokens": None}))
     for mix in MIX6:
         jobs.append(gjob(f"G1.6-qwen30b-1gpu-{mix}", q, mix, 1))
     for eng in ["sglang_cuda", "trtllm"]:
@@ -182,6 +203,17 @@ def xe7740() -> dict:
                 for w in ["conversational", "document_qa", "knowledge_search"]:
                     jobs.append(gjob(f"G2-{key}-{tp}gpu-{w}-reason{eff}", key, w, tp,
                                      reasoning_effort=eff))
+    # K: KV cache offload to host memory (vLLM native connector). Idle
+    # sessions' history moves to CPU RAM instead of being evicted, so
+    # multi-turn reuse survives near the knee. Same workloads with and
+    # without (the G1/G2 runs above) give the uplift.
+    for key in ["qwen30b", "gemma26b", "gptoss120b", "nemosuper"]:
+        tp = GPU_MODELS[key]["tp"]
+        for w in KV_OFFLOAD_WORKLOADS:
+            jobs.append(gjob(f"K-{key}-{tp}gpu-{w}-kvoff", key, w, tp,
+                             engine_extra=kv_offload(tp)))
+    for w in ["conversational", "contact_centre"]:
+        jobs.append(gjob(f"K-qwen30b-8gpu-{w}-kvoff", q, w, 8, engine_extra=kv_offload(1)))
     for key in ["gptoss20b", "qwen36", "nemonano", "kimilinear", "glm47", "gemma31b"]:
         jobs += gtune(key, GPU_TUNE_LIGHT, "T3")
     for key in ["qwen35", "minimax"]:
@@ -316,6 +348,10 @@ def r770() -> dict:
         jobs.append(cjob(f"C1.8-qwen30b-1s-{w}-nocache", m, loc, qn, w, 1,
                          cpu_engine_extra={"sglang_extra_flags": ["--disable-radix-cache"]},
                          pin=["cpu_engine"]))
+    # C1.9: no shared system prompt (see G1.8).
+    for w in SYS_CONTROL:
+        jobs.append(cjob(f"C1.9-qwen30b-1s-{w}-sys0", m, loc, qn, w, 1,
+                         simulation={"system_prompt_tokens": None}))
     # Two sockets: one instance per socket (TP2 and SNC layouts run as
     # separate jobs once the per-socket baseline is in).
     for w in ["quick_lookup", "document_qa", "long_form_generator"]:

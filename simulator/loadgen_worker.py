@@ -100,6 +100,7 @@ async def _amain(config: dict) -> bool:
         rng_seed=int(config.get("seed") or 0xC0FFEE),
         reasoning_effort=config.get("reasoning_effort"),
         history_window_turns=config.get("history_window_turns"),
+        system_prompt_tokens=config.get("system_prompt_tokens"),
         context_limit_tokens=config.get("context_limit_tokens"),
         planner_timeouts=config.get("planner_timeouts"),
     )

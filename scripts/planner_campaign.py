@@ -85,6 +85,22 @@ PLANNER_SIMULATION = {
     "open_loop_seed_sessions": True,
     "planner_timeouts": True,
     "max_total_duration_minutes": 240,
+    # Shared system prompt per persona (tokens): an application's
+    # instructions, policies and tool definitions, identical for every
+    # user of it, so the engine serves it from its prefix cache as in
+    # production. Everything the user sends stays unique. Sized to the
+    # kind of application: short bots ~0.5K, chat ~0.8K, RAG and
+    # document work 1-1.5K, IDE and customer assistants ~2K, tool-using
+    # agents 4-6K. A job sets simulation.system_prompt_tokens: null to
+    # run without.
+    "system_prompt_tokens": {
+        "quick_lookup": 500, "translation": 400, "meeting_summary": 600,
+        "conversational": 800, "writer": 800, "long_form_generator": 800,
+        "voice_assistant": 800, "document_qa": 1000, "reasoning_analysis": 1000,
+        "inbox_triage": 1200, "knowledge_search": 1500, "document_extraction": 1500,
+        "code_assist": 2000, "customer_assistant": 2000,
+        "agent_task_runner": 4000, "coding_agent": 6000,
+    },
 }
 
 
@@ -168,7 +184,13 @@ def gpu_config(job: dict, devices: list[int], lane: str, rundir: Path) -> dict:
           "vram_per_gpu_gb": 95.6}
     engine = custom_engine(custom, hw=hw)
     engine["port"] = BASE_PORT + LANE_PORTS * int(devices[0])
-    engine.update(job.get("engine_extra") or {})
+    # Flag lists add to the ones the job's settings produced (KV dtype,
+    # remote code) rather than replacing them.
+    for k, v in (job.get("engine_extra") or {}).items():
+        if isinstance(v, list) and isinstance(engine.get(k), list):
+            engine[k] = engine[k] + list(v)
+        else:
+            engine[k] = v
     doc = config_doc(engine, str(rundir))
     # Host-wide PMU and memory-bandwidth collectors would read every
     # lane at once; GPU telemetry is filtered to the lane's devices.

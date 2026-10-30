@@ -289,7 +289,11 @@ def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
     # their socket and stall whenever another process is scheduled on
     # one; the load generator runs on the hyper-thread siblings instead.
     pin = f"taskset -c {R770_HT_CPUS} " if q.box == "r770" else ""
-    if q.box == "r770" and int(job.get("socket_threads") or 1) == 2:
+    if q.box == "r770" and job.get("loadgen_other_socket"):
+        # Hyper-threading off: no sibling CPUs exist, so the generator
+        # takes the second socket the job reserved.
+        pin = f"taskset -c {R770_SOCKET_CPUS[devices[1]]} "
+    elif q.box == "r770" and int(job.get("socket_threads") or 1) == 2:
         # The engine has every thread of devices[0]; the generator
         # takes the second socket the job reserved.
         other = devices[1]

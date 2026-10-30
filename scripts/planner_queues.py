@@ -344,6 +344,9 @@ def clock_settings() -> dict:
                           "reset": reset} for g in CPU_CLOCKS_GHZ}
 
 
+MEM_RELIABILITY = "BIOS: SysProfile Custom, MemFrequency MaxReliability"
+
+
 def bios(jid, what, *a, **kw):
     """A run that needs a BIOS change and reboot: queued as manual."""
     return cjob(jid, *a, manual=what, **kw)
@@ -435,18 +438,20 @@ def r770() -> dict:
                 jobs.append(cjob(f"C2.6-qwen30b-1s-{w}-cores32-clock2.4", m, loc, qn, w, 1,
                                  socket_cores=32, pin=["socket_cores"], box_setting="clock2.4"))
     # BIOS-dependent runs: queued as manual until the box is reconfigured.
-    for mts in (4800, 4400):
-        for w in SHAPES:
-            jobs.append(bios(f"C2.3-qwen30b-1s-{w}-mem{mts}", f"BIOS: memory at {mts} MT/s",
-                             m, loc, qn, w, 1))
+    # The R770 BIOS offers MaxPerf (5,200 MT/s here) or MaxReliability
+    # (SysProfile Custom); there is no 4,800 or 4,400 setting.
+    for w in SHAPES:
+        jobs.append(bios(f"C2.3-qwen30b-1s-{w}-memrel", MEM_RELIABILITY, m, loc, qn, w, 1))
+        jobs.append(bios(f"C2.5-qwen30b-1s-{w}-htoff", "BIOS: LogicalProc Disabled",
+                         m, loc, qn, w, 2, loadgen_other_socket=True,
+                         initial_rate_per_s=CPU_SHAPE_START))
     for w in SHAPES:
         jobs.append(bios(f"C2.4-qwen30b-snc-{w}", "BIOS: SNC on (one instance per SNC domain)",
                          m, loc, qn, w, 2))
-        jobs.append(bios(f"C2.5-qwen30b-1s-{w}-amxoff", "BIOS or kernel: AMX disabled",
+        jobs.append(bios(f"C2.5-qwen30b-1s-{w}-amxoff", "Kernel: clearcpuid=amx_tile",
                          m, loc, qn, w, 1, cpu_engine_extra={"attention_backend": "torch_native"}))
     for w in ["quick_lookup", "document_qa", "long_form_generator"]:
-        jobs.append(bios(f"C2.6-qwen30b-1s-{w}-mem4400", "BIOS: memory at 4400 MT/s",
-                         m, loc, qn, w, 1))
+        jobs.append(bios(f"C2.6-qwen30b-1s-{w}-memrel", MEM_RELIABILITY, m, loc, qn, w, 1))
     # ── C3: model ladder on one socket ──
     # Each model's first run is its load probe; the rest wait for it.
     for key, hf, path, quant, flags in CPU_LADDER:

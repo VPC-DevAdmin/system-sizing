@@ -517,6 +517,12 @@ class SimulationConfig:
     # engines that admit every request to the running batch (SGLang on
     # CPU) so overload never shows as a queue.
     open_loop_stability_basis: str = "auto"
+    # A stable window whose mean engine waiting queue exceeds this share
+    # of the requests in flight has a standing queue (filled during
+    # warm-up, then level). It keeps its verdict, but the next window
+    # starts from the last queue-free rate instead of inheriting the
+    # backlog. 0 turns the check off.
+    open_loop_standing_queue_share: float = 0.1
     # False: the warmup minimum stays at open_loop_warmup_s instead of
     # stretching toward the mean session length (seeding below makes
     # the wait unnecessary).

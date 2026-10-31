@@ -77,6 +77,9 @@ PLANNER_SIMULATION = {
     "open_loop_backfill_factor": 1.414,
     "open_loop_backfill_floor_ratio": 8.0,
     "open_loop_resolution_pct": 10.0,
+    # The XE7740's 8-GPU quick_lookup sweep was still stable at the
+    # default 256/s rail.
+    "open_loop_max_rate_per_s": 1024.0,
     "open_loop_window_s": 120,
     "open_loop_refine_window_s": 120,
     "open_loop_warmup_s": 30,

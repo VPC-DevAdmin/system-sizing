@@ -542,6 +542,7 @@ class _WindowResult:
     active_sessions_mean: float = 0.0
     inflight_mean: float = 0.0
     error_rate: float = 0.0
+    standing_queue: bool = False
 
 
 def _mean_turns_per_session(cohort, samples: int = 2000) -> float:
@@ -1229,6 +1230,18 @@ class OpenLoopRunner:
             statistics.fmean(inflight_series) if inflight_series else 0.0
         )
         self._last_inflight_mean = inflight_mean
+        # A stable verdict over a standing queue: the queue filled during
+        # warm-up and levelled off, so the growth test saw no trend while
+        # first-token waits ran to tens of seconds. The XE7740's 4-GPU
+        # long_form sweep held ~1,000 waiting requests "stable" at
+        # 311/min and its next window, at 39/min, inherited the backlog.
+        share = self.cfg.simulation.open_loop_standing_queue_share
+        standing_queue = bool(
+            share and stability == STABLE
+            and verdict_dict.get("basis") == "engine_queue"
+            and verdict.mean_depth > share * max(inflight_mean, 1.0))
+        if standing_queue:
+            verdict_dict["standing_queue"] = True
         pool_agg = self.pool.aggregate()
 
         # KV-pool utilization for THIS window, from the per-second
@@ -1315,6 +1328,7 @@ class OpenLoopRunner:
             active_sessions_mean=active_mean,
             inflight_mean=inflight_mean,
             error_rate=summary.get("error_rate", 0.0) or 0.0,
+            standing_queue=standing_queue,
         )
 
     def _mark_superseded(self, measurement_id: int | None) -> None:
@@ -1499,7 +1513,8 @@ class OpenLoopRunner:
                 self.stepper.record(step)
                 last_rate = rate
                 hopeless = self.stepper.is_ceiling_step(step)
-                if result.stability == STABLE and not hopeless:
+                if (result.stability == STABLE and not hopeless
+                        and not result.standing_queue):
                     self._last_stable = {
                         "rate": rate,
                         "sessions": result.active_sessions_mean,
@@ -1509,7 +1524,9 @@ class OpenLoopRunner:
                 # queue) leaves the same backlog a divergent one does:
                 # the XE7740's 1- and 2-GPU quick_lookup sweeps measured
                 # their next, lower rate on top of it and failed it.
-                if result.stability in (DIVERGENT, CLIENT_LIMITED) or hopeless:
+                # So does a standing queue.
+                if (result.stability in (DIVERGENT, CLIENT_LIMITED) or hopeless
+                        or result.standing_queue):
                     await self._revert_to_stable()
         except (KeyboardInterrupt, asyncio.CancelledError):
             final_status = "cancelled"

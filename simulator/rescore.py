@@ -17,7 +17,13 @@ asks, per service tier, which arrival rates met it:
     speed limit.
 
 The knee is the highest passing window (stable, error rate under
-``ERROR_CEILING``) below the first failing one. A passing window above
+``ERROR_CEILING``) below the first failing one. ``queue_onset_per_min``
+applies the same rule but also fails a window with a standing queue: a
+mean engine waiting queue above ``STANDING_QUEUE_SHARE`` of the
+requests in flight. Such a queue filled during warm-up and levelled
+off, so the growth test saw no trend while median first-token waits ran
+to tens of seconds; the knee there is a throughput ceiling, the onset
+is where queueing starts. A passing window above
 a failure (a warm-up window before the queue built, or a fluke) does
 not count; the run is flagged ``knee_nonmonotone`` for a re-test.
 
@@ -61,6 +67,10 @@ SPEED_SHARE = 0.90
 PROMPT_FREE_TOKENS = 2000
 # Matches simulation.open_loop_error_ceiling in the planner campaign.
 ERROR_CEILING = 0.05
+# Matches simulation.open_loop_standing_queue_share. Below it the median
+# first-token wait across the campaign's stable windows stays under
+# 2.5 s; from 0.3 up it is 54 s.
+STANDING_QUEUE_SHARE = 0.1
 # Window values carried to each capacity point.
 CARRIED = ("rate_per_min", "sessions", "in_flight", "turns_per_s",
            "prompt_tok_per_s", "output_tok_per_s", "power_w", "gpu_power_w",
@@ -104,18 +114,21 @@ def _load_windows(conn: sqlite3.Connection, cohort_run_id: str,
                   measurement_started_at,
                   measured_avg_pool_size, measured_avg_in_flight,
                   measurement_duration_s, power_w_avg, gpu_power_w_avg,
-                  avg_kv_cache_pct
+                  avg_kv_cache_pct, queue_depth_mean
              FROM cohort_measurements
             WHERE cohort_run_id = ? AND arrival_rate_per_min IS NOT NULL
               AND stability IN ('stable', 'divergent')""",
         (cohort_run_id,),
     ).fetchall()
     out = []
-    for mid, rate, stab, detail, started, sessions, inflight, dur, pw, gpw, kv in rows:
+    for mid, rate, stab, detail, started, sessions, inflight, dur, pw, gpw, kv, qd in rows:
         try:
-            phit = json.loads(detail or "{}").get("prefix_hit_rate")
+            det = json.loads(detail or "{}")
         except ValueError:
-            phit = None
+            det = {}
+        phit = det.get("prefix_hit_rate")
+        standing = (det.get("basis") == "engine_queue" and qd is not None
+                    and qd > STANDING_QUEUE_SHARE * max(inflight or 0.0, 1.0))
         turns = conn.execute(
             """SELECT ttft_ms, ttfct_ms, tpot_ms, input_tokens, history_tokens,
                       output_tokens, error
@@ -144,6 +157,7 @@ def _load_windows(conn: sqlite3.Connection, cohort_run_id: str,
             "kv_cache_pct": kv,
             "error_rate": (sum(1 for t in turns if t[6]) / n) if n else 0.0,
             "measurement_id": mid,
+            "standing_queue": standing,
         }
         out.append(Window(rate, stab == "stable", values, turns))
     out.sort(key=lambda w: w.rate_per_min)
@@ -186,17 +200,19 @@ def _point(w: Window) -> dict:
     return {k: w.values.get(k) for k in CARRIED}
 
 
-def _passes(w: Window) -> bool:
-    return w.stable and w.values["error_rate"] < ERROR_CEILING
+def _passes(w: Window, no_standing_queue: bool = False) -> bool:
+    return (w.stable and w.values["error_rate"] < ERROR_CEILING
+            and not (no_standing_queue and w.values.get("standing_queue")))
 
 
-def find_knee(windows: list[Window]) -> tuple[Window | None, Window | None]:
+def find_knee(windows: list[Window], no_standing_queue: bool = False,
+              ) -> tuple[Window | None, Window | None]:
     """(knee, highest passing window above the first failure or None).
     ``windows`` is sorted by rate."""
     knee = None
     for i, w in enumerate(windows):
-        if not _passes(w):
-            above = [x for x in windows[i + 1:] if _passes(x)]
+        if not _passes(w, no_standing_queue):
+            above = [x for x in windows[i + 1:] if _passes(x, no_standing_queue)]
             return knee, (above[-1] if above else None)
         knee = w
     return knee, None
@@ -255,6 +271,7 @@ def rescore_run(run_dir: Path, tiers: dict | None = None,
             # (rate_search.RateStepper.is_ceiling_step).
             knee_w, stray = find_knee(windows)
             knee = knee_w.rate_per_min if knee_w else None
+            onset_w, _ = find_knee(windows, no_standing_queue=True)
             above = [w.rate_per_min for w in windows
                      if not _passes(w) and knee is not None and w.rate_per_min > knee]
             entry = {
@@ -263,6 +280,7 @@ def rescore_run(run_dir: Path, tiers: dict | None = None,
                 "knee_per_min": knee,
                 "ceiling_per_min": min(above) if above else None,
                 "knee_nonmonotone": stray.rate_per_min if stray else None,
+                "queue_onset_per_min": onset_w.rate_per_min if onset_w else None,
                 "knee_point": _point(knee_w) if knee_w else None,
                 "tiers": {},
             }

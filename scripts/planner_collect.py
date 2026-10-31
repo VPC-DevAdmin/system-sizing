@@ -72,7 +72,8 @@ def main() -> int:
             row = {**base, "workload": wl, "windows": e.get("windows"),
                    "knee_per_min": e.get("knee_per_min"),
                    "ceiling_per_min": e.get("ceiling_per_min"),
-                   "knee_nonmonotone": e.get("knee_nonmonotone")}
+                   "knee_nonmonotone": e.get("knee_nonmonotone"),
+                   "queue_onset_per_min": e.get("queue_onset_per_min")}
             kp = e.get("knee_point") or {}
             for f in FIELDS:
                 row[f"knee_{f}"] = kp.get(f)

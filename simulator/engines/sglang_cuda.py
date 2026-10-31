@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
 import threading
 import time
 from typing import Optional
@@ -71,13 +72,25 @@ DEFAULT_IMAGE = "lmsysorg/sglang:latest"
 # teardown and the next cell's start), and a counter in memory settles
 # that with nothing on disk for two processes to race over. Across a
 # process restart the counter starts from the clock, so a serve
-# restarted within a window's lifetime lands elsewhere; the run lock
-# already guarantees two processes never launch at once.
+# restarted within a window's lifetime lands elsewhere. Parallel lanes
+# on one box (CAPSIM_GPU_INDEXES) are separate processes that can
+# start in the same second: the planner campaign's 1-GPU long_form
+# and knowledge_search lanes both drew port 21792 and one died with
+# EADDRINUSE. Each lane's counter is offset by its first GPU so lanes
+# start an eighth of the window range apart.
 NCCL_PORT_BASE = 20000
 NCCL_PORT_STRIDE = 64
 NCCL_PORT_CEILING = 60000
 
-_launch_counter = itertools.count(int(time.time()))
+
+def _lane_offset() -> int:
+    first = os.environ.get("CAPSIM_GPU_INDEXES", "").split(",")[0].strip()
+    if not first.isdigit():
+        return 0
+    return int(first) * (((NCCL_PORT_CEILING - NCCL_PORT_BASE) // NCCL_PORT_STRIDE) // 8)
+
+
+_launch_counter = itertools.count(int(time.time()) + _lane_offset())
 _launch_lock = threading.Lock()
 
 

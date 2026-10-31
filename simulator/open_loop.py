@@ -132,6 +132,12 @@ def _engine_broken(errors: int, completions: int,
            (errors >= 100 and errors > 4 * completions)
 
 
+# Client patience limits (simulator/streaming.py): the engine was slow,
+# not failing.
+PATIENCE_ERRORS = frozenset({"hard_timeout", "ttft_stalled", "decode_stalled",
+                             "connection_timeout"})
+
+
 class _ErrorFuse:
     """Runaway-error fuse armed at window start.
 
@@ -912,16 +918,25 @@ class OpenLoopRunner:
             self._tokens_last_good,
         )
         last_error: list[str] = []
+        # Patience timeouts on requests sent before this window are the
+        # backlog of the window before it timing out, not a broken
+        # engine. The R770's vLLM conversational sweep aborted on 26 of
+        # them at 27/min, right after a revert from 38/min.
+        fuse_armed_ms = int(time.time() * 1000)
+        inherited = [0]
 
         def _check_fuse(fresh_turns: list[dict]) -> None:
             for t in fresh_turns:
                 if t.get("error"):
                     last_error.append(str(t["error"]))
                     del last_error[:-3]
+                    if (t["error"] in PATIENCE_ERRORS
+                            and (t.get("submitted_at_ms") or 0) < fuse_armed_ms):
+                        inherited[0] += 1
             agg_now = self.pool.aggregate()
             if not agg_now:
                 return
-            errors = agg_now.get("errors", 0)
+            errors = agg_now.get("errors", 0) - inherited[0]
             completions = agg_now.get("completed", 0)
             if fuse.tripped(errors, completions, self._tokens_last_good):
                 raise EngineBrokenError(

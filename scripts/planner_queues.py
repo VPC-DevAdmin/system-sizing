@@ -83,8 +83,10 @@ GPU_TUNE_FULL = {
     "seqs2048-mbt32k": {"max_num_seqs": 2048, "max_num_batched_tokens": 32768},
     "kvfp8": {"kv_cache_dtype": "fp8"},
     "mem95": {"gpu_memory_utilization": 0.95},
+    # Without mem95: with 2,048 sequences at 0.95 the Qwen, Gemma and
+    # gpt-oss combined runs all ran out of memory at startup.
     "combined": {"max_num_seqs": 2048, "max_num_batched_tokens": 16384,
-                 "kv_cache_dtype": "fp8", "gpu_memory_utilization": 0.95},
+                 "kv_cache_dtype": "fp8"},
 }
 GPU_TUNE_LIGHT = {k: GPU_TUNE_FULL[k] for k in ("default", "seqs2048-mbt32k", "kvfp8", "combined")}
 GPU_TUNE_TP4 = {"default": {}, "seqs2048-kvfp8": {"max_num_seqs": 2048, "kv_cache_dtype": "fp8"}}

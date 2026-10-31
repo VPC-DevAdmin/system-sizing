@@ -461,6 +461,30 @@ def _tuned_overrides(q: Queue, job: dict) -> dict | None:
     return json.loads(f.read_text()).get("job_overrides") or {}
 
 
+def _in_start_gap(q: Queue, running: dict, job: dict) -> bool:
+    """start_gap_s: keep a job's engine load clear of other starts.
+
+    Nemotron Super NVFP4 loads its weights in ~50s alone but took
+    24-27 min with three or four 2-GPU loads at once on the XE7740, past
+    the 30-min health timeout. The gap applies both ways: the job
+    waits for recent starts, and nothing starts during its own gap.
+    """
+    defs = {j["id"]: j for j in q.jobs}
+    t = time.time()
+    for jid in running:
+        try:
+            started = dt.datetime.strptime(
+                q.status[jid]["started"], "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=dt.timezone.utc).timestamp()
+        except (KeyError, ValueError):
+            continue
+        gap = max(int(job.get("start_gap_s") or 0),
+                  int(defs.get(jid, {}).get("start_gap_s") or 0))
+        if t - started < gap:
+            return True
+    return False
+
+
 def _maybe_pick(q: Queue) -> None:
     groups = {j["tune_group"] for j in q.jobs if j.get("tune_group")}
     for g in groups:
@@ -592,6 +616,8 @@ def run(q: Queue) -> None:
             pins = set(job.get("pin") or [])
             tuned = {k: v for k, v in tuned.items() if k not in pins}
             job = deep_merge(job, tuned)
+            if _in_start_gap(q, running, job):
+                break
             need = int(job.get("devices") or 1)
             devs = pick_devices(free, need, q.box)
             if devs is None:

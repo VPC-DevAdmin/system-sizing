@@ -485,6 +485,22 @@ def _in_start_gap(q: Queue, running: dict, job: dict) -> bool:
     return False
 
 
+def _over_host_mem(q: Queue, running: dict, job: dict) -> bool:
+    """host_mem_gb against the queue's host_mem_budget_gb.
+
+    vLLM's KV offload maps its host buffer in /dev/shm (1008 GiB on the
+    XE7740). Eight 1-GPU jobs at 128 GiB each did not fit, and the
+    four that failed at start-up auto-held the queue for 8 hours.
+    """
+    need = float(job.get("host_mem_gb") or 0)
+    budget = float(q.doc.get("host_mem_budget_gb") or 0)
+    if not need or not budget:
+        return False
+    defs = {j["id"]: j for j in q.jobs}
+    used = sum(float(defs.get(jid, {}).get("host_mem_gb") or 0) for jid in running)
+    return used + need > budget
+
+
 def _maybe_pick(q: Queue) -> None:
     groups = {j["tune_group"] for j in q.jobs if j.get("tune_group")}
     for g in groups:
@@ -616,7 +632,7 @@ def run(q: Queue) -> None:
             pins = set(job.get("pin") or [])
             tuned = {k: v for k, v in tuned.items() if k not in pins}
             job = deep_merge(job, tuned)
-            if _in_start_gap(q, running, job):
+            if _in_start_gap(q, running, job) or _over_host_mem(q, running, job):
                 break
             need = int(job.get("devices") or 1)
             devs = pick_devices(free, need, q.box)

@@ -1179,6 +1179,7 @@ def test_run_escalates_tp_in_place_until_the_model_fits(tmp_path, monkeypatch):
 
     class _Cfg:
         output = _Out()
+        simulation = type("_Sim", (), {"prefix_reuse": "industry"})()
 
     async def fake_sweep(cfg, cohort, *, new_run, ladder_override=None):
         model, tp, _ = launched[-1]
@@ -1230,6 +1231,7 @@ def test_run_notes_when_no_wider_tp_exists(tmp_path, monkeypatch):
 
     class _Cfg:
         output = _Out()
+        simulation = type("_Sim", (), {"prefix_reuse": "industry"})()
 
     async def fake_sweep(cfg, cohort, *, new_run, ladder_override=None):
         raise RuntimeError("Executor creation failed due to insufficient GPU memory.")
@@ -1322,6 +1324,7 @@ def test_resume_does_not_confirm_a_winner_twice(tmp_path, monkeypatch):
 
     class _Cfg:
         output = _Out()
+        simulation = type("_Sim", (), {"prefix_reuse": "industry"})()
 
     async def fake_sweep(cfg, cohort, *, new_run, ladder_override=None):
         sweeps.append("confirm" if ladder_override is None else "search")
@@ -1413,6 +1416,7 @@ def test_resume_can_redo_an_engines_measured_cells(tmp_path, monkeypatch):
 
     class _Cfg:
         output = _Out()
+        simulation = type("_Sim", (), {"prefix_reuse": "industry"})()
 
     async def fake_sweep(cfg, cohort, *, new_run, ladder_override=None):
         sweeps.append(("sweep", ladder_override))
@@ -1700,6 +1704,7 @@ def test_priority_models_run_first_on_resume(tmp_path, monkeypatch):
 
     class _Cfg:
         output = _Out()
+        simulation = type("_Sim", (), {"prefix_reuse": "industry"})()
 
     async def fake_sweep(cfg, cohort, *, new_run, ladder_override=None):
         out = tmp_path / f"sweep_{len(order)}.json"

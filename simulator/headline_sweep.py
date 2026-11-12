@@ -50,6 +50,7 @@ from .headline_search import Chunk, chunks_converged, scrape_complete, whole_scr
 from .measurement import _percentile
 from .open_loop import EngineBrokenError, WorkerPool, smoke_test_engine
 from .personas import Cohort
+from .prefix_policy import headline_reuse
 from .preflight import preflight_check
 from .runs import resolve_run_dir
 from .telemetry import MeasurementTelemetry
@@ -87,6 +88,11 @@ class Rung:
     # the rung, used when the window saw too few completions for the
     # counter to be anything but a count of finishing waves.
     rate_source: str = "counter"
+    # Prompt tokens served from the prefix cache over the published chunk,
+    # and whether that is what the chat template explains ("template") or
+    # more ("above_template"); see prefix_policy.
+    prefix_hit_rate: float | None = None
+    prefix_reuse: str | None = None
 
 
 def engine_held(concurrency: int, in_flight: float | None,
@@ -313,6 +319,92 @@ def wave_bound(completions: int, population: float | None) -> bool:
     return bool(population) and completions < GAUGE_MIN_TURNS_PER_STREAM * population
 
 
+def prefix_hit_rate(m0: dict, m1: dict, gauge: list[float]) -> float | None:
+    """Share of the chunk's prompt tokens the engine served from its
+    prefix cache: the rise in the hit counter over the rise in the query
+    counter, both already summed over replicas. Engines without the
+    counters (SGLang) fall back to their own hit-rate gauge, averaged."""
+    q0, q1 = m0.get("prefix_cache_queries"), m1.get("prefix_cache_queries")
+    h0, h1 = m0.get("prefix_cache_hits"), m1.get("prefix_cache_hits")
+    if None not in (q0, q1, h0, h1) and q1 > q0:
+        return round(max(0.0, h1 - h0) / (q1 - q0), 4)
+    return round(statistics.fmean(gauge), 4) if gauge else None
+
+
+def _prefix_plan(cfg: Config, cohort: Cohort) -> dict:
+    """How this sweep reaches its prefix-cache reuse level
+    (``simulation.prefix_reuse``; docs/prefix-cache-policy.md): the length
+    of the system prompt every stream shares, the unique user text left of
+    the shape's prompt length, and the hit rate that split gives with this
+    model's chat template (``template_floor``, which every rung is judged
+    against)."""
+    import random
+
+    from .prefix_policy import (
+        MIN_UNIQUE_USER_TOKENS,
+        block_tokens,
+        choose_system_tokens,
+        resolve_reuse,
+        template_floor,
+    )
+    from .tokenizer_corpus import TokenCorpus, shared_system_prompt
+
+    shape = _cohort_shape(cohort) or {}
+    n_in = int(shape.get("input_tokens") or 0)
+    pid = next(iter(cohort.persona_weights), "")
+    explicit = (cfg.simulation.system_prompt_tokens or {}).get(pid)
+    level = resolve_reuse(cfg.simulation.prefix_reuse)
+    block = block_tokens(cfg.engine.type)
+    out = {"setting": level["setting"], "target": level["target"],
+           "source": level["source"],
+           "within_production": level["within_production"],
+           "block_tokens": block, "system_prompt_tokens": 0,
+           "system_prompt_actual_tokens": 0, "user_tokens": n_in,
+           "template_floor": None}
+    if explicit is not None:
+        out.update(setting="explicit", target=None,
+                   source="simulation.system_prompt_tokens")
+    if not n_in:
+        return out
+    try:
+        corpus = TokenCorpus(cfg.engine.model_id)
+        floors: dict[int, tuple] = {}
+
+        def split(sys_n: int) -> tuple:
+            """(floor, system prompt's real tokens, user tokens) at sys_n."""
+            if sys_n not in floors:
+                system = shared_system_prompt(corpus, pid, sys_n)
+                user_n = max(1, n_in - (system[1] if system else 0))
+                texts = [corpus.make_text(user_n, random.Random(seed))
+                         for seed in (1, 2)]
+                floors[sys_n] = (
+                    template_floor(corpus._tokenizer, texts, block,
+                                   system_prompt=system[0] if system else None),
+                    system[1] if system else 0, user_n)
+            return floors[sys_n]
+
+        if explicit is not None:
+            sys_n = max(0, int(explicit))
+        else:
+            sys_n = choose_system_tokens(
+                lambda n: split(n)[0], n_in - MIN_UNIQUE_USER_TOKENS,
+                level["target"])
+        floor, actual, user_n = split(sys_n)
+        out.update(system_prompt_tokens=sys_n,
+                   system_prompt_actual_tokens=actual, user_tokens=user_n,
+                   template_floor=floor)
+        if level["target"] is not None and explicit is None and (
+                floor is None or abs(floor - level["target"]) > 0.1):
+            log.warning(
+                "prefix reuse: aimed for %.0f%%, this model and a %d-token "
+                "prompt give %s", 100 * level["target"], n_in,
+                "an unknown rate (no usable chat template)" if floor is None
+                else f"{100 * floor:.0f}%")
+    except Exception as e:  # noqa: BLE001
+        log.warning("prefix reuse plan unavailable: %s", e)
+    return out
+
+
 async def run_headline_sweep(
     cfg: Config,
     cohort: Cohort,
@@ -393,10 +485,25 @@ async def run_headline_sweep(
         host_telemetry=(cfg.engine.type != "remote"),
     )
 
+    prefix_cache = await asyncio.to_thread(_prefix_plan, cfg, cohort)
+    log.info("prefix reuse: %s -> %d-token shared system prompt + %d unique "
+             "user tokens, expected hit rate %s",
+             prefix_cache["setting"], prefix_cache["system_prompt_actual_tokens"],
+             prefix_cache["user_tokens"],
+             "unknown" if prefix_cache["template_floor"] is None
+             else f"{100 * prefix_cache['template_floor']:.1f}%")
+    shared_prompt = ({pid: prefix_cache["system_prompt_tokens"]
+                      for pid in cohort.persona_weights}
+                     if prefix_cache["system_prompt_tokens"] else None)
+
     pool = WorkerPool(
         base_config={
             "persona_weights": cohort.persona_weights,
             "persona_specs": persona_specs,
+            # The shared system prompt comes out of the shape's prompt
+            # length, so the request stays the size the sweep reports.
+            "system_prompt_tokens": shared_prompt,
+            "system_prompt_in_input": True,
             "replica_urls": engine.replica_urls,
             "api_key": engine.api_key,
             "api_model_name": engine.api_model_name,
@@ -462,6 +569,7 @@ async def run_headline_sweep(
         t0 = time.monotonic()
         running: list[float] = []
         waiting: list[float] = []
+        hit_gauge: list[float] = []
         for _ in range(seconds):
             await asyncio.sleep(1.0)
             m = await _metrics()
@@ -472,6 +580,9 @@ async def run_headline_sweep(
                     running.append(float(m["num_running"]))
                 if m.get("queue_depth") is not None:
                     waiting.append(float(m["queue_depth"]))
+                if m.get("prefix_cache_queries") is None and \
+                        m.get("prefix_cache_hit_rate") is not None:
+                    hit_gauge.append(float(m["prefix_cache_hit_rate"]))
             _snapshot(phase, m, acc_offered[0], acc)
         m1 = await whole_scrape(_metrics)
         whole = whole and scrape_complete(m1)
@@ -482,6 +593,7 @@ async def run_headline_sweep(
                - (m0.get("prompt_tokens_total") or 0))
         run_mean = statistics.fmean(running) if running else None
         q_mean = statistics.fmean(waiting) if waiting else None
+        hit_rate = prefix_hit_rate(m0, m1, hit_gauge)
         out_rate = gen / dt if gen else None
         prompt_rate = prm / dt if prm else None
         source = "counter"
@@ -509,6 +621,7 @@ async def run_headline_sweep(
             prompt_rate=prompt_rate,
             complete=whole,
             rate_source=source,
+            prefix_hit_rate=hit_rate,
         )
 
     acc_offered = [ladder[0]]   # current offered count, for snapshots
@@ -647,7 +760,16 @@ async def run_headline_sweep(
                 steady_state=steady, measure_s=measure_s,
                 held=engine_held(n, last.running),
                 rate_source=rate_source,
+                prefix_hit_rate=last.prefix_hit_rate,
+                prefix_reuse=headline_reuse(last.prefix_hit_rate,
+                                            prefix_cache["template_floor"]),
             )
+            if rung.prefix_reuse == "above_template":
+                log.warning("rung %d: %.0f%% of prompt tokens came from the "
+                            "prefix cache; the chat template and shared "
+                            "system prompt explain %.0f%%",
+                            n, 100 * rung.prefix_hit_rate,
+                            100 * prefix_cache["template_floor"])
             rungs.append(rung)
             db.update_measurement(measurement_id, {
                 "measured_avg_in_flight": float(rung.in_flight or 0.0),
@@ -706,6 +828,11 @@ async def run_headline_sweep(
             # cross-engine result comparable rather than merely
             # adjacent. None when the engine does not report it.
             "kv_cache_tokens": kv_capacity,
+            # The reuse level this sweep was built to reach, how (shared
+            # system prompt + unique user text), and the hit rate that
+            # gives (template_floor), against which every rung's
+            # prefix_hit_rate is judged.
+            "prefix_cache": prefix_cache,
             "ladder": ladder,
             "shape": _cohort_shape(cohort),
             "rungs": [asdict(r) for r in rungs],

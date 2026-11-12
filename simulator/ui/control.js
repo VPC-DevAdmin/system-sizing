@@ -428,7 +428,7 @@ export const Control = {
       if (dl && !dl.running && !e?.cached) {
         clearInterval(this._dlPoll);
         if (slot) slot.innerHTML =
-          `<span class="status-fail">download failed — see Prepare tab</span>`;
+          `<span class="status-fail">download failed — see the System tab</span>`;
       }
     }, 2500);
   },
@@ -598,6 +598,7 @@ export const Control = {
     if (headline) {
       const cap = $("#hl-max-conc").value;
       if (cap) body.max_concurrency = +cap;
+      body.prefix_reuse = $("#hl-prefix-reuse")?.value || "industry";
     }
     try {
       this.msg("starting…");
@@ -700,6 +701,7 @@ export const Control = {
     }
     body.preset = $("#hl-preset").value;
     body.input_tokens = +$("#hl-input-tokens")?.value || 128;
+    body.prefix_reuse = $("#hl-prefix-reuse")?.value || "industry";
     const engines = (Engines.available().length > 1
                      && this.headlineEngines?.length)
       ? this.headlineEngines : null;

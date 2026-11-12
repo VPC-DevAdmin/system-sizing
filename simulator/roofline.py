@@ -557,7 +557,9 @@ def _pick_fast(ranked: list[Candidate], limit: int, diverse: bool,
 # key: a roofline restarted with a new prompt length, memory share or
 # KV precision measures NEW cells instead of reusing old ones.
 SHAPE_KEYS = ("input_tokens", "gpu_memory_utilization", "kv_cache_dtype",
-              "replicas", "tp", "max_model_len", "placement")
+              "replicas", "tp", "max_model_len", "placement", "prefix_reuse")
+# Shape keys that describe the offered load, not the engine launch.
+WORKLOAD_KEYS = ("input_tokens", "prefix_reuse")
 LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_", "llamacpp_")
 
 
@@ -1134,7 +1136,7 @@ def cell_overrides(cell: dict) -> dict:
     out = {"model_id": cell["model"], "engine": cell["engine"],
            "max_num_seqs": cell["max_num_seqs"]}
     out.update({k: v for k, v in cell.items()
-                if _is_shape_key(k) and k != "input_tokens"
+                if _is_shape_key(k) and k not in WORKLOAD_KEYS
                 and v not in (None, "")})
     return out
 
@@ -1457,6 +1459,10 @@ async def run_roofline(
     resume: bool = True,
     confirm_winners: bool = True,
     engine_shape: dict | None = None,
+    # Prefix-cache reuse every cell's sweep is built to reach
+    # (simulation.prefix_reuse); None = the config default. Part of the
+    # cell key: cells measured at another level are measured again.
+    prefix_reuse: str | float | None = None,
     model_info: dict[str, dict] | None = None,
     retry_engines: list[str] | None = None,
     redo_engines: list[str] | None = None,
@@ -1532,6 +1538,10 @@ async def run_roofline(
     else:
         st = State()
 
+    from .prefix_policy import resolve_reuse
+    reuse = resolve_reuse(prefix_reuse)["setting"]
+    engine_shape = {**(engine_shape or {}), "prefix_reuse": reuse}
+
     notes: list[str] = []
     plan_cells = cells(models, engines, shapes, input_tokens=input_tokens,
                        engine_shape=engine_shape, model_info=model_info,
@@ -1560,7 +1570,8 @@ async def run_roofline(
     st.input_tokens = input_tokens
     st.plan = {"models": models, "engines": engines, "shapes": shapes,
                "cells": plan_cells, "model_info": model_info or {},
-               "notes": notes, "benchmarks": benchmarks or {}}
+               "notes": notes, "benchmarks": benchmarks or {},
+               "prefix_reuse": reuse}
     st.estimate_min = estimate_minutes(len(plan_cells) - len(done),
                                        n_models=len(models))
     if not st.models:
@@ -1627,6 +1638,7 @@ async def run_roofline(
             cfg_path = build_config(cell_overrides(cell))
             sub = load_config(cfg_path)
             sub.output.db_directory = str(runs_base)
+            sub.simulation.prefix_reuse = cell.get("prefix_reuse") or reuse
             # Coarse ladder while RANKING: the peak sits at the top
             # of the curve, so the low rungs cost minutes and teach
             # nothing. The winner earns the full ladder below.
@@ -1687,6 +1699,7 @@ async def run_roofline(
                 cfg_path = build_config(cell_overrides(best))
                 sub = load_config(cfg_path)
                 sub.output.db_directory = str(runs_base)
+                sub.simulation.prefix_reuse = best.get("prefix_reuse") or reuse
                 final = await run_headline_sweep(
                     sub, cohort_from_persona("headline_generation"),
                     new_run=True,

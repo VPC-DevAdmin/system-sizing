@@ -99,8 +99,10 @@ async def _amain(config: dict) -> bool:
         request_timeout_s=int(config.get("request_timeout_s") or 300),
         rng_seed=int(config.get("seed") or 0xC0FFEE),
         reasoning_effort=config.get("reasoning_effort"),
+        reasoning_overhead_tokens=config.get("reasoning_overhead_tokens"),
         history_window_turns=config.get("history_window_turns"),
         system_prompt_tokens=config.get("system_prompt_tokens"),
+        system_prompt_in_input=bool(config.get("system_prompt_in_input")),
         context_limit_tokens=config.get("context_limit_tokens"),
         planner_timeouts=config.get("planner_timeouts"),
     )

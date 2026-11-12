@@ -10,6 +10,7 @@ dicts, and the lookup helpers.
 
 from __future__ import annotations
 
+from typing import Optional
 from dataclasses import dataclass
 
 from .distributions import Distribution
@@ -98,6 +99,12 @@ class Persona:
     # number quietly underestimates. Real-user personas leave this
     # off; early EOS is authentic behavior there.
     ignore_eos: bool = False
+
+    # What a session starts with before its first question: an agent's
+    # task and repo map, a ticket thread, a document under review. Sent
+    # once with turn 0's input, then replayed as history like any other
+    # turn. None for personas that start empty.
+    initial_context_tokens: Optional[Distribution] = None
 
     @property
     def pre_ttft_timeout_s(self) -> float:

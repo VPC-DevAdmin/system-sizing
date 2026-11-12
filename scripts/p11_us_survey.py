@@ -71,6 +71,11 @@ DFLASH = json.dumps(_dflash)
 def cfg(model, engine, tp, replicas, image=None, args=(), env=None, reasoning=None):
     return {
         "unique_prompts": False,  # see UNIQUE_PROMPTS
+        # Tokens of ISL sent as a system prompt shared by every user (the rest is
+        # unique user text), and the prefix-cache hit rate that split should give.
+        # Only meaningful with unique_prompts; see docs/prefix-cache-policy.md.
+        "system_tokens": 0,
+        "expected_hit_rate": None,
         "model": model,
         "engine": engine,
         "tp": tp,
@@ -291,12 +296,29 @@ def engine_running(shard_dirs):
     return sum(seen.values()) if seen else None
 
 
+def prefix_hit_rate(shard_dirs):
+    """Prompt tokens served from the prefix cache during the measured window, as
+    a fraction of prompt tokens queried, from vLLM's counters over distinct
+    replicas. None for engines that do not export the counters (SGLang)."""
+    hits, queries = {}, {}
+    for d in shard_dirs:
+        f = d / "server_metrics_export.json"
+        if not f.is_file():
+            continue
+        metrics = json.loads(f.read_text()).get("metrics", {})
+        for key, into in (("vllm:prefix_cache_hits", hits), ("vllm:prefix_cache_queries", queries)):
+            for s in metrics.get(key, {}).get("series", []):
+                into[s.get("endpoint_url")] = s.get("stats", {}).get("total") or 0
+    total = sum(queries.values())
+    return sum(hits.values()) / total if total else None
+
+
 def aiperf_rung(c, urls, concurrency, rung_dir):
     """One load rung. A single AIPerf process tops out near 400 requests/s (its
     timing manager pins a core), so the load is split over SHARDS processes,
     each driving its own replicas, and per-request records are merged."""
     rung_dir.mkdir(parents=True, exist_ok=True)
-    if c["unique_prompts"]:
+    if c["unique_prompts"] and c["engine"] == "sglang":  # vLLM has no flush; seeds differ per rung
         for u in urls:  # drop whatever the radix cache kept from the previous rung
             req = urllib.request.Request(u + "/flush_cache", data=b"{}", method="POST",
                                          headers={"Content-Type": "application/json"})
@@ -310,7 +332,8 @@ def aiperf_rung(c, urls, concurrency, rung_dir):
         cmd = [
             AIPERF, "profile", "--model", c["model"], "--endpoint-type", "chat", "--streaming",
             "--tokenizer", c["model"], "--use-server-token-count",
-            "--synthetic-input-tokens-mean", str(ISL), "--synthetic-input-tokens-stddev", "0",
+            "--synthetic-input-tokens-mean", str(ISL - c["system_tokens"]),
+            "--synthetic-input-tokens-stddev", "0",
             "--output-tokens-mean", str(OSL), "--output-tokens-stddev", "0",
             "--extra-inputs", "ignore_eos:true",
             "--concurrency", str(concurrency // k + (i < concurrency % k)),
@@ -322,6 +345,8 @@ def aiperf_rung(c, urls, concurrency, rung_dir):
         ]
         if c["unique_prompts"]:
             cmd += ["--num-dataset-entries", str(DATASET_ENTRIES)]
+        if c["system_tokens"]:
+            cmd += ["--shared-system-prompt-length", str(c["system_tokens"])]
         for u in (urls[i::k] if len(urls) >= k else urls):
             cmd += ["--url", u]
         log_f = open(shard_dir / "aiperf.log", "w")
@@ -344,7 +369,10 @@ def aiperf_rung(c, urls, concurrency, rung_dir):
             if rec["metadata"].get("benchmark_phase") == "warmup":
                 continue
             m = rec.get("metrics", {})
-            if rec.get("error") or "time_to_first_token" not in m or "request_latency" not in m:
+            # A stream that ends without a token count died part-way (gpt-oss with
+            # ignore_eos: vLLM's Harmony parser throws on the stop token).
+            if (rec.get("error") or "time_to_first_token" not in m or "request_latency" not in m
+                    or "output_sequence_length" not in m):
                 failed += 1
                 continue
             first = m["time_to_first_token"]["value"]
@@ -369,6 +397,11 @@ def aiperf_rung(c, urls, concurrency, rung_dir):
         "engine_running_p50": engine_running([s for _, s, _ in procs]),
     }
     row["tok_s_per_user_p50"] = 1000 / row["itl_p50_ms"] if row["itl_p50_ms"] else None
+    row["prefix_hit_rate"] = hit = prefix_hit_rate([s for _, s, _ in procs])
+    if c["expected_hit_rate"] is not None and hit is not None:
+        # More than 3 points off the designed rate means prompts repeated (or did
+        # not share the system prompt): do not publish the rung.
+        row["prefix_hit_as_designed"] = abs(hit - c["expected_hit_rate"]) <= 0.03
     return row
 
 
@@ -460,7 +493,9 @@ def run(cid, ladder, do_quality, label, keep=False, resume=False):
     prior = json.loads((run_dir / "result.json").read_text()) if resume and (run_dir / "result.json").is_file() else {}
     done = {r["concurrency"] for r in prior.get("rungs", []) if not r.get("error")}
     result = {"config": cid, **c, "isl": ISL, "osl": OSL, "rung_s": RUNG_S,
-              "prefix_cache": "on, defeated by unique prompts" if c["unique_prompts"] else "disabled",
+              "prefix_cache": "disabled" if not c["unique_prompts"]
+              else f"on, {c['system_tokens']}-token shared system prompt, unique user text"
+              if c["system_tokens"] else "on, defeated by unique prompts",
               "provenance": provenance(c), "started": time.strftime("%Y-%m-%dT%H:%M:%S")}
     if prior:
         result["quality"] = prior.get("quality")

@@ -253,6 +253,23 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def forced_length_body(model_id: str, output_tokens: int) -> dict:
+    """Request fields that hold a reply to ``output_tokens``, the
+    persona's answer length before any reasoning allowance (max_tokens
+    keeps that allowance as the cap).
+
+    ``ignore_eos`` keeps generating past the model's end token. gpt-oss
+    replies in the Harmony format: past an ignored ``<|return|>`` it emits
+    control tokens out of order, and vLLM's streaming Harmony parser aborts
+    the stream ("Unexpected token 200002 while expecting start token
+    200006"). ``min_tokens`` blocks the stop tokens until the target
+    instead, so the reply stays well-formed and the decode work is the
+    same."""
+    if "gpt-oss" in model_id.lower():
+        return {"min_tokens": int(output_tokens)}
+    return {"ignore_eos": True}
+
+
 async def _consume_or_cancel(
     consume_coro, cancel_event: asyncio.Event,
 ):
@@ -298,11 +315,13 @@ async def run_virtual_user(
     capture_token_timestamps: bool = False,
     initial_phase_offset_enabled: bool = True,
     reasoning_effort: str | None = None,
+    reasoning_overhead_tokens: int | None = None,
     start_mid_session: bool = False,
     history_window_turns: int | None = None,
     context_limit_tokens: int | None = None,
     planner_timeouts: dict | None = None,
     system_prompt: tuple[str, int] | None = None,
+    system_prompt_in_input: bool = False,
 ) -> None:
     """Run one virtual user to completion (or until cancelled).
 
@@ -315,7 +334,9 @@ async def run_virtual_user(
     persona's SLA-scaled abort tiers with fixed patience.
     ``system_prompt`` is (text, tokens) sent first on every turn; its
     tokens count toward the context limit and are recorded with the
-    history tokens."""
+    history tokens. ``system_prompt_in_input`` takes those tokens out of
+    each turn's user text, so system prompt + user text is the persona's
+    input length (headline sweeps, whose shape fixes the prompt size)."""
     sys_messages = ([{"role": "system", "content": system_prompt[0]}]
                     if system_prompt else [])
     sys_tokens = system_prompt[1] if system_prompt else 0
@@ -376,8 +397,10 @@ async def run_virtual_user(
                 n_turns = rng.choices(draws, weights=[max(1, d) for d in draws],
                                       k=1)[0]
                 first_turn = rng.randrange(max(1, n_turns))
-                for _ in range(first_turn):
+                for seeded in range(first_turn):
                     q_tok = persona.input_tokens.sample_int(rng)
+                    if seeded == 0 and persona.initial_context_tokens is not None:
+                        q_tok += persona.initial_context_tokens.sample_int(rng)
                     a_tok = persona.output_tokens.sample_int(rng)
                     history_messages.append(
                         {"role": "user", "content": corpus.make_text(q_tok, rng)})
@@ -391,17 +414,28 @@ async def run_virtual_user(
                     return
 
                 input_tokens_target = persona.input_tokens.sample_int(rng)
+                # The session's starting material rides with its first
+                # question, then stays in the history.
+                if turn == 0 and persona.initial_context_tokens is not None:
+                    input_tokens_target += persona.initial_context_tokens.sample_int(rng)
+                if system_prompt_in_input:
+                    input_tokens_target = max(1, input_tokens_target - sys_tokens)
                 output_tokens_target = persona.output_tokens.sample_int(rng)
+                answer_tokens_target = output_tokens_target
                 # Reasoning models consume budget on chain-of-thought
                 # before content streams. Bump the wire-level
                 # max_tokens by the per-effort overhead so the answer
                 # fits even for short-output personas (quick_lookup
                 # median ~30 tokens). Persona's output_tokens stays
                 # the user-facing answer-length target.
-                if reasoning_effort:
+                # A measured allowance applies on its own too: models
+                # with no effort knob (thinking on, or always reasoning)
+                # still reason, and their level-matching reruns set it.
+                if reasoning_overhead_tokens:
+                    output_tokens_target += int(reasoning_overhead_tokens)
+                elif reasoning_effort:
                     output_tokens_target += REASONING_OVERHEAD_TOKENS.get(
-                        reasoning_effort, 250,
-                    )
+                        reasoning_effort, 250)
                 # History actually sent: the window, then the context
                 # limit (oldest exchanges dropped first).
                 keep = len(exchange_tokens)
@@ -460,7 +494,7 @@ async def run_virtual_user(
                 # decode work — vendor benchmarks pin lengths with
                 # ignore_eos, so a comparable number must too.
                 if getattr(persona, "ignore_eos", False):
-                    extra_body["ignore_eos"] = True
+                    extra_body.update(forced_length_body(model_id, answer_tokens_target))
                 extra_body = extra_body or None
                 stream_result = await _consume_or_cancel(consume_with_tiers(
                     # Bind loop-iteration values as defaults: the

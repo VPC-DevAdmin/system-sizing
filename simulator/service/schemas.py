@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel
 
@@ -34,6 +34,15 @@ class StartRunRequest(BaseModel):
     # Headline sweeps only: cap the concurrency ladder (the UI's
     # "max concurrent streams" control). None = the full ladder.
     max_concurrency: Optional[int] = None
+    # Headline sweeps and the joint search: the prefix-cache reuse the
+    # sweep is built to reach (simulation.prefix_reuse): "industry",
+    # "consumer_chat", "conversation", "template" or a share such as
+    # 0.45. None = the profile's setting (default "industry").
+    prefix_reuse: Optional[Union[str, float]] = None
+    # Headline sweep of the generation workload only: the request shape
+    # to measure, {"input_tokens": n, "output_tokens": n}. None = the
+    # workload's current shape.
+    shape: Optional[dict] = None
     # Shape search only: the pinned prompt length. None = config
     # default (128, the vendor convention).
     input_tokens: Optional[int] = None
@@ -124,6 +133,9 @@ class RooflineRequest(BaseModel):
     max_num_seqs: Optional[list[int]] = None
     output_tokens: Optional[list[int]] = None
     input_tokens: int = 128
+    # Prefix-cache reuse every sweep is built to reach; see
+    # StartRunRequest.prefix_reuse. Part of each cell's identity.
+    prefix_reuse: Optional[Union[str, float]] = None
     # resume: true (default) reuses every cell of the previous run
     # whose full launch shape -- model, engine, batch width, output
     # AND input tokens, memory share, KV precision, levers -- matches.

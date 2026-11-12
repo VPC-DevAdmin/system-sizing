@@ -1,0 +1,273 @@
+# H wave: heavy workloads at 128K context (test plan of 2 Nov 2026,
+# https://claude.ai/artifact/2cTXdqpc7dz8CMAaHa2SoT). Merged over the
+# packaged catalog at load, like planner.yaml.
+#
+# Two light workloads for people asking questions; five heavy ones that
+# carry the plan. Outputs are pinned to the sampled length (ignore_eos):
+# the prompts are filler text, so a model would otherwise stop early and
+# under-load the decode side of the shape being tested. Every turn
+# replays the session's history verbatim, so the engine's prefix cache
+# can reuse it; the per-persona shared prefix is set in
+# scripts/planner_campaign.py (PLANNER_SIMULATION.system_prompt_tokens).
+#
+# Agent shapes follow published traces (arXiv 2605.26297): 12-62 turns
+# per task, context averaging 37K-80K and peaking near 170K, ~23K at the
+# first turn, 85-99% of input reused across turns. The service agent has
+# no published trace; its shape is an estimate.
+
+personas:
+  h_assistant:
+    name: "Assistant chat"
+    description: "Questions, drafting and conversation with a general assistant"
+    input_tokens: {lognormal: {median: 400, sigma: 0.6, min: 20, max: 4000}}
+    output_tokens: {lognormal: {median: 300, sigma: 0.6, min: 20, max: 2000}}
+    turns_per_session: {discrete: {3: 0.4, 6: 0.4, 10: 0.2}}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {lognormal: {median: 20, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 25, sigma: 0.6}}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+
+  h_document_qa:
+    name: "Document Q&A"
+    description: "Questions over retrieved passages or an attached document"
+    input_tokens: {lognormal: {median: 8000, sigma: 0.5, min: 1000, max: 32000}}
+    output_tokens: {lognormal: {median: 400, sigma: 0.4, min: 50, max: 1500}}
+    turns_per_session: {discrete: {1: 0.5, 2: 0.3, 4: 0.2}}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {lognormal: {median: 30, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 40, sigma: 0.6}}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+
+  h_coding_agent:
+    name: "Coding agent"
+    description: "Agent that reads a repository, edits code and runs tools; context grows every turn"
+    # Task description and repository map, sent once with the first turn.
+    initial_context_tokens: {lognormal: {median: 8000, sigma: 0.4, min: 2000, max: 24000}}
+    # Tool output each turn: file reads, test runs, search results.
+    input_tokens: {lognormal: {median: 3000, sigma: 0.8, min: 200, max: 24000}}
+    output_tokens: {lognormal: {median: 600, sigma: 0.7, min: 50, max: 4000}}
+    turns_per_session: {discrete: {10: 0.15, 20: 0.25, 30: 0.3, 60: 0.2, 120: 0.1}}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    # Tool execution between turns, not reading.
+    read_time_seconds: {lognormal: {median: 0.5, sigma: 0.3}}
+    active_think_seconds: {lognormal: {median: 2.5, sigma: 0.6}}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+
+  h_research_agent:
+    name: "Research agent"
+    description: "Searches internal and web sources, reads what it finds and writes a report"
+    initial_context_tokens: {lognormal: {median: 1000, sigma: 0.3, min: 200, max: 4000}}
+    # Search results and document pages, with occasional long pages.
+    input_tokens: {lognormal: {median: 1200, sigma: 0.9, min: 100, max: 16000}}
+    output_tokens: {lognormal: {median: 300, sigma: 0.7, min: 30, max: 3000}}
+    turns_per_session: {discrete: {10: 0.2, 20: 0.35, 30: 0.3, 60: 0.15}}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {lognormal: {median: 0.5, sigma: 0.3}}
+    active_think_seconds: {lognormal: {median: 2.5, sigma: 0.6}}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+
+  h_service_agent:
+    name: "Service agent"
+    description: "Works a support ticket to resolution: records, help articles, actions and a reply"
+    # The ticket thread.
+    initial_context_tokens: {lognormal: {median: 1500, sigma: 0.5, min: 200, max: 6000}}
+    # Record and article lookups.
+    input_tokens: {lognormal: {median: 600, sigma: 0.7, min: 50, max: 4000}}
+    output_tokens: {lognormal: {median: 150, sigma: 0.6, min: 20, max: 1500}}
+    turns_per_session: {discrete: {4: 0.25, 8: 0.35, 12: 0.25, 20: 0.15}}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {lognormal: {median: 0.2, sigma: 0.3}}
+    active_think_seconds: {lognormal: {median: 0.8, sigma: 0.5}}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+
+  h_document_pipeline:
+    name: "Document pipeline"
+    description: "Batch extraction and summaries over contracts, reports and transcripts"
+    input_tokens: {lognormal: {median: 32000, sigma: 0.6, min: 4000, max: 120000}}
+    output_tokens: {lognormal: {median: 1500, sigma: 0.5, min: 200, max: 6000}}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 30.0, ttft_failure_seconds: 120.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+
+  h_deep_analysis:
+    name: "Deep analysis"
+    description: "Long reasoned answers and long-form writing"
+    input_tokens: {lognormal: {median: 6000, sigma: 0.6, min: 500, max: 32000}}
+    # Includes the model's reasoning.
+    output_tokens: {lognormal: {median: 6000, sigma: 0.5, min: 500, max: 16000}}
+    turns_per_session: {discrete: {1: 0.6, 2: 0.3, 3: 0.1}}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {lognormal: {median: 60, sigma: 0.5}}
+    active_think_seconds: {lognormal: {median: 30, sigma: 0.6}}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+
+  # Context ladder: one request of a fixed size, 512 tokens out. Finds the
+  # longest context each response tier allows and how per-stream speed
+  # falls as context grows.
+  h_ctx_8k:
+    name: "Context 8K"
+    description: "Context ladder: 8K-token prompt"
+    input_tokens: {constant: 8192}
+    output_tokens: {constant: 512}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 60.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+  h_ctx_32k:
+    name: "Context 32K"
+    description: "Context ladder: 32K-token prompt"
+    input_tokens: {constant: 32768}
+    output_tokens: {constant: 512}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 60.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+  h_ctx_64k:
+    name: "Context 64K"
+    description: "Context ladder: 64K-token prompt"
+    input_tokens: {constant: 65536}
+    output_tokens: {constant: 512}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 60.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+  h_ctx_128k:
+    name: "Context 128K"
+    description: "Context ladder: 128K-token prompt"
+    input_tokens: {constant: 126000}
+    output_tokens: {constant: 512}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 120.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+
+  # Output ladder: a 1K-token prompt and a fixed answer length. Finds the
+  # ceiling when generation dominates.
+  h_out_1k:
+    name: "Output 1K"
+    description: "Output ladder: 1K tokens out"
+    input_tokens: {constant: 1024}
+    output_tokens: {constant: 1024}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+  h_out_4k:
+    name: "Output 4K"
+    description: "Output ladder: 4K tokens out"
+    input_tokens: {constant: 1024}
+    output_tokens: {constant: 4096}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+  h_out_8k:
+    name: "Output 8K"
+    description: "Output ladder: 8K tokens out"
+    input_tokens: {constant: 1024}
+    output_tokens: {constant: 8192}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+  h_out_16k:
+    name: "Output 16K"
+    description: "Output ladder: 16K tokens out"
+    input_tokens: {constant: 1024}
+    output_tokens: {constant: 16384}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+
+# T wave: task-model jobs for small models on CPU (Task models level of
+# the AI capacity planner, 2 Nov 2026). Short, one-pass requests at 32K
+# context; the shared prefix is set in scripts/planner_campaign.py.
+  t_ticket_triage:
+    name: "Ticket triage"
+    description: "A ticket or email read once, then classified, tagged and routed"
+    input_tokens: {lognormal: {median: 1000, sigma: 0.5, min: 100, max: 6000}}
+    output_tokens: {lognormal: {median: 80, sigma: 0.3, min: 20, max: 300}}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 5.0, ttft_failure_seconds: 15.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+  t_document_intake:
+    name: "Document intake"
+    description: "A form, invoice or claim read once for its fields"
+    input_tokens: {lognormal: {median: 4000, sigma: 0.6, min: 500, max: 16000}}
+    output_tokens: {lognormal: {median: 300, sigma: 0.4, min: 50, max: 1200}}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+  t_privacy_screening:
+    name: "Privacy screening"
+    description: "A message returned with its personal data masked: output as long as the input"
+    input_tokens: {lognormal: {median: 1200, sigma: 0.6, min: 100, max: 8000}}
+    output_tokens: {lognormal: {median: 1200, sigma: 0.6, min: 100, max: 8000}}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 10.0, ttft_failure_seconds: 30.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}
+  t_agent_support:
+    name: "Agent support layer"
+    description: "A small model beside a larger one: routing, guardrail checks and shortening tool output"
+    input_tokens: {lognormal: {median: 3000, sigma: 0.7, min: 200, max: 16000}}
+    output_tokens: {lognormal: {median: 200, sigma: 0.5, min: 20, max: 1000}}
+    turns_per_session: {constant: 1}
+    sessions_before_leaving: {constant: 1}
+    inter_session_gap_seconds: {constant: 600}
+    read_time_seconds: {constant: 0}
+    active_think_seconds: {constant: 0}
+    ignore_eos: true
+    sla: {ttft_target_seconds: 5.0, ttft_failure_seconds: 15.0, tpot_target_ms: 143.0, tpot_failure_ms: 225.0}

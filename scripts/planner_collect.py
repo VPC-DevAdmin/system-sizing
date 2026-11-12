@@ -28,6 +28,10 @@ import yaml
 TIERS = ("responsive", "standard", "relaxed", "batch")
 FIELDS = ("rate_per_min", "sessions", "turns_per_s", "prompt_tok_per_s",
           "output_tok_per_s", "wall_power_w", "gpu_power_w", "power_w")
+# Knee-only signals: what ran out first, and the cache hit rate the
+# planner's cost model uses.
+KNEE_FIELDS = ("in_flight", "kv_cache_pct", "prefix_hit_rate", "error_rate",
+               "preemptions", "gpu_util_pct")
 
 
 def main() -> int:
@@ -42,6 +46,8 @@ def main() -> int:
     defaults = doc.get("defaults") or {}
     rows = []
     for job in doc["jobs"]:
+        if job.get("kind") in ("livebench", "opencompass", "reasoning_probe"):
+            continue  # a quality score, not capacity
         jid = job["id"]
         st = status.get(jid, {})
         jd = runs_dir / jid
@@ -60,7 +66,9 @@ def main() -> int:
             "engine": job.get("engine") or (job.get("cpu_engine") or {}).get("type")
             or defaults.get("engine"),
             "history": (job.get("simulation") or {}).get("history_window_turns"),
-            "max_model_len": job.get("max_model_len", defaults.get("max_model_len")),
+            "max_model_len": job.get("max_model_len")
+            or (job.get("cpu_engine") or {}).get("max_model_len")
+            or defaults.get("max_model_len"),
             "kv_cache_dtype": job.get("kv_cache_dtype"),
             "reasoning_effort": job.get("reasoning_effort"),
         }
@@ -68,14 +76,21 @@ def main() -> int:
             rows.append({**base, "workload": ",".join(job.get("workloads", []))})
             continue
         res = json.loads(tiers_path.read_text())
+        # Reasoning tokens added to every turn's length (a reasoning_from
+        # job's measured allowance). The run's output tokens include them,
+        # so a planner sizing answer tokens needs it to convert.
+        cfg_path = jd / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
+        base["reasoning_overhead_tokens"] = ((cfg or {}).get("engine") or {}).get("reasoning_overhead_tokens")
         for wl, e in res["workloads"].items():
             row = {**base, "workload": wl, "windows": e.get("windows"),
                    "knee_per_min": e.get("knee_per_min"),
                    "ceiling_per_min": e.get("ceiling_per_min"),
                    "knee_nonmonotone": e.get("knee_nonmonotone"),
-                   "queue_onset_per_min": e.get("queue_onset_per_min")}
+                   "queue_onset_per_min": e.get("queue_onset_per_min"),
+                   "binding": e.get("binding")}
             kp = e.get("knee_point") or {}
-            for f in FIELDS:
+            for f in FIELDS + KNEE_FIELDS:
                 row[f"knee_{f}"] = kp.get(f)
             for t in TIERS:
                 v = (e.get("tiers") or {}).get(t) or {}

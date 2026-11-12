@@ -1,6 +1,6 @@
 # Parallel workspace UI
 
-The Classic UI remains the default at `/` and `/index.html`. Choose **Try new UI** in its header to open `/workspace.html`. **Classic UI** in the new sidebar returns to the corresponding original section. Switching interfaces does not start, stop, or transfer a benchmark. Both use the same service and run lock.
+Superseded 2026-11-12 by the Daylight UI (docs/ui-daylight.md), which is now where capsim opens. This workspace is still served at `/workspace.html` but is no longer linked from the header. The original tools page is `/index.html`. **Classic UI** in the new sidebar returns to the corresponding original section. Switching interfaces does not start, stop, or transfer a benchmark. Both use the same service and run lock.
 
 The new workspace has five destinations:
 

@@ -113,6 +113,18 @@ class EngineConfig:
     # ``reasoning_effort`` is ignored.
     reasoning: bool = False
     reasoning_effort: str = "medium"  # "minimal" | "low" | "medium" | "high"
+    # Tokens added to each request's max_tokens for the reasoning trace,
+    # replacing the per-effort default (virtual_user.REASONING_OVERHEAD_TOKENS)
+    # for models that think longer at a given effort. Beam 1.0 at "low"
+    # spends ~260-310 tokens before any content (HP-beam-8gpu-boot).
+    reasoning_overhead_tokens: int | None = None
+    # Level-matching reruns (T2): each turn's forced length is the answer
+    # plus the variant's measured mean reasoning, and its answer is taken
+    # to start once that many tokens have streamed (ttft + N x tpot), not
+    # whenever the model happens to stop thinking about the load
+    # generator's filler text. simulator.rescore reads it from the run's
+    # stored config.
+    answer_start_after_tokens: int | None = None
 
     # Hardware requirements that the host must satisfy. Validated by
     # ``simulator.preflight.preflight_check`` before launch — fails fast
@@ -430,6 +442,10 @@ class SimulationConfig:
     # SAFETY RAIL like max_pool_size — high enough that no plausible
     # host reaches it; hitting it reports rates as lower bounds.
     open_loop_max_rate_per_s: float = 256.0
+    # Lowest rate the downward search tries (sessions/s). Long agent
+    # sessions at 128K context can saturate a GPU below 1 session a
+    # minute, so heavy workloads lower it.
+    open_loop_min_rate_per_s: float = 0.02
     # Coarse-phase measurement window. Refinement windows near the
     # boundary are longer — slow divergence needs more samples to
     # distinguish from noise.
@@ -540,6 +556,17 @@ class SimulationConfig:
     # from its prefix cache. Each persona's text differs. None or a
     # missing persona = no system prompt.
     system_prompt_tokens: dict[str, int] | None = None
+    # Prefix-cache reuse a headline (saturation) sweep is built to reach, as
+    # a share of prompt tokens. The sweep splits its fixed prompt length
+    # into a system prompt every user shares and user text nobody else
+    # sends, sized from the model's tokenizer. "industry" (default) is the
+    # published business-API level, 54%; "consumer_chat" 62%;
+    # "conversation" 40%; "template" sends no system prompt (only the chat
+    # template repeats); or a number such as 0.45. A persona listed in
+    # system_prompt_tokens keeps that length instead. Persona workloads
+    # are not steered by this: their reuse comes from their own system
+    # prompts and history. See docs/prefix-cache-policy.md.
+    prefix_reuse: str | float = "industry"
     # Oldest exchanges are dropped so history + prompt + reply fit this
     # many tokens. None = engine.max_model_len when set.
     context_limit_tokens: int | None = None
@@ -653,6 +680,8 @@ def load_config(path: str | Path | None) -> Config:
     if cfg.engine.replicas and isinstance(cfg.engine.replicas[0], dict):
         cfg.engine.replicas = [ReplicaConfig(**r) for r in cfg.engine.replicas]
     _validate_mode(cfg.simulation.mode)
+    from .prefix_policy import resolve_reuse
+    resolve_reuse(cfg.simulation.prefix_reuse)  # ValueError on a bad setting
     return cfg
 
 

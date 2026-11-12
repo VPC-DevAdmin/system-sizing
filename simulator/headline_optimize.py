@@ -181,6 +181,7 @@ async def run_headline_optimize(
     build_config,
     runs_base: Path,
     progress: dict | None = None,
+    prefix_reuse: str | float | None = None,
 ) -> Path:
     """Search (max_num_seqs × output length), then sweep the winner.
 
@@ -192,6 +193,9 @@ async def run_headline_optimize(
     from .persona_loader import USER_CATALOG_DIR
 
     pairs = grid(preset, max_num_seqs, output_tokens, engines)
+    # None = what the base config says (default: the industry level).
+    reuse = (prefix_reuse if prefix_reuse is not None
+             else cfg.simulation.prefix_reuse)
     started = time.monotonic()
     results: list[Candidate] = []
     BUS.publish("run", {
@@ -227,6 +231,7 @@ async def run_headline_optimize(
             from .config import load_config
             sub = load_config(cfg_path)
             sub.output.db_directory = str(runs_base)
+            sub.simulation.prefix_reuse = reuse
             summary = await run_headline_sweep(
                 sub, cohort, new_run=True,
                 ladder_override=SEARCH_LADDER,
@@ -288,6 +293,7 @@ async def run_headline_optimize(
             from .config import load_config
             sub = load_config(cfg_path)
             sub.output.db_directory = str(runs_base)
+            sub.simulation.prefix_reuse = reuse
             final = await run_headline_sweep(sub, cohort, new_run=True)
             final_dir = str(Path(final).parent)
         except Exception as e:  # noqa: BLE001

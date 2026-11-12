@@ -101,11 +101,13 @@ class SessionArrivalLauncher:
         request_timeout_s: int,
         rng_seed: int = 0xC0FFEE,
         reasoning_effort: str | None = None,
+        reasoning_overhead_tokens: int | None = None,
         capture_token_timestamps: bool = False,
         history_window_turns: int | None = None,
         context_limit_tokens: int | None = None,
         planner_timeouts: dict | None = None,
         system_prompt_tokens: dict[str, int] | None = None,
+        system_prompt_in_input: bool = False,
     ):
         if not clients:
             raise ValueError("SessionArrivalLauncher requires at least one client")
@@ -117,12 +119,14 @@ class SessionArrivalLauncher:
         self._request_timeout_s = request_timeout_s
         self._rng = random.Random(rng_seed)
         self._reasoning_effort = reasoning_effort
+        self._reasoning_overhead_tokens = reasoning_overhead_tokens
         self._capture = capture_token_timestamps
         self._history_window_turns = history_window_turns
         self._context_limit_tokens = context_limit_tokens
         self._planner_timeouts = planner_timeouts
         self._system_prompt_tokens = dict(system_prompt_tokens or {})
         self._system_prompts: dict[str, tuple[str, int]] = {}
+        self._system_prompt_in_input = bool(system_prompt_in_input)
 
         self._rate_per_s: float = 0.0
         self._outstanding: int = 0
@@ -142,11 +146,9 @@ class SessionArrivalLauncher:
         if n <= 0:
             return None
         if persona_id not in self._system_prompts:
-            import zlib
-            rng = random.Random(zlib.crc32(persona_id.encode()))
-            text = f"You are the {persona_id.replace('_', ' ')} assistant.\n" + \
-                self._corpus.make_text(n, rng, unique=False)
-            self._system_prompts[persona_id] = (text, self._corpus.count(text))
+            from .tokenizer_corpus import shared_system_prompt
+            self._system_prompts[persona_id] = shared_system_prompt(
+                self._corpus, persona_id, n)
         return self._system_prompts[persona_id]
 
     # ── Control ──────────────────────────────────────────────────────
@@ -255,6 +257,7 @@ class SessionArrivalLauncher:
 
     async def _arrival_loop(self) -> None:
         next_at: float | None = None  # monotonic time of next arrival
+        drawn_rate: float | None = None  # rate the pending gap was drawn at
         while not self._stopped:
             rate = self._rate_per_s
             if rate <= 0:
@@ -263,14 +266,18 @@ class SessionArrivalLauncher:
                 await self._rate_changed.wait()
                 continue
             now = time.monotonic()
-            if next_at is None:
+            if next_at is None or rate != drawn_rate:
+                # Poisson arrivals are memoryless, so the wait still to
+                # come at a new rate is a fresh draw at that rate. A gap
+                # drawn at the old rate would hold the new one back: a
+                # first gap drawn at 0.12/min kept every session out of
+                # four rate steps (20 minutes) on a slow CPU agent run.
                 next_at = now + self._rng.expovariate(rate)
+                drawn_rate = rate
             delay = next_at - now
             if delay > 0:
                 # Sleep interruptibly so a rate change re-plans the
-                # NEXT gap immediately (the current scheduled arrival
-                # keeps its time — arrivals already committed to the
-                # wall clock stay pinned to it).
+                # pending gap at the new rate.
                 self._rate_changed.clear()
                 try:
                     await asyncio.wait_for(
@@ -330,11 +337,13 @@ class SessionArrivalLauncher:
                     # offset; Poisson arrivals are already spread.
                     initial_phase_offset_enabled=mid_session,
                     reasoning_effort=self._reasoning_effort,
+                    reasoning_overhead_tokens=self._reasoning_overhead_tokens,
                     start_mid_session=mid_session,
                     history_window_turns=self._history_window_turns,
                     context_limit_tokens=self._context_limit_tokens,
                     planner_timeouts=self._planner_timeouts,
                     system_prompt=self._system_prompt(persona.id),
+                    system_prompt_in_input=self._system_prompt_in_input,
                 )
             finally:
                 self.stats.sessions_done += 1

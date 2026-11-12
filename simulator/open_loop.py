@@ -729,6 +729,7 @@ class OpenLoopRunner:
         self.stepper = RateStepper(
             initial_rate_per_s=sim.open_loop_initial_rate_per_s,
             max_rate_per_s=sim.open_loop_max_rate_per_s,
+            min_rate_per_s=getattr(sim, "open_loop_min_rate_per_s", 0.02),
             resolution_ratio=1.0 + max(
                 0.5, getattr(sim, "open_loop_resolution_pct", 5.0)) / 100.0,
             sla_gate=sim.open_loop_sla_gate,
@@ -749,6 +750,8 @@ class OpenLoopRunner:
                     cfg.engine.reasoning_effort if cfg.engine.reasoning
                     else None
                 ),
+                "reasoning_overhead_tokens": getattr(
+                    cfg.engine, "reasoning_overhead_tokens", None),
                 "seed": 0xC0FFEE,
                 "history_window_turns": sim.history_window_turns,
                 "system_prompt_tokens": sim.system_prompt_tokens,

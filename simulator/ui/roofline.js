@@ -163,7 +163,7 @@ export const Roofline = {
       `<label class="chip ${this.engines.has(e) ? "selected" : ""}"
         data-rf-engine="${e}"><input type="checkbox"
         ${this.engines.has(e) ? "checked" : ""}> ${Engines.label(e)}</label>`
-    ).join("") || '<span class="msg">no engine staged — pull one in Prepare</span>';
+    ).join("") || '<span class="msg">no engine staged — pull one in System</span>';
     $("#rf-engines").querySelectorAll("[data-rf-engine]").forEach(el =>
       el.addEventListener("change", () => {
         const k = el.dataset.rfEngine;
@@ -273,6 +273,7 @@ export const Roofline = {
         max_num_seqs: this.shapes.max_num_seqs,
         output_tokens: this.shapes.output_tokens,
         input_tokens: +$("#rf-input-tokens").value || 128,
+        prefix_reuse: $("#rf-prefix-reuse")?.value || "industry",
         confirm_winners: $("#rf-confirm").checked,
         benchmarks: Benchmarks.spec(),
         allow_cross_domain_tp: $("#rf-cross-domain").checked,
@@ -315,6 +316,11 @@ export const Roofline = {
       }
       $("#rf-model-mode").value = "manual";
       $("#rf-input-tokens").value = String(d.input_tokens || 128);
+      const reuse = $("#rf-prefix-reuse");
+      const level = d.plan.prefix_reuse || "industry";
+      if (reuse && [...reuse.options].some(o => o.value === level)) {
+        reuse.value = level;
+      }
       this.renderPlan();
     }
     $("#rf-stop").disabled = !running;

@@ -112,7 +112,7 @@ def parse_persona(persona_id: str, spec: dict):
     if not isinstance(spec, dict):
         raise PersonaSpecError(f"persona {persona_id}: spec must be a mapping")
     unknown = set(spec) - {"name", "description", "sla", "timeouts",
-                           "ignore_eos", *_DISTRIBUTION_FIELDS}
+                           "ignore_eos", "initial_context_tokens", *_DISTRIBUTION_FIELDS}
     if unknown:
         raise PersonaSpecError(
             f"persona {persona_id}: unknown fields {sorted(unknown)}"
@@ -150,6 +150,10 @@ def parse_persona(persona_id: str, spec: dict):
         or persona_id.replace("_", " ").capitalize(),
         description=str(spec.get("description", "")),
         ignore_eos=bool(spec.get("ignore_eos", False)),
+        initial_context_tokens=parse_distribution(
+            spec["initial_context_tokens"],
+            where=f"persona {persona_id}.initial_context_tokens",
+        ) if spec.get("initial_context_tokens") is not None else None,
         **dists,
         **{f: float(sla[f]) for f in _SLA_FIELDS},
         **{f: float(timeouts[f]) for f in _TIMEOUT_FIELDS if f in timeouts},
@@ -165,6 +169,8 @@ def serialize_persona(p) -> dict:
     out["sla"] = {f: getattr(p, f) for f in _SLA_FIELDS}
     if getattr(p, "ignore_eos", False):
         out["ignore_eos"] = True
+    if getattr(p, "initial_context_tokens", None) is not None:
+        out["initial_context_tokens"] = serialize_distribution(p.initial_context_tokens)
     timeouts = {
         f: getattr(p, f) for f in _TIMEOUT_FIELDS
         if getattr(p, f) != type(p).__dataclass_fields__[f].default

@@ -48,6 +48,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .prefix_policy import workload_class, workload_reuse
+
 DEFAULT_TIERS = {
     "responsive": {"ttft_s": 2.0, "ttft_per_4k_s": 1.0, "tpot_ms": 1000 / 35},
     "standard": {"ttft_s": 5.0, "ttft_per_4k_s": 2.0, "tpot_ms": 1000 / 15},
@@ -62,6 +64,14 @@ DEFAULT_OVERRIDES = {
         "standard": None, "relaxed": None, "batch": None,
     },
 }
+# Heavy-workload personas (the H wave) carry their session's history in
+# the engine's prefix cache, so their first-token allowance grows only
+# with tokens the engine has not seen: the new input of each turn. A
+# 128K agent turn would otherwise get a 33-second allowance.
+UNCACHED_ALLOWANCE_PREFIX = "h_"
+# A knee is memory-bound when the KV cache is this full, or requests are
+# preempted, at the knee or the first failing window above it.
+KV_BOUND_PCT = 95.0
 TTFT_SHARE = 0.95
 SPEED_SHARE = 0.90
 PROMPT_FREE_TOKENS = 2000
@@ -74,7 +84,8 @@ STANDING_QUEUE_SHARE = 0.1
 # Window values carried to each capacity point.
 CARRIED = ("rate_per_min", "sessions", "in_flight", "turns_per_s",
            "prompt_tok_per_s", "output_tok_per_s", "power_w", "gpu_power_w",
-           "wall_power_w", "kv_cache_pct", "error_rate", "prefix_hit_rate")
+           "wall_power_w", "kv_cache_pct", "error_rate", "prefix_hit_rate",
+           "preemptions", "gpu_util_pct")
 
 
 def load_wall_power(path: str | None) -> list[tuple[float, float]]:
@@ -136,6 +147,15 @@ def _load_windows(conn: sqlite3.Connection, cohort_run_id: str,
         ).fetchall()
         dur = max(1, int(dur or 0))
         n = len(turns)
+        # Preemptions are a cumulative engine counter; the window's share
+        # is its rise. GPU utilisation is the per-second average.
+        try:
+            pre_lo, pre_hi, gutil = conn.execute(
+                """SELECT MIN(preemptions), MAX(preemptions), AVG(gpu_sm_util_pct)
+                     FROM measurement_telemetry WHERE measurement_id = ?""", (mid,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            pre_lo = pre_hi = gutil = None
         wall_w = None
         if wall and started:
             try:
@@ -155,6 +175,8 @@ def _load_windows(conn: sqlite3.Connection, cohort_run_id: str,
             "wall_power_w": wall_w,
             "prefix_hit_rate": phit,
             "kv_cache_pct": kv,
+            "preemptions": (pre_hi - pre_lo) if pre_hi is not None and pre_lo is not None else None,
+            "gpu_util_pct": gutil,
             "error_rate": (sum(1 for t in turns if t[6]) / n) if n else 0.0,
             "measurement_id": mid,
             "standing_queue": standing,
@@ -174,8 +196,14 @@ def _margin(w: Window, limits: dict) -> float:
     for ttft, ttfct, tpot, inp, hist, out, err in w.turns:
         if err:
             continue
-        first = ttfct if ttfct else ttft
-        prompt = (inp or 0) + (hist or 0)
+        after = limits.get("answer_after_tokens")
+        if after:
+            # Level-matching reruns: the answer starts once the variant's
+            # mean reasoning has streamed at this turn's token pace.
+            first = (ttft + after * tpot) if ttft is not None and tpot else None
+        else:
+            first = ttfct if ttfct else ttft
+        prompt = (inp or 0) if limits.get("uncached_only") else (inp or 0) + (hist or 0)
         limit_s = limits["ttft_s"] + limits.get("ttft_per_4k_s", 0.0) * max(
             0.0, (prompt - PROMPT_FREE_TOKENS) / 4000.0)
         if first is not None and first <= limit_s * 1000.0:
@@ -198,6 +226,17 @@ def _interp(a: Window, b: Window, frac: float) -> dict:
 
 def _point(w: Window) -> dict:
     return {k: w.values.get(k) for k in CARRIED}
+
+
+def _label_reuse(entry: dict, cohort: str) -> None:
+    """Mark every capacity point within or above the reuse production
+    traces reach for this kind of workload (prefix_policy)."""
+    kind = workload_class(cohort)
+    points = [entry.get("knee_point")] + list((entry.get("tiers") or {}).values())
+    for p in points:
+        if isinstance(p, dict) and "prefix_hit_rate" in p:
+            p["prefix_reuse"] = workload_reuse(p.get("prefix_hit_rate"), kind)
+    entry["prefix_workload_class"] = kind
 
 
 def _passes(w: Window, no_standing_queue: bool = False) -> bool:
@@ -251,6 +290,22 @@ def tier_capacity(windows: list[Window], limits: dict | None) -> dict | None:
     return None
 
 
+def binding_limit(knee: Window | None, above: Window | None) -> str | None:
+    """"memory" when the KV cache fills or requests are preempted at the
+    knee or just above it, else "compute"."""
+    if knee is None:
+        return None
+    for w in (knee, above):
+        if w is None:
+            continue
+        kv = w.values.get("kv_cache_pct")
+        if kv is not None and (kv if kv > 1.0 else kv * 100.0) >= KV_BOUND_PCT:
+            return "memory"
+        if (w.values.get("preemptions") or 0) > 0:
+            return "memory"
+    return "compute"
+
+
 def rescore_run(run_dir: Path, tiers: dict | None = None,
                 overrides: dict | None = None, wall_power: str | None = None) -> dict:
     tiers = tiers or DEFAULT_TIERS
@@ -266,6 +321,11 @@ def rescore_run(run_dir: Path, tiers: dict | None = None,
         result = {"run_dir": str(run_dir), "tiers": tiers, "workloads": {}}
         for crid, cohort, model, engine, status, cfg_json, started in runs:
             windows = _load_windows(conn, crid, wall)
+            try:
+                after_tokens = int(((json.loads(cfg_json or "{}").get("engine") or {})
+                                    .get("answer_start_after_tokens")) or 0)
+            except (ValueError, TypeError, AttributeError):
+                after_tokens = 0
             # A "stable" window where turns time out faster than the
             # queue grows is a ceiling, not a stable point
             # (rate_search.RateStepper.is_ceiling_step).
@@ -282,6 +342,9 @@ def rescore_run(run_dir: Path, tiers: dict | None = None,
                 "knee_nonmonotone": stray.rate_per_min if stray else None,
                 "queue_onset_per_min": onset_w.rate_per_min if onset_w else None,
                 "knee_point": _point(knee_w) if knee_w else None,
+                "binding": binding_limit(knee_w, next(
+                    (w for w in windows if knee is not None and w.rate_per_min > knee
+                     and not _passes(w)), None)),
                 "tiers": {},
             }
             for tier, limits in tiers.items():
@@ -292,7 +355,14 @@ def rescore_run(run_dir: Path, tiers: dict | None = None,
                     if lim is None:
                         entry["tiers"][tier] = {"basis": "not_scored"}
                         continue
+                if lim and str(cohort).startswith(UNCACHED_ALLOWANCE_PREFIX):
+                    lim = {**lim, "uncached_only": True}
+                if lim and after_tokens:
+                    lim = {**lim, "answer_after_tokens": after_tokens}
                 entry["tiers"][tier] = tier_capacity(windows, lim)
+            if after_tokens:
+                entry["answer_start_after_tokens"] = after_tokens
+            _label_reuse(entry, str(cohort))
             try:
                 cfg = json.loads(cfg_json or "{}")
                 sim = cfg.get("simulation") or {}

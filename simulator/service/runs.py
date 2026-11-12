@@ -428,6 +428,15 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             422, f"{config_path} is not a valid capsim config: "
                  f"{type(e).__name__}: {e}") from e
     cfg.output.db_directory = str(runs_base)
+    reuse = req.prefix_reuse
+    if req.workload.get("kind") == "roofline":
+        reuse = (req.workload.get("spec") or {}).get("prefix_reuse", reuse)
+    if reuse is not None:
+        from ..prefix_policy import resolve_reuse
+        try:
+            cfg.simulation.prefix_reuse = resolve_reuse(reuse)["setting"]
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
 
     kind = req.workload.get("kind")
     # A headline workload asks a different question than capacity,
@@ -443,6 +452,23 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
         if wid not in PERSONAS:
             raise HTTPException(404, f"unknown persona '{wid}'")
         from ..headline_sweep import run_headline_sweep
+        if req.shape is not None:
+            if wid != "headline_generation":
+                raise HTTPException(
+                    422, "shape applies to the headline_generation workload only")
+            try:
+                n_in = int(req.shape["input_tokens"])
+                n_out = int(req.shape["output_tokens"])
+            except (KeyError, TypeError, ValueError) as e:
+                raise HTTPException(
+                    422, "shape needs integer input_tokens and output_tokens") from e
+            if not (1 <= n_in <= 200_000 and 1 <= n_out <= 65_536):
+                raise HTTPException(422, "shape token counts are out of range")
+            from ..headline_shapes import apply_shape_to_generation
+            from .catalog import _catalog_dir
+            await asyncio.to_thread(
+                apply_shape_to_generation,
+                _catalog_dir(app.state.paths), n_in, n_out)
         is_sweep = True
         coro_factory = lambda: run_headline_sweep(  # noqa: E731
             cfg, cohort_from_persona(wid), new_run=req.new_run,
@@ -496,6 +522,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             models=models, engines=engines,
             shapes={k: v for k, v in shapes.items() if v},
             input_tokens=int(spec.get("input_tokens") or 128),
+            prefix_reuse=cfg.simulation.prefix_reuse,
             build_config=_build_rf, runs_base=runs_base,
             resume=resume,
             confirm_winners=bool(spec.get("confirm_winners", True)),
@@ -537,6 +564,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             output_tokens=req.search_output_tokens,
             engines=req.search_engines,
             input_tokens=req.input_tokens or 128,
+            prefix_reuse=cfg.simulation.prefix_reuse,
             build_config=_build, runs_base=runs_base,
             progress=sweep_progress,
         )

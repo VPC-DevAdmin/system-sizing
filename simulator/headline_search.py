@@ -103,6 +103,10 @@ class Chunk:
     prompt_rate: float | None        # prompt tok/s
     complete: bool = True            # every replica answered every scrape
     rate_source: str = "counter"     # or "little" (headline_sweep.little_rate)
+    # Prompt tokens served from the prefix cache over the chunk, from the
+    # engine's hit/query counters summed over replicas (vLLM); SGLang
+    # publishes only a rate gauge, averaged instead.
+    prefix_hit_rate: float | None = None
 
 
 async def whole_scrape(fetch, tries: int = 3, pause_s: float = 0.5) -> dict:

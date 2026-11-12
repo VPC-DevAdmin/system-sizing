@@ -215,6 +215,11 @@ def curve_point(r: dict) -> dict:
         "tpot_implied_tok_per_s": tpot_implied(r),
         "gpu_power_w": power,
         "tokens_per_watt": round(out / power, 3) if out and power else None,
+        # Share of prompt tokens served from the prefix cache, and whether
+        # the chat template explains it (simulator/prefix_policy.py). None
+        # for sweeps measured before 2026-11 recorded it.
+        "prefix_cache_hit_rate": r.get("prefix_hit_rate"),
+        "prefix_reuse": r.get("prefix_reuse"),
     }
 
 
@@ -296,6 +301,8 @@ def row_document(row: dict, *, info: dict, sweep: dict | None, system: dict,
             "tokens_per_watt": (round(peak["out_tok_s"] / peak["gpu_power_w"], 3)
                                 if peak.get("out_tok_s") and peak.get("gpu_power_w")
                                 else row.get("tokens_per_watt")),
+            "prefix_cache_hit_rate": peak.get("prefix_hit_rate"),
+            "prefix_reuse": peak.get("prefix_reuse"),
         },
         "curve": curve,
         # additions
@@ -326,6 +333,10 @@ def row_document(row: dict, *, info: dict, sweep: dict | None, system: dict,
                          "sla_enforced": False},
             "output_accounting": ("generated tokens include reasoning (chain-of-thought)"
                                   if reasoning else "generated tokens are visible output"),
+            # The reuse the sweep may legitimately contain: its chat
+            # template (and any fixed system prompt). Missing for sweeps
+            # measured before 2026-11, whose prompts could repeat.
+            "prefix_cache": (sweep or {}).get("prefix_cache"),
             "model_info": {k: info.get(k) for k in ("vendor", "series", "params_b",
                                                     "approx_size_gb", "quant", "tier",
                                                     "fits_gpu")},

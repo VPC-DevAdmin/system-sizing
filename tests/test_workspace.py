@@ -115,7 +115,8 @@ def test_both_interfaces_and_evidence_api(tmp_path):
     with TestClient(create_app(tmp_path / 'runs', catalog_dir=tmp_path / 'catalog')) as client:
         classic = client.get('/')
         assert classic.status_code == 200
-        assert 'Try new UI' in classic.text
+        assert 'daylight.html#home' in classic.text
+        assert 'daylight-tools.css' in classic.text
         assert 'src="app.js"' in classic.text
         workspace = client.get('/workspace.html')
         assert workspace.status_code == 200
@@ -130,3 +131,31 @@ def test_both_interfaces_and_evidence_api(tmp_path):
         assert client.get(endpoint, params={**params, 'attempt': -1}).status_code == 422
         assert client.get(endpoint, params={**params, 'attempt': 99}).status_code == 404
         assert client.get(endpoint, params={**params, 'model': '../outside'}).status_code == 404
+
+
+def test_simple_ui_is_served_beside_classic(tmp_path):
+    client = TestClient(create_app(tmp_path / 'runs', catalog_dir=tmp_path / 'catalog'))
+    page = client.get('/daylight.html')
+    assert page.status_code == 200 and 'daylight.js' in page.text
+    for asset in ('/daylight.js', '/daylight.css', '/lib/daylight-data.js'):
+        assert client.get(asset).status_code == 200
+    tools = client.get('/index.html').text
+    assert 'daylight.html' in tools and client.get('/daylight-tools.css').status_code == 200
+    # Every tool keeps its tab; opened with no tool named, capsim starts at Daylight.
+    for view in ('prepare', 'optimizer', 'roofline', 'control', 'results', 'personas', 'infrastructure'):
+        assert f'data-view="{view}"' in tools
+    assert 'location.replace("daylight.html")' in tools
+    for tool in ('control', 'roofline', 'optimizer', 'results', 'infrastructure', 'personas', 'prepare'):
+        assert f'index.html#{tool}' in page.text
+
+
+def test_headline_run_request_validates_its_shape(tmp_path):
+    client = TestClient(create_app(tmp_path / 'runs', catalog_dir=tmp_path / 'catalog'))
+    body = {'workload': {'kind': 'persona', 'id': 'headline_generation'},
+            'profile': 'mock', 'new_run': True}
+    bad = client.post('/api/runs', json={**body, 'shape': {'input_tokens': 'many'}})
+    assert bad.status_code == 422 and 'shape' in bad.json()['detail']
+    wrong = client.post('/api/runs', json={
+        **body, 'workload': {'kind': 'persona', 'id': 'headline_ingest'},
+        'shape': {'input_tokens': 128, 'output_tokens': 128}})
+    assert wrong.status_code == 422

@@ -207,6 +207,30 @@ export const Results = {
     this.render(c);
   },
 
+  // One sentence on prefix-cache reuse for a saturation result: what the
+  // sweep was built to reach, how, and what the engine measured at the peak.
+  prefixReuseLine(doc, peak) {
+    const pc = doc.prefix_cache;
+    if (!pc) return "";
+    const pct = v => v == null ? "—" : `${Math.round(v * 1000) / 10}%`;
+    const design = pc.system_prompt_actual_tokens
+      ? `a ${pc.system_prompt_actual_tokens}-token system prompt shared by
+         every stream plus ${pc.user_tokens} unique user tokens`
+      : "unique prompts with no shared system prompt";
+    const level = pc.target != null
+      ? `aimed at ${pct(pc.target)} (${pc.source})` : (pc.source || "");
+    const over = peak?.prefix_reuse === "above_template";
+    const offLevel = pc.within_production === false;
+    return `<div class="msg" style="margin-top:8px">Prefix cache:
+      <b>${pct(peak?.prefix_hit_rate)}</b> of prompt tokens were served from
+      cache at the peak. Designed for ${pct(pc.template_floor)}: ${design},
+      ${level}.${over ? ` <span class="status-fail">The measured rate is
+        above the design: prompts were reused beyond it, so this figure
+        overstates throughput.</span>` : ""}${offLevel
+        ? ` <span class="status-fail">This level is above what published
+        chat and API traffic reaches.</span>` : ""}</div>`;
+  },
+
   /* ── Headline sweep report ──────────────────────────────────────
    * The saturation curve and what it costs. No SLA verdicts, no
    * arrival rate, no "concurrent users" — none of that means
@@ -273,6 +297,7 @@ export const Results = {
        ${notSteady ? ` <span class="status-fail">${notSteady} rung(s)
          hit the measurement cap before settling — treat those as
          provisional.</span>` : ""}
+       ${this.prefixReuseLine(doc, peak)}
        <div class="msg" style="margin-top:8px">${doc.note || ""}</div>`;
 
     this.xy("hl-chart-tput", labels, [
@@ -416,7 +441,7 @@ export const Results = {
     $("#headline-verdict").innerHTML =
       `<b>No measured windows</b> — ${why}.`
       + (status ? ` <span class="msg">Run status: ${status}.</span>` : "")
-      + ` <span class="msg">Start it again from the Workload tab; ${
+      + ` <span class="msg">Start it again from the Capacity run tab; ${
           ctx.isOpen
             ? "the first verdict arrives after warmup plus one measuring window"
             : "the first pool step has to complete"}.</span>`;

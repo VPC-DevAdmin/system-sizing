@@ -56,6 +56,14 @@ class TokenCorpus:
         except Exception:
             return _heuristic_token_count(text)
 
+    def _paragraph_tokens(self, para: str) -> int:
+        # The paragraphs are a small fixed set; count each once, so a
+        # 120K-token prompt doesn't cost thousands of tokenizer calls.
+        cache = self.__dict__.setdefault("_para_counts", {})
+        if para not in cache:
+            cache[para] = self.count(para)
+        return cache[para]
+
     def make_text(self, target_tokens: int, rng: random.Random,
                   unique: bool = True) -> str:
         target_tokens = max(1, int(target_tokens))
@@ -73,10 +81,13 @@ class TokenCorpus:
         chunks: list[str] = [f"Ref {_uuid.uuid4().hex[:16]}."] if unique else []
         current_tokens = 0
         guard = 0
-        while current_tokens < target_tokens and guard < 1000:
+        # Enough paragraphs for any target (each is ~23 tokens); the old
+        # fixed 1,000 capped texts near 24K tokens without warning.
+        limit = max(1000, target_tokens // 8 + 100)
+        while current_tokens < target_tokens and guard < limit:
             para = rng.choice(_BASE_PARAGRAPHS)
             chunks.append(para)
-            current_tokens += self.count(para) + 1  # newline
+            current_tokens += self._paragraph_tokens(para) + 1  # newline
             guard += 1
         text = "\n".join(chunks)
         # Trim if overshot
@@ -94,3 +105,20 @@ class TokenCorpus:
             if len(words) > est_words:
                 text = " ".join(words[:est_words])
         return text
+
+
+def shared_system_prompt(corpus: TokenCorpus, persona_id: str,
+                         tokens: int) -> tuple[str, int] | None:
+    """(text, tokens) of the system prompt every session of a persona
+    shares, or None for ``tokens`` <= 0. Seeded by the persona id, so
+    every worker and every run builds the same text; the count is the
+    text's real length, a few tokens over ``tokens`` for the opening
+    line."""
+    n = int(tokens or 0)
+    if n <= 0:
+        return None
+    import zlib
+    rng = random.Random(zlib.crc32(persona_id.encode()))
+    text = f"You are the {persona_id.replace('_', ' ')} assistant.\n" + \
+        corpus.make_text(n, rng, unique=False)
+    return text, corpus.count(text)

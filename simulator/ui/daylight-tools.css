@@ -1,0 +1,89 @@
+/* Daylight look for the full tools page (index.html): Capacity run,
+ * Roofline, Optimize, Workloads, System, All results and Lab tests.
+ * Loaded after app.css; it re-points app.css's variables at the Daylight
+ * palette and replaces the few dark values app.css hard-codes. The
+ * workspace.html page does not load this file. */
+:root {
+  --bg-0: #eef3f6; --bg-1: #eef3f6;
+  --glass: #ffffff; --glass-2: #eef3f6; --glass-solid: #ffffff;
+  --stroke: #d3dee6; --stroke-strong: #b7c7d1;
+  --text: #14323f; --muted: #4f6a77;
+  --accent: #0b7a75; --accent-soft: #d5efed;
+  --gold: #a66a00; --teal: #0b7a75; --blue: #2563a8; --purple: #6d4fb3;
+  --ok: #1f7a45; --warn: #96560a; --fail: #b3261e;
+  --panel-2: #f7fafb;
+  font-size: 15px;
+}
+body {
+  background: #eef3f6; padding: 0 0 60px;
+  font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Inter, Roboto, sans-serif;
+}
+a { color: #075a56; }
+
+/* Header: the same bar as daylight.html, then the tool tabs. */
+header {
+  gap: 6px 8px; padding: 12px 28px; margin-bottom: 22px;
+  background: #ffffff; border-bottom: 1px solid var(--stroke);
+}
+.brand { margin-right: 18px; }
+.brand .logo { font-size: 21px; letter-spacing: 0; }
+nav.dl-primary { display: flex; flex-wrap: wrap; gap: 6px; }
+nav.dl-primary a {
+  padding: 11px 14px; border-radius: 12px; color: var(--muted); text-decoration: none;
+}
+nav.dl-primary a:hover { background: #eef3f6; }
+nav#tabs {
+  margin: 0 0 0 10px; padding: 4px; gap: 2px; flex-wrap: wrap;
+  background: #eef3f6; border: 0; border-radius: 14px;
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+nav#tabs button { border-radius: 10px; padding: 9px 14px; font-size: 14px; }
+nav#tabs button.active {
+  background: #d5efed; border-color: transparent; color: #075a56;
+  font-weight: 600; box-shadow: none;
+}
+#status-pill { margin-left: auto; }
+.pill { background: #eef3f6; border-color: transparent; color: var(--text); backdrop-filter: none; }
+.pill.running { background: #fdebd8; color: #5c2e05; border-color: transparent; font-weight: 600; }
+.pill.error { background: #fbe3e1; color: #8c1d18; border-color: transparent; }
+.pill.offline { background: #fdebd8; color: #5c2e05; border-color: transparent; }
+
+.view { padding: 0 28px; }
+.panel {
+  background: #ffffff; border-radius: 18px; padding: 22px 24px;
+  box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+.panel:hover { border-color: var(--stroke); }
+
+select, input[type="text"], input[type="number"], input[type="search"],
+input:not([type]), textarea {
+  background: #f7fafb; border-radius: 12px; min-height: 40px;
+}
+button {
+  background: #ffffff; border-radius: 12px; backdrop-filter: none; min-height: 40px;
+}
+button:hover:not(:disabled) { transform: none; }
+button.primary, button.primary:hover:not(:disabled) {
+  background: #0b7a75; color: #ffffff; font-weight: 700;
+}
+button.danger { border-color: #b3261e; }
+nav#tabs button { min-height: 0; background: none; }
+
+/* Dark fills app.css hard-codes. */
+.bar, .track, progress { background: #e3ebf0; }
+tbody tr:hover { background: #f3f7f9; }
+.run-row.active { background: #d5efed; }
+#hl-ladder tr.peak td { background: #d5efed; }
+[class*="pop"], .tooltip, .tip-body {
+  background: #ffffff; color: var(--text); box-shadow: 0 8px 24px rgba(20, 50, 63, .14);
+}
+.pop-row:hover { background: #eef3f6; }
+code, pre, .log, .mono-box {
+  background: #f3f7f9; color: var(--text);
+}
+
+@media (max-width: 760px) {
+  header { padding: 10px 14px; } .view { padding: 0 14px; }
+  nav#tabs { margin-left: 0; }
+}

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>capsim</title>
+<link rel="stylesheet" href="daylight.css">
+</head>
+<body>
+<nav class="top" aria-label="Main">
+  <div class="brand">capsim</div>
+  <a href="#home" data-route="home">Home</a>
+  <a href="#new" data-route="new">New run</a>
+  <a href="#results" data-route="results">Results</a>
+  <a href="index.html#personas">Workloads</a>
+  <a href="index.html#prepare">System</a>
+  <details class="tools">
+    <summary>More tools</summary>
+    <div class="menu">
+      <a href="index.html#control">Capacity run</a>
+      <a href="index.html#roofline">Roofline</a>
+      <a href="index.html#optimizer">Optimize</a>
+      <a href="index.html#results">All results</a>
+      <a href="index.html#infrastructure">Lab tests</a>
+    </div>
+  </details>
+  <a id="server-chip" class="chip" href="#run"><span class="dot" aria-hidden="true"></span><span id="server-state">checking…</span></a>
+</nav>
+<main id="view" class="page" aria-live="polite"></main>
+<script type="module" src="daylight.js"></script>
+</body>
+</html>

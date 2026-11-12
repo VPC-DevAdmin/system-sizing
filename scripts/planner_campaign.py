@@ -64,6 +64,16 @@ R770_SOCKET_CPUS = {
     0: ",".join(str(c) for c in range(0, 172, 2)),
     1: ",".join(str(c) for c in range(1, 172, 2)),
 }
+# R770 with SubNumaCluster on (SNC2, from lscpu on 2026-11-04): four
+# domains of 43 physical cores, NUMA node = domain. Socket 0 holds
+# domains 0 and 1, socket 1 domains 2 and 3. A queue with r770_snc: true
+# treats each domain as a device and pins its engine's memory there too.
+R770_SNC_CPUS = {
+    0: ",".join(str(c) for c in range(0, 86, 2)),
+    1: ",".join(str(c) for c in range(86, 172, 2)),
+    2: ",".join(str(c) for c in range(1, 87, 2)),
+    3: ",".join(str(c) for c in range(87, 172, 2)),
+}
 R770_HT_CPUS = "172-343"
 R770_HT_OFFSET = 172
 BASE_PORT = 9100
@@ -104,6 +114,14 @@ PLANNER_SIMULATION = {
         "inbox_triage": 1200, "knowledge_search": 1500, "document_extraction": 1500,
         "code_assist": 2000, "customer_assistant": 2000,
         "agent_task_runner": 4000, "coding_agent": 6000,
+        # H wave (config/personas/hwave.yaml): real agents carry their
+        # tool definitions and rules in a ~10-24K prefix.
+        "h_assistant": 2000, "h_document_qa": 1500, "h_coding_agent": 24000,
+        "h_research_agent": 20000, "h_service_agent": 10000,
+        "h_document_pipeline": 2000, "h_deep_analysis": 2000,
+        # T wave: task-model jobs; their instructions and label sets.
+        "t_ticket_triage": 1500, "t_document_intake": 1200,
+        "t_privacy_screening": 800, "t_agent_support": 1500,
     },
 }
 
@@ -147,7 +165,23 @@ class Queue:
         tmp.replace(self.status_path)
 
     def total_devices(self) -> list[int]:
-        return list(range(8)) if self.box == "xe7740" else [0, 1]
+        if self.box == "xe7740":
+            return list(range(8))
+        return [0, 1, 2, 3] if self.doc.get("r770_snc") else [0, 1]
+
+
+def check_numa(q: Queue, nodes: int | None = None) -> None:
+    """The R770 queue's device map must match the box: two NUMA nodes
+    (one per socket) normally, four with SNC on and r770_snc set. A
+    mismatch pins engines to the wrong cores, so the runner stops."""
+    if q.box != "r770":
+        return
+    if nodes is None:
+        nodes = len(list(Path("/sys/devices/system/node").glob("node[0-9]*")))
+    want = 4 if q.doc.get("r770_snc") else 2
+    if nodes != want:
+        raise SystemExit(f"R770 has {nodes} NUMA nodes but the queue expects {want} "
+                         f"(r770_snc={bool(q.doc.get('r770_snc'))})")
 
 
 def pick_devices(free: list[int], n: int, box: str) -> list[int] | None:
@@ -204,16 +238,19 @@ def gpu_config(job: dict, devices: list[int], lane: str, rundir: Path) -> dict:
     return doc
 
 
-def cpu_config(job: dict, devices: list[int], lane: str, rundir: Path) -> dict:
+def cpu_config(job: dict, devices: list[int], lane: str, rundir: Path,
+               snc: bool = False) -> dict:
     """R770: one engine replica per socket in the lane, pinned to that
-    socket's physical cores and memory node."""
+    socket's physical cores and memory node. With ``snc`` each device is
+    an SNC domain instead: 43 cores and its own memory node."""
     engine = copy.deepcopy(job.get("cpu_engine") or {})
     if not engine:
         raise SystemExit(f"job {job['id']}: r770 jobs need cpu_engine")
-    cores = int(job.get("socket_cores") or 86)
+    cpu_map = R770_SNC_CPUS if snc else R770_SOCKET_CPUS
+    cores = int(job.get("socket_cores") or (43 if snc else 86))
 
     def socket_cpus(d: int) -> str:
-        cpus = R770_SOCKET_CPUS[d].split(",")[:cores]
+        cpus = cpu_map[d].split(",")[:cores]
         if int(job.get("socket_threads") or 1) == 2:
             # Hyper-threads too: each core's sibling is CPU n + 172.
             cpus += [str(int(c) + R770_HT_OFFSET) for c in cpus]
@@ -225,7 +262,12 @@ def cpu_config(job: dict, devices: list[int], lane: str, rundir: Path) -> dict:
             engine["cpu_bind"] = socket_cpus(devices[0])
         engine["port"] = BASE_PORT + LANE_PORTS * int(devices[0])
         engine.setdefault("docker_extra_env", {})
+        if snc:
+            engine["docker_extra_args"] = list(engine.get("docker_extra_args") or []) + [
+                "--cpuset-mems", ",".join(str(d) for d in devices)]
     else:  # vllm_dual_socket: a replica per socket
+        if snc:
+            raise SystemExit(f"job {job['id']}: only SGLang jobs run under r770_snc")
         reps = []
         for i, d in enumerate(devices):
             r = copy.deepcopy((engine.get("replicas") or [{}])[0])
@@ -256,7 +298,7 @@ def build_config(q: Queue, job: dict, devices: list[int], lane: str,
     if q.box == "xe7740":
         doc = gpu_config(job, devices, lane, rundir)
     else:
-        doc = cpu_config(job, devices, lane, rundir)
+        doc = cpu_config(job, devices, lane, rundir, snc=bool(q.doc.get("r770_snc")))
     sim = deep_merge(PLANNER_SIMULATION, job.get("simulation") or {})
     workers = int(job.get("workers_per_device", 8 if q.box == "xe7740" else 4))
     sim.setdefault("open_loop_max_workers", max(8, workers * len(devices)))
@@ -267,10 +309,47 @@ def build_config(q: Queue, job: dict, devices: list[int], lane: str,
     if job.get("reasoning_effort"):
         doc["engine"]["reasoning"] = True
         doc["engine"]["reasoning_effort"] = job["reasoning_effort"]
+    allowance = job.get("reasoning_overhead_tokens")
+    if job.get("reasoning_from"):
+        # Level-matching rerun (T2): the allowance is the variant's mean
+        # reasoning on this workload, measured by its reasoning_probe job,
+        # and the answer is timed from that point (simulator.rescore).
+        allowance = measured_allowance(q, job)
+        doc["engine"]["answer_start_after_tokens"] = int(allowance)
+        # Every turn is a fixed length, so splitting reasoning from the
+        # answer adds nothing; with a parser, a turn that reasons past the
+        # mean streams no answer text and is filed as no_content_tokens,
+        # which the search reads as errors and backs off from. Without it
+        # every token streams as content and the answer start comes from
+        # the allowance above.
+        flags = list(doc["engine"].get("vllm_extra_flags") or [])
+        if "--reasoning-parser" in flags:
+            i = flags.index("--reasoning-parser")
+            del flags[i:i + 2]
+            doc["engine"]["vllm_extra_flags"] = flags
+    if allowance:
+        # Applies with or without an effort setting: models with no effort
+        # knob still reason.
+        doc["engine"]["reasoning_overhead_tokens"] = int(allowance)
     rundir.mkdir(parents=True, exist_ok=True)
     cfg = rundir / "config.yaml"
     cfg.write_text(yaml.safe_dump(doc, sort_keys=False))
     return cfg
+
+
+def measured_allowance(q: Queue, job: dict) -> int:
+    """Mean reasoning tokens per turn for the job's workload, from the
+    summary its ``reasoning_from`` probe job wrote."""
+    src = job["reasoning_from"]
+    f = q.runs_dir / src / SCORE_JOBS["reasoning_probe"][1]
+    summary = json.loads(f.read_text())
+    if summary.get("status") != "ok":
+        raise ValueError(f"job {job['id']}: probe {src} did not finish ok")
+    (wl,) = job["workloads"]
+    row = (summary.get("workloads") or {}).get(wl)
+    if not row or row.get("reasoning_mean") is None:
+        raise ValueError(f"job {job['id']}: probe {src} has no reasoning for {wl}")
+    return max(1, round(row["reasoning_mean"]))
 
 
 def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
@@ -287,6 +366,18 @@ def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
         env["CAPSIM_WALL_POWER_CSV"] = q.doc["wall_power_csv"]
     if q.box == "xe7740":
         env["CAPSIM_GPU_INDEXES"] = ",".join(str(d) for d in devices)
+    if job.get("kind") in SCORE_JOBS:
+        # A quality score, not a capacity sweep: same engine build, then the
+        # kind's own script (scripts/livebench_job.py, scripts/opencompass_job.py)
+        # writes a summary the runner checks.
+        (rundir / "job.json").write_text(json.dumps(job, indent=1, default=str))
+        script = (f"cd {REPO} && {UV} run -q python scripts/{SCORE_JOBS[job['kind']][0]} "
+                  f"--config {cfg} --job-file {rundir / 'job.json'}")
+        log = open(rundir / "job.log", "a")
+        log.write(f"\n=== {now()} start {job['kind']} lane={lane} devices={devices}\n")
+        log.flush()
+        return subprocess.Popen(["bash", "-c", script], stdout=log, stderr=subprocess.STDOUT,
+                                env=env, start_new_session=True)
     workloads = ",".join(job["workloads"])
     # On the R770 the engine's OpenMP threads own every physical core of
     # their socket and stall whenever another process is scheduled on
@@ -378,10 +469,41 @@ def _sweeps_ok(q: Queue, jid: str) -> bool:
     return bool(rows) and all(r[0] == "ok" for r in rows)
 
 
+# Quality-score job kinds: the script the runner starts and the summary file
+# whose status must be "ok" for the job to count as done.
+SCORE_JOBS = {
+    "livebench": ("livebench_job.py", "livebench_summary.json"),
+    "opencompass": ("opencompass_job.py", "opencompass_summary.json"),
+    # Not a quality score, but the same shape: one engine, a script, a
+    # summary. Measures reasoning length per workload (level matching, T1).
+    "reasoning_probe": ("reasoning_probe_job.py", "reasoning_probe_summary.json"),
+}
+
+
+def _score_ok(q: Queue, jid: str, kind: str) -> bool:
+    f = q.runs_dir / jid / SCORE_JOBS[kind][1]
+    try:
+        return json.loads(f.read_text()).get("status") == "ok"
+    except (OSError, ValueError):
+        return False
+
+
+def _livebench_ok(q: Queue, jid: str) -> bool:
+    return _score_ok(q, jid, "livebench")
+
+
+def _finished_ok(q: Queue, jid: str) -> bool:
+    """A quality-score job is done when its summary says ok; a capacity job
+    when its sweeps finished."""
+    job = next((j for j in q.jobs if j["id"] == jid), {})
+    kind = job.get("kind")
+    return _score_ok(q, jid, kind) if kind in SCORE_JOBS else _sweeps_ok(q, jid)
+
+
 def _job_outcome(q: Queue, jid: str) -> str:
     """For a job whose process is not our child (adopted after a runner
-    restart): done when its sweeps finished and were re-scored."""
-    return "done" if _sweeps_ok(q, jid) else "failed"
+    restart): done when it finished cleanly."""
+    return "done" if _finished_ok(q, jid) else "failed"
 
 
 # ── Engine tuning ──────────────────────────────────────────────────────
@@ -513,6 +635,7 @@ def _maybe_pick(q: Queue) -> None:
 
 
 def run(q: Queue) -> None:
+    check_numa(q)
     free = q.total_devices()
     running: dict[str, tuple[subprocess.Popen | None, list[int]]] = {}
     adopted: dict[str, int] = {}
@@ -562,7 +685,7 @@ def run(q: Queue) -> None:
                 rc = proc.poll()
                 if rc is None:
                     continue
-                state = "done" if rc == 0 and _sweeps_ok(q, jid) else "failed"
+                state = "done" if rc == 0 and _finished_ok(q, jid) else "failed"
             q.status[jid].update({"state": state, "rc": rc, "finished": now()})
             # Several jobs failing within seconds of starting means the
             # rig is broken, not the job: hold the queue instead of
@@ -638,7 +761,15 @@ def run(q: Queue) -> None:
             devs = pick_devices(free, need, q.box)
             if devs is None:
                 break
-            proc = launch(q, job, devs)
+            # A job that cannot even start (a bad config, a model the
+            # engine refuses) fails alone instead of stopping the runner.
+            try:
+                proc = launch(q, job, devs)
+            except Exception as exc:  # noqa: BLE001
+                q.status[job["id"]] = {"state": "failed", "started": now(), "finished": now(),
+                                       "reason": f"launch: {type(exc).__name__}: {exc}"[:500]}
+                q.save()
+                continue
             free = [d for d in free if d not in devs]
             running[job["id"]] = (proc, devs)
             q.status[job["id"]] = {"state": "running", "devices": devs,

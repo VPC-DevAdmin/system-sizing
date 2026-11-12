@@ -6,6 +6,9 @@
 <title>capsim</title>
 <link rel="stylesheet" href="app.css">
 <link rel="stylesheet" href="infrastructure.css">
+<link rel="stylesheet" href="daylight-tools.css">
+<!-- Opened without naming a tool, capsim starts at the Daylight home page. -->
+<script>if (!location.hash && !/[?&]tools\b/.test(location.search)) location.replace("daylight.html");</script>
 <!-- Vendored: benchmark boxes are often offline; no CDN dependency. -->
 <script src="vendor/chart.umd.min.js"></script>
 </head>
@@ -13,25 +16,28 @@
 <header>
   <div class="brand">
     <span class="logo">capsim</span>
-    <span class="sub">Size &middot; Optimize &middot; Measure</span>
   </div>
-  <nav id="tabs" role="tablist" aria-label="Sections">
+  <nav class="dl-primary" aria-label="Main">
+    <a href="daylight.html#home">Home</a>
+    <a href="daylight.html#new">New run</a>
+    <a href="daylight.html#results">Results</a>
+  </nav>
+  <nav id="tabs" role="tablist" aria-label="Tools">
     <button role="tab" id="tab-prepare" data-view="prepare" class="active"
-      aria-selected="true" aria-controls="view-prepare">Prepare</button>
+      aria-selected="true" aria-controls="view-prepare">System</button>
     <button role="tab" id="tab-optimizer" data-view="optimizer"
       aria-selected="false" aria-controls="view-optimizer" tabindex="-1">Optimize</button>
     <button role="tab" id="tab-roofline" data-view="roofline"
       aria-selected="false" aria-controls="view-roofline" tabindex="-1">Roofline</button>
     <button role="tab" id="tab-control" data-view="control"
-      aria-selected="false" aria-controls="view-control" tabindex="-1">Workload</button>
+      aria-selected="false" aria-controls="view-control" tabindex="-1">Capacity run</button>
     <button role="tab" id="tab-results" data-view="results"
-      aria-selected="false" aria-controls="view-results" tabindex="-1">Results</button>
+      aria-selected="false" aria-controls="view-results" tabindex="-1">All results</button>
     <button role="tab" id="tab-personas" data-view="personas"
-      aria-selected="false" aria-controls="view-personas" tabindex="-1">Edit&nbsp;workloads</button>
-    <button role="tab" id="tab-infrastructure" data-view="infrastructure" aria-selected="false" aria-controls="view-infrastructure" tabindex="-1">Infrastructure Tests</button>
+      aria-selected="false" aria-controls="view-personas" tabindex="-1">Workloads</button>
+    <button role="tab" id="tab-infrastructure" data-view="infrastructure" aria-selected="false" aria-controls="view-infrastructure" tabindex="-1">Lab tests</button>
   </nav>
   <div id="status-pill" class="pill idle" role="status" aria-live="polite">idle</div>
-  <a href="workspace.html" onclick="this.hash=location.hash" style="color:var(--teal);font-size:.85rem;white-space:nowrap">Try new UI ↗</a>
 </header>
 
 <!-- ── 1 · Prepare ─────────────────────────────────────────────── -->
@@ -234,6 +240,13 @@
           <option value="256">256 tokens</option>
           <option value="512">512 tokens</option>
         </select></label>
+      <label title="Share of prompt tokens the engine may serve from its prefix cache. The sweep sends a system prompt every user shares plus unique user text, sized from the model's tokenizer to reach this level; the prompt length stays as set. Levels are published production figures (docs/prefix-cache-policy.md). Every result records the measured rate.">Prefix-cache reuse
+        <select id="rf-prefix-reuse">
+          <option value="industry">Industry standard — 54% (business API traffic)</option>
+          <option value="consumer_chat">Consumer chat — 62%</option>
+          <option value="conversation">Multi-turn conversation — 40%</option>
+          <option value="template">None — unique prompts, chat template only</option>
+        </select></label>
       <label class="check"><input type="checkbox" id="rf-confirm" checked>
         Confirm each winner <span class="hint">(full ladder)</span></label>
       <label class="check"><input type="checkbox" id="rf-cross-domain">
@@ -381,6 +394,13 @@
             <option value="256">256 tokens</option>
             <option value="512">512 tokens</option>
             <option value="1024">1024 tokens</option>
+          </select></label>
+        <label title="Share of prompt tokens the engine may serve from its prefix cache. The sweep sends a system prompt every user shares plus unique user text, sized from the model's tokenizer to reach this level; the prompt length stays as set. Levels are published production figures (docs/prefix-cache-policy.md). Every result records the measured rate.">Prefix-cache reuse
+          <select id="hl-prefix-reuse">
+            <option value="industry">Industry standard — 54% (business API traffic)</option>
+            <option value="consumer_chat">Consumer chat — 62%</option>
+            <option value="conversation">Multi-turn conversation — 40%</option>
+            <option value="template">None — unique prompts, chat template only</option>
           </select></label>
         <label>Shape
           <span id="hl-shape" class="hint" style="margin-top:6px"></span>

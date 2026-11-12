@@ -57,19 +57,28 @@ GPU_MODELS = {
                    "trust_remote_code": True},
     "glm47": {"model": "zai-org/GLM-4.7-Flash", "tp": 1},
     "gemma31b": {"model": "nvidia/Gemma-4-31B-IT-NVFP4", "tp": 1},
+    # SGLang's default FlashInfer TRT-LLM MoE runner rejects NVFP4 on
+    # this card (T3-qwen35-4gpu, 2 Nov); CUTLASS is the backend it names.
     "qwen35": {"model": "nvidia/Qwen3.5-397B-A17B-NVFP4", "tp": 4,
-               "engine": "sglang_cuda"},
+               "engine": "sglang_cuda",
+               "engine_extra": {"sglang_extra_flags": ["--moe-runner-backend", "flashinfer_cutlass"]}},
     "minimax": {"model": "MiniMaxAI/MiniMax-M2.7", "tp": 4},
+    # At "low" Beam thinks ~260-310 tokens before answering; the default
+    # 250-token headroom left most short answers empty (HP-beam-8gpu-boot).
     "beam": {"model": "reflection/Beam-1.0-501B-A23B-NVFP4", "tp": 8,
-             "reasoning_effort": "low",
+             "reasoning_effort": "low", "reasoning_overhead_tokens": 1024,
              "engine_extra": {"gpu_image": "vllm/vllm-openai:reflection-beam",
                               "vllm_extra_flags": ["--kv-cache-dtype", "fp8",
                                                    "--reasoning-parser", "beam"],
                               "docker_extra_env": {"VLLM_ENGINE_READY_TIMEOUT_S": "3600"}}},
     "nemoultra": {"model": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", "tp": 8,
                   "engine_extra": {"docker_extra_env": {"VLLM_ENGINE_READY_TIMEOUT_S": "3600"}}},
-    "kimik2": {"model": "nvidia/Kimi-K2-Thinking-NVFP4", "tp": 8, "reasoning_effort": "low",
-               "trust_remote_code": True},
+    # Moonshot's own INT4 checkpoint: the NVIDIA NVFP4 one is not on the
+    # box and the data disks have no room for it.
+    "kimik2": {"model": "moonshotai/Kimi-K2-Thinking", "tp": 8, "reasoning_effort": "low",
+               "reasoning_overhead_tokens": 1024,
+               "trust_remote_code": True,
+               "engine_extra": {"docker_extra_env": {"VLLM_ENGINE_READY_TIMEOUT_S": "3600"}}},
 }
 
 
@@ -504,8 +513,160 @@ def r770() -> dict:
     }
 
 
+# ── H wave: heavy workloads at 128K context ───────────────────────────
+# Test plan of 2 Nov 2026 (https://claude.ai/artifact/2cTXdqpc7dz8CMAaHa2SoT).
+# Personas in config/personas/hwave.yaml. Appended to the live queues
+# with scripts/hwave_append.py rather than regenerating them: the queues
+# on the boxes carry manual jobs this file does not.
+
+HWAVE = ["h_assistant", "h_document_qa", "h_coding_agent", "h_research_agent",
+         "h_service_agent", "h_document_pipeline", "h_deep_analysis"]
+H_CTX = ["h_ctx_8k", "h_ctx_32k", "h_ctx_64k", "h_ctx_128k"]
+H_OUT = ["h_out_1k", "h_out_4k", "h_out_8k", "h_out_16k"]
+# Agent sessions last 5-15 minutes: longer windows, a warm-up that waits
+# for sessions to fill instead of seeding them mid-session (a seeded
+# session's history is not in the engine's cache, so its first turn is
+# a full prefill no real agent pays), and a lower rate floor.
+H_LONG = {"h_coding_agent", "h_research_agent", "h_service_agent"}
+H_SIM = {"open_loop_min_rate_per_s": 0.002, "max_total_duration_minutes": 480}
+H_SIM_LONG = {**H_SIM, "open_loop_window_s": 600, "open_loop_refine_window_s": 600,
+              "open_loop_seed_sessions": False, "open_loop_warmup_follows_sessions": True,
+              "open_loop_settle_max_s": 900}
+# First rate tried per GPU (sessions/s); the search doubles from here.
+H_START = {"h_assistant": 0.5, "h_document_qa": 0.25, "h_coding_agent": 0.005,
+           "h_research_agent": 0.01, "h_service_agent": 0.05, "h_document_pipeline": 0.05,
+           "h_deep_analysis": 0.05}
+H_START_DEFAULT = 0.1
+H_LEN = 131072
+H_SMOKE = "H0-qwen30b-1gpu-h_coding_agent"
+
+
+def hjob(jid, key, workload, gpus=None, **kw):
+    """A GPU job at 128K context. Flag lists in engine_extra add to the
+    model's own (Beam's reasoning parser stays) instead of replacing them."""
+    sim = {**(H_SIM_LONG if workload in H_LONG else H_SIM), **kw.pop("simulation", {})}
+    extra = kw.pop("engine_extra", {})
+    own = GPU_MODELS[key].get("engine_extra", {})
+    for k, v in extra.items():
+        if isinstance(v, list) and isinstance(own.get(k), list):
+            extra[k] = own[k] + v
+    j = gjob(jid, key, [workload], gpus, max_model_len=H_LEN, simulation=sim,
+             engine_extra=extra, **kw)
+    tp = int(j["tp"])
+    j["initial_rate_per_s"] = round(
+        H_START.get(workload, H_START_DEFAULT) * (int(j["devices"]) / tp) * (1.0 if tp == 1 else 0.5), 4)
+    if key == "qwen35":
+        j.pop("tune_key", None)  # its tuning never produced a usable setting
+    return j
+
+
+def hwave_xe7740() -> list[dict]:
+    nocache = {"vllm_extra_flags": ["--no-enable-prefix-caching"]}
+    jobs = [hjob(H_SMOKE, "qwen30b", "h_coding_agent", 1),
+            hjob(f"{H_SMOKE}-nocache", "qwen30b", "h_coding_agent", 1, engine_extra=dict(nocache))]
+    # Phase 1: one-GPU baselines on every workload, the context ladder,
+    # and what the prefix cache is worth to agents.
+    for key in ("gemma26b", "gptoss120b", "qwen36"):
+        for w in HWAVE:
+            jobs.append(hjob(f"H1-{key}-1gpu-{w}", key, w, 1, after=H_SMOKE))
+    # Qwen3 30B is the planner's reference GPU model; its coding agent run
+    # is the smoke job above.
+    for w in HWAVE:
+        if w != "h_coding_agent":
+            jobs.append(hjob(f"H1-qwen30b-1gpu-{w}", "qwen30b", w, 1, after=H_SMOKE))
+    for key in ("qwen36", "gemma26b"):
+        for w in H_CTX:
+            jobs.append(hjob(f"H1.2-{key}-1gpu-{w}", key, w, 1, after=H_SMOKE))
+    for w in ("h_coding_agent", "h_research_agent"):
+        jobs.append(hjob(f"H1.3-gemma26b-1gpu-{w}-nocache", "gemma26b", w, 1, after=H_SMOKE,
+                         engine_extra=dict(nocache)))
+    # Phase 2: the most capable models, each after its boot probe.
+    for key, gpus in (("beam", 8), ("minimax", 4), ("qwen35", 4), ("nemoultra", 8), ("kimik2", 8)):
+        probe = f"HP-{key}-{GPU_MODELS[key]['tp']}gpu-boot"
+        for w in HWAVE:
+            jobs.append(hjob(f"H2-{key}-{gpus}gpu-{w}", key, w, gpus, after=probe))
+    # Phase 3: KV offload to host memory, the output ladder, reasoning
+    # effort and GPU layout.
+    for key, gpus, dep in (("beam", 8, "HP-beam-8gpu-boot"), ("qwen36", 1, H_SMOKE)):
+        tp = GPU_MODELS[key]["tp"]
+        for w in ("h_coding_agent", "h_document_pipeline"):
+            jobs.append(hjob(f"H3.1-{key}-{gpus}gpu-{w}-kvoff", key, w, gpus, after=dep,
+                             engine_extra=kv_offload(tp), host_mem_gb=KV_OFFLOAD_GIB_PER_GPU * gpus))
+        for w in H_OUT:
+            jobs.append(hjob(f"H3.3-{key}-{gpus}gpu-{w}", key, w, gpus, after=dep))
+    for eff in ("medium", "high"):
+        for w in ("h_deep_analysis", "h_coding_agent"):
+            jobs.append(hjob(f"H3.2-gptoss120b-1gpu-{w}-reason{eff}", "gptoss120b", w, 1,
+                             after=H_SMOKE, reasoning_effort=eff))
+    for w in ("h_coding_agent", "h_research_agent"):
+        jobs.append(hjob(f"H3.4-minimax-8gpu-tp8-{w}", "minimax", w, 8, tp=8,
+                         after="HP-minimax-4gpu-boot"))
+        jobs.append(hjob(f"H3.4-qwen36-2gpu-tp2-{w}", "qwen36", w, 2, tp=2, after=H_SMOKE))
+    return jobs
+
+
+def hwave_r770() -> list[dict]:
+    """CPU servers already owned: batch-tier throughput on short-output
+    work and the document pipeline, one socket per job."""
+    jobs = []
+    models = [("qwen30b", "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+               "/models/Qwen3-30B-A3B-Instruct-2507-FP8", "fp8", [])]
+    models += [m for m in CPU_LADDER if m[0] == "gptoss20b"]
+    for key, hf, path, quant, flags in models:
+        ce = {"max_model_len": H_LEN, "context_length": H_LEN}
+        if flags:
+            ce["sglang_extra_flags"] = list(flags)
+        reason = {"reasoning_effort": "low"} if flags is GPTOSS_FLAGS else {}
+        for w in ("h_assistant", "h_document_pipeline"):
+            j = cjob(f"HC-{key}-1s-{w}", hf, path, quant, w, 1, cpu_engine_extra=dict(ce),
+                     simulation=dict(H_SIM), **reason)
+            j.pop("tune_key", None)
+            jobs.append(j)
+    return jobs
+
+
+# ── T wave: task-model jobs for small models on CPU ───────────────────
+# The planner's Task models level (2 Nov 2026): short, one-pass jobs on
+# one socket each, at 32K context. Named HC- like the H wave so the
+# planner import reads them as measured shapes.
+TWAVE = ["t_ticket_triage", "t_document_intake", "t_privacy_screening", "t_agent_support"]
+T_LEN = 32768
+T_SIM = {"open_loop_min_rate_per_s": 0.002, "max_total_duration_minutes": 240}
+# First rate tried per socket (sessions/s); the search doubles from here.
+T_START = {"t_ticket_triage": 0.1, "t_document_intake": 0.05,
+           "t_privacy_screening": 0.02, "t_agent_support": 0.05}
+
+
+def twave_r770() -> list[dict]:
+    jobs = []
+    models = [("qwen4b", *next(m[1:] for m in CPU_LADDER if m[0] == "qwen4b")),
+              ("gptoss20b", *next(m[1:] for m in CPU_LADDER if m[0] == "gptoss20b")),
+              ("qwen30b", "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+               "/models/Qwen3-30B-A3B-Instruct-2507-FP8", "fp8", [])]
+    for key, hf, path, quant, flags in models:
+        ce = {"max_model_len": T_LEN, "context_length": T_LEN}
+        if flags:
+            ce["sglang_extra_flags"] = list(flags)
+        # gpt-oss reasons before it answers; short outputs need room for it.
+        reason = {"reasoning_effort": "low", "reasoning_overhead_tokens": 256} if flags is GPTOSS_FLAGS else {}
+        for w in TWAVE:
+            j = cjob(f"HC-{key}-1s-{w}", hf, path, quant, w, 1, cpu_engine_extra=dict(ce),
+                     simulation=dict(T_SIM), **reason)
+            j["initial_rate_per_s"] = T_START[w]
+            j.pop("tune_key", None)
+            jobs.append(j)
+    return jobs
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "xe7740"
+    if which == "twave-r770":
+        yaml.safe_dump({"jobs": twave_r770()}, sys.stdout, sort_keys=False, width=120)
+        return
+    if which.startswith("hwave"):
+        jobs = hwave_xe7740() if which == "hwave-xe7740" else hwave_r770()
+        yaml.safe_dump({"jobs": jobs}, sys.stdout, sort_keys=False, width=120)
+        return
     doc = xe7740() if which == "xe7740" else r770()
     yaml.safe_dump(doc, sys.stdout, sort_keys=False, width=120)
 

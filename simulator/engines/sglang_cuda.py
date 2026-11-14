@@ -33,6 +33,7 @@ import threading
 import time
 from typing import Optional
 
+from ..gpu_vendor import docker_gpu_args, engine_image
 from .docker_replica import DockerReplicaEngine, gpus_arg_for
 from .vram import to_engine_fraction
 
@@ -242,7 +243,7 @@ class SGLangCudaEngine(DockerReplicaEngine):
         cmd = [
             "docker", "run", "-d", "--rm",
             "--name", container_name,
-            "--gpus", gpus_arg_for(devices),
+            *docker_gpu_args(devices),
             # SGLang's workers use shared memory for tensor transport;
             # the 64MB docker default kills tp>1 init.
             "--ipc=host",
@@ -252,7 +253,7 @@ class SGLangCudaEngine(DockerReplicaEngine):
         for k, v in (cfg.sglang_extra_env or {}).items():
             cmd += ["-e", f"{k}={v}"]
         cmd += list(cfg.docker_extra_args or [])
-        cmd.append(getattr(cfg, "sglang_image", None) or DEFAULT_IMAGE)
+        cmd.append(engine_image("sglang", getattr(cfg, "sglang_image", None) or DEFAULT_IMAGE))
 
         return cmd + launch_argv(
             cfg.model_local_path or cfg.model_id,

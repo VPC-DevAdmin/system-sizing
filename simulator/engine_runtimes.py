@@ -159,16 +159,25 @@ def _containerd_root(config_path: str = "/etc/containerd/config.toml",
 def runtime_status(images: set[str] | None = None) -> list[dict]:
     """One row per engine: staged or not, with what a pull would cost."""
     from .engines.knobs import caveats
+    from .gpu_vendor import ROCM_ENGINE_FAMILY, engine_image, is_amd
     have = local_images() if images is None else images
     rows = []
     for key, meta in RUNTIMES.items():
+        image = meta["image"]
+        if is_amd():
+            # ROCm host: the engine's ROCm build is the gate; engines
+            # with no ROCm build (TensorRT-LLM, KTransformers) are not
+            # offered at all.
+            if key not in ROCM_ENGINE_FAMILY:
+                continue
+            image = engine_image(ROCM_ENGINE_FAMILY[key], image)
         rows.append({
             "engine": key,
             "label": meta["label"],
-            "image": meta["image"],
+            "image": image,
             "approx_gb": meta["approx_gb"],
             "blurb": meta["blurb"],
-            "staged": meta["image"] in have,
+            "staged": image in have,
             # Where this engine's numbers are NOT interchangeable with
             # another's. Surfaced next to the choice, not buried in a
             # doc nobody reads mid-benchmark.

@@ -390,6 +390,12 @@ async def engines_pull(req: EnginePullRequest, request: Request) -> dict:
 async def _engines_pull_locked(req: EnginePullRequest, request: Request) -> dict:
     from ..engine_runtimes import RUNTIMES, image_store_root
     meta = RUNTIMES.get(req.engine)
+    from ..gpu_vendor import ROCM_ENGINE_FAMILY, engine_image, is_amd
+    if meta and is_amd():
+        fam = ROCM_ENGINE_FAMILY.get(req.engine)
+        if fam is None:
+            raise HTTPException(422, f"{req.engine} has no ROCm build")
+        meta = {**meta, "image": engine_image(fam, meta["image"])}
     if meta is None:
         raise HTTPException(
             404, f"unknown engine '{req.engine}' — one of "

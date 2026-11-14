@@ -30,6 +30,7 @@ from typing import Optional
 
 import httpx
 
+from ..gpu_vendor import docker_gpu_args, engine_image
 from .base import Engine, redact_argv
 
 # Stale-container sweep is shared: a leftover trtllm-* container would
@@ -189,21 +190,10 @@ class VllmCudaEngine(Engine):
         cfg = self.cfg
         name = f"vllm-cuda-{lane_tag()}{uuid.uuid4().hex[:12]}"
 
-        if cfg.gpu_device_ids:
-            gpus_arg = "device=" + ",".join(str(i) for i in cfg.gpu_device_ids)
-            # Docker parses the --gpus value as CSV, so a multi-device
-            # list needs EMBEDDED quotes (`"device=0,1"`, quote chars
-            # included) or it reads as device=0 + count=1 and the
-            # daemon refuses ("cannot set both Count and DeviceIDs").
-            if len(cfg.gpu_device_ids) > 1:
-                gpus_arg = f'"{gpus_arg}"'
-        else:
-            gpus_arg = "all"
-
         cmd: list[str] = [
             "docker", "run", "-d", "--rm",
             "--name", name,
-            "--gpus", gpus_arg,
+            *docker_gpu_args(cfg.gpu_device_ids),
             "--ipc=host",
             "--network", cfg.docker_network,
         ]
@@ -230,7 +220,7 @@ class VllmCudaEngine(Engine):
         for k, v in (cfg.docker_extra_env or {}).items():
             cmd += ["-e", f"{k}={v}"]
         cmd += list(cfg.docker_extra_args or [])
-        cmd.append(cfg.gpu_image)
+        cmd.append(engine_image("vllm", cfg.gpu_image))
 
         # Inner vLLM server args (the image's entrypoint is the server).
         model_arg = cfg.model_local_path or cfg.model_id

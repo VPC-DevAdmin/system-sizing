@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 
+from ..gpu_vendor import docker_gpu_args, engine_image
 from .docker_replica import (
     DockerReplicaEngine,
     aggregate_replica_metrics,
@@ -58,7 +59,7 @@ class VllmCudaMultiEngine(DockerReplicaEngine):
         cmd = [
             "docker", "run", "-d", "--rm",
             "--name", container_name,
-            "--gpus", gpus_arg_for(devices),
+            *docker_gpu_args(devices),
             # vLLM's CUDA workers use shared memory for tensor
             # transport; the 64MB docker default kills TP>1 init.
             "--ipc=host",
@@ -66,7 +67,7 @@ class VllmCudaMultiEngine(DockerReplicaEngine):
         ]
         cmd += self._mount_args()
         cmd += list(cfg.docker_extra_args or [])
-        cmd.append(cfg.gpu_image)
+        cmd.append(engine_image("vllm", cfg.gpu_image))
 
         model_arg = cfg.model_local_path or cfg.model_id
         inner = [

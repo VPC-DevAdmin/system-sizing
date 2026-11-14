@@ -242,13 +242,19 @@ def score_models(catalog: list[dict], *, vram_per_gpu_gb: float | None,
     This is a PREDICTION and is labelled as one. It orders the search;
     it does not decide the answer.
     """
+    from .gpu_vendor import is_amd
     from .model_catalog import infer_family
     from .models import model_status
 
+    amd = is_amd()
     out: list[Candidate] = []
     for e in catalog:
         mid = str(e.get("id") or "")
         if not mid:
+            continue
+        if amd and str(e.get("quant") or e.get("quantization") or "").lower() == "nvfp4":
+            # NVFP4 checkpoints are an NVIDIA (Blackwell) format; the
+            # ROCm engines serve MXFP4/FP8/BF16 instead.
             continue
         st = model_status(mid, cache) if cache else model_status(mid)
         size = e.get("approx_size_gb")

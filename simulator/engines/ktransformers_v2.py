@@ -52,6 +52,7 @@ import re
 import sys
 from pathlib import Path
 
+from ..gpu_vendor import docker_gpu_args, engine_image
 from .docker_replica import gpus_arg_for
 
 log = logging.getLogger(__name__)
@@ -480,7 +481,7 @@ def build_replica_command(engine, index: int, devices: list[int],
     cmd = [
         "docker", "run", "-d", "--rm",
         "--name", container_name,
-        "--gpus", gpus_arg_for(devices),
+        *docker_gpu_args(devices),
         # The expert path moves activations through shared memory and
         # the image's own launch uses --ipc host; SYS_NICE lets the
         # thread pools pin to their NUMA node.

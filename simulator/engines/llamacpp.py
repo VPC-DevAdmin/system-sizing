@@ -52,6 +52,7 @@ from pathlib import Path
 
 import httpx
 
+from ..gpu_vendor import docker_gpu_args, engine_image
 from .docker_replica import DockerReplicaEngine, gpus_arg_for
 from .ktransformers import physical_cores
 
@@ -316,7 +317,7 @@ class LlamaCppEngine(DockerReplicaEngine):
         cmd = [
             "docker", "run", "-d", "--rm",
             "--name", container_name,
-            "--gpus", gpus_arg_for(devices),
+            *docker_gpu_args(devices),
             # The offloaded experts are mmap'd from the GGUF and read
             # through the page cache; sharing the host's IPC namespace
             # is what the CPU path wants.
@@ -330,7 +331,7 @@ class LlamaCppEngine(DockerReplicaEngine):
             cmd += ["-v", f"{gguf_dir}:{GGUF_MOUNT}:ro"]
             gguf_mount = GGUF_MOUNT
         cmd += list(cfg.docker_extra_args or [])
-        cmd.append(getattr(cfg, "llamacpp_image", None) or DEFAULT_IMAGE)
+        cmd.append(engine_image("llamacpp", getattr(cfg, "llamacpp_image", None) or DEFAULT_IMAGE))
 
         threads = getattr(cfg, "llamacpp_cpu_threads", None) or default_threads()
         kv = getattr(cfg, "kv_cache_dtype", None)

@@ -502,7 +502,9 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
         # actually launched.
         base_custom = dict(req.custom or {})
         base_custom.setdefault("device", "gpu")
-        base_custom.setdefault("replicas", 8)
+        # One tp1 replica per GPU: eight on the XE7740, one on a
+        # single-card box.
+        base_custom.setdefault("replicas", max(1, int(hw_bounds.get("gpu_count") or 8)))
         base_custom.setdefault("tp", 1)
         base_custom.setdefault("gpu_memory_utilization", 0.95)
         base_custom.setdefault("kv_cache_dtype", "fp8")

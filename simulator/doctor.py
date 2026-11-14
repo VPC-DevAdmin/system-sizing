@@ -184,7 +184,38 @@ def _check_engine_runtimes(report: DoctorReport, docker_ok: bool) -> None:
             f"staged: {names}. Available to add: {want}{where}")
 
 
+def _check_gpu_amd(report: DoctorReport) -> bool:
+    """ROCm host: amd-smi for the cards, /dev/kfd + render group for
+    container access (engines get the devices passed through, no
+    container runtime needed)."""
+    import os
+    from .gpu_vendor import query_gpus
+    found = query_gpus()
+    if not found:
+        report.add("gpu", FAIL, "amd-smi present but reported no GPUs — "
+                   "check the amdgpu driver (lsmod | grep amdgpu)")
+        return False
+    rc, ver = _run(["amd-smi", "version"])
+    for name, mib in found:
+        report.gpus.append({"name": name, "memory": f"{mib:.0f} MiB",
+                            "driver": ver.strip() if rc == 0 else "?"})
+    report.add("gpu", OK, f"{len(found)} GPU(s): "
+               + "; ".join(f"{n} ({m / 1024:.0f} GiB)" for n, m in found)
+               + (f" — {ver.strip()}" if rc == 0 else ""))
+    if os.access("/dev/kfd", os.R_OK | os.W_OK):
+        report.add("gpu_container_toolkit", OK,
+                   "/dev/kfd and /dev/dri passed to engine containers")
+    else:
+        report.add("gpu_container_toolkit", FAIL,
+                   "no read/write on /dev/kfd — add this user to the "
+                   "render and video groups")
+    return True
+
+
 def _check_gpu(report: DoctorReport, docker_ok: bool) -> bool:
+    from .gpu_vendor import is_amd
+    if is_amd():
+        return _check_gpu_amd(report)
     rc, out = _run([
         "nvidia-smi",
         "--query-gpu=name,memory.total,driver_version",

@@ -63,7 +63,11 @@ FIXED_GMU = 0.92
 
 
 def detect_gpus() -> list[float]:
-    """Per-GPU VRAM in GB via nvidia-smi; [] on non-GPU hosts."""
+    """Per-GPU VRAM in GB via nvidia-smi (or amd-smi on a ROCm host);
+    [] on non-GPU hosts."""
+    from .gpu_vendor import is_amd, query_gpus
+    if is_amd():
+        return [round(mib / 1024, 1) for _, mib in (query_gpus() or [])]
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.total",

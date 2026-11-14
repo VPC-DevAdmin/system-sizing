@@ -229,7 +229,7 @@ def test_gpu_requirement_is_checked_even_without_proc_cpuinfo(monkeypatch) -> No
         sockets=None, detection_status="no_proc_cpuinfo"))
     monkeypatch.setattr(pf, "detect_gpus",
                         lambda: GpuInfo(0, [], [], "no_nvidia_smi"))
-    with pytest.raises(PreflightError, match="requires an NVIDIA GPU"):
+    with pytest.raises(PreflightError, match="requires a GPU"):
         preflight_check(HardwareRequirements(requires_gpu=True))
     # With GPUs present it passes; without a GPU requirement the CPU
     # gates are skipped as before.

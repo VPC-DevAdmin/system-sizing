@@ -162,6 +162,13 @@ def detect_gpus() -> GpuInfo:
     import shutil
     import subprocess
 
+    from .gpu_vendor import is_amd, query_gpus
+    if is_amd():
+        found = query_gpus()
+        if found is None:
+            return GpuInfo(0, [], [], "query_failed")
+        return GpuInfo(len(found), [n for n, _ in found],
+                       [m / 1024.0 for _, m in found], "ok")
     if shutil.which("nvidia-smi") is None:
         return GpuInfo(0, [], [], "no_nvidia_smi")
     try:
@@ -201,7 +208,7 @@ def check_gpu_requirements(
         return failures
     if gpus.detection_status != "ok" or gpus.count == 0:
         failures.append(
-            f"config requires an NVIDIA GPU but none detected "
+            f"config requires a GPU but none detected "
             f"(status: {gpus.detection_status})"
         )
         return failures

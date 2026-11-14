@@ -43,6 +43,7 @@ import re
 import sys
 from pathlib import Path
 
+from ..gpu_vendor import docker_gpu_args, engine_image
 from .docker_replica import DockerReplicaEngine, gpus_arg_for
 
 log = logging.getLogger(__name__)
@@ -279,7 +280,7 @@ class KTransformersEngine(DockerReplicaEngine):
         cmd = [
             "docker", "run", "-d", "--rm",
             "--name", container_name,
-            "--gpus", gpus_arg_for(devices),
+            *docker_gpu_args(devices),
             # --ipc=host shares the host's /dev/shm outright, which is
             # what the expert path needs; a --shm-size beside it would
             # be a no-op (it sizes the private /dev/shm --ipc=host

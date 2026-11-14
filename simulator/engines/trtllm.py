@@ -46,6 +46,7 @@ from typing import Optional
 import httpx
 import yaml
 
+from ..gpu_vendor import docker_gpu_args, engine_image
 from .docker_replica import DockerReplicaEngine, gpus_arg_for
 
 log = logging.getLogger(__name__)
@@ -281,7 +282,7 @@ def docker_prefix(container_name: str, devices: list[int], *, image: str,
         cmd.append("--rm")
     cmd += [
         "--name", container_name,
-        "--gpus", gpus_arg_for(devices),
+        *docker_gpu_args(devices),
         # TensorRT-LLM's workers use shared memory for tensor
         # transport; the 64MB docker default kills tp>1 init. The
         # ulimits are what the image itself asks for on startup.

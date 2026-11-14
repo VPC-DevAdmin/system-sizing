@@ -130,7 +130,7 @@ class GpuCollector:
     name = "gpu"
 
     def __init__(self) -> None:
-        self._mode: Optional[str] = None   # "nvml" | "smi" | "unavailable"
+        self._mode: Optional[str] = None   # "nvml" | "smi" | "amdsmi" | "unavailable"
         self._nvml = None
         self._handles: list = []
         self.status = "not_started"
@@ -138,7 +138,7 @@ class GpuCollector:
     def is_available(self) -> bool:
         if self._mode is None:
             self._resolve_backend()
-        return self._mode in ("nvml", "smi")
+        return self._mode in ("nvml", "smi", "amdsmi")
 
     def _resolve_backend(self) -> None:
         try:
@@ -170,6 +170,15 @@ class GpuCollector:
                     return
             except Exception:  # noqa: BLE001
                 pass
+        from ..gpu_vendor import amd_sample_devices, is_amd
+        if is_amd():
+            try:
+                if amd_sample_devices():
+                    self._mode = "amdsmi"
+                    self.status = "ok"
+                    return
+            except Exception:  # noqa: BLE001
+                pass
         self._mode = "unavailable"
         self.status = "not_available"
 
@@ -190,6 +199,9 @@ class GpuCollector:
         try:
             if self._mode == "nvml":
                 devices = self._sample_nvml_devices()
+            elif self._mode == "amdsmi":
+                from ..gpu_vendor import amd_sample_devices
+                devices = amd_sample_devices()
             else:
                 devices = self._sample_smi_devices()
         except Exception as e:  # noqa: BLE001

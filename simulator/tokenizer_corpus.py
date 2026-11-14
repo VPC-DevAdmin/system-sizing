@@ -32,10 +32,39 @@ def _heuristic_token_count(text: str) -> int:
     return int(round(words / 0.75))
 
 
+def _local_cache_dirs() -> list:
+    """Hub cache directories to try offline, capsim's own first: the
+    weights were staged there (HF_HOME-pinned), but the serve process
+    and its loadgen workers do not carry HF_HOME themselves."""
+    dirs = []
+    try:
+        from .models import hf_cache_dir
+        dirs.append(str(hf_cache_dir() / "hub"))
+    except Exception:
+        pass
+    dirs.append(None)   # transformers' default (HF_HOME or ~/.cache)
+    return dirs
+
+
 @lru_cache(maxsize=4)
 def _load_tokenizer(model_id: str):
     try:
         from transformers import AutoTokenizer
+    except Exception:
+        return None
+    # Offline first. Every loadgen worker loads the tokenizer at spawn,
+    # and an online load asks the Hub for the revision even when the
+    # files are cached. On a host whose route to huggingface.co stalls
+    # (the R7725 lab box) that turned a 2 s spawn into minutes and
+    # failed the 2048-stream rung on the 180 s readiness timeout.
+    for cache_dir in _local_cache_dirs():
+        try:
+            return AutoTokenizer.from_pretrained(
+                model_id, trust_remote_code=True, local_files_only=True,
+                cache_dir=cache_dir)
+        except Exception:
+            continue
+    try:
         return AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     except Exception:
         return None

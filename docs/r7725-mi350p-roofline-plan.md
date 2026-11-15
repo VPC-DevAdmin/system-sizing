@@ -1,6 +1,6 @@
 # R7725 / MI350P: roofline on leading-edge AMD software
 
-2026-11-15, revision 3. Box: Dell R7725, 1x AMD Instinct MI350P (PCIe).
+2026-11-15, revision 4. Box: Dell R7725, 1x AMD Instinct MI350P (PCIe).
 
 **Goal:** the best performance this pre-release card can show, on the
 newest and most capable models that fit it, using the newest AMD software
@@ -9,8 +9,19 @@ open pull requests are in scope; every result names exactly what it ran.
 
 Revision 1 tuned settings on the software the box already had. Revision 2
 found that software was a month behind AMD's MI350P work and added a stack
-refresh. Revision 3 adds AMD's unreleased techniques (section 3) and
-re-picks the models (Phase 4).
+refresh. Revision 3 added AMD's unreleased techniques (section 3).
+Revision 4 restricts the models to recent ones (below) and adds a search
+for the best shape and serving settings (Phase 1b).
+
+**Which models.** Only models released in the last six months (since
+mid-May 2026) with a mixture-of-experts design or a newer attention
+mechanism, and room for higher performance. Llama-3.3-70B is dropped;
+gpt-oss, Gemma-4, Step-3.5-Flash, Qwen3.5 and Qwen3-Coder-Next are older
+than the cutoff and are out of the headline set. Of the models on the
+box, Qwen3.8-27B (August 2026, hybrid linear attention) and its
+fine-tune Arete-27B qualify. A search for other qualifying models that
+fit one 144 GB card is running; the lists in Phases 1 and 4 are
+completed from it.
 
 ## 1. Review of revision 1 against the goal
 
@@ -122,13 +133,16 @@ build beats the current image's tuned-table hit rate, stop and report.
 
 ### Phase 1: settings and techniques on the new stack (about 9 GPU-hours)
 
-One cell each (cap 2048, 128 in / 256 out). Models:
+One cell each (128 in / 256 out). Models:
 
-- gpt-oss-120b (MXFP4 MoE; 128-CU tables now exist)
-- Qwen3.8-27B MXFP4 (128-CU tables exist; hybrid, so it runs at its
-  Mamba block cap)
-- Llama-3.3-70B MXFP4 and FP8 (dense, no 128-CU tables: the control that
-  shows what tuning is worth, and the FP8 to MXFP4 step)
+- Qwen3.8-27B MXFP4 (128-CU tables exist; a hybrid, so both engines run
+  it at a cap of 1024: vLLM refuses 2048 for it)
+- Qwen3.8-27B FP8: the same model, for the FP8 to MXFP4 step
+- The other qualifying models from the search, at a cap of 2048. One
+  with no 128-CU tables serves as the untuned control.
+
+The rows below that name gpt-oss apply only if a model with windowed
+attention is in the final list.
 
 | Engine | Arm | Settings |
 |---|---|---|
@@ -146,7 +160,7 @@ Technique arms, Qwen3.8-27B MXFP4 on vLLM, each against S3:
 | Arm | Settings | Measured on |
 |---|---|---|
 | T1 | Mono decode image, `VLLM_ROCM_MONO_DECODE=1` | Interactive ladder; one roofline cell to confirm the peak is unchanged |
-| T2 | MXFP4 fusion image, fusion flag on | Roofline cell and interactive ladder. Llama-3.3-70B MXFP4 too |
+| T2 | MXFP4 fusion image, fusion flag on | Roofline cell and interactive ladder |
 | T3 | DFlash2 draft, 7 speculative tokens | Interactive ladder |
 | T4 | MTP, 3 draft tokens | Interactive ladder |
 | T5 | The best of T1 to T4 combined, if the builds allow | Interactive ladder |
@@ -168,14 +182,37 @@ About 27 cells plus 6 technique runs, about 9 GPU-hours. Rules:
   length.
 
 Gate: carry the winning settings and techniques forward. The
-tuned-versus-control gap on Llama decides how much Phase 2 is worth.
+gap between the tuned models and the untuned control decides how much
+Phase 2 is worth.
+
+### Phase 1b: best shape and serving settings (about 6 GPU-hours)
+
+Phase 1 holds the shape fixed (128 in / 256 out) to compare kernels. The
+headline number should come from the shape and serving settings that
+suit the card, so this step searches them on the Phase 1 winners.
+
+Already in place: every saturation request forces the full output length
+(`ignore_eos`, or `min_tokens` where the model's parser needs it), so no
+stream ends early.
+
+| Lever | Values | Why |
+|---|---|---|
+| Output length | 256, 512, 1024 | At 128 in / 256 out the engine prefills one token for every two it generates. Longer outputs cut that share, so more of each step is decode |
+| Input length | 32, 128 | Less prefill and less KV per stream. 32 is reported separately as a best-case shape, not as the standard one |
+| Engine cap | 1024, 2048, 4096 | The reference runs peaked at 512 streams and fell at 2048; the best cap is not known yet |
+| Prefill budget | vLLM `--max-num-batched-tokens` 8192 (default), 32768, 65536; SGLang `--max-prefill-tokens` likewise | AMD's guide recommends 32k or more for throughput; the default starves prefill at 2048 streams |
+| Scheduling and front end | vLLM `--async-scheduling`; SGLang `--stream-interval` | At 10k+ tokens a second the API process and per-token streaming can be the limit |
+
+Shapes first (6 per model), then the serving levers one at a time on the
+best shape. Results report two numbers per model: the standard shape
+(128 / 256, comparable with the XE7740) and the best shape found, each
+with its shape stated.
 
 ### Phase 2: tune only what upstream has not (up to 8 GPU-hours)
 
 1. From the Phase 1 logs and one smoke start per remaining model, list
-   the shapes that still miss a tuned row. Expected: Llama-3.3-70B,
-   Gemma-4-31B MXFP4, gpt-oss-20b, Qwen3.5-35B-A3B, Qwen3-Coder-Next,
-   Step-3.5-Flash.
+   the shapes that still miss a tuned row, for the models in the final
+   list only.
 2. Tune those with AITER's in-tree tuners, MXFP4 (a4w4, fp4 MoE) first.
    Known traps: the a4w4 tuner faults on N=96 and some CK-tuned rows are
    unusable on 128 CUs (AITER #6255); unaligned rows are being removed
@@ -203,13 +240,12 @@ Grid as in the baseline (caps 1024 and 2048, outputs 128 and 256, input
 
 | Part | Models | Cells | GPU-hours |
 |---|---|---|---|
-| 4a Headline | Qwen3.8-27B MXFP4 (AMD's showcase model for this card: tuned tables, mono decode, DFlash2, MTP); gpt-oss-120b; Step-3.5-Flash MXFP4 (114 GB, the largest that fits); Gemma-4-31B MXFP4. Both engines, roofline grid plus the interactive ladder with the Phase 1 techniques | about 40 | about 12 |
-| 4b Newest models | Arete-27B (NousResearch, 11-06, a Qwen3.8-27B fine-tune) and Nanbeige4.3-33B (10-24), BF16 as published; Qwen3-Coder-Next, Qwen3.5-35B-A3B, Llama-3.3-70B and gpt-oss-20b in MXFP4 | about 48 | about 11 |
-| 4c FP8 | The baseline's FP8 models and its three fixable failures | about 90 | about 21 |
-| 4d BF16 | Optional; the baseline's BF16 numbers stand as "untuned" | about 80 | about 19 |
+| 4a Headline | Qwen3.8-27B in MXFP4 and FP8 (AMD's showcase model for this card: tuned tables, mono decode, DFlash2, MTP) and Arete-27B. Both engines, the roofline grid, the best shape from Phase 1b, and the interactive ladder with the Phase 1 techniques | about 30 | about 9 |
+| 4b Other qualifying models | From the search: released since mid-May 2026, MoE or a newer attention design, fits one card | to be set | to be set |
+| 4c Older models | Optional: gpt-oss-120b, Gemma-4-31B, Step-3.5-Flash and the other MXFP4 checkpoints already on the box | about 50 | about 12 |
+| 4d Baseline grid | Optional: the baseline's FP8 and BF16 models on the new stack | about 170 | about 40 |
 
-4a and 4b are the deliverable. 4c and 4d run only if you want the full
-grid on the new stack.
+4a and 4b are the deliverable. 4c and 4d run only if you ask for them.
 
 The newest large models do not fit one 144 GB card: DeepSeek-V4.1-Flash
 (510 GB), GLM-5.3-Flash (657 GB), Qwen3.8-Flash-Next (182 GB in MXFP4),

@@ -339,7 +339,10 @@ def report_sections(manifest, state, comparison, claim, path):
         )
     if spec["project_id"] in ("P01", "P02"):
         engines = []
-        for planfile in sorted(path.glob("block-*/replica-0/dynamo-plan.json")):
+        planfiles = sorted(path.glob("block-*/replica-0/dynamo-plan.json"))
+        # Plain vLLM P02 replicas (session_vllm.py) record their own plan.
+        planfiles += sorted(path.glob("block-*/**/replica-0/session-plan.json"))
+        for planfile in planfiles:
             plan = read_json(planfile)
             if spec["project_id"] == "P02":
                 settings = plan.pop("sessions", {})
@@ -360,7 +363,7 @@ def report_sections(manifest, state, comparison, claim, path):
             runtime = planfile.parent / "runtime-versions.json"
             if runtime.exists():
                 plan["runtime_packages"] = read_json(runtime)["packages"]
-            plan["image"] = manifest.get("dynamo", {}).get("image")
+            plan["image"] = plan.get("image") or manifest.get("dynamo", {}).get("image")
             plan["worker_commands"] = str(
                 (planfile.parent / "service-commands.json").relative_to(path)
             )

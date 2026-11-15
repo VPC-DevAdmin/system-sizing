@@ -21,7 +21,9 @@ sweep resumes its run folder, skipping finished workloads).
 
 Queue file:
 
-    box: xe7740                     # xe7740 (GPUs) or r770 (sockets)
+    box: xe7740                     # xe7740 or r7725 (GPUs), r770 (sockets)
+    gpu_count: 1                    # r7725 only: GPUs in the box (default 1)
+    vram_per_gpu_gb: 143.7          # GPU boxes: per-card VRAM for engine sizing
     state_dir: /data/capsim-planner/state
     runs_dir: /data/capsim-planner/runs
     defaults:
@@ -58,6 +60,10 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 UV = os.environ.get("UV", "uv")
 GPU_DOMAINS = [[0, 1, 2, 3], [4, 5, 6, 7]]
+# Boxes whose devices are GPUs. The R7725 carries one AMD Instinct
+# MI350P (ROCm; capsim picks the ROCm engine images itself).
+GPU_BOXES = {"xe7740", "r7725"}
+XE7740_VRAM_GB = 95.6
 # R770: socket -> physical cores (even = socket 0, odd = socket 1),
 # NUMA node = socket. Hyper-threads stay idle.
 R770_SOCKET_CPUS = {
@@ -167,6 +173,8 @@ class Queue:
     def total_devices(self) -> list[int]:
         if self.box == "xe7740":
             return list(range(8))
+        if self.box == "r7725":
+            return list(range(int(self.doc.get("gpu_count") or 1)))
         return [0, 1, 2, 3] if self.doc.get("r770_snc") else [0, 1]
 
 
@@ -187,6 +195,9 @@ def check_numa(q: Queue, nodes: int | None = None) -> None:
 def pick_devices(free: list[int], n: int, box: str) -> list[int] | None:
     """Contiguous devices inside one PCIe domain when they fit there
     (TP groups must not span the two domains); the whole box for 8."""
+    if box == "r7725":
+        want = sorted(free)[:n]
+        return want if len(want) == n else None
     if box != "xe7740":
         if n >= 2:
             return [0, 1] if set(free) >= {0, 1} else None
@@ -202,7 +213,8 @@ def pick_devices(free: list[int], n: int, box: str) -> list[int] | None:
     return None
 
 
-def gpu_config(job: dict, devices: list[int], lane: str, rundir: Path) -> dict:
+def gpu_config(job: dict, devices: list[int], lane: str, rundir: Path,
+               vram_per_gpu_gb: float = XE7740_VRAM_GB) -> dict:
     sys.path.insert(0, str(REPO))
     from simulator.engines.custom import config_doc, custom_engine
     tp = int(job.get("tp") or 1)
@@ -219,7 +231,7 @@ def gpu_config(job: dict, devices: list[int], lane: str, rundir: Path) -> dict:
         if job.get(k) is not None:
             custom[k] = job[k]
     hw = {"count": len(devices), "device_groups": [devices],
-          "vram_per_gpu_gb": 95.6}
+          "vram_per_gpu_gb": float(vram_per_gpu_gb)}
     engine = custom_engine(custom, hw=hw)
     engine["port"] = BASE_PORT + LANE_PORTS * int(devices[0])
     # Flag lists add to the ones the job's settings produced (KV dtype,
@@ -295,12 +307,13 @@ def cpu_config(job: dict, devices: list[int], lane: str, rundir: Path,
 
 def build_config(q: Queue, job: dict, devices: list[int], lane: str,
                  rundir: Path) -> Path:
-    if q.box == "xe7740":
-        doc = gpu_config(job, devices, lane, rundir)
+    if q.box in GPU_BOXES:
+        doc = gpu_config(job, devices, lane, rundir,
+                         vram_per_gpu_gb=q.doc.get("vram_per_gpu_gb") or XE7740_VRAM_GB)
     else:
         doc = cpu_config(job, devices, lane, rundir, snc=bool(q.doc.get("r770_snc")))
     sim = deep_merge(PLANNER_SIMULATION, job.get("simulation") or {})
-    workers = int(job.get("workers_per_device", 8 if q.box == "xe7740" else 4))
+    workers = int(job.get("workers_per_device", 8 if q.box in GPU_BOXES else 4))
     sim.setdefault("open_loop_max_workers", max(8, workers * len(devices)))
     sim.setdefault("open_loop_min_workers", max(2, workers * len(devices) // 2))
     if job.get("initial_rate_per_s"):
@@ -353,7 +366,7 @@ def measured_allowance(q: Queue, job: dict) -> int:
 
 
 def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
-    lane = ("g" if q.box == "xe7740" else "s") + "".join(str(d) for d in devices)
+    lane = ("g" if q.box in GPU_BOXES else "s") + "".join(str(d) for d in devices)
     rundir = q.runs_dir / job["id"]
     cfg = build_config(q, job, devices, lane, rundir)
     env = dict(os.environ)
@@ -364,7 +377,7 @@ def launch(q: Queue, job: dict, devices: list[int]) -> subprocess.Popen:
     env["CAPSIM_HARDWARE_LOCK"] = str(q.state_dir / "locks" / f"{lane}.lock")
     if q.doc.get("wall_power_csv"):
         env["CAPSIM_WALL_POWER_CSV"] = q.doc["wall_power_csv"]
-    if q.box == "xe7740":
+    if q.box in GPU_BOXES:
         env["CAPSIM_GPU_INDEXES"] = ",".join(str(d) for d in devices)
     if job.get("kind") in SCORE_JOBS:
         # A quality score, not a capacity sweep: same engine build, then the

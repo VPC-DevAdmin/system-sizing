@@ -18,6 +18,21 @@ from .dynamo import OwnedDynamo
 
 class OwnedSessions(OwnedDynamo):
     def launch(self, log_dir):
+        self._session_preflight()
+        super().launch(log_dir)
+        self._record_mounts()
+
+    def _record_mounts(self):
+        mounts = json.loads(
+            subprocess.check_output(
+                ["docker", "inspect", "--format", "{{json .Mounts}}", self._container_id],
+                text=True,
+                timeout=15,
+            )
+        )
+        write_json(self.directory / "container-mounts.json", mounts)
+
+    def _session_preflight(self):
         self.storage_root = None
         if self.arm == "treatment":
             for offset in ((20, 30, 31) if self.spec.session_cpu_backend == "kvbm" else ()):
@@ -40,15 +55,6 @@ class OwnedSessions(OwnedDynamo):
                 self.storage_root = root
                 if shutil.disk_usage(root).free < (self.spec.session_disk_gb + 20) * 1024**3:
                     raise RuntimeError("Insufficient Docker storage for the ephemeral disk cache")
-        super().launch(log_dir)
-        mounts = json.loads(
-            subprocess.check_output(
-                ["docker", "inspect", "--format", "{{json .Mounts}}", self._container_id],
-                text=True,
-                timeout=15,
-            )
-        )
-        write_json(self.directory / "container-mounts.json", mounts)
 
     def _build_docker_command(self):
         argv = super()._build_docker_command()

@@ -37,6 +37,12 @@ def arm_config(configuration, spec, arm):
     )
     if spec.project_id == "P02" and spec.session_kv_cache_dtype != "source":
         e["kv_cache_dtype"] = spec.session_kv_cache_dtype
+    if getattr(spec, "session_runtime", "dynamo") == "vllm" and not spec.p01_runtime_image:
+        from ..gpu_vendor import engine_image
+
+        # The stock vLLM image, or its ROCm build on an AMD host; the
+        # capacity worker pins it to its local image ID before launch.
+        e["gpu_image"] = engine_image("vllm", "vllm/vllm-openai:latest")
     # This is a matched Dynamo comparison, not a replay of arbitrary roofline flags.
     return cfg
 

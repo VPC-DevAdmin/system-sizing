@@ -3,6 +3,7 @@
 
     planner_queues.py xe7740 > queue-xe7740.yaml
     planner_queues.py r770   > queue-r770.yaml
+    planner_queues.py r7725  > queue-r7725.yaml   # tiers 1-2; r7725-all adds tier 3
 
 Wave ids follow the campaign plan (G0-G3 on the XE7740, C0-C3 on the
 R770). Fixed-shape AIPerf ladders (C1.2, C2, G4, G5) are not capsim
@@ -129,8 +130,8 @@ def gtune(key, grid, prefix):
     return out
 
 
-def gjob(jid, key, workloads, gpus=None, **kw):
-    m = dict(GPU_MODELS[key])
+def gjob(jid, key, workloads, gpus=None, models=None, **kw):
+    m = dict((models or GPU_MODELS)[key])
     extra = m.pop("engine_extra", {})
     tp = m["tp"]
     gpus = gpus or tp
@@ -141,7 +142,7 @@ def gjob(jid, key, workloads, gpus=None, **kw):
     ee = {**ee, **kw.pop("engine_extra", {})}
     j = {"id": jid, **m, "devices": gpus, "workloads": wl,
          "initial_rate_per_s": round(start, 4), "engine_extra": ee}
-    if key in TUNED_GPU_KEYS:
+    if key in TUNED_GPU_KEYS or models is not None:
         j["tune_key"] = f"{key}-gpu"
     j.update(kw)
     if j.get("tune_group") or jid.startswith("G0"):
@@ -541,17 +542,17 @@ H_LEN = 131072
 H_SMOKE = "H0-qwen30b-1gpu-h_coding_agent"
 
 
-def hjob(jid, key, workload, gpus=None, **kw):
+def hjob(jid, key, workload, gpus=None, models=None, **kw):
     """A GPU job at 128K context. Flag lists in engine_extra add to the
     model's own (Beam's reasoning parser stays) instead of replacing them."""
     sim = {**(H_SIM_LONG if workload in H_LONG else H_SIM), **kw.pop("simulation", {})}
     extra = kw.pop("engine_extra", {})
-    own = GPU_MODELS[key].get("engine_extra", {})
+    own = (models or GPU_MODELS)[key].get("engine_extra", {})
     for k, v in extra.items():
         if isinstance(v, list) and isinstance(own.get(k), list):
             extra[k] = own[k] + v
-    j = gjob(jid, key, [workload], gpus, max_model_len=H_LEN, simulation=sim,
-             engine_extra=extra, **kw)
+    j = gjob(jid, key, [workload], gpus, models=models, max_model_len=H_LEN,
+             simulation=sim, engine_extra=extra, **kw)
     tp = int(j["tp"])
     j["initial_rate_per_s"] = round(
         H_START.get(workload, H_START_DEFAULT) * (int(j["devices"]) / tp) * (1.0 if tp == 1 else 0.5), 4)
@@ -658,8 +659,145 @@ def twave_r770() -> list[dict]:
     return jobs
 
 
+# ── R7725: one AMD Instinct MI350P (144 GB, ROCm) ─────────────────────
+# The XE7740's one-GPU jobs on a single card, so the two boxes compare
+# card for card. capsim swaps in the ROCm vLLM/SGLang images itself.
+# NVFP4 is an NVIDIA format: the Gemma and Qwen3.6 anchors run their
+# FP8 builds here, and Nemotron Super fits one card at FP8 (it needed
+# two at NVFP4 on the XE7740). Every job is one GPU, so the queue runs
+# one job at a time; it is ordered in tiers, most comparable first.
+
+R7725_HF = {"/data/capsim/huggingface": "/root/.cache/huggingface"}
+R7725_MODELS = {
+    "qwen30b": {"model": "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8", "tp": 1},
+    "gptoss120b": {"model": "openai/gpt-oss-120b", "tp": 1, "reasoning_effort": "low"},
+    "gptoss20b": {"model": "openai/gpt-oss-20b", "tp": 1, "reasoning_effort": "low"},
+    "gemma26b": {"model": "RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic", "tp": 1},
+    "qwen36": {"model": "Qwen/Qwen3.6-35B-A3B-FP8", "tp": 1},
+    "nemosuper": {"model": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8", "tp": 1},
+    "glm47": {"model": "zai-org/GLM-4.7-Flash", "tp": 1},
+    "kimilinear": {"model": "moonshotai/Kimi-Linear-48B-A3B-Instruct", "tp": 1,
+                   "trust_remote_code": True},
+}
+for _m in R7725_MODELS.values():
+    _m["engine_extra"] = {"docker_volumes": dict(R7725_HF), **_m.get("engine_extra", {})}
+# First rate tried for T-wave jobs on one GPU: ten times the per-socket
+# start (the search doubles from here, so low only costs a window).
+T_START_GPU = {w: r * 10 for w, r in T_START.items()}
+R7725_KV_OFFLOAD_GIB = 128
+R7725_TUNED = ("qwen30b", "gptoss120b", "gemma26b")   # tier-1 tuning groups   # the XE7740's per-GPU size, for a like-for-like uplift
+
+
+def r7725_kv_offload() -> dict:
+    return {"vllm_extra_flags": ["--kv-offloading-size", str(R7725_KV_OFFLOAD_GIB),
+                                 "--kv-offloading-backend", "native"]}
+
+
+def r7725(tiers=(1, 2)) -> dict:
+    M = R7725_MODELS
+    g = lambda jid, key, wl, **kw: gjob(jid, key, wl, 1, models=M, **kw)  # noqa: E731
+    h = lambda jid, key, wl, **kw: hjob(jid, key, wl, 1, models=M, **kw)  # noqa: E731
+    jobs = []
+    smoke = "G0-qwen30b-1gpu-conversational"
+    if 1 in tiers:
+        # Tier 1 (~1.5 days at the XE7740's 0.8 h/job): the anchor's
+        # sixteen personas and six team mixes, two more anchors, and KV
+        # offload on multi-turn work -- the XE7740's G1.1/G1.6/G2/K at 1 GPU.
+        jobs.append(g(smoke, "qwen30b", "conversational", barrier=True))
+        for name, ov in GPU_TUNE_LIGHT.items():
+            for key in R7725_TUNED:
+                jobs.append(g(f"T1-{key}-1gpu-{name}", key, list(TUNE_WORKLOADS), after=smoke,
+                              simulation=dict(TUNE_SIM), tune_group=f"{key}-gpu",
+                              tune_name=name, tune_overrides=ov, **ov))
+        for w in ALL16:
+            if w != "conversational":
+                jobs.append(g(f"G1.1-qwen30b-1gpu-{w}", "qwen30b", w))
+        for mix in MIX6:
+            jobs.append(g(f"G1.6-qwen30b-1gpu-{mix}", "qwen30b", mix))
+        for key in ("gptoss120b", "gemma26b"):
+            for w in CORE6:
+                jobs.append(g(f"G2-{key}-1gpu-{w}", key, w))
+        for key in ("qwen30b", "gptoss120b"):
+            for w in HISTORY:
+                jobs.append(g(f"K-{key}-1gpu-{w}-kvoff", key, w, engine_extra=r7725_kv_offload(),
+                              host_mem_gb=R7725_KV_OFFLOAD_GIB))
+    if 2 in tiers:
+        # Tier 2 (~2 days): heavy agent and RAG work at 128K (H wave),
+        # its context ladder and KV offload, and the T-wave task jobs
+        # (ticket triage, intake, privacy screening, guardrail support)
+        # on the GPU -- they ran on Xeon sockets before.
+        hs = "H0-qwen30b-1gpu-h_coding_agent"
+        jobs.append(h(hs, "qwen30b", "h_coding_agent", barrier=True))
+        for key in ("qwen30b", "gptoss120b", "gemma26b", "qwen36"):
+            for w in HWAVE:
+                if (key, w) != ("qwen30b", "h_coding_agent"):
+                    jobs.append(h(f"H1-{key}-1gpu-{w}", key, w, after=hs))
+        for w in H_CTX:
+            jobs.append(h(f"H1.2-qwen30b-1gpu-{w}", "qwen30b", w, after=hs))
+        for w in ("h_coding_agent", "h_document_pipeline"):
+            jobs.append(h(f"H3.1-qwen30b-1gpu-{w}-kvoff", "qwen30b", w, after=hs,
+                          engine_extra=r7725_kv_offload(), host_mem_gb=R7725_KV_OFFLOAD_GIB))
+        for key in ("gptoss20b", "qwen30b"):
+            reason = ({"reasoning_overhead_tokens": 256} if key.startswith("gptoss") else {})
+            for w in TWAVE:
+                j = g(f"TW-{key}-1gpu-{w}", key, w, max_model_len=T_LEN,
+                      simulation=dict(T_SIM), **reason)
+                j["initial_rate_per_s"] = T_START_GPU[w]
+                jobs.append(j)
+    if 3 in tiers:
+        # Tier 3: the XE7740's remaining one-GPU variants.
+        for w in HISTORY:
+            for hist in HISTORY_SETTINGS:
+                jobs.append(g(f"G1.4-qwen30b-1gpu-{w}-hist{hist}", "qwen30b", w,
+                              simulation={"history_window_turns": hist}))
+        for w in ["quick_lookup", "conversational", "document_qa"]:
+            jobs.append(g(f"G1.5-qwen30b-1gpu-{w}-kvauto", "qwen30b", w,
+                          kv_cache_dtype="auto", pin=["kv_cache_dtype"]))
+        for w in HISTORY:
+            jobs.append(g(f"G1.7-qwen30b-1gpu-{w}-nocache", "qwen30b", w,
+                          engine_extra={"vllm_extra_flags": ["--no-enable-prefix-caching"]}))
+        for w in SYS_CONTROL:
+            jobs.append(g(f"G1.8-qwen30b-1gpu-{w}-sys0", "qwen30b", w,
+                          simulation={"system_prompt_tokens": None}))
+        for w in CORE6:
+            jobs.append(g(f"G1.3-qwen30b-1gpu-{w}-sglang_cuda", "qwen30b", w,
+                          engine="sglang_cuda"))
+        for eff in ("medium", "high"):
+            for w in ("conversational", "document_qa", "knowledge_search"):
+                jobs.append(g(f"G2-gptoss120b-1gpu-{w}-reason{eff}", "gptoss120b", w,
+                              reasoning_effort=eff))
+        for key in ("gptoss20b", "qwen36", "nemosuper", "glm47", "kimilinear"):
+            for w in CORE6:
+                jobs.append(g(f"G3-{key}-1gpu-{w}", key, w))
+    # A job waits for its model's tuning pick (tune_key); only the models
+    # tuned in tier 1 ever get one, so the rest run on engine defaults
+    # instead of holding the queue forever. Tier 3 alone is appended to a
+    # queue that already ran tier 1, so it keeps the tier-1 keys.
+    tuned = {f"{k}-gpu" for k in R7725_TUNED}
+    for j in jobs:
+        if j.get("tune_key") and j["tune_key"] not in tuned:
+            j.pop("tune_key")
+    return {
+        "box": "r7725",
+        "gpu_count": 1,
+        "vram_per_gpu_gb": 143.7,
+        # vLLM maps offloaded KV in /dev/shm, half of the 377 GB host by default.
+        "host_mem_budget_gb": 160,
+        "state_dir": "/data/capsim-planner/state",
+        "runs_dir": "/data/capsim-planner/runs",
+        "defaults": {"engine": "vllm_cuda_multi", "max_model_len": 32768,
+                     "gpu_memory_utilization": 0.90},
+        "jobs": jobs,
+    }
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "xe7740"
+    if which.startswith("r7725"):
+        # r7725 = tiers 1-2; r7725-all adds tier 3; r7725-tier3 is tier 3 alone.
+        tiers = {"r7725": (1, 2), "r7725-all": (1, 2, 3), "r7725-tier3": (3,)}[which]
+        yaml.safe_dump(r7725(tiers), sys.stdout, sort_keys=False, width=120)
+        return
     if which == "twave-r770":
         yaml.safe_dump({"jobs": twave_r770()}, sys.stdout, sort_keys=False, width=120)
         return

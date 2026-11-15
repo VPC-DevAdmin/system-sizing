@@ -25,6 +25,14 @@ def idle_reasons(plan):
     reasons = []
     if (status.get("active_run") or {}).get("running"):
         reasons.append("capsim has active work")
+    from ..gpu_vendor import amd_compute_pids, amd_sample_devices, is_amd
+    if is_amd():
+        if amd_compute_pids():
+            reasons.append("GPU compute processes are present")
+        if any((d.get("vram_used_gb") or 0) > 1 or (d.get("sm_util_pct") or 0) > 5
+               for d in amd_sample_devices()):
+            reasons.append("GPU memory or utilization remains active")
+        return reasons + _host_reasons(plan)
     result = subprocess.run(
         ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader,nounits"],
         capture_output=True,
@@ -51,6 +59,12 @@ def idle_reasons(plan):
         if len(parts := line.split(",")) == 3
     ):
         reasons.append("GPU memory or utilization remains active")
+    return reasons + _host_reasons(plan)
+
+
+def _host_reasons(plan):
+    """Containers and the hardware lease: the same on every GPU vendor."""
+    reasons = []
     running = subprocess.run(
         ["docker", "ps", "--format", "{{.Names}}"],
         capture_output=True,

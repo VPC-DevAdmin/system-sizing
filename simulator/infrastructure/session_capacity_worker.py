@@ -50,7 +50,12 @@ class SessionReplicas(OwnedReplicas):
                 str(node),
             ]
             settings = spec.model_copy(update={"gpu_ids": [gpu]})
-            worker = OwnedSessions(child, settings, arm, owner)
+            if getattr(spec, "session_runtime", "dynamo") == "vllm":
+                from .session_vllm import OwnedNativeSessions
+
+                worker = OwnedNativeSessions(child, settings, arm, owner)
+            else:
+                worker = OwnedSessions(child, settings, arm, owner)
             worker.stopping = self.stopping
             self.children.append(worker)
 

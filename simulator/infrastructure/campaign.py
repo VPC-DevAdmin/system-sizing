@@ -306,7 +306,17 @@ def create(base, row, spec, idempotency_key):
         if spec.project_id == "P02":
             from .dynamo import DYNAMO_IMAGE, DYNAMO_SOURCE
 
-            manifest["dynamo"] = {"image": DYNAMO_IMAGE, "source": DYNAMO_SOURCE}
+            if getattr(spec, "session_runtime", "dynamo") == "vllm":
+                from ..gpu_vendor import engine_image, vendor
+
+                manifest["runtime"] = {
+                    "kind": "vllm serve (no Dynamo)",
+                    "image": spec.p01_runtime_image
+                    or engine_image("vllm", "vllm/vllm-openai:latest"),
+                    "gpu_vendor": vendor(),
+                }
+            else:
+                manifest["dynamo"] = {"image": DYNAMO_IMAGE, "source": DYNAMO_SOURCE}
             manifest["harness"] = "capsim finite returning-session replay v2"
             manifest["session_hot_diagnostic"] = True
             manifest["cache_policy"] = (

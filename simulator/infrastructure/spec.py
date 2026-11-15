@@ -144,6 +144,12 @@ class ExperimentSpec(BaseModel):
     session_client_lag_s: float = Field(default=0.5, gt=0, le=5)
     session_tier: Literal["cpu", "cpu_disk"] = "cpu"
     session_cpu_backend: Literal["kvbm", "simple_cpu"] = "kvbm"
+    # Serving runtime for P02 capacity cells. "dynamo" is the pinned
+    # NVIDIA Dynamo image (frontend + dynamo.vllm workers). "vllm" is a
+    # plain ``vllm serve`` container per GPU -- the same vLLM engine
+    # flags and native CPU connector without Dynamo, for hosts with no
+    # Dynamo build (AMD ROCm). One GPU per replica needs no router.
+    session_runtime: Literal["dynamo", "vllm"] = "dynamo"
     session_ttft_slo_s: float = Field(default=5, gt=0, le=600)
     session_count: int = Field(default=8, ge=4, le=256)
     session_churn: int = Field(default=16, ge=4, le=512)
@@ -339,6 +345,14 @@ class ExperimentSpec(BaseModel):
             or self.session_tier != "cpu"
         ):
             raise ValueError("Native CPU offload currently requires P02 CPU capacity mode")
+        if self.session_runtime == "vllm" and (
+            self.project_id != "P02"
+            or self.session_mode != "capacity"
+            or self.session_cpu_backend != "simple_cpu"
+        ):
+            raise ValueError(
+                "The plain vLLM runtime supports P02 capacity mode with the simple_cpu backend only"
+            )
         if self.session_active_records is not None and (
             self.session_workload != "knowledge_worker"
             or not self.session_answer_records

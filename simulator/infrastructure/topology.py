@@ -13,17 +13,27 @@ def expand_cpus(text):
     return result
 
 
-def discover(gpu_ids):
+def _pci_addresses():
+    """{GPU index: PCI address as sysfs spells it (dddd:bb:dd.f)}."""
+    from ..gpu_vendor import amd_pci_addresses, is_amd
+    if is_amd():
+        return amd_pci_addresses()
     raw = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=index,pci.bus_id", "--format=csv,noheader"],
         text=True,
         timeout=15,
     )
-    inventory = {}
+    out = {}
     for line in raw.splitlines():
         index, address = [v.strip() for v in line.split(",")]
         domain, bus, function = address.lower().split(":")
-        address = f"{int(domain, 16):04x}:{bus}:{function}"
+        out[int(index)] = f"{int(domain, 16):04x}:{bus}:{function}"
+    return out
+
+
+def discover(gpu_ids):
+    inventory = {}
+    for index, address in _pci_addresses().items():
         if int(index) in gpu_ids:
             node = int((Path("/sys/bus/pci/devices") / address / "numa_node").read_text())
             if node < 0:

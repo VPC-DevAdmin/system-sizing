@@ -217,7 +217,8 @@ class VllmCudaEngine(Engine):
         # HF token for gated models, offline mode for staged weights.
         from .base import hub_env_args
         cmd += hub_env_args(cfg.model_id)
-        for k, v in (cfg.docker_extra_env or {}).items():
+        for k, v in {**(cfg.docker_extra_env or {}),
+                     **(cfg.vllm_extra_env or {})}.items():
             cmd += ["-e", f"{k}={v}"]
         cmd += list(cfg.docker_extra_args or [])
         cmd.append(engine_image("vllm", cfg.gpu_image))

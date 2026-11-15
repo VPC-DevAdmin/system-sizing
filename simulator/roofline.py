@@ -566,7 +566,7 @@ SHAPE_KEYS = ("input_tokens", "gpu_memory_utilization", "kv_cache_dtype",
               "replicas", "tp", "max_model_len", "placement", "prefix_reuse")
 # Shape keys that describe the offered load, not the engine launch.
 WORKLOAD_KEYS = ("input_tokens", "prefix_reuse")
-LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_", "llamacpp_")
+LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_", "llamacpp_", "vllm_")
 
 
 def _gguf_engines_label(engines: Optional[list]) -> str:

@@ -66,6 +66,8 @@ class VllmCudaMultiEngine(DockerReplicaEngine):
             "--network", "host",
         ]
         cmd += self._mount_args()
+        for k, v in (cfg.vllm_extra_env or {}).items():
+            cmd += ["-e", f"{k}={v}"]
         cmd += list(cfg.docker_extra_args or [])
         cmd.append(engine_image("vllm", cfg.gpu_image))
 

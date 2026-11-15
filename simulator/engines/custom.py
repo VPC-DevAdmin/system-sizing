@@ -33,7 +33,7 @@ from .knobs import (
 )
 from .vram import weights_per_gpu_gb
 
-LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_", "llamacpp_")
+LEVER_PREFIXES = ("trtllm_", "sglang_", "ktransformers_", "llamacpp_", "vllm_")
 
 # Which engine owns each lever family. A lever whose prefix belongs to
 # another engine is meaningless on this candidate: the search collapses
@@ -43,6 +43,7 @@ ENGINE_LEVER_PREFIX = {
     "sglang_cuda": "sglang_",
     "ktransformers": "ktransformers_",
     "llamacpp": "llamacpp_",
+    "vllm_cuda_multi": "vllm_",
 }
 
 
@@ -374,6 +375,12 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
         **to_engine_config(engine_type, knobs),
         **levers,
     }
+    if levers.get("vllm_extra_flags"):
+        # Appended to the searched shape's own flags (max-num-seqs, KV
+        # precision), never in place of them.
+        engine["vllm_extra_flags"] = (
+            list(to_engine_config(engine_type, knobs).get("vllm_extra_flags") or [])
+            + list(levers["vllm_extra_flags"]))
     if custom.get("served_model_name"):
         engine["served_model_name"] = str(custom["served_model_name"])
     if engine_type != "vllm_cuda_multi":
@@ -391,11 +398,11 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
         engine["replica_devices"] = devices
     elif replicas > 1:
         engine["type"] = "vllm_cuda_multi"
-        engine["gpu_image"] = "vllm/vllm-openai:latest"
+        engine["gpu_image"] = levers.get("vllm_gpu_image") or "vllm/vllm-openai:latest"
         engine["replica_devices"] = devices
     else:
         engine["type"] = "vllm_cuda"
-        engine["gpu_image"] = "vllm/vllm-openai:latest"
+        engine["gpu_image"] = levers.get("vllm_gpu_image") or "vllm/vllm-openai:latest"
         engine["gpu_device_ids"] = devices[0]
     return engine
 

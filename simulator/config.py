@@ -140,6 +140,9 @@ class EngineConfig:
     # max_model_len / tensor_parallel_size / quantization / port /
     # docker_volumes / vllm_extra_flags from above.
     gpu_image: str = "vllm/vllm-openai:latest"
+    # Per-run override of ``gpu_image`` (a lever, so a roofline cell
+    # records the build it ran): a newer or locally rebuilt vLLM image.
+    vllm_gpu_image: str | None = None
     # Fraction of each GPU's VRAM vLLM may claim (weights + KV pool).
     gpu_memory_utilization: float = 0.90
     # Restrict to specific devices (e.g. [0, 1]); None = all GPUs.

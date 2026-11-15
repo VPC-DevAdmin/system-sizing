@@ -65,3 +65,48 @@ def test_amd_runtimes_gate_on_rocm_images(amd):
     assert "rocm" in rows["vllm_cuda_multi"]["image"]
     have = {gpu_vendor.ROCM_IMAGES["vllm"], gpu_vendor.ROCM_IMAGES["sglang"]}
     assert set(available_engines(have)) == {"vllm_cuda_multi", "sglang_cuda"}
+
+
+def test_amd_groups_are_numeric_host_gids(amd, monkeypatch):
+    """docker resolves a group NAME inside the image; the vLLM ROCm
+    image has no "render" group, so the host's gids go by number."""
+    monkeypatch.setattr(gpu_vendor, "_device_gids", lambda: ["993", "44"])
+    args = gpu_vendor.docker_gpu_args([0])
+    groups = [args[i + 1] for i, a in enumerate(args) if a == "--group-add"]
+    assert groups == ["993", "44"]
+    assert "render" not in args
+
+
+def _run(stdout, rc=0):
+    import subprocess
+    return lambda *a, **k: subprocess.CompletedProcess(a, rc, stdout=stdout, stderr="")
+
+
+def test_amd_compute_pids(monkeypatch):
+    busy = '[{"gpu": 0, "process_list": [{"process_info": {"name": "N/A", "pid": 4242}}]}]'
+    monkeypatch.setattr(gpu_vendor.subprocess, "run", _run(busy))
+    assert gpu_vendor.amd_compute_pids() == [4242]
+    monkeypatch.setattr(gpu_vendor.subprocess, "run", _run('[{"gpu": 0, "process_list": []}]'))
+    assert gpu_vendor.amd_compute_pids() == []
+    # "Unknown" must never read as "idle".
+    monkeypatch.setattr(gpu_vendor.subprocess, "run", _run("", rc=1))
+    with pytest.raises(RuntimeError):
+        gpu_vendor.amd_compute_pids()
+
+
+def test_amd_pci_addresses(monkeypatch):
+    monkeypatch.setattr(gpu_vendor, "_amd_json",
+                        lambda *a, **k: [{"gpu": 0, "bus": {"bdf": "0000:8B:00.0"}}])
+    assert gpu_vendor.amd_pci_addresses() == {0: "0000:8b:00.0"}
+
+
+def test_assert_gpu_idle_on_amd(amd, monkeypatch):
+    from types import SimpleNamespace
+
+    from simulator.benchmarks import worker
+    eng = SimpleNamespace(cfg=SimpleNamespace(type="vllm_cuda"))
+    monkeypatch.setattr(gpu_vendor, "amd_compute_pids", lambda: [])
+    worker.assert_gpu_idle(eng)
+    monkeypatch.setattr(gpu_vendor, "amd_compute_pids", lambda: [7])
+    with pytest.raises(RuntimeError, match="already active"):
+        worker.assert_gpu_idle(eng)

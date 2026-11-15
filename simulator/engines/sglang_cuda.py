@@ -79,9 +79,16 @@ DEFAULT_IMAGE = "lmsysorg/sglang:latest"
 # and knowledge_search lanes both drew port 21792 and one died with
 # EADDRINUSE. Each lane's counter is offset by its first GPU so lanes
 # start an eighth of the window range apart.
+#
+# The window also has to stay BELOW the kernel's ephemeral port range
+# (Linux default 32768-60999). Outbound client sockets draw from that
+# range, and a saturation sweep opens thousands of them, so a
+# rendezvous port inside it can already be held by a load-generator
+# connection. On the R7725 a 2048-stream cell died at 59872 with
+# EADDRINUSE. 20000-32000 still gives 23 eight-replica windows.
 NCCL_PORT_BASE = 20000
 NCCL_PORT_STRIDE = 64
-NCCL_PORT_CEILING = 60000
+NCCL_PORT_CEILING = 32000
 
 
 def _lane_offset() -> int:

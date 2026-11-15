@@ -58,15 +58,41 @@ def docker_gpu_args(device_ids: Optional[list[int]] = None) -> list[str]:
             return ["--gpus", "all"]
         arg = "device=" + ",".join(str(i) for i in ids)
         return ["--gpus", f'"{arg}"' if len(ids) > 1 else arg]
-    args = ["--device=/dev/kfd", "--device=/dev/dri",
-            "--group-add", "video", "--group-add", "render",
-            "--security-opt", "seccomp=unconfined", "--cap-add=SYS_PTRACE"]
+    args = ["--device=/dev/kfd", "--device=/dev/dri"]
+    for gid in _device_gids():
+        args += ["--group-add", gid]
+    args += ["--security-opt", "seccomp=unconfined", "--cap-add=SYS_PTRACE"]
     if ids:
         vis = ",".join(str(i) for i in ids)
         # HIP only: ROCR_VISIBLE_DEVICES as well would renumber twice
         # (ROCR filters to 2,3, then HIP=2,3 points past the end).
         args += ["-e", f"HIP_VISIBLE_DEVICES={vis}"]
     return args
+
+
+def _device_gids() -> list[str]:
+    """Numeric owning groups of the GPU device nodes, for --group-add.
+
+    By number, not name: docker resolves a group NAME inside the image,
+    and the vLLM ROCm image has no "render" group ("Unable to find group
+    render"), while the host's /dev/kfd belongs to render (gid 993 on
+    the R7725). Falls back to the conventional names when the device
+    nodes cannot be read."""
+    gids: list[str] = []
+    paths = ["/dev/kfd"]
+    try:
+        paths += [os.path.join("/dev/dri", n) for n in sorted(os.listdir("/dev/dri"))
+                  if n.startswith(("card", "renderD"))]
+    except OSError:
+        pass
+    for p in paths:
+        try:
+            gid = str(os.stat(p).st_gid)
+        except OSError:
+            continue
+        if gid != "0" and gid not in gids:
+            gids.append(gid)
+    return gids or ["video", "render"]
 
 
 def _num(v) -> Optional[float]:
@@ -143,6 +169,43 @@ def amd_sample_devices() -> list[dict]:
             "temperature_c": _num(temp.get("hotspot")) or _num(temp.get("edge")),
         })
     return devices
+
+
+def amd_compute_pids() -> list[int]:
+    """PIDs holding a compute context on any AMD GPU (``amd-smi process``).
+    Raises RuntimeError when amd-smi cannot answer: callers use this to
+    prove a GPU is free, so "unknown" must not read as "idle"."""
+    try:
+        r = subprocess.run(["amd-smi", "process", "--json"], capture_output=True,
+                           text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"amd-smi process failed: {exc}") from exc
+    if r.returncode != 0:
+        raise RuntimeError(f"amd-smi process failed: {r.stderr.strip()[:200]}")
+    try:
+        data = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("amd-smi process returned unreadable output") from exc
+    if isinstance(data, dict):
+        data = data.get("gpu_data", [])
+    pids = []
+    for gpu in data:
+        for proc in gpu.get("process_list") or []:
+            info = proc.get("process_info") if isinstance(proc, dict) else None
+            pid = (info or {}).get("pid")
+            if isinstance(pid, int):
+                pids.append(pid)
+    return pids
+
+
+def amd_pci_addresses() -> dict[int, str]:
+    """{GPU index: PCI address} from ``amd-smi static --bus``."""
+    out = {}
+    for g in _amd_json("static", "--bus", timeout=15):
+        bdf = (g.get("bus") or {}).get("bdf")
+        if bdf and str(bdf).count(":") == 2:
+            out[int(g.get("gpu", len(out)))] = str(bdf).lower()
+    return out
 
 
 # Stock CUDA images capsim defaults to, and their ROCm counterparts for

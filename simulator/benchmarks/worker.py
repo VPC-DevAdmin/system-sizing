@@ -109,6 +109,17 @@ def capture_environment(cfg) -> dict:
 def assert_gpu_idle(engine):
     if engine.cfg.type not in ("vllm_cuda", "vllm_cuda_multi", "sglang_cuda", "trtllm"):
         return
+    from ..gpu_vendor import amd_compute_pids, is_amd
+    if is_amd():
+        try:
+            busy = amd_compute_pids()
+        except RuntimeError as exc:
+            raise RuntimeError(f"Cannot verify exclusive GPU access before benchmark launch: {exc}") from exc
+        if busy:
+            raise RuntimeError(
+                "GPU compute processes are already active. Stop their owning job before benchmarking; no containers were removed"
+            )
+        return
     try:
         proc = subprocess.run(
             ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader,nounits"],

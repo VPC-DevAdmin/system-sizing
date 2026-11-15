@@ -255,3 +255,14 @@ def test_every_possible_rendezvous_port_is_a_legal_port():
                 ports.add(p)
             # The replicas of any one launch are always distinct.
             assert len(ports) == n
+
+
+def test_rendezvous_ports_stay_below_the_ephemeral_range():
+    """Client sockets take ephemeral ports (Linux default from 32768);
+    a rendezvous port up there collided with a load-generator
+    connection at 59872 on the R7725."""
+    from simulator.engines.sglang_cuda import nccl_port, port_windows
+
+    for n in (1, 8, 16):
+        for w in range(port_windows(n)):
+            assert max(nccl_port(i, w, n) for i in range(n)) + 64 < 32768

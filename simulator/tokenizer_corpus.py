@@ -46,6 +46,22 @@ def _local_cache_dirs() -> list:
     return dirs
 
 
+def _staged_locally(model_id: str, dirs: list) -> bool:
+    """Does any hub cache hold a snapshot of ``model_id``?"""
+    import glob
+    import os
+    if os.path.isdir(model_id):
+        return True
+    repo = "models--" + model_id.replace("/", "--")
+    for d in dirs:
+        if d is None:
+            home = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
+            d = os.path.join(home, "hub")
+        if glob.glob(os.path.join(d, repo, "snapshots", "*")):
+            return True
+    return False
+
+
 @lru_cache(maxsize=4)
 def _load_tokenizer(model_id: str):
     try:
@@ -57,13 +73,24 @@ def _load_tokenizer(model_id: str):
     # files are cached. On a host whose route to huggingface.co stalls
     # (the R7725 lab box) that turned a 2 s spawn into minutes and
     # failed the 2048-stream rung on the 180 s readiness timeout.
-    for cache_dir in _local_cache_dirs():
+    dirs = _local_cache_dirs()
+    for cache_dir in dirs:
         try:
             return AutoTokenizer.from_pretrained(
                 model_id, trust_remote_code=True, local_files_only=True,
                 cache_dir=cache_dir)
         except Exception:
             continue
+    # Staged but not loadable offline: the snapshot has no Hugging Face
+    # tokenizer files (Mistral's tekken.json-only repos), and asking the
+    # Hub would not fix that -- it would only stall the worker on a slow
+    # route, as it did past the 180 s readiness timeout on the R7725.
+    if _staged_locally(model_id, dirs):
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s is staged locally without a loadable tokenizer; "
+            "using heuristic token counts", model_id)
+        return None
     try:
         return AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     except Exception:

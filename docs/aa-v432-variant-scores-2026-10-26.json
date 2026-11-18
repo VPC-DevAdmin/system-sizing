@@ -1,0 +1,37 @@
+{
+  "source": "Artificial Analysis Intelligence Index v4.3.2, read from Wayback Machine snapshots: leaderboard 20261026052839; model pages 20261021-20261026 (each page states v4.3.2).",
+  "read": "2026-11-06",
+  "fields": "score, estimated (AA marks the score as an estimate), aa_cost_per_index_task_usd (AA's billed cost per index task, reasoning included), aa_first_answer_token_s (AA's median time to first answer token)",
+  "onprem": {
+    "gpt-oss-120b@low": {"score": 10.21, "estimated": true},
+    "gpt-oss-120b@high": {"score": 11.60, "estimated": false},
+    "gpt-oss-20b@low": {"score": 9.95, "estimated": true},
+    "gpt-oss-20b@high": {"score": 8.97, "estimated": false},
+    "gemma4-26b@off": {"score": 13.13, "estimated": true},
+    "gemma4-26b@on": {"score": 16.67, "estimated": true},
+    "gemma4-31b@off": {"score": 13.92, "estimated": true},
+    "gemma4-31b@on": {"score": 14.67, "estimated": false},
+    "qwen3.6-35b@off": {"score": 15.23, "estimated": true},
+    "qwen3.6-35b@on": {"score": 18.23, "estimated": false},
+    "qwen3.5-397b@off": {"score": 21.44, "estimated": true},
+    "qwen3.5-397b@on": {"score": 18.42, "estimated": false},
+    "glm-4.7-flash@off": {"score": 10.56, "estimated": true},
+    "glm-4.7-flash@on": {"score": 14.87, "estimated": true},
+    "nemotron3-super@on": {"score": 12.83, "estimated": false, "note": "no thinking-off score published"},
+    "nemotron3-ultra@on": {"score": 22.93, "estimated": false, "note": "no thinking-off score published"},
+    "minimax-m2.7": {"score": 22.76, "estimated": false, "note": "always reasons"},
+    "kimi-k2-thinking": {"score": 22.02, "estimated": true, "note": "always reasons"},
+    "beam-1.0": {"score": 30.33, "estimated": false, "note": "AA lists a single unlabelled variant. Beam's chat template defaults to max effort (512) when none is set, so the score most likely reflects max, not low."}
+  },
+  "cloud": {
+    "gpt-6-luna@none": {"score": 18.47, "aa_cost_per_index_task_usd": 0.0113, "aa_first_answer_token_s": 0.92},
+    "gpt-6-luna@low": {"score": 21.53, "aa_cost_per_index_task_usd": 0.0045, "aa_first_answer_token_s": 2.54},
+    "gpt-6-luna@medium": {"score": 29.93, "aa_cost_per_index_task_usd": 0.0175, "aa_first_answer_token_s": 12.12},
+    "gpt-6-luna@high": {"score": 32.93},
+    "claude-haiku-5-5@low": {"score": 29.45, "aa_cost_per_index_task_usd": 0.0245, "aa_first_answer_token_s": 7.62},
+    "claude-haiku-5-5@medium": {"score": 34.46, "aa_cost_per_index_task_usd": 0.0470, "aa_first_answer_token_s": 10.25},
+    "claude-haiku-5-5@high": {"score": 37.82},
+    "gemini-3.5-flash-lite@minimal": {"score": 22.17, "aa_cost_per_index_task_usd": 0.1927, "aa_first_answer_token_s": 7.85}
+  },
+  "claude_haiku_5_5_settings": "From Anthropic's API reference: adaptive thinking on by default; thinking can be disabled at effort high or below; effort low to max, default medium; the newer tokenizer counts the same text as about 30% more tokens; prompts over 100K tokens are billed at $0.50 / $2.50."
+}

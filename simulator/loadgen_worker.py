@@ -59,6 +59,9 @@ def _turn_to_wire(e: TurnEvent) -> dict:
         "history_tokens": e.history_tokens,
         "output_tokens": e.output_tokens,
         "reasoning_tokens": e.reasoning_tokens,
+        "content_chunks": e.content_chunks,
+        "usage_completion_tokens": e.usage_completion_tokens,
+        "usage_prompt_tokens": e.usage_prompt_tokens,
         "in_flight_at_submit": e.in_flight_at_submit,
         "error": e.error,
         "ttft_violation": e.ttft_violation(),
@@ -103,6 +106,7 @@ async def _amain(config: dict) -> bool:
         history_window_turns=config.get("history_window_turns"),
         system_prompt_tokens=config.get("system_prompt_tokens"),
         system_prompt_in_input=bool(config.get("system_prompt_in_input")),
+        stream_usage=bool(config.get("stream_usage")),
         context_limit_tokens=config.get("context_limit_tokens"),
         planner_timeouts=config.get("planner_timeouts"),
     )
@@ -139,7 +143,8 @@ async def _amain(config: dict) -> bool:
             elif cmd == "mark":
                 launcher.mark_window()
             elif cmd == "outstanding":
-                launcher.set_outstanding(int(msg.get("n") or 0))
+                launcher.set_outstanding(int(msg.get("n") or 0),
+                                         msg.get("budget"))
             elif cmd == "restart":
                 # Saturation-mode shape swap: abort every in-flight
                 # session (the engine cancels aborted requests) —

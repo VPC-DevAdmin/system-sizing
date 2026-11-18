@@ -422,6 +422,10 @@ def compare_capacity(results, spec):
         from .knowledge_workers import compare_workers
 
         return compare_workers(results, spec)
+    if getattr(spec, "session_pacing", "open") != "open":
+        from .session_paced import compare_paced
+
+        return compare_paced(results, spec)
     if spec.session_arrival_rates:
         from .session_saturation import compare_saturation
 

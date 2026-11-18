@@ -191,8 +191,10 @@ def amd_compute_pids() -> list[int]:
     pids = []
     for gpu in data:
         for proc in gpu.get("process_list") or []:
+            # An idle card reports the string "No running processes
+            # detected" where a busy one has the process record.
             info = proc.get("process_info") if isinstance(proc, dict) else None
-            pid = (info or {}).get("pid")
+            pid = info.get("pid") if isinstance(info, dict) else None
             if isinstance(pid, int):
                 pids.append(pid)
     return pids

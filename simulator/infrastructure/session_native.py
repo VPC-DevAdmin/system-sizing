@@ -66,7 +66,7 @@ async def monitor_native(engine, directory):
                         )
                 output.write(
                     json.dumps(
-                        dict(at_s=time.monotonic() - start, timestamp=time.time(), samples=samples, host=host_snapshot(), cpu_offload=[r for child in engine.children for r in native_cpu_records(child.directory)])
+                        dict(at_s=time.monotonic() - start, timestamp=time.time(), samples=samples, host=host_snapshot(), cpu_offload=[r for child in engine.children for r in native_cpu_records(child.directory)], cpu_pool=[dict(r, replica=i) for i, child in enumerate(engine.children) for r in native_cpu_records(child.directory, pattern='cpu-pool-*.json')])
                     )
                     + "\n"
                 )
@@ -74,11 +74,11 @@ async def monitor_native(engine, directory):
                 await asyncio.sleep(2)
 
 
-def native_cpu_records(directory, attempts=5):
+def native_cpu_records(directory, attempts=5, pattern="native-cpu-*.json"):
     """Connector evidence files are replaced atomically by the engine; tolerate the swap."""
     for attempt in range(attempts):
         try:
-            return [json.loads(p.read_text()) for p in sorted(directory.glob("native-cpu-*.json"))]
+            return [json.loads(p.read_text()) for p in sorted(directory.glob(pattern))]
         except (FileNotFoundError, json.JSONDecodeError):
             if attempt == attempts - 1:
                 raise

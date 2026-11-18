@@ -172,6 +172,36 @@ def aggregate_replica_metrics(per_replica: list[dict]) -> dict[str, float]:
     return agg
 
 
+# Cumulative counters reported per replica alongside the box totals.
+REPLICA_COUNTER_KEYS = ("generation_tokens_total", "prompt_tokens_total",
+                        "prefix_cache_queries", "prefix_cache_hits")
+
+
+def check_gpu_sharing(groups: list[list[int]], cfg) -> None:
+    """Refuse a device assignment that puts a GPU in more processes than
+    the config asks for (``replicas_per_gpu``, 1 unless set), or whose
+    memory shares add up to more than the card."""
+    per_gpu = max(1, int(getattr(cfg, "replicas_per_gpu", 1) or 1))
+    counts: dict[int, int] = {}
+    for g in groups:
+        for d in g:
+            counts[d] = counts.get(d, 0) + 1
+    if per_gpu == 1:
+        if any(c > 1 for c in counts.values()):
+            raise RuntimeError(
+                f"replica_devices assigns a GPU twice: {groups}")
+        return
+    if any(c != per_gpu for c in counts.values()):
+        raise RuntimeError(
+            f"replicas_per_gpu is {per_gpu} but replica_devices does not "
+            f"put every GPU in {per_gpu} replicas: {groups}")
+    share = float(getattr(cfg, "gpu_memory_utilization", 0) or 0)
+    if share * per_gpu > 1.0:
+        raise RuntimeError(
+            f"{per_gpu} processes per GPU at a {share} memory share each "
+            f"is more than the card")
+
+
 class DockerReplicaEngine(Engine):
     """N GPU-pinned server containers, sticky-routed by the pool."""
 
@@ -273,11 +303,7 @@ class DockerReplicaEngine(Engine):
                 "image in Docker (needs nvidia-container-toolkit)."
             )
         groups = self._device_groups()
-        flat = [d for g in groups for d in g]
-        if len(set(flat)) != len(flat):
-            raise RuntimeError(
-                f"replica_devices assigns a GPU twice: {groups}"
-            )
+        check_gpu_sharing(groups, self.cfg)
         remove_stale_engine_containers()
 
         log_dir = Path(log_dir)
@@ -299,10 +325,22 @@ class DockerReplicaEngine(Engine):
         try:
             log.info("Starting %d %s replicas on devices %s",
                      len(groups), self.ENGINE_NAME, groups)
-            for i, devices in enumerate(groups):
-                self._launch_replica(i, devices, run_id)
-            for i, _devices, port, cid, _ in list(self._replicas):
-                self._wait_for_replica_ready(i, port, cid)
+            if max(1, int(getattr(self.cfg, "replicas_per_gpu", 1) or 1)) > 1:
+                # Processes sharing a GPU start one at a time. vLLM sizes
+                # its KV cache from how much the card's used memory grew
+                # while it loaded; started together, each process counts
+                # the other's allocation as its own and the second one
+                # finds no room left ("No available memory for the cache
+                # blocks", LFM2 x2 on the MI350P).
+                for i, devices in enumerate(groups):
+                    self._launch_replica(i, devices, run_id)
+                    _i, _devices, port, cid, _ = self._replicas[-1]
+                    self._wait_for_replica_ready(i, port, cid)
+            else:
+                for i, devices in enumerate(groups):
+                    self._launch_replica(i, devices, run_id)
+                for i, _devices, port, cid, _ in list(self._replicas):
+                    self._wait_for_replica_ready(i, port, cid)
             log.info("All replicas ready: %s", ", ".join(self.replica_urls))
         except Exception:
             self.shutdown()
@@ -639,6 +677,28 @@ class DockerReplicaEngine(Engine):
         agg["replicas_scraped"] = float(len(per_replica))
         agg["replicas_total"] = float(len(self._replicas))
         return agg
+
+    def get_replica_counters(self) -> dict:
+        """Each replica's own cumulative counters, read one by one:
+        ``{"replicas_total": n, "at": wall seconds, "replicas": [{"replica",
+        "port", <REPLICA_COUNTER_KEYS>}, ...]}``, a replica that did not
+        answer left out. For a rate computed replica by replica
+        (``headline_sweep.counter_growth``): the summed counters of
+        ``get_metrics`` cannot show which replica was missing or
+        restarted."""
+        rows = []
+        for i, _d, port, _cid, _s in self._replicas:
+            try:
+                r = httpx.get(self._metrics_url(port), timeout=10.0)
+                if r.status_code != 200:
+                    continue
+                parsed = self._parse_replica(i, r.text)
+            except Exception:  # noqa: BLE001
+                continue
+            rows.append({"replica": i, "port": port,
+                         **{k: parsed.get(k) for k in REPLICA_COUNTER_KEYS}})
+        return {"replicas_total": len(self._replicas), "at": time.time(),
+                "replicas": rows}
 
     def _parse_replica(self, index: int, text: str) -> dict[str, float]:
         """Hook so stateful parsers can key accumulators per replica."""

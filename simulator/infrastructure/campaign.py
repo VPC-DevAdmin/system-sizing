@@ -99,6 +99,7 @@ def create(base, row, spec, idempotency_key):
                             for arm in (
                                 spec.session_cache_arms
                                 if spec.session_workload == "knowledge_worker"
+                                or spec.session_pacing != "open"
                                 else ["baseline", "treatment"]
                             )
                             for compaction in (

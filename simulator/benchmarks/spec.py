@@ -25,7 +25,12 @@ class BenchmarkSpec(BaseModel):
     input_tokens: int | None = Field(default=None, ge=8, le=131072)
     output_tokens: int | None = Field(default=None, ge=1, le=131072)
     seed: int = Field(default=42, ge=0, le=2147483647)
-    dataset_size: int = Field(default=256, ge=16, le=4096)
+    # Prompts in the corpus both harnesses cycle through. A run that sends
+    # more requests than this repeats prompts, and the engine serves the
+    # repeats from its prefix cache: at 8,192 streams for ten minutes
+    # (about 110,000 requests) the old 4,096 cap meant every prompt 26
+    # times. Size it above the requests the run will send.
+    dataset_size: int = Field(default=256, ge=16, le=1_000_000)
     cache_policy: Literal["warm", "restart"] = "warm"
     ignore_eos: bool = True
     ttft_p95_ms: float | None = Field(default=None, gt=0)

@@ -58,6 +58,9 @@ from .telemetry import MeasurementTelemetry
 log = logging.getLogger(__name__)
 
 DEFAULT_LADDER = [64, 128, 256, 512, 1024, 2048, 4096, 8192]
+# A fixed batch that completes no request for this long is abandoned
+# (an engine that died mid-batch would otherwise be waited on for ever).
+BATCH_STALL_S = 180.0
 
 
 @dataclass
@@ -93,6 +96,74 @@ class Rung:
     # more ("above_template"); see prefix_policy.
     prefix_hit_rate: float | None = None
     prefix_reuse: str | None = None
+    # Fixed-duration rung (``headline_hold_s``): the rate is every
+    # replica's generated-token counter growth over the whole hold, the
+    # raw readings are in ``counters``, and ``window_rates`` are the
+    # hold's consecutive chunk rates (how far the rate swings inside it).
+    hold_s: float | None = None
+    counters: dict | None = None
+    window_rates: list[float] = field(default_factory=list)
+    # Client-side totals over the rung's completed requests: the server's
+    # own usage counts per request (``stream_usage``), and streamed chunks.
+    client_requests: int = 0
+    client_completion_tokens: int = 0
+    client_prompt_tokens: int = 0
+    client_usage_requests: int = 0
+    client_content_chunks: int = 0
+    # Fixed batch (``headline_batch_requests``): what was sent, what came
+    # back, and how the client's token total compares with the engine's.
+    batch: dict | None = None
+
+
+def counter_growth(start: dict, end: dict) -> dict:
+    """Growth of every replica's token counters between two
+    ``get_replica_counters`` readings, with the raw readings kept.
+
+    ``ok`` is False, with the reason, when the two readings cannot give a
+    rate: a replica missing at either end (its whole history would count
+    as new generation at the other), or a counter that went backwards (an
+    engine restart). Nothing is summed in that case."""
+    out: dict = {"ok": False, "reason": None, "replicas": [],
+                 "generation_tokens": None, "prompt_tokens": None,
+                 "prefix_cache_queries": None, "prefix_cache_hits": None,
+                 "started_at": start.get("at"), "ended_at": end.get("at")}
+    total = int(end.get("replicas_total") or start.get("replicas_total") or 0)
+    a = {r["replica"]: r for r in start.get("replicas") or []}
+    b = {r["replica"]: r for r in end.get("replicas") or []}
+    if not total or len(a) < total or len(b) < total or set(a) != set(b):
+        out["reason"] = (f"a replica did not answer: {len(a)} of {total} at "
+                         f"the start, {len(b)} of {total} at the end")
+        return out
+    sums = {"generation_tokens": 0.0, "prompt_tokens": 0.0,
+            "prefix_cache_queries": 0.0, "prefix_cache_hits": 0.0}
+    seen = {k: False for k in sums}
+    for i in sorted(a):
+        row = {"replica": i, "port": a[i].get("port")}
+        for key, name in (("generation_tokens_total", "generation_tokens"),
+                          ("prompt_tokens_total", "prompt_tokens"),
+                          ("prefix_cache_queries", "prefix_cache_queries"),
+                          ("prefix_cache_hits", "prefix_cache_hits")):
+            v0, v1 = a[i].get(key), b[i].get(key)
+            row[f"{name}_start"], row[f"{name}_end"] = v0, v1
+            if v0 is None or v1 is None:
+                if name == "generation_tokens":
+                    out["reason"] = f"replica {i} reported no generated-token counter"
+                    out["replicas"].append(row)
+                    return out
+                continue
+            if v1 < v0:
+                out["reason"] = (f"replica {i}'s {key} went backwards "
+                                 f"({v0:.0f} to {v1:.0f}): the engine restarted")
+                out["replicas"].append(row)
+                return out
+            row[name] = v1 - v0
+            sums[name] += v1 - v0
+            seen[name] = True
+        out["replicas"].append(row)
+    for name, v in sums.items():
+        out[name] = v if seen[name] else None
+    out["ok"] = True
+    return out
 
 
 def engine_held(concurrency: int, in_flight: float | None,
@@ -266,6 +337,11 @@ class _Acc:
     gauge_start: float | None = None
     gauge_live: bool = False
     gauge_updates: int = 0            # fresh readings (value changes)
+    # Client-side token totals over completed turns (see Rung).
+    usage_turns: int = 0
+    usage_completion_tokens: int = 0
+    usage_prompt_tokens: int = 0
+    content_chunks: int = 0
 
     def add_gauge(self, v: float | None) -> None:
         if v is None:
@@ -286,6 +362,11 @@ class _Acc:
     def add(self, turns: list[dict]) -> None:
         for t in turns:
             self.completed += 1
+            self.content_chunks += int(t.get("content_chunks") or 0)
+            if t.get("usage_completion_tokens") is not None:
+                self.usage_turns += 1
+                self.usage_completion_tokens += int(t["usage_completion_tokens"])
+                self.usage_prompt_tokens += int(t.get("usage_prompt_tokens") or 0)
             if t.get("error"):
                 if t["error"] == "no_content_tokens":
                     self.no_content += 1
@@ -342,7 +423,9 @@ def _prefix_plan(cfg: Config, cohort: Cohort) -> dict:
 
     from .prefix_policy import (
         MIN_UNIQUE_USER_TOKENS,
+        OFF,
         block_tokens,
+        engine_cache_off_flags,
         choose_system_tokens,
         resolve_reuse,
         template_floor,
@@ -364,6 +447,12 @@ def _prefix_plan(cfg: Config, cohort: Cohort) -> dict:
     if explicit is not None:
         out.update(setting="explicit", target=None,
                    source="simulation.system_prompt_tokens")
+    if level["setting"] == OFF and explicit is None:
+        # No shared prompt, and the engine's cache is off at launch, so
+        # nothing is expected from cache: not even the chat template.
+        out.update(template_floor=0.0,
+                   engine_cache_off_flags=engine_cache_off_flags(cfg.engine.type))
+        return out
     if not n_in:
         return out
     try:
@@ -419,9 +508,29 @@ async def run_headline_sweep(
     ladder_override: list[int] | None = None,
     existing_engine=None,
     persona_specs: dict | None = None,
+    # Hold every rung this many seconds and report the whole-period rate
+    # from each replica's counter growth (None: simulation.headline_hold_s;
+    # 0: the chunk-convergence method).
+    hold_s: float | None = None,
+    # Send exactly this many requests at each rung, wait for all of them,
+    # and report client and engine token totals (None:
+    # simulation.headline_batch_requests; 0: off).
+    batch_requests: int | None = None,
 ) -> Path:
     """Sweep concurrency at saturation. Returns the summary JSON path."""
     sim = cfg.simulation
+    hold_s = float(sim.headline_hold_s if hold_s is None else hold_s or 0)
+    batch_requests = int(sim.headline_batch_requests
+                         if batch_requests is None else batch_requests or 0)
+    from .prefix_policy import cache_off, engine_cache_off_flags
+    if existing_engine is None and cache_off(sim.prefix_reuse):
+        # Reuse "off" is off in the engine too, not only in the prompts.
+        flags = engine_cache_off_flags(cfg.engine.type)
+        field_name = ("sglang_extra_flags" if cfg.engine.type == "sglang_cuda"
+                      else "vllm_extra_flags")
+        have = list(getattr(cfg.engine, field_name, None) or [])
+        setattr(cfg.engine, field_name,
+                have + [f for f in flags if f not in have])
     if run_dir is None:
         run_dir = resolve_run_dir(cfg.output.db_directory, new=new_run)
     run_dir = Path(run_dir)
@@ -504,6 +613,10 @@ async def run_headline_sweep(
             # length, so the request stays the size the sweep reports.
             "system_prompt_tokens": shared_prompt,
             "system_prompt_in_input": True,
+            # vLLM and SGLang close a stream with its usage record when
+            # asked; other engines are not asked (an unknown field is a
+            # 400 on some).
+            "stream_usage": cfg.engine.type.startswith(("vllm", "sglang", "mock")),
             "replica_urls": engine.replica_urls,
             "api_key": engine.api_key,
             "api_model_name": engine.api_model_name,
@@ -624,6 +737,149 @@ async def run_headline_sweep(
             prefix_hit_rate=hit_rate,
         )
 
+    async def _counters() -> dict:
+        """Every replica's own counters, retried until all answer. An
+        engine that is one process is its own single replica."""
+        fetch = getattr(engine, "get_replica_counters", None)
+        c: dict = {}
+        for i in range(3):
+            if fetch is not None:
+                try:
+                    c = await asyncio.to_thread(fetch)
+                except Exception:  # noqa: BLE001
+                    c = {}
+            else:
+                m = await _metrics()
+                c = {"replicas_total": 1, "at": time.time(),
+                     "replicas": ([{
+                         "replica": 0, "port": None,
+                         **{k: m.get(k) for k in (
+                             "generation_tokens_total", "prompt_tokens_total",
+                             "prefix_cache_queries", "prefix_cache_hits")},
+                     }] if scrape_complete(m) else [])}
+            if c and len(c.get("replicas") or []) >= int(
+                    c.get("replicas_total") or 1):
+                return c
+            if i < 2:
+                await asyncio.sleep(0.5)
+        return c
+
+    async def _wait_idle(timeout_s: float) -> bool:
+        """Wait until the engine holds no request (running or queued)."""
+        end = time.monotonic() + timeout_s
+        while time.monotonic() < end:
+            m = await _metrics()
+            pool.drain_turn_queue()
+            if scrape_complete(m) and not (m.get("num_running") or 0) \
+                    and not (m.get("queue_depth") or 0):
+                return True
+            await asyncio.sleep(1.0)
+        return False
+
+    async def _hold(n: int, acc: _Acc) -> tuple[dict, list[Chunk], int]:
+        """Hold ``n`` streams for ``hold_s`` seconds. The rate is every
+        replica's counter growth over the whole hold; the chunks along
+        the way give the running count and how far the rate swings."""
+        c0 = await _counters()
+        t0 = time.monotonic()
+        chunks: list[Chunk] = []
+        gaps = 0
+        while True:
+            done_s = time.monotonic() - t0
+            left = hold_s - done_s
+            if left < 1.0:
+                # Under a second left: wait it out so the hold is at
+                # least as long as asked.
+                await asyncio.sleep(max(0.0, left))
+                break
+            chunk = await _chunk(
+                f"{n} streams — holding ({done_s:.0f}s of {hold_s:.0f}s)",
+                max(1, min(sim.headline_measure_s, int(left))), acc)
+            if chunk.complete:
+                chunks.append(chunk)
+            else:
+                gaps += 1
+        c1 = await _counters()
+        elapsed = time.monotonic() - t0
+        growth = counter_growth(c0, c1)
+        growth["elapsed_s"] = round(elapsed, 3)
+        if not growth["ok"]:
+            log.warning("rung %d: hold not measured: %s", n, growth["reason"])
+        return growth, chunks, gaps
+
+    async def _batch(n: int, acc: _Acc) -> tuple[dict, Chunk]:
+        """Send exactly ``batch_requests`` requests, ``n`` at a time, and
+        wait for all of them. Engine counters are read with the engine
+        idle before and after, so their growth is these requests' tokens
+        and nothing else, and can be set against the client's total."""
+        c0 = await _counters()
+        t0 = time.monotonic()
+        await pool.set_outstanding(n, budget=batch_requests)
+        running: list[float] = []
+        seen, last_progress = 0, t0
+        stalled = False
+        while acc.completed < batch_requests:
+            await asyncio.sleep(1.0)
+            m = await _metrics()
+            acc.add(pool.drain_turn_queue())
+            if scrape_complete(m) and m.get("num_running") is not None:
+                running.append(float(m["num_running"]))
+            _snapshot(f"{n} streams — batch {acc.completed} of "
+                      f"{batch_requests}", m, n, acc)
+            now = time.monotonic()
+            if acc.completed > seen:
+                seen, last_progress = acc.completed, now
+            elif now - last_progress > BATCH_STALL_S:
+                stalled = True
+                log.warning("rung %d: batch stalled at %d of %d requests",
+                            n, acc.completed, batch_requests)
+                break
+        elapsed = time.monotonic() - t0
+        idle = await _wait_idle(60.0)
+        acc.add(pool.drain_turn_queue())
+        c1 = await _counters()
+        growth = counter_growth(c0, c1)
+        gen = growth.get("generation_tokens") if growth["ok"] else None
+        workers = pool.aggregate() or {}
+        answered = acc.completed - acc.errors - acc.no_content
+        batch = {
+            "requests": batch_requests,
+            "completed": acc.completed,
+            "answered": answered,
+            "errors": acc.errors,
+            "error_counts": dict(acc.error_counts),
+            "no_content": acc.no_content,
+            "cancelled": workers.get("cancelled"),
+            "stalled": stalled,
+            "engine_idle_after": idle,
+            "elapsed_s": round(elapsed, 3),
+            "client_usage_requests": acc.usage_turns,
+            "client_completion_tokens": acc.usage_completion_tokens,
+            "client_prompt_tokens": acc.usage_prompt_tokens,
+            "client_content_chunks": acc.content_chunks,
+            "engine_generation_tokens": gen,
+            "engine_prompt_tokens": (growth.get("prompt_tokens")
+                                     if growth["ok"] else None),
+            # Client total over engine total: 1.0 when every generated
+            # token belongs to a request whose usage the client read.
+            "client_over_engine": (round(acc.usage_completion_tokens / gen, 5)
+                                   if gen else None),
+            "counters": growth,
+        }
+        chunk = Chunk(
+            running=statistics.fmean(running) if running else None,
+            queue=None,
+            out_rate=(gen / elapsed) if gen else None,
+            prompt_rate=((growth["prompt_tokens"] / elapsed)
+                         if growth["ok"] and growth.get("prompt_tokens") else None),
+            complete=bool(growth["ok"]),
+            rate_source="counter_batch",
+            prefix_hit_rate=(
+                round(growth["prefix_cache_hits"] / growth["prefix_cache_queries"], 4)
+                if growth["ok"] and growth.get("prefix_cache_queries") else None),
+        )
+        return batch, chunk
+
     acc_offered = [ladder[0]]   # current offered count, for snapshots
 
     kv_capacity: float | None = None
@@ -654,15 +910,21 @@ async def run_headline_sweep(
             await pool.scale_to(min(
                 sim.open_loop_max_workers,
                 max(1, math.ceil(n / sim.open_loop_inflight_per_worker))))
-            await pool.set_outstanding(n)
+            if batch_requests:
+                # A fixed batch starts from an idle engine: stop
+                # replacing the previous rung's requests and let them end.
+                await pool.set_outstanding(0)
+                await _wait_idle(float(sim.headline_refill_max_s))
+            else:
+                await pool.set_outstanding(n)
 
-            # Let the batch fill at the new pressure before measuring.
-            settle_end = time.monotonic() + sim.headline_clear_s
-            while time.monotonic() < settle_end:
-                m = await _metrics()
-                pool.drain_turn_queue()
-                _snapshot(f"{n} streams — filling batch", m, n)
-                await asyncio.sleep(1.0)
+                # Let the batch fill at the new pressure before measuring.
+                settle_end = time.monotonic() + sim.headline_clear_s
+                while time.monotonic() < settle_end:
+                    m = await _metrics()
+                    pool.drain_turn_queue()
+                    _snapshot(f"{n} streams — filling batch", m, n)
+                    await asyncio.sleep(1.0)
 
             pre_row = {
                 "cohort_run_id": cohort_run_id, "step_index": idx,
@@ -686,30 +948,40 @@ async def run_headline_sweep(
             scrape_gaps = 0
             t_start = time.monotonic()
             steady = False
-            while True:
-                chunk = await _chunk(
-                    f"{n} streams — measuring (chunk {len(chunks) + 1})",
-                    sim.headline_measure_s, acc)
-                if not chunk.complete:
-                    # A replica did not answer: the counters this
-                    # chunk's rates come from are not the box's. It
-                    # is measured again, never compared or published.
-                    scrape_gaps += 1
-                    log.warning("rung %d: a replica scrape failed during "
-                                "chunk %d; discarding it", n,
-                                len(chunks) + scrape_gaps)
-                    if time.monotonic() - t_start >= sim.headline_measure_max_s:
+            hold: dict | None = None
+            batch: dict | None = None
+            if batch_requests:
+                batch, batch_chunk = await _batch(n, acc)
+                chunks.append(batch_chunk)
+                steady = batch_chunk.complete and not batch["stalled"]
+            elif hold_s:
+                hold, chunks, scrape_gaps = await _hold(n, acc)
+                steady = bool(hold["ok"])
+            else:
+                while True:
+                    chunk = await _chunk(
+                        f"{n} streams — measuring (chunk {len(chunks) + 1})",
+                        sim.headline_measure_s, acc)
+                    if not chunk.complete:
+                        # A replica did not answer: the counters this
+                        # chunk's rates come from are not the box's. It
+                        # is measured again, never compared or published.
+                        scrape_gaps += 1
+                        log.warning("rung %d: a replica scrape failed during "
+                                    "chunk %d; discarding it", n,
+                                    len(chunks) + scrape_gaps)
+                        if time.monotonic() - t_start >= sim.headline_measure_max_s:
+                            break
+                        continue
+                    chunks.append(chunk)
+                    if len(chunks) >= 2 and chunks_converged(chunks[-2],
+                                                             chunks[-1]):
+                        steady = True
                         break
-                    continue
-                chunks.append(chunk)
-                if len(chunks) >= 2 and chunks_converged(chunks[-2],
-                                                         chunks[-1]):
-                    steady = True
-                    break
-                if time.monotonic() - t_start >= sim.headline_measure_max_s:
-                    log.warning("rung %d hit the %ds cap before steady "
-                                "state", n, sim.headline_measure_max_s)
-                    break
+                    if time.monotonic() - t_start >= sim.headline_measure_max_s:
+                        log.warning("rung %d hit the %ds cap before steady "
+                                    "state", n, sim.headline_measure_max_s)
+                        break
             measure_s = round(time.monotonic() - t_start)
             if not chunks:
                 # Every chunk of the rung had a scrape gap. Nothing
@@ -736,6 +1008,30 @@ async def run_headline_sweep(
             out_rate = last.out_rate
             prm_rate = last.prompt_rate
             rate_source = last.rate_source
+            hit_rate = last.prefix_hit_rate
+            window_rates: list[float] = []
+            if hold is not None:
+                # The whole hold, from each replica's counters. Its chunks
+                # are kept only for the running count and the swing.
+                window_rates = [round(c.out_rate, 1) for c in chunks
+                                if c.out_rate]
+                span = hold["elapsed_s"]
+                out_rate = (hold["generation_tokens"] / span
+                            if hold["ok"] and hold["generation_tokens"] else None)
+                prm_rate = (hold["prompt_tokens"] / span
+                            if hold["ok"] and hold["prompt_tokens"] else None)
+                rate_source = "counter_hold"
+                if hold["ok"] and hold.get("prefix_cache_queries"):
+                    hit_rate = round(hold["prefix_cache_hits"]
+                                     / hold["prefix_cache_queries"], 4)
+                runs = [c.running for c in chunks if c.running is not None]
+                queues = [c.queue for c in chunks if c.queue is not None]
+                last = Chunk(
+                    running=statistics.fmean(runs) if runs else None,
+                    queue=statistics.fmean(queues) if queues else None,
+                    out_rate=out_rate, prompt_rate=prm_rate,
+                    complete=bool(hold["ok"]), rate_source=rate_source,
+                    prefix_hit_rate=hit_rate)
             rung = Rung(
                 concurrency=n,
                 in_flight=(round(last.running, 1)
@@ -760,9 +1056,18 @@ async def run_headline_sweep(
                 steady_state=steady, measure_s=measure_s,
                 held=engine_held(n, last.running),
                 rate_source=rate_source,
-                prefix_hit_rate=last.prefix_hit_rate,
-                prefix_reuse=headline_reuse(last.prefix_hit_rate,
+                prefix_hit_rate=hit_rate,
+                prefix_reuse=headline_reuse(hit_rate,
                                             prefix_cache["template_floor"]),
+                hold_s=hold["elapsed_s"] if hold is not None else None,
+                counters=hold,
+                window_rates=window_rates,
+                client_requests=acc.completed,
+                client_completion_tokens=acc.usage_completion_tokens,
+                client_prompt_tokens=acc.usage_prompt_tokens,
+                client_usage_requests=acc.usage_turns,
+                client_content_chunks=acc.content_chunks,
+                batch=batch,
             )
             if rung.prefix_reuse == "above_template":
                 log.warning("rung %d: %.0f%% of prompt tokens came from the "

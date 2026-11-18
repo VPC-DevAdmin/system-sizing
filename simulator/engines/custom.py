@@ -63,6 +63,11 @@ LEVER_FIELDS: dict[str, str] = {
 }
 
 
+# Engines that can run more than one process on the same GPUs
+# (``replicas_per_gpu``): both take their memory as a share of the card.
+SHARED_GPU_ENGINES = ("vllm_cuda_multi", "sglang_cuda")
+
+
 class ShapeError(ValueError):
     """The requested shape cannot be built as specified."""
 
@@ -287,6 +292,12 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
 
     replicas = int(custom.get("replicas") or 1)
     tp = int(custom.get("tp") or 1)
+    try:
+        per_gpu = int(custom.get("replicas_per_gpu") or 1)
+    except (TypeError, ValueError):
+        per_gpu = 0
+    if per_gpu < 1:
+        raise ShapeError("replicas_per_gpu must be a whole number, 1 or more")
     placement = (custom.get("placement")
                  if custom.get("placement") in ("pack", "spread", "span")
                  else "pack")
@@ -326,6 +337,26 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
     levers = levers_from(custom)
     knobs = canonical(custom)
     weights, model_quant = _model_facts(model_id, tp, catalog)
+    if per_gpu > 1:
+        # Several engine processes on the same GPUs. A serving engine
+        # runs its scheduler on one host core; on a model fast enough
+        # that this core is the limit (LFM2 on the MI350P: engine core
+        # at 100%, GPU at 356 W of 450), a second process uses the idle
+        # GPU time. Each process gets an equal part of the memory share
+        # and its own batch cap.
+        if engine_type not in SHARED_GPU_ENGINES:
+            raise ShapeError(
+                f"replicas_per_gpu is for {', '.join(SHARED_GPU_ENGINES)}; "
+                f"{engine_type} runs one process per GPU set")
+        share = knobs["gpu_memory_utilization"] / per_gpu
+        vram = hw.get("vram_per_gpu_gb")
+        if weights and vram and share * float(vram) <= weights:
+            raise ShapeError(
+                f"{per_gpu} engine processes per GPU leave each "
+                f"{share * float(vram):.0f} GB, under the {weights:.0f} GB "
+                f"of weights")
+        knobs["gpu_memory_utilization"] = round(share, 4)
+        devices = [list(g) for g in devices for _ in range(per_gpu)]
     why = unsupported(engine_type, knobs)
     if why:
         # Refuse rather than approximate: measuring "close enough" here
@@ -375,14 +406,19 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
         **to_engine_config(engine_type, knobs),
         **levers,
     }
-    if levers.get("vllm_extra_flags"):
+    if "vllm_extra_flags" in levers:
         # Appended to the searched shape's own flags (max-num-seqs, KV
-        # precision), never in place of them.
+        # precision), never in place of them. An empty list counts:
+        # ``**levers`` above already replaced the shape's flags with
+        # it, which launched vLLM on its default batch cap and KV
+        # precision while the cell recorded the requested ones.
         engine["vllm_extra_flags"] = (
             list(to_engine_config(engine_type, knobs).get("vllm_extra_flags") or [])
             + list(levers["vllm_extra_flags"]))
     if custom.get("served_model_name"):
         engine["served_model_name"] = str(custom["served_model_name"])
+    if per_gpu > 1:
+        engine["replicas_per_gpu"] = per_gpu
     if engine_type != "vllm_cuda_multi":
         # Every non-vLLM engine is a DockerReplicaEngine, so one code
         # path covers any replica count -- even a single replica is
@@ -396,7 +432,7 @@ def custom_engine(custom: dict, *, hw: Optional[dict] = None,
         # own type, so a new engine cannot be quietly absorbed again.
         engine["type"] = engine_type
         engine["replica_devices"] = devices
-    elif replicas > 1:
+    elif len(devices) > 1:
         engine["type"] = "vllm_cuda_multi"
         engine["gpu_image"] = levers.get("vllm_gpu_image") or "vllm/vllm-openai:latest"
         engine["replica_devices"] = devices

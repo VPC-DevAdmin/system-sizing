@@ -7,6 +7,7 @@ against an OpenAI-compatible endpoint with streaming responses.
 from __future__ import annotations
 
 import asyncio
+import re
 import logging
 import random
 import time
@@ -19,6 +20,9 @@ from openai import AsyncOpenAI
 from .personas import Persona
 from .streaming import consume_with_tiers
 from .tokenizer_corpus import TokenCorpus
+
+# Chat-format control tags such as <|channel|>, <|message|>, <|end|>.
+_WIRE_TAG = re.compile(r"<\|[A-Za-z_]{1,32}\|>")
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +90,15 @@ class TurnEvent:
     # chain-of-thought chunks separately from content output_tokens.
     ttfct_ms: float = 0.0
     reasoning_tokens: int = 0
+    # Streamed content chunks, and the server's own token counts from the
+    # stream's closing usage record (None when the request did not ask for
+    # one or was cut short). ``output_tokens`` is the server's count when
+    # there is one and the chunk count otherwise: with batched streaming
+    # (``--stream-interval 8``) a chunk carries up to eight tokens, so the
+    # chunk count is not a token count.
+    content_chunks: int = 0
+    usage_completion_tokens: Optional[int] = None
+    usage_prompt_tokens: Optional[int] = None
 
     def ttft_violation(self) -> bool:
         """Hard SLA violation — past the FAILURE threshold. This is
@@ -322,8 +335,13 @@ async def run_virtual_user(
     planner_timeouts: dict | None = None,
     system_prompt: tuple[str, int] | None = None,
     system_prompt_in_input: bool = False,
+    stream_usage: bool = False,
 ) -> None:
     """Run one virtual user to completion (or until cancelled).
+
+    ``stream_usage`` asks the server to close each stream with its usage
+    record (``stream_options.include_usage``), so a turn carries the
+    server's own prompt and completion token counts.
 
     ``start_mid_session``: join at a random turn of a session drawn in
     proportion to its length (how sessions appear in a running
@@ -508,6 +526,8 @@ async def run_virtual_user(
                             stream=True,
                             temperature=0.7,
                             extra_body=eb,
+                            **({"stream_options": {"include_usage": True}}
+                               if stream_usage else {}),
                         )
                     ),
                     # Fixed-token saturation may wait for queued prefill before headers.
@@ -626,9 +646,19 @@ async def run_virtual_user(
                 # reasoning + content tokens. For non-reasoning models
                 # reasoning_tokens=0 so this collapses to the previous
                 # formula (output_tokens - 1).
-                total_visible_tokens = (
-                    output_tokens + stream_result.reasoning_tokens
-                )
+                content_chunks = output_tokens
+                usage_out = stream_result.usage_completion_tokens
+                if usage_out is not None:
+                    # The server's count. Chunks undercount whenever the
+                    # engine batches its stream, which made TPOT eight
+                    # times too large under ``--stream-interval 8``.
+                    total_visible_tokens = int(usage_out)
+                    output_tokens = max(
+                        0, int(usage_out) - stream_result.reasoning_tokens)
+                else:
+                    total_visible_tokens = (
+                        output_tokens + stream_result.reasoning_tokens
+                    )
                 tpot_ms = (e2e_ms - ttft_ms) / max(1, total_visible_tokens - 1)
                 # ttfct_ms: time to first content token. For non-reasoning
                 # models this equals ttft_ms (no reasoning phase).
@@ -657,6 +687,9 @@ async def run_virtual_user(
                     token_timestamps=token_timestamps,
                     ttfct_ms=ttfct_ms,
                     reasoning_tokens=stream_result.reasoning_tokens,
+                    content_chunks=content_chunks,
+                    usage_completion_tokens=usage_out,
+                    usage_prompt_tokens=stream_result.usage_prompt_tokens,
                 )
 
                 await state.complete(first_token_seen=ttft_obs is not None)
@@ -664,7 +697,11 @@ async def run_virtual_user(
 
                 # Append turn to history (byte-identical reuse for prefix cache)
                 history_messages.append({"role": "user", "content": query_text})
-                history_messages.append({"role": "assistant", "content": response_text})
+                # Forced-length replies (ignore_eos) can run past the model's own
+                # end into its chat-format control tags, which come back as text.
+                # Beam's template rejects history holding them ("Pass plain text
+                # in API fields, not Harmony wire tags"), so replay the text only.
+                history_messages.append({"role": "assistant", "content": _WIRE_TAG.sub("", response_text)})
                 history_token_count += event.input_tokens + output_tokens
                 exchange_tokens.append(event.input_tokens + output_tokens)
                 stats.turns_total += 1

@@ -34,6 +34,18 @@ class StartRunRequest(BaseModel):
     # Headline sweeps only: cap the concurrency ladder (the UI's
     # "max concurrent streams" control). None = the full ladder.
     max_concurrency: Optional[int] = None
+    # Headline sweeps only: the exact concurrency rungs to climb, in
+    # place of the default ladder (64..8192). Per-stream speed at low
+    # concurrency -- 1 to 32 streams, where mono decode and speculative
+    # decoding pay -- needs rungs the saturation ladder starts above.
+    ladder: Optional[list[int]] = None
+    # Headline sweeps only. ``hold_s``: hold each rung this many seconds
+    # and report the whole-period rate from every replica's counter
+    # growth. ``batch_requests``: send exactly this many requests at each
+    # rung and wait for all of them, reporting client and engine token
+    # totals. One or the other.
+    hold_s: Optional[float] = None
+    batch_requests: Optional[int] = None
     # Headline sweeps and the joint search: the prefix-cache reuse the
     # sweep is built to reach (simulation.prefix_reuse): "industry",
     # "consumer_chat", "conversation", "template" or a share such as

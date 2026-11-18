@@ -95,13 +95,17 @@ class OwnedVllm(VllmCudaEngine):
                 timeout=10,
             )
             if result.returncode == 0:
-                removed = subprocess.run(
-                    ["docker", "rm", "-f", "-v", name], capture_output=True, timeout=20
-                )
-                if removed.returncode:
-                    # --rm may remove the container between inspect and rm.
-                    # Verify absence instead of treating that benign race as failure.
-                    deadline = time.monotonic() + 30
+                try:
+                    failed = subprocess.run(
+                        ["docker", "rm", "-f", "-v", name], capture_output=True, timeout=20
+                    ).returncode
+                except subprocess.TimeoutExpired:
+                    failed = True
+                if failed:
+                    # --rm may remove the container between inspect and rm, and a
+                    # replica with a large pinned host cache takes minutes to release
+                    # it. Verify absence instead of treating either as failure.
+                    deadline = time.monotonic() + 600
                     while True:
                         final = subprocess.run(
                             ["docker", "inspect", name], capture_output=True, text=True, timeout=10
@@ -112,7 +116,7 @@ class OwnedVllm(VllmCudaEngine):
                             raise RuntimeError(
                                 f"Could not verify removal of owned container {name}"
                             )
-                        time.sleep(0.5)
+                        time.sleep(2)
             elif "no such" not in result.stderr.lower():
                 raise RuntimeError(f"Could not verify cleanup of owned container {name}")
             self._container_id = None

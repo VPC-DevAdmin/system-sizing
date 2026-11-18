@@ -49,7 +49,14 @@ REUSE_LEVELS = {
                            "ICLR '26, Table 1, on Mooncake's traces)"),
     # Unique prompts and no system prompt: only the chat template repeats.
     "template": (None, "chat template only (no shared system prompt)"),
+    # No reuse at all: no shared system prompt, and the engine's prefix
+    # cache switched off at launch (``engine_cache_off_flags``), so not
+    # even the chat template is served from cache. A sensitivity setting,
+    # not a production level: every deployment reuses its template.
+    "off": (0.0, "prefix caching disabled in the engine; no shared system prompt"),
 }
+# A share of 0 means the same thing as "off".
+OFF = "off"
 DEFAULT_REUSE = "industry"
 # A shared-prompt sweep keeps at least this many unique user tokens.
 MIN_UNIQUE_USER_TOKENS = 32
@@ -82,7 +89,9 @@ def resolve_reuse(setting) -> dict:
         raise ValueError(
             f"simulation.prefix_reuse must be between 0 and 0.95, got {setting!r}")
     if value == 0:
-        return resolve_reuse("template")
+        # Zero reuse is zero: template-only reuse is its own named
+        # setting ("template"), and used to be what 0 silently meant.
+        return resolve_reuse(OFF)
     ceiling = PRODUCTION_REUSE_CEILING["chat"]
     return {"setting": f"{value:.2f}", "target": round(value, 4),
             "source": "chosen for this run; published chat and API traffic "
@@ -196,3 +205,22 @@ def workload_reuse(hit_rate: float | None, kind: str = "chat") -> str | None:
         return None
     ceiling = PRODUCTION_REUSE_CEILING[kind]
     return "above_production" if hit_rate > ceiling else "within_production"
+
+
+def cache_off(setting) -> bool:
+    """Does this reuse setting ask for the engine's prefix cache off?"""
+    try:
+        return resolve_reuse(setting)["setting"] == OFF
+    except ValueError:
+        return False
+
+
+def engine_cache_off_flags(engine_type: str) -> list[str]:
+    """Launch flags that disable ``engine_type``'s prefix cache, or [] for
+    an engine capsim has no switch for (the run then records whatever the
+    engine served from cache, and ``headline_reuse`` flags it)."""
+    if engine_type in ("vllm", "vllm_cuda", "vllm_cuda_multi", "vllm_dual_socket"):
+        return ["--no-enable-prefix-caching"]
+    if engine_type == "sglang_cuda":
+        return ["--disable-radix-cache"]
+    return []

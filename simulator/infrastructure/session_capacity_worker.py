@@ -1,5 +1,6 @@
 """Fresh paired cache-capacity cells, NUMA-local independent GPU replicas."""
 
+import traceback
 import asyncio
 import copy
 import math
@@ -223,7 +224,17 @@ async def run(path, manifest, spec):
                 cfg.engine.gpu_image = assets["image"]["id"]
                 pin_model(cfg.engine, assets["snapshot"])
                 (directory / "launch-resolved.yaml").write_text(yaml.safe_dump(asdict(cfg)))
-                trace = make_trace(spec, cell["population"], cell["rate"], cell["block"])
+                paced = spec.session_pacing != "open"
+                # Paced users have no frozen arrival trace; one event per user
+                # still drives the tokenizer preflight for every document.
+                trace = (
+                    [
+                        dict(at_s=0.0, slot=slot, generation=0, turn=1)
+                        for slot in range(cell["population"])
+                    ]
+                    if paced
+                    else make_trace(spec, cell["population"], cell["rate"], cell["block"])
+                )
                 # Exact tokenizer preflight, including chat formatting and output headroom.
                 from transformers import AutoTokenizer
 
@@ -279,7 +290,14 @@ async def run(path, manifest, spec):
                 )
                 engine = SessionReplicas(cfg.engine, spec, cell["arm"], path.name, inventory)
                 sampler = None
+                power = None
                 try:
+                    if spec.session_power_env:
+                        from .wall_power import sample_power
+
+                        power = asyncio.create_task(
+                            sample_power(spec.session_power_env, directory / "power.csv")
+                        )
                     update("launching", current=cell)
                     await launch_owned(engine, directory)
                     await probe(engine, 60)
@@ -320,6 +338,12 @@ async def run(path, manifest, spec):
                             directory,
                             tokenizer,
                             cell.get("compaction", "none"),
+                        )
+                    elif paced:
+                        from .session_paced import replay_paced
+
+                        work = replay_paced(
+                            engine, spec, cell["population"], cell["block"], directory
                         )
                     else:
                         work = replay(engine, spec, trace, cell["block"], directory)
@@ -368,15 +392,23 @@ async def run(path, manifest, spec):
                         dict(cell, metrics=metrics, evidence=str(directory.relative_to(path)))
                     )
                     update("measured", current=cell)
+                    if paced:
+                        try:
+                            from .session_cells import export_cells
+
+                            await asyncio.to_thread(export_cells, path)
+                        except Exception as exc:  # the export is re-runnable from evidence
+                            state["cells_export_error"] = str(exc)
                     if not pending and spec.session_workload != "knowledge_worker":
                         pending = next_cells(state["results"], spec, refinements)
                         state.setdefault("adaptive_schedule", []).extend(pending)
                         state["refinement_rounds"] = refinements
                         update("scheduled", current=None)
                 finally:
-                    if sampler:
-                        sampler.cancel()
-                        await asyncio.gather(sampler, return_exceptions=True)
+                    for task in (sampler, power):
+                        if task:
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
                     await finish_owned_cleanup([engine])
             comparison = compare_capacity(state["results"], spec)
             resolved = all(g["saturation_resolved"] for g in comparison.get("by_working_set", []))
@@ -389,7 +421,7 @@ async def run(path, manifest, spec):
         update("cancelled", current=None, outcome="incomplete")
         raise
     except Exception as exc:
-        update("failed", current=None, error=str(exc), outcome="incomplete")
+        update("failed", current=None, error=str(exc), traceback=traceback.format_exc(), outcome="incomplete")
     finally:
         try:
             await asyncio.to_thread(export, path, compare_capacity(state["results"], spec))

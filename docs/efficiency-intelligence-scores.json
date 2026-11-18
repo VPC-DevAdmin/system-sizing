@@ -1,0 +1,27 @@
+{
+  "source": "Artificial Analysis Intelligence Index v4.3.2 (artificialanalysis.ai), read 2026-10-27",
+  "notes": [
+    "Index is a weighted mean of ten evaluations (agents 30%, coding 20%, scientific reasoning 20%, general 30%); scale compresses older models toward single digits.",
+    "'estimate' = the site marks the value 'Estimate (independent evaluation forthcoming)'.",
+    "variant = the reasoning mode the score belongs to; the sweep serves each model as noted in docs/efficiency-sweep-plan.md (fixed 1,024 output tokens, so thinking mode does not change token counts)."
+  ],
+  "scores": {
+    "llama-3.3-70b-nvfp4":             {"index": 8,  "variant": "non-reasoning", "estimate": true},
+    "gemma-4-31b-nvfp4":               {"index": 15, "variant": "reasoning", "estimate": false, "non_reasoning_index": 14},
+    "qwen3-32b-fp8":                   {"index": 7,  "variant": "non-reasoning", "estimate": true},
+    "mistral-small-3.2-24b":           {"index": 7,  "variant": "non-reasoning", "estimate": false},
+    "gpt-oss-20b":                     {"index": 9,  "variant": "high", "estimate": false, "low_index": 10},
+    "gpt-oss-120b":                    {"index": 12, "variant": "high", "estimate": false, "low_index": 10},
+    "gemma-4-26b-a4b-nvfp4":           {"index": 17, "variant": "reasoning", "estimate": true, "non_reasoning_index": 13},
+    "qwen3-30b-a3b-fp8":               {"index": 8,  "variant": "non-reasoning (Instruct-2507)", "estimate": true},
+    "qwen3.6-35b-a3b-nvfp4":           {"index": 18, "variant": "reasoning", "estimate": false, "non_reasoning_index": 15},
+    "glm-4.7-flash":                   {"index": 15, "variant": "reasoning", "estimate": true},
+    "nemotron-3-super-120b-nvfp4":     {"index": 13, "variant": "reasoning", "estimate": false},
+    "qwen3-235b-a22b-fp8":             {"index": 12, "variant": "non-reasoning (Instruct-2507)", "estimate": true},
+    "minimax-m2.7-fp8":                {"index": 23, "variant": "reasoning (always on)", "estimate": false},
+    "qwen3.5-397b-a17b-nvfp4-sglang":  {"index": 18, "variant": "reasoning", "estimate": false, "non_reasoning_index": 21},
+    "qwen3.5-397b-a17b-nvfp4-sglang-mtp": {"index": 18, "variant": "reasoning", "estimate": false, "non_reasoning_index": 21},
+    "beam-1.0-501b-nvfp4":             {"index": 30, "variant": "reasoning", "estimate": false},
+    "nemotron-3-ultra-550b-nvfp4":     {"index": 23, "variant": "reasoning", "estimate": false}
+  }
+}

@@ -118,6 +118,15 @@ class StreamResult:
     output_text: str = ""
     token_timestamps: list = None  # list[[elapsed_ms, cum_tokens]]
     error: Optional[str] = None
+    # ``output_tokens`` and ``reasoning_tokens`` count streamed CHUNKS. One
+    # chunk is one token only while the engine sends every token on its
+    # own; with batched streaming (vLLM/SGLang ``--stream-interval 8``) a
+    # chunk carries up to eight. The server's own counts, from the usage
+    # record that closes a stream asked for with
+    # ``stream_options={"include_usage": True}``; None when the stream
+    # carried none (not asked for, or cut short).
+    usage_completion_tokens: Optional[int] = None
+    usage_prompt_tokens: Optional[int] = None
 
     def __post_init__(self):
         if self.token_timestamps is None:
@@ -154,6 +163,8 @@ async def consume_with_tiers(
     reasoning_tokens = 0
     token_timestamps: list = []
     t_last_chunk = submitted_at
+    usage_completion: Optional[int] = None
+    usage_prompt: Optional[int] = None
 
     # SDK stream creation includes waiting for HTTP response headers.
     # Saturation callers can allow queued prefill within their request budget;
@@ -243,6 +254,10 @@ async def consume_with_tiers(
             # Both kinds are user-visible, so either one resets the inter-
             # token deadline and either one (whichever arrives first) sets
             # ttft_obs. Content arrival sets ttfct_obs separately.
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                usage_completion = getattr(usage, "completion_tokens", None)
+                usage_prompt = getattr(usage, "prompt_tokens", None)
             delta = chunk.choices[0].delta if chunk.choices else None
             reasoning_chunk = (
                 getattr(delta, "reasoning", None)
@@ -322,6 +337,8 @@ async def consume_with_tiers(
         reasoning_tokens=reasoning_tokens,
         output_text="".join(output_text_parts),
         token_timestamps=token_timestamps,
+        usage_completion_tokens=usage_completion,
+        usage_prompt_tokens=usage_prompt,
     )
 
 

@@ -1,0 +1,69 @@
+{
+  "version": 2,
+  "model": "openai/gpt-oss-120b",
+  "api": "http://127.0.0.1:8321",
+  "runs_root": "/data/system-sizing/runs",
+  "source_manifest": "/data/p02-gptoss-saturation-20261001/gptoss-source-absolute.json",
+  "wait_containers": [],
+  "purpose": "S3 boundary: 24K, 640 users, tier.",
+  "spec": {
+    "project_id": "P02",
+    "mode": "pilot",
+    "session_mode": "capacity",
+    "session_workload": "document",
+    "session_cpu_backend": "simple_cpu",
+    "session_tier": "cpu",
+    "gpu_ids": [
+      0,
+      4,
+      1,
+      5,
+      2,
+      6,
+      3,
+      7
+    ],
+    "paired_blocks": 1,
+    "duration_s": 1800,
+    "warmup_s": 0,
+    "request_timeout_s": 300,
+    "session_slo_grid_s": [
+      5,
+      10,
+      30,
+      60,
+      120,
+      300
+    ],
+    "min_requests": 30,
+    "min_quality": 0.95,
+    "max_error_fraction": 0.01,
+    "min_slo_fraction": 0.95,
+    "document_records": 16,
+    "session_answer_records": 2,
+    "max_output_tokens": 1024,
+    "context_limit": 131072,
+    "session_gpu_gb": null,
+    "session_cpu_gb": 192,
+    "session_engine_max_seqs": 256,
+    "concurrency": 1024,
+    "session_max_pending": 16384,
+    "session_prime_documents": true,
+    "session_min_returns": 4,
+    "structured_output": true,
+    "session_document_padding": true,
+    "session_context_tokens": 24000,
+    "session_pacing": "think",
+    "session_think_s": 300,
+    "session_power_env": "/data/capsim/idrac/idrac.env",
+    "max_hours": 20,
+    "session_situation": "S3",
+    "session_population_grid": [
+      640
+    ],
+    "session_cache_arms": [
+      "treatment"
+    ]
+  },
+  "attempt": 1
+}

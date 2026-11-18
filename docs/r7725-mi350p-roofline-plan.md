@@ -1,6 +1,6 @@
 # R7725 / MI350P: roofline on leading-edge AMD software
 
-2026-11-15, revision 4. Box: Dell R7725, 1x AMD Instinct MI350P (PCIe).
+2026-11-15, revision 5. Box: Dell R7725, 1x AMD Instinct MI350P (PCIe).
 
 **Goal:** the best performance this pre-release card can show, on the
 newest and most capable models that fit it, using the newest AMD software
@@ -10,18 +10,59 @@ open pull requests are in scope; every result names exactly what it ran.
 Revision 1 tuned settings on the software the box already had. Revision 2
 found that software was a month behind AMD's MI350P work and added a stack
 refresh. Revision 3 added AMD's unreleased techniques (section 3).
-Revision 4 restricts the models to recent ones (below) and adds a search
-for the best shape and serving settings (Phase 1b).
+Revision 4 restricted the models to recent ones and added a search for
+the best shape and serving settings (Phase 1b). Revision 5 sets the
+model window to all of 2026.
 
-**Which models.** Only models released in the last six months (since
-mid-May 2026) with a mixture-of-experts design or a newer attention
-mechanism, and room for higher performance. Llama-3.3-70B is dropped;
-gpt-oss, Gemma-4, Step-3.5-Flash, Qwen3.5 and Qwen3-Coder-Next are older
-than the cutoff and are out of the headline set. Of the models on the
-box, Qwen3.8-27B (August 2026, hybrid linear attention) and its
-fine-tune Arete-27B qualify. A search for other qualifying models that
-fit one 144 GB card is running; the lists in Phases 1 and 4 are
-completed from it.
+**Which models.** Only models released in 2026 with a mixture-of-experts
+design or a newer attention mechanism, and room for higher performance.
+Llama-3.3-70B and gpt-oss (both 2025 or earlier) are out, as are
+Kimi-Linear, Qwen3-30B-A3B, Qwen3-Next-80B and GLM-4.5-Air.
+
+Candidates from two searches of Hugging Face on 2026-11-15 (some
+checkpoint that fits one 144 GB card and is not NVIDIA-only NVFP4).
+Each is smoke-tested on both engines first; a model that does not start
+is recorded as an engine gap and dropped. Release dates, designs and
+pull-request numbers come from the search and are checked only where a
+result depends on them.
+
+Released since mid-May:
+
+| Model (checkpoint) | Released | GB | Design | Risk |
+|---|---|---|---|---|
+| Qwen3.8-27B (`amd/...-Quark-AWQ-MXFP4`, `Qwen/...-FP8`) | 08-05 | 20 / 31 | Dense, 48 linear-attention + 16 full layers, MTP head | Low: AMD's tuned model |
+| Qwen3.8-Flash-Next (`amd/...-Quark-TokenPLE-AWQ-UINT4`) | 08-24 | 80 | MoE 512 experts / 10 active, linear + full attention, MTP | vLLM support is an open PR (#64369) |
+| Muse-Glimmer-30B (`amd/...-w8a8-llmcompressor`) | 08-09 | 34 | Dense, 39 sliding-window + 13 full layers | AITER has gfx950 Muse work (#6507) |
+| North-Mini-Code-1.0 (`CohereLabs/...-fp8`) | 06-05 | 32 | MoE 128 / 8, sliding-window + global attention | vLLM support merged (#62101) |
+| Nemotron-3.5-Lightning-30B-A3B (`RedHatAI/...-FP8`) | 08-01 | 32 | Mamba-2 + MoE 128 / 6 + attention | AITER Mamba-2 kernel is an open issue |
+| Laguna-XS-2.1 (`poolside/...-FP8`) | 06-20 | 35 | MoE 256 / 8, sliding-window + global attention | vLLM support is an open PR (#52800) |
+| Raon-1-mini-preview (`KRAFTON/...`) | 10-21 | 33 | MoE 128 / 6, delta attention + gated MLA | vLLM support is an open PR (#64672) |
+| Instella-MoE-16B-A3B (`amd/...-SFT`) | 07-23 | 32 | AMD's own MoE 64 / 6 with gated MLA | No engine support found |
+| Arete-27B (`NousResearch/...`) | 11-06 | 55 | Qwen3.8-27B fine-tune, BF16 | Low |
+
+Released January to mid-May (all already on the box except LFM2):
+
+| Model (checkpoint) | Released | GB | Design | Risk |
+|---|---|---|---|---|
+| Step-3.5-Flash (`amd/...-MXFP4`) | 02-01 | 114 | MoE, sliding-window + full attention, MTP | The largest that fits; AITER's Step-3.5 MoE work is still open |
+| Gemma-4-31B (`amd/...-MXFP4`) | 03-11 | 20 | Dense, 50 sliding-window + 10 full layers | Low |
+| Gemma-4-26B-A4B (`RedHatAI/...-FP8-dynamic`) | 03-11 | 29 | MoE 128 experts, sliding-window + full | Failed on SGLang in the baseline; MI350P MoE tables are open PRs |
+| Qwen3.5-35B-A3B (`amd/...-MXFP4`) | 02-24 | 25 | MoE 256 / 8, linear + full attention, MTP | Low |
+| Qwen3.6-35B-A3B (`Qwen/...-FP8`) | 04-15 | 38 | Same design as Qwen3.5-35B-A3B | Ran in the baseline |
+| Qwen3.6-27B (`Qwen/...-FP8`) | 04-21 | 31 | Dense, linear + full attention | Ran in the baseline |
+| Qwen3-Coder-Next (`amd/...-MXFP4`) | 01-30 | 45 | MoE 512 / 10, linear + full attention | Low |
+| GLM-4.7-Flash (`zai-org/...`, BF16) | 01-19 | 62 | MoE 64 / 4, MLA | Ran in the baseline |
+| Nemotron-3-Super-120B-A12B (`nvidia/...-FP8`) | 03-10 | 128 | Mamba-2 + MoE 512 / 22 + attention | Little room for KV; failed on SGLang in the baseline |
+| LFM2-24B-A2B (`LiquidAI/...`, BF16) | 02-24 | 48 | MoE 64 / 4, convolution + attention | No AMD build |
+
+Qualifying but not runnable here:
+- NVFP4 only under the size limit, which ROCm cannot load: Ripple-65B,
+  Laguna-S-2.1, Nemotron-3.5-Super-VL, Qwen3.5-122B-A10B (its FP8 is
+  127 GB and failed in the baseline), Mistral-Small-4-119B.
+- Too large for one card: MiniMax-M2.5 and M2.7 MXFP4 (127 GB each),
+  Step-3.7-Flash (129 GB), DeepSeek-V4-Flash (159 GB), GLM-5.3-Flash
+  (185 GB), DeepSeek-V4.1-Flash, MiniMax-M3.1-Flash, Inkling-2-Small,
+  Kimi-K3, GLM-5 and 5.1.
 
 ## 1. Review of revision 1 against the goal
 
@@ -138,8 +179,8 @@ One cell each (128 in / 256 out). Models:
 - Qwen3.8-27B MXFP4 (128-CU tables exist; a hybrid, so both engines run
   it at a cap of 1024: vLLM refuses 2048 for it)
 - Qwen3.8-27B FP8: the same model, for the FP8 to MXFP4 step
-- The other qualifying models from the search, at a cap of 2048. One
-  with no 128-CU tables serves as the untuned control.
+- Gemma-4-31B MXFP4 (dense, no 128-CU tables: the untuned control) and
+  Step-3.5-Flash MXFP4 (the largest that fits), at a cap of 2048
 
 The rows below that name gpt-oss apply only if a model with windowed
 attention is in the final list.
@@ -241,11 +282,10 @@ Grid as in the baseline (caps 1024 and 2048, outputs 128 and 256, input
 | Part | Models | Cells | GPU-hours |
 |---|---|---|---|
 | 4a Headline | Qwen3.8-27B in MXFP4 and FP8 (AMD's showcase model for this card: tuned tables, mono decode, DFlash2, MTP) and Arete-27B. Both engines, the roofline grid, the best shape from Phase 1b, and the interactive ladder with the Phase 1 techniques | about 30 | about 9 |
-| 4b Other qualifying models | From the search: released since mid-May 2026, MoE or a newer attention design, fits one card | to be set | to be set |
-| 4c Older models | Optional: gpt-oss-120b, Gemma-4-31B, Step-3.5-Flash and the other MXFP4 checkpoints already on the box | about 50 | about 12 |
-| 4d Baseline grid | Optional: the baseline's FP8 and BF16 models on the new stack | about 170 | about 40 |
+| 4b Other 2026 models | Every candidate in the two tables at the top that passes its smoke test, AMD's MXFP4 checkpoints first | up to 140 | up to 33 |
+| 4c Baseline grid | Optional: the baseline's remaining FP8 and BF16 models on the new stack | about 100 | about 23 |
 
-4a and 4b are the deliverable. 4c and 4d run only if you ask for them.
+4a and 4b are the deliverable. 4c runs only if you ask for it.
 
 The newest large models do not fit one 144 GB card: DeepSeek-V4.1-Flash
 (510 GB), GLM-5.3-Flash (657 GB), Qwen3.8-Flash-Next (182 GB in MXFP4),
@@ -265,6 +305,547 @@ the untuned baseline, with tokens per watt.
 | Card firmware and driver 31.60 | Unknown; none documented for inference | Ask Dell for the current MI350P firmware bundle; driver update needs sudo and a reboot |
 | CPX partitions (4 x 32 CUs, about 36 GB each) | Four replicas for models under about 30 GB (gpt-oss-20b, Qwen3.8-27B MXFP4, Gemma-4-31B MXFP4) | Driver reconfiguration with sudo; AITER has no 32-CU gfx950 tables |
 | Host kernel arguments (`iommu=pt`, `pci=realloc=off`, C-states) | Small at one GPU | Reboot with sudo |
+
+### Partition test (queued 2026-11-18, waits for the mode switch)
+
+Goal: "one card, four isolated servers". Show that four engines, one per
+CPX partition, hold the unpartitioned card's total throughput, per model
+as a percentage, including the cases where partitions are slower.
+
+What the driver reports today (read without root):
+
+- Modes offered: SPX, DPX, CPX. Current: SPX. Memory mode: NPS1 only.
+- `compute_partition_mem_alloc_mode` is `CAPPING`, so each partition is
+  expected to be limited to its share of memory (about 36 GB in CPX,
+  about 72 GB in DPX). `ALL` is the other setting. The cap is read from
+  the setting's name and has to be confirmed after the switch.
+- No memory-mode change is involved (only NPS1 exists), so no driver
+  reload is expected. The card has to be idle when the mode changes.
+
+Commands for the box owner (root; not run by the test session):
+
+```bash
+sudo amd-smi partition --accelerator          # read-only: profiles and resources
+sudo amd-smi set -g 0 --accelerator-partition CPX
+sudo amd-smi set -g 0 --accelerator-partition DPX
+sudo amd-smi set -g 0 --accelerator-partition SPX   # back to the whole card
+```
+
+Models (all staged on the box) and expected fit:
+
+| Model | On disk | CPX (about 36 GB) | Whole-card reference, output tok/s |
+|---|---|---|---|
+| LFM2.5-24B-A2B FP8 | 24 GB | fits | 40,732 (two engines, short reading) |
+| Qwen3.5-35B-A3B MXFP4 | 23 GB | fits | 15,966 (short reading; 15,046 outside tool) |
+| Qwen3.8-27B Quark-AWQ-MXFP4 | 19 GB | fits; stream count limited by per-stream state | 5,710 |
+| Gemma-4-26B-A4B FP8 | 27 GB | marginal; DPX if it does not hold enough streams | 17,433 (short reading; 16,765 outside tool) |
+| LFM2-24B-A2B bf16 | 45 GB | does not fit; DPX only | 42,081 (10-minute mean, two engines) |
+
+Steps, 128 in / 256 out, same serving settings as the whole-card runs:
+
+1. After each switch, `/data/capsim/partition/inspect.sh` records what
+   amd-smi, sysfs and PyTorch in a container see (devices, memory per
+   device), which decides whether the launcher needs a change to treat
+   partitions as devices.
+2. A fresh whole-card reference per model as a 10-minute hold, so both
+   sides of each percentage use the same method (most references above
+   are 15-second readings, which read high).
+3. CPX: each model alone, one engine per partition, all four under load;
+   10-minute hold. Record total and per-partition tok/s, power, streams
+   in flight, and whether AITER reports missing tables for 32 CUs.
+4. DPX: LFM2 bf16 and any model that did not fit or ran badly in CPX,
+   two engines.
+5. Mixed: four different models, one per CPX partition, all under load;
+   per-model tok/s. One capsim run serves one model, so this step drives
+   each engine with `vllm bench serve` and compares with that tool's
+   whole-card figure.
+
+Open: Gemma in DPX or left out of the four-way picture; whether the mode
+survives a reboot.
+
+## Results to date (2026-11-16)
+
+Everything below is one GPU, 450 W cap, new images (vLLM nightly `9bc16ae6`
+and SGLang daily `20261115`, both with AITER main `95d21128`) unless a row
+says otherwise. Result files are on the box under `/data/capsim/phase1*/results`.
+
+### Stack (Phase 0)
+
+- Both rebuilt images pass. AITER main is required for Qwen3.8-27B MXFP4: the
+  published SGLang daily and the old vLLM 0.33 image both fail in the untuned
+  MXFP4 GEMM (shared-memory limit).
+
+### Qwen3.8-27B MXFP4, 128 in / 256 out, output tok/s
+
+| Engine | Setting | Tok/s | Streams |
+|---|---|---|---|
+| SGLang | default | 2,525 | 71 |
+| SGLang | half-precision state | 3,689 | 139 |
+| SGLang | half-precision state, state memory ratio 4 | 5,060 | 236 |
+| vLLM | AITER on, default attention | 3,535 | 581 |
+| vLLM | AITER on, half-precision state | 5,173 | 1,023 |
+| vLLM | AITER on, half-precision state, `ROCM_AITER_FA` | 5,710 | 1,024 |
+
+The linear-attention layers keep about 141 MB of recurrent state per stream at
+float32, so the state, not the KV cache, sets how many streams fit.
+`VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1` fails on hybrid models.
+
+### Low-concurrency techniques, Qwen3.8-27B MXFP4 on vLLM, 8k in / 1k out
+
+Output tok/s. The first four columns use half-precision state; the last three
+use float32 state, which mono decode requires.
+
+| Streams | Reference | MXFP4 fusion | DFlash2 | MTP-3 | Reference f32 | Mono f32 | Mono + MTP-3 f32 |
+|---|---|---|---|---|---|---|---|
+| 1 | 38 | 35 | 60 | 71 | 50 | 66 | 103 |
+| 2 | 176 | 175 | 243 | 331 | 171 | 213 | 320 |
+| 4 | 324 | 325 | 415 | 564 | 321 | 385 | 542 |
+| 8 | 536 | 532 | 478 | 872 | 518 | 520 | 806 |
+| 16 | 972 | 966 | 698 | 995 | 826 | 774 | 929 |
+| 32 | 1,732 | 1,560 | 801 | 1,462 | 730 | 978 | 1,222 |
+
+- Mono decode (vLLM #65078): +25% at 2 streams and +20% at 4 against the
+  like-for-like float32 reference; no effect past its 4-row cap. With MTP each
+  request is 4 rows, so mono only covers one stream there (+16% at 1 stream).
+  MTP-3 on float32 state alone: 89 / 309 / 553 / 803 / 941 / 1,210.
+- MTP-3 (merged): +88% at 2 streams, +74% at 4, +63% at 8, level at 16, behind
+  at 32. About 2.8 tokens accepted per step.
+- DFlash2 draft: +38% at 2 streams, +28% at 4, behind from 8 streams.
+- MXFP4 activation-quant fusion (#61902): no sites on this model, no change.
+- Single-stream rows have few samples and are noisy.
+
+### Small-active MoE models, 128 in / 256 out, output tok/s
+
+Best steady rung per setting. vLLM unless the column says SGLang.
+
+| Model | AITER on | AITER on, FA, cap 2048 | AITER off | SGLang | Old-stack baseline | XE7740 per GPU |
+|---|---|---|---|---|---|---|
+| Gemma-4-26B-A4B FP8 | 12,671 (cap 2048); 14,402 (cap 1024, BF16 KV) | FA rejected | 13,134 | fails | 15,205 | 15,919 |
+| GLM-4.7-Flash BF16 | fails with FP8 KV; 12,750 (cap 1024, BF16 KV) | not applicable | 14,082 | 7,186 | 14,130 | 6,530 |
+| Qwen3.6-35B-A3B FP8 | 11,462 (cap 1024) | 13,921 | | 8,896 | 8,647 | 6,802 |
+| Qwen3.5-35B-A3B MXFP4 | 12,989 (cap 1024) | 12,258 steady; 14,709 unsteady | | 8,888 | | |
+| Qwen3-Coder-Next MXFP4 | 9,745 (cap 1024) | 12,013 | | 5,597 | | |
+
+- The stock ladder offers 512, 2048, 4096 and 8192 streams, with nothing
+  between 512 and 2048, and several higher rungs fail the steady-state check
+  (Gemma read 15,955 at an unsteady rung). Phase 1b sweeps the batch cap
+  (768 to 2048) to place the peak.
+- The "cap 1024, BF16 KV" numbers come from two runs that launched without
+  their batch-cap and KV-cache flags (capsim bug: an empty `vllm_extra_flags`
+  lever replaced the shape's flags; fixed 2026-11-16). They stand as
+  measurements of that configuration.
+- GLM-4.7-Flash with AITER on and an FP8 KV cache crashes in AITER's MLA
+  reduce kernel (32 heads, head dimension 256 unsupported); it runs with a
+  BF16 KV cache, slower than AITER off.
+- Gemma-4-26B-A4B: `ROCM_AITER_FA` is rejected (multimodal attention), and with
+  AITER's linear path off (`VLLM_ROCM_USE_AITER_LINEAR=0`) it reached 13,658.
+- SGLang on Gemma-4-26B-A4B FP8 fails at graph capture: AITER has no
+  `gemm_a8w8_bpreshuffle` kernel for M=256, N=2816, K=2112.
+- Raising the cap to 2048 with `ROCM_AITER_FA` and half-precision state lifted
+  Qwen3.6-35B-A3B by 21% and Qwen3-Coder-Next by 23%; both then fill the cache.
+
+### Newer models, first runs, 128 in / 256 out, cap 1024, output tok/s
+
+vLLM with AITER on; SGLang on the rebuilt daily. Hybrid models ran with
+half-precision recurrent state. Best steady rung.
+
+| Model | vLLM | SGLang | Note |
+|---|---|---|---|
+| Laguna-XS-2.1 FP8 | 13,778 | 16,054 | both queue-bound at the cap, cache 16% full |
+| LFM2-24B-A2B | 15,103 | unsteady | vLLM peak at 512 streams; GPU power falls as streams rise |
+| North-Mini-Code-1.0 FP8 | 14,420 | fails | vLLM peak at 512 streams; SGLang needs `SGLANG_USE_AITER_UNIFIED_ATTN=1` for the sliding window |
+| Nemotron-3.5-Lightning-30B-A3B FP8 | 11,092 | 9,798 | vLLM queue-bound at the cap |
+| Muse-Glimmer-30B w8a8 | 7,095 | fails | SGLang: `int8_scaled_mm` not defined |
+| Arete-27B | 4,485 | 3,939 | dense hybrid; vLLM peak rung had no completed requests |
+| Qwen3.6-27B FP8 | 3,654 | 4,186 | dense hybrid; vLLM peak rung had no completed requests |
+| Nemotron-3-Super-120B-A12B FP8 | 1,740 | fails | SGLang: modelopt FP8 unsupported on ROCm |
+| Step-3.5-Flash MXFP4 | 1,675 | fails | vLLM holds 72 streams (cache full); SGLang: rope config key missing |
+| Qwen3.8-Flash-Next UINT4 | fails | fails | vLLM: no `per_token_table` in the n-gram embedding; SGLang: unsupported fused-MoE scheme |
+| Instella-MoE-16B-A3B | fails | fails | vLLM: attention not dispatchable; SGLang: K/V layout mismatch |
+| Raon-1-mini-preview | fails | fails | no implementation in either engine |
+
+- LFM2's SGLang rungs were all unsteady and collapsed to 1,025 tok/s at 8,192
+  offered streams; its 15,853 reading is not usable.
+- On vLLM the fastest models (LFM2, North-Mini, Laguna) lose GPU power as
+  streams rise (432 W to 348 W on LFM2), which points at a host-side limit.
+  Serving settings (`--stream-interval`, `--api-server-count`) are being tried.
+
+### Follow-ups on the newer models, 128 in / 256 out, output tok/s
+
+| Model | Engine | Setting | Cap | Tok/s | GPU W |
+|---|---|---|---|---|---|
+| LFM2-24B-A2B | vLLM | first run | 1024 | 15,103 | 432 |
+| LFM2-24B-A2B | vLLM | `--stream-interval 8` | 1024 | 16,571 | 351 |
+| LFM2-24B-A2B | vLLM | `--api-server-count 4` | 1024 | 16,790 | 348 |
+| LFM2-24B-A2B | vLLM | both | 1024 | 16,851 | 351 |
+| LFM2-24B-A2B | vLLM | both | 2048 | 24,068 | 334 |
+| North-Mini-Code-1.0 FP8 | SGLang | `SGLANG_USE_AITER_UNIFIED_ATTN=1` | 1024 | 19,943 | 431 |
+| Laguna-XS-2.1 FP8 | vLLM | cap raised | 2048 | 13,395 | 442 |
+| Laguna-XS-2.1 FP8 | SGLang | cap raised | 2048 | 11,412 | 312 |
+| Nemotron-3.5-Lightning FP8 | vLLM | `ROCM_AITER_FA` | 1024 | 11,048 | 448 |
+| Nemotron-3.5-Lightning FP8 | vLLM | `ROCM_AITER_FA` | 2048 | 11,469 | 443 |
+
+- During a Gemma run the vLLM API server process sat at 100% of one core and
+  the engine core at 200%, with the GPU at its 450 W cap. On LFM2 the GPU is
+  at 334 W at the 24,068 peak, so that model is still host-bound.
+- Laguna-XS does worse at a 2048 cap on both engines; its best stays 16,054
+  on SGLang at 1024.
+
+### Serving settings on the fast models, 128 in / 256 out, output tok/s
+
+Serving settings on vLLM are `--stream-interval 8 --api-server-count 4`; on
+SGLang, `--stream-interval 8`. "Before" is the best earlier result on that
+engine at any cap.
+
+| Model | Engine | Cap | Before | With serving settings | GPU W |
+|---|---|---|---|---|---|
+| LFM2-24B-A2B | vLLM | 4096 | 24,068 | 29,806 | 356 |
+| LFM2-24B-A2B | vLLM (stream 16, 8 servers) | 4096 | 24,068 | 28,604 | 359 |
+| North-Mini-Code-1.0 FP8 | SGLang, unified attention | 2048 | 19,943 | 25,211 | 449 |
+| North-Mini-Code-1.0 FP8 | SGLang, unified attention | 1024 | 19,943 | 20,271 | 433 |
+| North-Mini-Code-1.0 FP8 | vLLM | 2048 | 14,420 | 18,612 | 450 |
+| Laguna-XS-2.1 FP8 | vLLM | 2048 | 13,778 | 19,477 | 450 |
+| Laguna-XS-2.1 FP8 | vLLM | 1024 | 13,778 | 14,098 | 448 |
+| Gemma-4-26B-A4B FP8 | vLLM | 1024 | 14,660 | 15,590 | 449 |
+| Gemma-4-26B-A4B FP8 | vLLM | 768 | 14,660 | 14,683 | 439 |
+| GLM-4.7-Flash | vLLM, AITER off | 2048 | 14,082 | 15,136 | 448 |
+| Qwen3.6-35B-A3B FP8 | vLLM | 2048 | 13,921 | 14,633 | 446 |
+| Nemotron-3.5-Lightning FP8 | vLLM, bf16 state | 2048 | 11,469 | 12,264 | 444 |
+
+- With the serving settings the wider cap wins on every model, the reverse
+  of the earlier runs: Laguna-XS at 2048 went from 13,395 to 19,477.
+- LFM2 is the one model still short of the power cap. Its vLLM engine core
+  process sits at 100% of one core; the four API servers are at 20 to 30%
+  each, and eight servers with stream interval 16 do no better. The next
+  lever there is the engine core, not the API servers.
+- North-Mini on SGLang at a 2048 cap without batched streaming recorded
+  30,759 at one rung with 959 requests in flight and the GPU at 366 W, after
+  an unsteady rung. That reading is a backlog flush, not a rate, and is not
+  used.
+- SGLang with unified attention on Laguna-XS: 15,864, no change from 16,054
+  without it.
+
+### Second serving round and two engines on one GPU, 128 in / 256 out, output tok/s
+
+Same serving settings as above. "Two engines" is capsim's `replicas_per_gpu: 2`:
+two vLLM processes on the card, started one after the other, each with half
+the memory share and its own batch cap.
+
+| Model | Engine | Cap | Tok/s | GPU W |
+|---|---|---|---|---|
+| LFM2-24B-A2B | vLLM, one engine | 8192 | 28,030 | 357 |
+| LFM2-24B-A2B | vLLM, one engine, `--async-scheduling` | 4096 | 28,559 | 365 |
+| LFM2-24B-A2B | vLLM, two engines | 2 x 2048 | 37,653 | 450 |
+| LFM2-24B-A2B | vLLM, two engines | 2 x 4096 | 45,519 (15 s reading; 10-minute mean 42,081) | 450 |
+| North-Mini-Code-1.0 FP8 | SGLang, unified attention | 4096 | 25,147 | 447 |
+| North-Mini-Code-1.0 FP8 | vLLM | 4096 | 23,358 | 444 |
+| Laguna-XS-2.1 FP8 | vLLM | 4096 | 21,891 | 450 |
+| Laguna-XS-2.1 FP8 | SGLang | 2048 | 26,100 | 447 |
+| Laguna-XS-2.1 FP8 | SGLang | 1024 | 16,013 | 429 |
+| Gemma-4-26B-A4B FP8 | vLLM | 1536 | 17,433 | 450 |
+| Gemma-4-26B-A4B FP8 | vLLM | 2048 | 16,922 | 449 |
+| GLM-4.7-Flash | vLLM, AITER off | 4096 | 14,983 | 448 |
+| Qwen3.5-35B-A3B MXFP4 | vLLM, bf16 state | 2048 | 15,966 | 446 |
+| Qwen3-Coder-Next MXFP4 | vLLM, bf16 state | 2048 | 11,647 | 445 |
+| Nemotron-3.5-Lightning FP8 | SGLang, bf16 state | 2048 | 9,906 | 437 |
+| Qwen3.6-35B-A3B FP8 | SGLang, bf16 state | 2048 | 8,788 | 409 |
+
+- One LFM2 engine levels off at 28 to 30k (four runs) with its engine core
+  at 100% of a host core and the GPU near 357 W. Two engines take the GPU to
+  the 450 W cap. The 45,519 reading is the top rung of the ladder (8,192
+  streams, 8,140 in flight). It is a 15-second reading; three 10-minute
+  holds later gave 42,081 (hardening section below).
+- Two engines started together fail: each counts the other's allocation
+  while sizing its KV cache and the second exits with "No available memory
+  for the cache blocks". capsim now starts shared-GPU engines one at a time.
+- North-Mini on SGLang at a 4096 cap recorded nothing at the 4,096-stream
+  rung (GPU idle at 102 W); the 25,147 is its 2,048-stream rung.
+- Gemma at 17,433 is 9.5% above the XE7740's 15,919 per GPU.
+- SGLang on the two linear-attention hybrids holds only about 450 to 530
+  requests in flight whatever the cap, so batched streaming changes nothing
+  there (Lightning 9,906, Qwen3.6-35B-A3B 8,788); vLLM stays ahead on both.
+- Qwen3-Coder-Next held 1,586 in flight at a 2048 cap: memory for its
+  recurrent state, not the cap, sets its concurrency.
+
+### Shape search, Qwen3.6-35B-A3B FP8, vLLM AITER on, bf16 state, 128 in, output tok/s
+
+No serving settings (run before they were found).
+
+| Cap | 256 out | 1024 out |
+|---|---|---|
+| 1024 | 11,575 | 12,806 |
+| 1536 | 13,540 | 14,900 |
+| 2048 | 13,827 | 15,559 |
+
+Longer outputs raise the rate on this model, the reverse of Gemma. The two
+highest 1024-output cells had no request complete inside the measured window;
+the next rung of the 2048 cell agrees (15,376).
+
+### Shape search, Gemma-4-26B-A4B FP8, vLLM AITER on, 128 in, output tok/s
+
+| Cap | 256 out | 1024 out |
+|---|---|---|
+| 768 | 14,660 | 11,825 |
+| 1024 | 13,595 | 12,584 |
+| 1536 | 12,838 | 12,212 |
+| 2048 | 12,870 | 10,146 |
+
+Longer outputs lower the rate; the peak is at the smallest cap tried. The GPU
+is at 450 W throughout, so this model is bound by the card at the power cap.
+
+### Profiling and tuning slot (scheduled 2026-11-16)
+
+Order, and why: the profile decides which settings every later run uses, so
+it goes before the shape search, the larger models and the third-party
+benchmark campaigns, and after the serving round already in flight.
+
+1. Profile (about 40 minutes of GPU time). LFM2 on one engine and on two,
+   then Gemma-4-26B and Laguna-XS as card-bound cases. Each run records GPU
+   power, activity and memory-controller activity once a second, a py-spy
+   profile of each engine core, and a torch profiler trace of 30 engine
+   steps. Arms `/data/capsim/phase1p`, sidecar `/data/capsim/phase0/prof_side.sh`.
+2. Act on the profile, most likely in this order:
+   - Tune AITER for the shapes with no tuned entry. On LFM2 the fused expert
+     kernel runs on its default ("using 2stage default") and 3,531 matrix
+     multiplies report "not found tuned config" across seven shape families.
+   - Repeat the 45,519 reading and extend the ladder past 8,192 streams.
+   - LFM2.5-24B-A2B FP8 (LiquidAI, 2026-10, 24.7 GB): newer model, half the
+     weight bytes, room for three or four engines.
+   - SGLang on LFM2 with batched streaming; host placement of engine cores.
+3. Shape search, on the settings that come out of step 2.
+4. Larger models (first-load checks can run earlier; they do not depend on
+   tuning).
+5. AIPerf and GuideLLM campaigns on the final settings.
+
+Already checked without the GPU: vLLM runs LFM2 natively (`lfm2_moe`) and
+its experts go through AITER's fused expert kernel, not a per-expert loop.
+Needs a decision, not scheduled: raising the 450 W cap; `perf` is usable
+as it stands (`perf_event_paranoid` is -1).
+
+### Profile results (2026-11-16)
+
+vLLM torch profiler, 30 engine steps at the stated streams in flight, 128 in
+/ 256 out, serving settings on. Share of GPU kernel time:
+
+| Kernel group | LFM2, one engine | LFM2, two engines | Gemma-4-26B | Laguna-XS |
+|---|---|---|---|---|
+| Streams in flight | 4,096 | 4,096 each | 1,536 | 4,096 |
+| Expert layers (fused MoE) | 48% (AITER) | 50% (AITER) | 16% (vLLM's own kernel) | 20% (AITER FP8) |
+| Attention | 19% (vLLM kernel) | 9% (vLLM kernel) | 42% (vLLM kernel) | 48% (vLLM kernels) |
+| Dense matrix multiplies (rocBLAS) | 16% | 17% | 15% | 14% |
+| Sampling (top-k/top-p, Gumbel) | 6% | n/a | 8% | 2% |
+| GPU kernel time per step | 85 ms | 162 ms | 74 ms | 166 ms |
+| Step time from throughput | 137 ms | 180 ms | 88 ms | 187 ms |
+| GPU activity / power | 60% / 325 W | 100% / 450 W | 100% / 448 W | 100% / 450 W |
+| Memory-controller activity | 19% | n/a | 24 to 35% | 19 to 23% |
+
+- One LFM2 engine keeps the GPU busy 62% of each step; the rest is the
+  engine core on the host (92 to 100% of one core). Two engines fill the
+  GPU: each engine's kernels take 1.9 times as long because the two share
+  the card. 4,096 tokens per 85 ms of kernel time puts the ceiling for this
+  kernel mix near 48k tok/s; the two-engine 45,519 is 95% of it. More
+  engines will not help LFM2 until the kernels get faster.
+- Attention on vLLM runs in vLLM's own paged-attention kernel on all three
+  models, 19 to 42% of GPU time; AITER's flash attention was never selected
+  for them. SGLang, which uses AITER attention, is ahead of vLLM on
+  Laguna-XS (26,100 against 21,891).
+- Dense multiplies go to rocBLAS; the engine logs show AITER has no tuned
+  entry for these shapes. LFM2's expert kernel runs on its default too.
+- Memory-controller activity stays under 35%: the card is limited by compute
+  at the 450 W cap, not by memory bandwidth.
+- The engine-core CPU profile (py-spy) did not run: the sidecar picked the
+  wrong process id. The process list shows one engine core at 92 to 100% of
+  a core on LFM2 and about 190% on Gemma and Laguna-XS.
+
+Runs queued from this (`/data/capsim/phase1c`, e and g arms): AITER flash
+attention on Laguna-XS, North-Mini, LFM2 (two engines) and Gemma in
+text-only mode; a repeat of the two-engine LFM2 peak; LFM2.5-24B-A2B FP8 on
+one, two and three engines; first load of Qwen3.5-122B-A10B MXFP4.
+
+### Runs from the profile, 128 in / 256 out, output tok/s
+
+vLLM, serving settings on. "FA" is `--attention-backend ROCM_AITER_FA`.
+
+| Model | Setup | Cap | Before | Tok/s | GPU W |
+|---|---|---|---|---|---|
+| Laguna-XS-2.1 FP8 | FA | 4096 | 21,891 | 24,973 | 449 |
+| North-Mini-Code-1.0 FP8 | FA | 4096 | 23,358 | 24,985 | 438 |
+| LFM2-24B-A2B | two engines, FA | 2 x 4096 | 45,519 | 40,213 | 449 |
+| LFM2-24B-A2B | two engines, repeat | 2 x 4096 | 45,519 | 46,548 | 448 |
+| LFM2.5-24B-A2B FP8 | one engine | 4096 | n/a | 28,612 | 345 |
+| LFM2.5-24B-A2B FP8 | two engines | 2 x 4096 | n/a | 40,732 | 446 |
+| LFM2.5-24B-A2B FP8 | three engines | 3 x 4096 | n/a | 39,814 | 442 |
+
+- AITER flash attention gains 14% on Laguna-XS and 7% on North-Mini and
+  brings vLLM level with SGLang on both (26,100 and 25,211). It loses 12%
+  on LFM2, which keeps vLLM's default kernel.
+- The two-engine LFM2 peak repeats: 45,519 and 46,548. Both are 15-second
+  readings; the 10-minute mean is 42,081 (see the hardening section).
+- LFM2.5 FP8 is slower than LFM2 in bf16 on two engines (40,732 against
+  46,548) and a third engine adds nothing, as the profile predicted.
+- Gemma-4-26B: flash attention refuses it in text-only mode too ("head_size
+  not supported").
+- Qwen3.5-122B-A10B "MXFP4" from olka-fi is compressed-tensors 4-bit, not
+  AMD's Quark format; vLLM sends it to `gptq_marlin_repack`, which the ROCm
+  build does not have. Laguna-S-2.1 MXFP4 from the same author is the same
+  format.
+
+### Larger models: candidates (searched 2026-11-16, not yet run)
+
+Sizes are the weight files on Hugging Face. The card holds 143.7 GB; at a 0.95
+share that is 136.5 GB for weights, workspace and KV cache together.
+
+60B to 200B, released in 2026, with a checkpoint this stack can load:
+
+| Model | Released | Params (total / active) | Checkpoint | Weights GB | On the box |
+|---|---|---|---|---|---|
+| Nemotron-Labs-3-Puzzle-75B-A9B | 2026-06 | 75B / 9B | nvidia FP8 | 83 | no |
+| Qwen3.5-122B-A10B | 2026-02 | 122B / 10B | olka-fi MXFP4 (community) | 79 | no |
+| Qwen3.5-122B-A10B | 2026-02 | 122B / 10B | Qwen FP8 | 127 | yes |
+| Laguna-S-2.1 | 2026-07 | 118B | olka-fi MXFP4 (community) | 68 | no |
+| Laguna-S-2.1 | 2026-07 | 118B | poolside FP8 | 131 | no |
+| Nemotron-3.5-Super-VL-120B-A12B | 2026-10 | 120B / 12B | RedHatAI FP8 | 129 | no |
+| Qwen3.8-Flash-Next | 2026-08 | 180B | amd AWQ UINT4 | 80 | yes (does not load) |
+| Step-3.5-Flash | 2026-02 | 199B / 11B | amd MXFP4 | 115 | yes |
+| MiniMax-M2.7 | 2026-04 | 229B / 10B | amd MXFP4 | 127 | no |
+
+- An FP8 checkpoint of a 120B model is 127 to 131 GB and leaves under 10 GB
+  for the KV cache. That is why Nemotron-3-Super FP8 measured 1,740 tok/s;
+  the 4-bit checkpoints (68 to 83 GB) leave 50 GB and more.
+- Qwen3.8-Flash-Next (`qwen4_exp`) fails to load on both current images.
+
+Largest model on one card: MXFP4 weights run about 0.55 GB per billion
+parameters. Qwen3.5-397B-A17B MXFP4 is 221.5 GB and K2-Horizon-375B-A23B
+MXFP4 is 218 GB, so neither fits one card; each fits two (287 GB). The
+ceiling for one card is about 230B parameters: MiniMax-M2.7 (229B, 127 GB)
+with about 9 GB left for cache, or Step-3.5-Flash (199B, 115 GB) with about
+22 GB. Neither fits a 96 GB card at 4 bits (MiniMax-M2.7 NVFP4 is 140 GB).
+
+### Larger models: first loads (2026-11-16), 128 in / 256 out, output tok/s
+
+vLLM, serving settings on, memory share 0.98 where the weights are over
+100 GiB. No tuning yet.
+
+| Model | Params | Checkpoint | Weights GiB | KV cache | Cap | In flight | Tok/s | GPU W |
+|---|---|---|---|---|---|---|---|---|
+| MiniMax-M2.7 | 229B / 10B | amd MXFP4 | 119 | 20 GiB, 147k tokens | 512 | 491 | 6,721 | 450 |
+| MiniMax-M2.7 | 229B / 10B | amd MXFP4 | 119 | 20 GiB | 256 | 253 | 4,774 | 450 |
+| Step-3.5-Flash | 199B / 11B | amd MXFP4 | 107 | 23 GiB, 73k tokens | 512 | 277 | 3,741 | 448 |
+| Nemotron-Labs-3-Puzzle-75B-A9B | 75B / 9B | nvidia FP8 | 73 | 60 GiB | 1024 | 753 | 3,830 | 445 |
+| Qwen3.5-122B-A10B | 122B / 10B | Qwen FP8 | 117 | 22 GiB | 256 | 126 | 2,460 | 450 |
+
+- MiniMax-M2.7 is the largest model that runs on one card, and it does not
+  fit a 96 GB card at 4 bits. Its KV cache holds about 500 requests of this
+  shape, which is what limits it.
+- Step-3.5-Flash holds only 277 requests (311 KB of cache per token) and one
+  of its layer types falls back to an emulated MXFP4 path.
+- Puzzle-75B runs its experts and its Mamba state update on Triton kernels,
+  not AITER's; Qwen3.5-122B FP8 leaves room for 126 requests.
+- Do not load: Qwen3.5-122B MXFP4 and Laguna-S MXFP4 from olka-fi
+  (compressed-tensors 4-bit; vLLM has no ROCm kernel, SGLang fails on
+  `w2_weight_packed`).
+- Laguna-XS on SGLang at a 4096 cap: 26,347 (26,100 at 2048).
+
+### After the first loads (2026-11-16)
+
+| Model | Setup | Shape | Cap | In flight | Tok/s | GPU W |
+|---|---|---|---|---|---|---|
+| MiniMax-M2.7 MXFP4 | vLLM, FA | 128 / 256 | 640 | 460 | 5,697 | 450 |
+| MiniMax-M2.7 MXFP4 | vLLM | 1,024 / 1,024 | 128 | 125 | 2,682 | 450 |
+
+- Flash attention loses 15% on MiniMax-M2.7 (5,697 against 6,721), so it
+  keeps vLLM's default kernel, like LFM2.
+- At 1,024 in / 1,024 out one card holds 125 MiniMax-M2.7 requests and
+  generates 2,682 tok/s. The XE7740 measured the FP8 checkpoint at 4,827
+  tok/s for the box at that shape (two engines, four cards each, AIPerf
+  with unique prompts), about 603 per card. The two runs differ in
+  precision, engine layout and prompt reuse, so this is context and not a
+  like-for-like ratio.
+- Gemma-4-26B rejects `ROCM_ATTN` as well as `ROCM_AITER_FA`.
+- Kernel tuning: AITER's fused-MoE tuner on LFM2's shapes found a gain only
+  at 512 tokens per call (14%) and none from 1,024 to 8,192, which is where
+  the headline load runs. The dense (bf16) tuner's search is 34,688 trials
+  and was stopped unfinished after 25 minutes. Nothing was installed.
+
+### Hardening the LFM2 two-engine figure (2026-11-16)
+
+The 45,519 and 46,548 above are 15-second readings. At 8,192 streams the
+rate swings between about 48,000 and about 25,000 as each wave of requests
+finishes and the next wave's prompts are processed, so the harness gained a
+fixed hold (`hold_s`) and a fixed batch (`batch_requests`), both measured
+from the engines' counters at the two ends. Full write-up:
+`docs/mi350p-lfm2-throughput-claim.md`.
+
+| Run | What | Tok/s | In flight | Notes |
+|---|---|---|---|---|
+| run_415 to run_417 | 600 s hold, three engine starts | 42,040 / 42,024 / 42,179 | 8,060 | mean 42,081, range 0.4%; 447 W; TTFT p95 4.2 to 4.4 s |
+| run_418 | batch of 50,000 requests | 40,909 incl. ramp and drain | 7,582 | client token count 99.91% of the engines' |
+| run_419 | 600 s hold, prefix reuse off | 36,918 | 7,999 | 12% lower; no errors |
+| run_420 to run_422 | 60 scored questions: bf16 KV idle, fp8 KV idle, fp8 KV under load | n/a | 0 / 0 / 8,192 | 60 of 60 in all three |
+| run_423 | 600 s hold, 1,024 in / 1,024 out | 20,440 | 4,080 | over-driven: 8,192 offered, the rest timed out in the queue |
+| run_426 | `vllm bench serve`, shared 71-token prefix, 100,000 requests | 41,566 steady on engine counters | 8,192 | 0 failed; within 1.2% of the holds; 49% cache hits |
+| run_428 | `vllm bench serve`, unique prompts, 100,000 requests | 36,799 steady on engine counters | 8,192 | 0 failed; 3% cache hits; 0.3% from the reuse-off hold |
+| run_429 | `vllm bench serve`, shared prefix, 60,000 requests | 36,618 steady on engine counters | 4,096 | 0 failed; 109 ms per token |
+| run_430 | 600 s hold, 1,024 in / 1,024 out, 3,840 offered | 21,245 | 3,378 | 27% of requests cut: each wave's prompts take 45 to 50 s and stall running streams |
+| benchmarks/fc7ee79ef6db | AIPerf 0.13.0, unique prompts, 600 s | 36,856 | 8,192 | 0 failed; no cache hits; 0.2% from the reuse-off hold |
+| benchmarks/fc7ee79ef6db | AIPerf 0.13.0, unique prompts, 600 s | 32,936 | 4,096 | 0 failed; TTFT p95 3.0 s |
+
+- The LFM2 two-engine figure to quote is 42,081 (10-minute mean), not
+  45,519.
+- Two outside tools agree with the harness: vLLM's own benchmark tool with
+  a shared prefix (41,566) and AIPerf with unique prompts (36,856 against
+  capsim's 36,918 with reuse off). The shared system prompt is worth about
+  12% at this shape.
+- Lead not followed: with no new prompts arriving, two engines at 2,037
+  streams each decoded at about 61,000 tok/s (66 ms per token); under
+  sustained load at that stream count they gave 36,618 (109 ms). Prompt
+  processing interleaved with running streams costs more than its token
+  share, at both shapes. Staggered arrivals and the prompt batch budget
+  (`--max-num-batched-tokens`) are untested.
+- capsim's AIPerf path needed two fixes on this box: the idle-GPU check
+  crashed on ROCm 10's idle output (`simulator/gpu_vendor.py`), and the
+  system Python has no `venv`, so the service runs with
+  `CAPSIM_BENCHMARK_PYTHON` set to a uv-managed Python 3.12.
+- About 0.1% of streams stop delivering after their first tokens and are
+  closed by the client after 40 s; the engines still generate their tokens.
+  None occurred with reuse off. Cause not established.
+
+### Outside-tool check on the other models (2026-11-16 to 17)
+
+`vllm bench serve` against each model's best recorded configuration, 128 in /
+256 out, with the shared-prefix and unique split capsim used for that model,
+about 8 minutes of load, streams at the engine cap. "Sustained" is the
+engine's generated-token counter over the steady part of the run for vLLM
+and the tool's own whole-batch figure for SGLang (its counter moves only
+when a request completes). The capsim column is the earlier 15-second
+reading. Data: `/data/capsim/vbench_models/` on the box.
+
+| Model | Engine | Streams | capsim reading | Sustained | Difference | Failed | Cache hits | Run |
+|---|---|---|---|---|---|---|---|---|
+| MiniMax-M2.7 MXFP4 (229B) | vLLM | 512 | 6,721 | 6,633 | -1.3% | 0 of 12,500 | 58% | run_435 |
+| Gemma-4-26B-A4B FP8 | vLLM | 1,536 | 17,433 | 16,765 | -3.8% | 0 of 32,000 | 1.5% | run_431 |
+| Puzzle-75B-A9B FP8 | vLLM | 1,024 | 3,830 | 3,611 | -5.7% | 0 of 7,000 | 0% | run_436 |
+| Qwen3.5-35B-A3B MXFP4 | vLLM | 2,048 | 15,966 | 15,046 | -5.8% | 0 of 30,000 | 0% | run_432 |
+| North-Mini-Code-1.0 FP8 | SGLang | 2,048 | 25,147 | 21,699 | -14% | 0 of 47,000 | 53% | run_434 |
+| Laguna-XS-2.1 FP8 | SGLang | 4,096 | 26,347 | 21,120 | -20% | 0 of 50,000 | 62% | run_433 |
+
+- The vLLM rows hold up to within 1 to 6% over several minutes.
+- The two SGLang rows do not: their rate swings between about 10,000 and
+  33,000 across each request wave, and the 15-second reading caught the high
+  part. Quote about 21,000 for both until a 10-minute hold says otherwise.
+  vLLM with flash attention (24,973 and 24,985, also short readings) may now
+  be the better configuration for both and has not had the same check.
+- Gemma, Qwen3.5-35B-A3B and Puzzle-75B get no prefix-cache hits on vLLM, in
+  capsim's runs as well as the tool's, so the 54% reuse setting did not
+  apply to those rows.
+- AIPerf with unique prompts on Laguna-XS (SGLang) gave 17,017, with a mean
+  output of 253 tokens against the 256 requested
+  (`runs/benchmarks/6b771cf8e0f6af8f8bba62de`).
+
+### Not running yet
+
+- Gemma-4-31B MXFP4: vLLM fails loading weights (shape [5376, 576] against
+  [5376, 1152]); `ROCM_AITER_FA` rejects its multimodal attention.
 
 ## 6. What stays as it is
 

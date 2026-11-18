@@ -77,6 +77,8 @@ def _build_app(cfg, state: dict):
             f"vllm:kv_cache_usage_perc {kv / 100.0}\n"
             f"vllm:prefix_cache_queries_total {queries}\n"
             f"vllm:prefix_cache_hits_total {hits}\n"
+            f"vllm:prompt_tokens_total {state.get('prompt_tokens', 0)}\n"
+            f"vllm:generation_tokens_total {state.get('generation_tokens', 0)}\n"
         )
 
     async def chat_completions(request):
@@ -86,6 +88,9 @@ def _build_app(cfg, state: dict):
         max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or 64)
         input_tokens = _estimate_tokens(body.get("messages") or [])
         rng = random.Random()
+        # Like vLLM's --stream-interval: this many tokens per chunk.
+        interval = max(1, int(getattr(cfg, "mock_stream_interval", 1) or 1))
+        want_usage = bool((body.get("stream_options") or {}).get("include_usage"))
 
         def _jitter() -> float:
             j = cfg.mock_jitter
@@ -118,13 +123,27 @@ def _build_app(cfg, state: dict):
                     / 1000.0 * load * _jitter()
                 )
                 await asyncio.sleep(ttft_s)
+                state["prompt_tokens"] = state.get("prompt_tokens", 0) + input_tokens
                 yield _chunk({"role": "assistant", "content": ""})
-                for _ in range(max_tokens):
+                pending = 0
+                for i in range(max_tokens):
                     await asyncio.sleep(
                         cfg.mock_tpot_ms / 1000.0 * load * _jitter()
                     )
-                    yield _chunk({"content": "tok "})
+                    state["generation_tokens"] = state.get("generation_tokens", 0) + 1
+                    pending += 1
+                    if pending >= interval or i == max_tokens - 1:
+                        yield _chunk({"content": "tok " * pending})
+                        pending = 0
                 yield _chunk({}, finish="stop")
+                if want_usage:
+                    usage = {"id": chunk_id, "object": "chat.completion.chunk",
+                             "created": created, "model": served_name,
+                             "choices": [],
+                             "usage": {"prompt_tokens": input_tokens,
+                                       "completion_tokens": max_tokens,
+                                       "total_tokens": input_tokens + max_tokens}}
+                    yield f"data: {json.dumps(usage)}\n\n"
                 yield "data: [DONE]\n\n"
                 state["completed"] += 1
             finally:

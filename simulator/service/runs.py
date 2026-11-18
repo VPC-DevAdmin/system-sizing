@@ -469,11 +469,26 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             await asyncio.to_thread(
                 apply_shape_to_generation,
                 _catalog_dir(app.state.paths), n_in, n_out)
+        ladder = None
+        if req.ladder is not None:
+            ladder = sorted({int(n) for n in req.ladder})
+            if not ladder or ladder[0] < 1 or ladder[-1] > 65_536:
+                raise HTTPException(
+                    422, "ladder needs concurrency rungs between 1 and 65536")
+        if req.hold_s is not None and not 0 <= req.hold_s <= 7200:
+            raise HTTPException(422, "hold_s must be between 0 and 7200 seconds")
+        if req.batch_requests is not None and not 0 <= req.batch_requests <= 5_000_000:
+            raise HTTPException(422, "batch_requests must be between 0 and 5000000")
+        if req.hold_s and req.batch_requests:
+            raise HTTPException(422, "pass hold_s or batch_requests, not both")
         is_sweep = True
         coro_factory = lambda: run_headline_sweep(  # noqa: E731
             cfg, cohort_from_persona(wid), new_run=req.new_run,
             max_concurrency=req.max_concurrency,
+            ladder_override=ladder,
             progress=sweep_progress,
+            hold_s=req.hold_s,
+            batch_requests=req.batch_requests,
         )
     elif kind == "cohort":
         wid = req.workload.get("id")
@@ -604,6 +619,8 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             "custom CPU engine" if c.get("device") == "cpu"
             else "custom: "
             + f"{c.get('replicas') or 1}×tp{c.get('tp') or 1}"
+            + (f" ×{c['replicas_per_gpu']} per GPU"
+               if int(c.get("replicas_per_gpu") or 1) > 1 else "")
             + f" {c.get('placement') or 'pack'}"
             + f" · gmu {c.get('gpu_memory_utilization') or 0.92}"
             + (f" · mns {c['max_num_seqs']}"

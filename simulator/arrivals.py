@@ -108,6 +108,7 @@ class SessionArrivalLauncher:
         planner_timeouts: dict | None = None,
         system_prompt_tokens: dict[str, int] | None = None,
         system_prompt_in_input: bool = False,
+        stream_usage: bool = False,
     ):
         if not clients:
             raise ValueError("SessionArrivalLauncher requires at least one client")
@@ -127,9 +128,12 @@ class SessionArrivalLauncher:
         self._system_prompt_tokens = dict(system_prompt_tokens or {})
         self._system_prompts: dict[str, tuple[str, int]] = {}
         self._system_prompt_in_input = bool(system_prompt_in_input)
+        self._stream_usage = bool(stream_usage)
 
         self._rate_per_s: float = 0.0
         self._outstanding: int = 0
+        # Fixed-batch mode: sessions still to start (None = no limit).
+        self._budget: int | None = None
         self._rate_changed = asyncio.Event()
         self._stopped = False
         self._sessions: dict[str, asyncio.Task] = {}
@@ -159,24 +163,35 @@ class SessionArrivalLauncher:
 
     def set_rate(self, per_s: float) -> None:
         self._outstanding = 0          # rate mode cancels saturation mode
+        self._budget = None
         self._rate_per_s = max(0.0, float(per_s))
         self._rate_changed.set()
 
-    def set_outstanding(self, n: int) -> None:
+    def set_outstanding(self, n: int, budget: int | None = None) -> None:
         """Saturation mode: keep exactly ``n`` sessions active —
         spawn up to ``n`` now, respawn as each finishes. With
         zero-think single-turn personas this is the classic
         max-throughput benchmark loop (closed-loop self-throttling is
         exactly what we want here: the engine stays fully fed and
-        measurement happens on ITS counters)."""
+        measurement happens on ITS counters).
+
+        ``budget`` makes it a fixed batch: at most that many sessions are
+        started from now on, ``n`` at a time, and none replaces the last
+        ones to finish. Every token the engine then generates belongs to
+        a request the client saw end, so the two counts can be compared."""
         self._rate_per_s = 0.0
         self._rate_changed.set()       # stop scheduled arrivals
         self._outstanding = max(0, int(n))
+        self._budget = None if budget is None else max(0, int(budget))
         self._refill()
 
     def _refill(self) -> None:
         target = getattr(self, "_outstanding", 0)
         while not self._stopped and len(self._sessions) < target:
+            if self._budget is not None:
+                if self._budget <= 0:
+                    break
+                self._budget -= 1
             self.stats.tardiness_ms.append(0.0)
             self._spawn_session()
 
@@ -344,6 +359,7 @@ class SessionArrivalLauncher:
                     planner_timeouts=self._planner_timeouts,
                     system_prompt=self._system_prompt(persona.id),
                     system_prompt_in_input=self._system_prompt_in_input,
+                    stream_usage=self._stream_usage,
                 )
             finally:
                 self.stats.sessions_done += 1

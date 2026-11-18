@@ -88,6 +88,10 @@ def test_amd_compute_pids(monkeypatch):
     assert gpu_vendor.amd_compute_pids() == [4242]
     monkeypatch.setattr(gpu_vendor.subprocess, "run", _run('[{"gpu": 0, "process_list": []}]'))
     assert gpu_vendor.amd_compute_pids() == []
+    # ROCm 10 reports an idle card as a string in place of the process record.
+    idle = '[{"gpu": 0, "process_list": [{"process_info": "No running processes detected"}]}]'
+    monkeypatch.setattr(gpu_vendor.subprocess, "run", _run(idle))
+    assert gpu_vendor.amd_compute_pids() == []
     # "Unknown" must never read as "idle".
     monkeypatch.setattr(gpu_vendor.subprocess, "run", _run("", rc=1))
     with pytest.raises(RuntimeError):

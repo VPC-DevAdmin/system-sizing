@@ -88,6 +88,7 @@ def test_selecting_a_headline_workload_runs_a_sweep(tmp_path, monkeypatch):
     async def fake_sweep(cfg, cohort, **kw):
         called["cohort"] = cohort.id
         called["max_concurrency"] = kw.get("max_concurrency")
+        called["ladder"] = kw.get("ladder_override")
         await asyncio.sleep(0)
         return tmp_path / "headline_sweep.json"
 
@@ -106,14 +107,23 @@ def test_selecting_a_headline_workload_runs_a_sweep(tmp_path, monkeypatch):
             "config": config_path,
             "workload": {"kind": "persona", "id": "headline_generation"},
             "max_concurrency": 2048,
+            "ladder": [8, 1, 2, 4, 4],
         })
         assert r.status_code == 202, r.text
         for _ in range(50):
             if called:
                 break
             time.sleep(0.05)
+        bad = client.post("/api/runs", json={
+            "config": config_path,
+            "workload": {"kind": "persona", "id": "headline_generation"},
+            "ladder": [0, 4],
+        })
+        assert bad.status_code == 422
     assert "headline_generation" in called.get("cohort", "")
     assert called["max_concurrency"] == 2048
+    # The request's rungs, sorted and de-duplicated, replace the default ladder.
+    assert called["ladder"] == [1, 2, 4, 8]
     assert "open_loop" not in called       # the capacity search stayed out
 
 
@@ -331,3 +341,229 @@ def test_a_sweep_drains_the_engine_after_an_aborted_workload():
     e = Eng()
     asyncio.run(_drain_engine(e, timeout_s=5, poll_s=0.01))
     assert e.calls == 3
+
+
+# ── Hardening: whole-period counter rates, client token totals, fixed batch ──
+
+def _reading(at, *rows, total=None):
+    return {"replicas_total": total if total is not None else len(rows), "at": at,
+            "replicas": [{"replica": i, "port": 9100 + i,
+                          "generation_tokens_total": g, "prompt_tokens_total": p}
+                         for i, g, p in rows]}
+
+
+def test_counter_growth_sums_each_replicas_own_growth():
+    from simulator.headline_sweep import counter_growth
+    g = counter_growth(_reading(1.0, (0, 1000, 400), (1, 5000, 900)),
+                       _reading(601.0, (0, 13_001_000, 5_000_400), (1, 14_005_000, 5_500_900)))
+    assert g["ok"] and g["reason"] is None
+    assert g["generation_tokens"] == 27_000_000
+    assert g["prompt_tokens"] == 10_500_000
+    # The raw readings are kept, replica by replica.
+    assert g["replicas"][1]["generation_tokens_start"] == 5000
+    assert g["replicas"][1]["generation_tokens_end"] == 14_005_000
+
+
+def test_counter_growth_refuses_a_missing_replica_or_a_restart():
+    from simulator.headline_sweep import counter_growth
+    # One replica silent at the end: its history must not become a rate.
+    g = counter_growth(_reading(1.0, (0, 1000, 400), (1, 5000, 900)),
+                       _reading(601.0, (0, 9000, 800), total=2))
+    assert not g["ok"] and "did not answer" in g["reason"]
+    assert g["generation_tokens"] is None
+    # A counter that went backwards is an engine restart.
+    g = counter_growth(_reading(1.0, (0, 1000, 400), (1, 5000, 900)),
+                       _reading(601.0, (0, 9000, 800), (1, 30, 10)))
+    assert not g["ok"] and "backwards" in g["reason"]
+    # Nothing at all read.
+    assert not counter_growth({}, {})["ok"]
+
+
+def test_a_batched_stream_reports_the_servers_token_count():
+    """With --stream-interval 8 a chunk carries eight tokens: the chunk
+    count is not a token count, the usage record is."""
+    import asyncio
+    from types import SimpleNamespace as NS
+
+    from simulator.streaming import consume_with_tiers
+
+    def chunk(text=None, usage=None):
+        choices = [NS(delta=NS(content=text, reasoning=None, reasoning_content=None))] \
+            if usage is None else []
+        return NS(choices=choices, usage=usage)
+
+    class Stream:
+        def __init__(self, items):
+            self._it = iter(items)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._it)
+            except StopIteration:
+                raise StopAsyncIteration from None
+
+    async def create():
+        return Stream([chunk("a b c d e f g h ")] * 32
+                      + [chunk(usage=NS(completion_tokens=256, prompt_tokens=142))])
+
+    r = asyncio.run(consume_with_tiers(
+        create, pre_ttft_timeout_s=5, inter_token_timeout_s=5, hard_timeout_s=5))
+    assert r.error is None
+    assert r.output_tokens == 32                 # chunks
+    assert r.usage_completion_tokens == 256      # tokens
+    assert r.usage_prompt_tokens == 142
+
+
+def test_a_fixed_batch_starts_only_its_budget():
+    from simulator.arrivals import ArrivalStats, SessionArrivalLauncher
+    lau = object.__new__(SessionArrivalLauncher)
+    lau._stopped, lau._sessions, lau._budget = False, {}, None
+    lau._rate_per_s, lau._outstanding = 0.0, 0
+    lau._rate_changed = __import__("asyncio").Event()
+    lau.stats = ArrivalStats()
+    started = []
+
+    def spawn(**_kw):
+        started.append(len(started))
+        lau._sessions[len(started)] = object()
+    lau._spawn_session = spawn
+    lau.set_outstanding(4, budget=6)
+    assert len(started) == 4                     # four at a time
+    for _ in range(5):                           # each finish asks for a refill
+        lau._sessions.pop(next(iter(lau._sessions)))
+        lau._refill()
+    assert len(started) == 6                     # and never more than six
+    lau.set_outstanding(4)                       # no budget: the closed loop again
+    assert lau._budget is None and len(lau._sessions) == 4
+
+
+def test_the_pool_splits_a_batch_budget_across_workers():
+    import asyncio
+
+    from simulator.open_loop import WorkerPool
+    pool = object.__new__(WorkerPool)
+    pool._workers = [object(), object(), object()]
+    sent = []
+
+    async def send(_w, msg):
+        sent.append(msg)
+    pool._send = send
+    asyncio.run(pool.set_outstanding(8, budget=50))
+    assert [m["n"] for m in sent] == [3, 3, 2]
+    assert [m["budget"] for m in sent] == [17, 17, 16]
+    sent.clear()
+    asyncio.run(pool.set_outstanding(8))
+    assert all("budget" not in m for m in sent)
+
+
+def _mock_cfg(tmp_path, port, **engine):
+    from simulator.config import Config
+    cfg = Config()
+    cfg.engine.type = "mock"
+    cfg.engine.model_id = "mock-model"
+    cfg.engine.port = port
+    cfg.engine.mock_ttft_ms, cfg.engine.mock_tpot_ms = 20, 1
+    cfg.engine.mock_capacity_inflight, cfg.engine.mock_jitter = 64, 0.0
+    for k, v in engine.items():
+        setattr(cfg.engine, k, v)
+    cfg.simulation.headline_clear_s = 1
+    cfg.simulation.headline_measure_s = 2
+    cfg.simulation.open_loop_max_workers = 2
+    cfg.telemetry.enable_pmu = cfg.telemetry.enable_memory_bandwidth = False
+    cfg.telemetry.enable_power = cfg.telemetry.enable_gpu = False
+    cfg.output.db_directory = str(tmp_path / "runs")
+    return cfg
+
+
+def test_a_held_rung_reports_the_whole_period_from_the_counters(tmp_path):
+    import asyncio
+    import json
+
+    from simulator.headline_sweep import run_headline_sweep
+    from simulator.personas import cohort_from_persona
+    cfg = _mock_cfg(tmp_path, 18431, mock_stream_interval=8)
+    out = asyncio.run(run_headline_sweep(
+        cfg, cohort_from_persona("headline_generation"), new_run=True,
+        ladder_override=[4], hold_s=5))
+    summary = json.loads(out.read_text())
+    rung, n_out = summary["rungs"][0], int(summary["shape"]["output_tokens"])
+    assert rung["rate_source"] == "counter_hold" and rung["steady_state"]
+    c = rung["counters"]
+    assert c["ok"] and len(c["replicas"]) == 1
+    assert 4.5 <= rung["hold_s"] <= 8
+    # The published rate is the counter growth over the hold, nothing else.
+    assert rung["out_tok_s"] == round(c["generation_tokens"] / c["elapsed_s"], 1)
+    assert len(rung["window_rates"]) >= 2
+    # Eight tokens a chunk: the client's token total comes from usage, and
+    # time per token is per token, not per chunk.
+    assert rung["client_usage_requests"] > 0
+    assert rung["client_completion_tokens"] == n_out * rung["client_usage_requests"]
+    assert rung["client_content_chunks"] < rung["client_completion_tokens"] / 4
+    assert rung["tpot_p50_ms"] < 4
+
+
+def test_a_fixed_batch_matches_client_and_engine_totals(tmp_path):
+    import asyncio
+    import json
+
+    from simulator.headline_sweep import run_headline_sweep
+    from simulator.personas import cohort_from_persona
+    cfg = _mock_cfg(tmp_path, 18432)
+    out = asyncio.run(run_headline_sweep(
+        cfg, cohort_from_persona("headline_generation"), new_run=True,
+        ladder_override=[4], batch_requests=12))
+    summary = json.loads(out.read_text())
+    rung, n_out = summary["rungs"][0], int(summary["shape"]["output_tokens"])
+    b = rung["batch"]
+    assert rung["rate_source"] == "counter_batch"
+    assert b["completed"] == 12 and b["errors"] == 0 and not b["stalled"]
+    assert b["client_completion_tokens"] == 12 * n_out
+    assert b["engine_generation_tokens"] == 12 * n_out
+    assert b["client_over_engine"] == 1.0
+
+
+def test_hold_and_batch_options_reach_the_sweep(tmp_path, monkeypatch):
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from simulator.service import create_app
+    from tests.test_service import _write_mock_config
+
+    called = {}
+
+    async def fake_sweep(cfg, cohort, **kw):
+        called.update(hold_s=kw.get("hold_s"), batch=kw.get("batch_requests"),
+                      reuse=cfg.simulation.prefix_reuse)
+        await asyncio.sleep(0)
+        return tmp_path / "headline_sweep.json"
+
+    import simulator.headline_sweep as hs
+    monkeypatch.setattr(hs, "run_headline_sweep", fake_sweep)
+    config_path = _write_mock_config(tmp_path)
+    req = {"config": config_path,
+           "workload": {"kind": "persona", "id": "headline_generation"}}
+    with TestClient(create_app(tmp_path / "runs")) as client:
+        r = client.post("/api/runs", json={**req, "ladder": [8192], "hold_s": 600,
+                                           "prefix_reuse": 0})
+        assert r.status_code == 202, r.text
+        for _ in range(50):
+            if called:
+                break
+            time.sleep(0.05)
+        assert client.post("/api/runs", json={
+            **req, "hold_s": 600, "batch_requests": 50_000}).status_code == 422
+        assert client.post("/api/runs", json={**req, "hold_s": -1}).status_code == 422
+    assert called["hold_s"] == 600 and called["batch"] is None
+    assert called["reuse"] == "off"
+
+
+def test_telemetry_ignores_a_scrape_that_missed_a_replica():
+    from simulator.telemetry import _scrape_incomplete
+    assert not _scrape_incomplete({"generation_tokens_total": 5})        # one process
+    assert not _scrape_incomplete({"replicas_total": 2.0, "replicas_scraped": 2.0})
+    assert _scrape_incomplete({"replicas_total": 2.0, "replicas_scraped": 1.0})
+    assert _scrape_incomplete({"replicas_total": 2.0})

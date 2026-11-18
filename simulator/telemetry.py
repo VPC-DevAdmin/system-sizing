@@ -235,6 +235,15 @@ class _IntervalSample:
     gpu_devices: Optional[list] = None
 
 
+def _scrape_incomplete(m: dict) -> bool:
+    """Did a multi-replica engine's scrape miss a replica? Engines that
+    report no replica counts are one process and always whole."""
+    total = m.get("replicas_total")
+    if total is None:
+        return False
+    return float(m.get("replicas_scraped") or 0) < float(total)
+
+
 class MeasurementTelemetry:
     """Collects rich telemetry during a single measurement window.
 
@@ -484,7 +493,14 @@ class MeasurementTelemetry:
                     # Token-rate deltas from the monotonic counters.
                     pt = m.get("prompt_tokens_total")
                     gt = m.get("generation_tokens_total")
-                    if pt is not None and gt is not None:
+                    # The counters are sums over replicas. A scrape that
+                    # missed one is not the box: used as a boundary it
+                    # makes that replica's whole history look like new
+                    # generation at the next whole scrape (decode rates
+                    # of 895k tok/s on the XE7740). Skip it and keep the
+                    # last whole reading as the boundary.
+                    whole = not _scrape_incomplete(m)
+                    if pt is not None and gt is not None and whole:
                         now_s = time.monotonic()
                         if self._prev_tokens is not None:
                             p0, g0, t0 = self._prev_tokens

@@ -445,17 +445,23 @@ class WorkerPool:
                                  "target": base + (1 if i < rem else 0),
                                  "weights": weights})
 
-    async def set_outstanding(self, total: int) -> None:
+    async def set_outstanding(self, total: int,
+                              budget: int | None = None) -> None:
         """Saturation mode: hold ``total`` sessions active across the
-        workers (each respawns as its sessions finish)."""
+        workers (each respawns as its sessions finish). ``budget`` caps
+        how many sessions are started in all from here on (a fixed
+        batch), split across the workers like ``total``."""
         self._rate_total = 0.0
         if not self._workers:
             return
         k = len(self._workers)
         base, rem = divmod(max(0, int(total)), k)
+        b_base, b_rem = divmod(max(0, int(budget)), k) if budget is not None else (0, 0)
         for i, w in enumerate(self._workers):
-            await self._send(w, {"cmd": "outstanding",
-                                 "n": base + (1 if i < rem else 0)})
+            msg = {"cmd": "outstanding", "n": base + (1 if i < rem else 0)}
+            if budget is not None:
+                msg["budget"] = b_base + (1 if i < b_rem else 0)
+            await self._send(w, msg)
 
     async def reload_personas(self) -> None:
         for w in self._workers:

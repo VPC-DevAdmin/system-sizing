@@ -155,7 +155,12 @@ def test_reuse_accepts_a_share_and_says_when_it_is_above_production():
     assert resolve_reuse(0.45)["setting"] == "0.45"
     assert resolve_reuse(0.45)["within_production"]
     assert not resolve_reuse(0.9)["within_production"]
-    assert resolve_reuse(0)["setting"] == "template"
+    # Zero is zero: no shared prompt and the engine's cache off. Template-
+    # only reuse is its own named setting, and is what 0 used to mean.
+    assert resolve_reuse(0)["setting"] == "off"
+    assert resolve_reuse("0%") == resolve_reuse("off")
+    assert resolve_reuse("off")["target"] == 0.0
+    assert resolve_reuse("template")["setting"] == "template"
     for bad in ("lots", 0.99, -0.1, True):
         with pytest.raises(ValueError):
             resolve_reuse(bad)
@@ -234,3 +239,13 @@ def test_reuse_level_is_part_of_a_roofline_cell():
 def test_config_defaults_to_the_industry_level():
     from simulator.config import SimulationConfig
     assert SimulationConfig().prefix_reuse == "industry"
+
+
+def test_reuse_off_switches_the_engine_cache_off():
+    from simulator.prefix_policy import cache_off, engine_cache_off_flags
+    assert cache_off(0) and cache_off("off")
+    assert not cache_off("template") and not cache_off("industry")
+    assert not cache_off(None)                      # the default level
+    assert engine_cache_off_flags("vllm_cuda_multi") == ["--no-enable-prefix-caching"]
+    assert engine_cache_off_flags("sglang_cuda") == ["--disable-radix-cache"]
+    assert engine_cache_off_flags("llamacpp") == []

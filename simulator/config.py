@@ -151,6 +151,11 @@ class EngineConfig:
     # placement output verbatim (dp8: [[0],[4],[1],[5],[2],[6],[3],[7]];
     # tp2×4: [[0,1],[2,3],[4,5],[6,7]]). Replica i serves on port+i.
     replica_devices: list | None = None
+    # Engine processes sharing each replica's GPUs (custom shapes'
+    # ``replicas_per_gpu``). Above 1, replica_devices repeats each GPU
+    # set that many times and gpu_memory_utilization is one process's
+    # part of the card.
+    replicas_per_gpu: int = 1
 
     # ── Canonical launch knobs (engine-neutral) ───────────────────────
     # The optimizer and the benchmark form speak in these terms, and
@@ -316,6 +321,7 @@ class EngineConfig:
     mock_tpot_ms: float = 15.0
     mock_capacity_inflight: int = 8
     mock_jitter: float = 0.1        # +-10% uniform; 0 for determinism
+    mock_stream_interval: int = 1   # tokens per streamed chunk
 
     # ── vllm_dual_socket: per-replica fields ──────────────────────────
     # Used when ``type == "vllm_dual_socket"`` — N vLLM-CPU containers
@@ -602,6 +608,16 @@ class SimulationConfig:
     headline_sweep_ladder: list[int] = field(
         default_factory=lambda: [64, 128, 256, 512, 1024, 2048, 4096, 8192])
     headline_sweep_min_gain_pct: float = 3.0
+    # Hold each sweep rung this many seconds and report the whole-period
+    # rate from every replica's counter growth, in place of the last of
+    # two agreeing 15 s chunks (0 = off). At 8,192 streams of equal-length
+    # requests the rate swings by 40% as waves of requests turn over, and
+    # a single chunk reads wherever in the wave it falls.
+    headline_hold_s: int = 0
+    # Send exactly this many requests at each sweep rung and wait for all
+    # of them: the client's token total and the engine's counter growth
+    # then cover the same requests and can be compared (0 = off).
+    headline_batch_requests: int = 0
 
 
 @dataclass

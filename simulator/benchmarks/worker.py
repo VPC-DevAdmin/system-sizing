@@ -29,6 +29,19 @@ from .runtime import prepare
 from .storage import read_json, sha256, write_json
 
 
+def directory_bytes(directory):
+    """Bytes under a run directory. Engines replace small evidence files in it
+    many times a second, so a file can vanish between the listing and the stat."""
+    total = 0
+    for p in directory.rglob("*"):
+        try:
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+        except FileNotFoundError:
+            continue
+    return total
+
+
 def configure_file_limit(spec):
     """Each routed stream owns a client and upstream socket; children inherit the limit."""
     import resource
@@ -186,13 +199,7 @@ async def telemetry(directory: Path, engine, budget: int, started: float):
                 f.write(json.dumps(sample) + "\n")
                 f.flush()
                 if time.monotonic() - started > 10:
-                    size = await asyncio.to_thread(
-                        lambda: sum(
-                            p.stat().st_size
-                            for p in directory.rglob("*")
-                            if p.is_file() and not p.is_symlink()
-                        )
-                    )
+                    size = await asyncio.to_thread(directory_bytes, directory)
                     if size > budget:
                         raise RuntimeError("Attempt exceeded disk budget")
                 await asyncio.sleep(2)
@@ -358,11 +365,7 @@ async def campaign(directory: Path, base: Path):
                 continue
             used = len([a for a in prior if a["outcome"] != "interrupted"])
             for retry in range(used, spec["max_attempts"]):
-                size = sum(
-                    p.stat().st_size
-                    for p in directory.rglob("*")
-                    if p.is_file() and not p.is_symlink()
-                )
+                size = directory_bytes(directory)
                 if (
                     size > spec["disk_budget_gb"] * 1024**3
                     or shutil.disk_usage(directory).free < spec["min_free_gb"] * 1024**3

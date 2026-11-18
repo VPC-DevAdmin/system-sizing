@@ -14,7 +14,7 @@ class ExperimentSpec(BaseModel):
     duration_s: int = Field(default=60, ge=10, le=10800)
     warmup_s: int = Field(default=15, ge=0, le=600)
     concurrency: int = Field(default=4, ge=1, le=16384)
-    request_timeout_s: int = Field(default=120, ge=1, le=600)
+    request_timeout_s: int = Field(default=120, ge=1, le=1800)
     max_output_tokens: int = Field(default=1024, ge=128, le=8192)
     corpus_size: int = Field(default=256, ge=16, le=4096)
     document_records: int = Field(default=16, ge=4, le=4096)
@@ -124,8 +124,23 @@ class ExperimentSpec(BaseModel):
         default_factory=lambda: ["baseline", "treatment"], min_length=1, max_length=2
     )
     session_think_s: float = Field(default=60, gt=0, le=3600)
+    # Document workload pacing. "open" is the frozen Poisson arrival trace.
+    # "think" gives every user one outstanding question and an exponential think
+    # time (session_think_s) between an answer and the next question, so
+    # population is the variable. "surge" keeps users idle, then releases a share
+    # of them inside a short window (everyone back from a meeting).
+    session_pacing: Literal["open", "think", "surge"] = "open"
+    session_surge_shares: list[float] = Field(
+        default_factory=lambda: [0.1, 0.25, 0.5], min_length=1, max_length=6
+    )
+    session_surge_quiet_s: int = Field(default=600, ge=1, le=3600)
+    session_surge_window_s: int = Field(default=60, ge=1, le=600)
+    # iDRAC env file for wall-power sampling per cell (scripts/idrac_power.py).
+    session_power_env: str | None = None
+    # Label carried into cells.json so the situation tool can group campaigns.
+    session_situation: str | None = Field(default=None, max_length=64)
     session_population_grid: list[int] = Field(
-        default_factory=lambda: [32, 64, 128, 256], min_length=1, max_length=6
+        default_factory=lambda: [32, 64, 128, 256], min_length=1, max_length=12
     )
     session_rate_grid: list[float] = Field(
         default_factory=lambda: [1 / 60, 1 / 30], min_length=1, max_length=10
@@ -425,6 +440,28 @@ class ExperimentSpec(BaseModel):
                 raise ValueError("Padded documents need the document workload and output headroom")
             if self.warmup_s != 0:
                 raise ValueError("Capacity mode includes cold work; set warmup_s to zero")
+            if self.session_pacing != "open":
+                if (
+                    self.session_workload != "document"
+                    or not self.session_prime_documents
+                    or self.session_arrival_rates
+                    or self.session_capacity_multiples
+                ):
+                    raise ValueError(
+                        "Paced users need the primed document workload without arrival rates"
+                    )
+                if self.concurrency < max(self.session_population_grid):
+                    raise ValueError("Paced users need one client stream per user")
+                if self.session_pacing == "surge" and (
+                    any(x <= 0 for x in self.session_surge_shares)
+                    or sum(self.session_surge_shares) > 1
+                    or min(self.session_surge_shares) * min(self.session_population_grid) < 1
+                ):
+                    raise ValueError(
+                        "Surge shares must be positive, disjoint (sum to at most 1) and release at least one user"
+                    )
+                # One cadence per cell: a question every think time, per user.
+                self.session_rate_grid = [1 / self.session_think_s]
             if self.session_tier != "cpu":
                 raise ValueError("Document capacity currently supports CPU offload only")
             if (
@@ -442,7 +479,11 @@ class ExperimentSpec(BaseModel):
             for grid, upper in [(self.session_population_grid, 4096), (self.session_rate_grid, 10)]:
                 if grid != sorted(set(grid)) or any(x <= 0 or x > upper for x in grid):
                     raise ValueError("Session grids must be increasing, unique and bounded")
-            if len(self.session_population_grid) < 2 and not self.session_arrival_rates:
+            if (
+                len(self.session_population_grid) < 2
+                and not self.session_arrival_rates
+                and self.session_pacing == "open"
+            ):
                 raise ValueError("Capacity needs at least two session populations")
             if self.session_arrival_rates:
                 if (
@@ -477,7 +518,7 @@ class ExperimentSpec(BaseModel):
                         "Document lifetime must allow minimum returns after first touch"
                     )
                 needed = self.session_min_returns + (0 if self.session_prime_documents else 1)
-                if expected < needed:
+                if expected < needed and self.session_pacing != "surge":
                     raise ValueError(
                         "Capacity needs at least four expected returns per session; increase duration or rate"
                     )
@@ -514,6 +555,7 @@ class ExperimentSpec(BaseModel):
             if (
                 not self.session_arrival_rates
                 and self.session_workload == "document"
+                and self.session_pacing != "surge"
                 and self.duration_s
                 * min(self.session_rate_grid)
                 * min(self.session_population_grid)

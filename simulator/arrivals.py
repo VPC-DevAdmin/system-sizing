@@ -139,6 +139,7 @@ class SessionArrivalLauncher:
         self._sessions: dict[str, asyncio.Task] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._next_client = 0
+        self._client_sessions = [0] * len(clients)   # in flight, per engine
 
         self._task: asyncio.Task | None = None
         self.stats = ArrivalStats()
@@ -167,7 +168,8 @@ class SessionArrivalLauncher:
         self._rate_per_s = max(0.0, float(per_s))
         self._rate_changed.set()
 
-    def set_outstanding(self, n: int, budget: int | None = None) -> None:
+    def set_outstanding(self, n: int, budget: int | None = None,
+                        spread_s: float = 0.0) -> None:
         """Saturation mode: keep exactly ``n`` sessions active —
         spawn up to ``n`` now, respawn as each finishes. With
         zero-think single-turn personas this is the classic
@@ -178,22 +180,31 @@ class SessionArrivalLauncher:
         ``budget`` makes it a fixed batch: at most that many sessions are
         started from now on, ``n`` at a time, and none replaces the last
         ones to finish. Every token the engine then generates belongs to
-        a request the client saw end, so the two counts can be compared."""
+        a request the client saw end, so the two counts can be compared.
+
+        ``spread_s`` starts the sessions this call adds evenly over that
+        many seconds. Streams of one length that start together finish
+        together and reach the engine as a wave of prompts; real users do
+        not arrive in step. Replacements start at once, which keeps the
+        spread."""
         self._rate_per_s = 0.0
         self._rate_changed.set()       # stop scheduled arrivals
         self._outstanding = max(0, int(n))
         self._budget = None if budget is None else max(0, int(budget))
-        self._refill()
+        self._refill(spread_s=max(0.0, float(spread_s or 0.0)))
 
-    def _refill(self) -> None:
+    def _refill(self, spread_s: float = 0.0) -> None:
         target = getattr(self, "_outstanding", 0)
+        short = max(1, target - len(self._sessions))
+        started = 0
         while not self._stopped and len(self._sessions) < target:
             if self._budget is not None:
                 if self._budget <= 0:
                     break
                 self._budget -= 1
             self.stats.tardiness_ms.append(0.0)
-            self._spawn_session()
+            self._spawn_session(delay_s=spread_s * started / short)
+            started += 1
 
     def seed_to(self, target: int, weights: dict[str, float] | None = None) -> None:
         """Bring the active population to ``target`` now: start the
@@ -314,7 +325,8 @@ class SessionArrivalLauncher:
             next_at += self._rng.expovariate(rate)
 
     def _spawn_session(self, persona_id: str | None = None,
-                       mid_session: bool = False) -> None:
+                       mid_session: bool = False,
+                       delay_s: float = 0.0) -> None:
         persona_id = persona_id or self._pick_persona_id()
         persona = PERSONAS[persona_id]
         user_id = uuid.uuid4().hex
@@ -327,12 +339,27 @@ class SessionArrivalLauncher:
         )
         cancel_event = asyncio.Event()
         sub_rng = random.Random(self._rng.random())
-        client = self._clients[self._next_client % len(self._clients)]
-        self._next_client += 1
+        # The engine with the fewest sessions in flight, taking turns on a
+        # tie. Plain turn-taking gives every engine the same arrivals, so
+        # with a held stream count the slowest engine collects the whole
+        # backlog and the rest run short of work.
+        n = len(self._clients)
+        slot = min(range(n), key=lambda i: (
+            self._client_sessions[i], (i - self._next_client) % n))
+        self._next_client = slot + 1
+        self._client_sessions[slot] += 1
+        client = self._clients[slot]
         started = time.monotonic()
 
         async def _session() -> None:
             try:
+                if delay_s > 0:
+                    # Holds its place in the count while it waits its turn.
+                    try:
+                        await asyncio.wait_for(cancel_event.wait(), timeout=delay_s)
+                        return
+                    except asyncio.TimeoutError:
+                        pass
                 await run_virtual_user(
                     persona=persona,
                     rng=sub_rng,
@@ -362,6 +389,7 @@ class SessionArrivalLauncher:
                     stream_usage=self._stream_usage,
                 )
             finally:
+                self._client_sessions[slot] -= 1
                 self.stats.sessions_done += 1
                 if stats.sessions_completed > 0:
                     # Natural end only — see ArrivalStats.

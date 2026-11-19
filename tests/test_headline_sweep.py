@@ -456,7 +456,10 @@ def test_the_pool_splits_a_batch_budget_across_workers():
     assert [m["budget"] for m in sent] == [17, 17, 16]
     sent.clear()
     asyncio.run(pool.set_outstanding(8))
-    assert all("budget" not in m for m in sent)
+    assert all("budget" not in m and "spread_s" not in m for m in sent)
+    sent.clear()
+    asyncio.run(pool.set_outstanding(8, spread_s=50))
+    assert [m["spread_s"] for m in sent] == [50.0, 50.0, 50.0]
 
 
 def _mock_cfg(tmp_path, port, **engine):

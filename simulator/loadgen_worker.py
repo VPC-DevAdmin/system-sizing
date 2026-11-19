@@ -144,7 +144,8 @@ async def _amain(config: dict) -> bool:
                 launcher.mark_window()
             elif cmd == "outstanding":
                 launcher.set_outstanding(int(msg.get("n") or 0),
-                                         msg.get("budget"))
+                                         msg.get("budget"),
+                                         float(msg.get("spread_s") or 0.0))
             elif cmd == "restart":
                 # Saturation-mode shape swap: abort every in-flight
                 # session (the engine cancels aborted requests) —

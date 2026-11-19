@@ -348,8 +348,8 @@ Steps, 128 in / 256 out, same serving settings as the whole-card runs:
    device), which decides whether the launcher needs a change to treat
    partitions as devices.
 2. A fresh whole-card reference per model as a 10-minute hold, so both
-   sides of each percentage use the same method (most references above
-   are 15-second readings, which read high).
+   sides of each percentage use the same method (done 2026-11-18, table
+   below).
 3. CPX: each model alone, one engine per partition, all four under load;
    10-minute hold. Record total and per-partition tok/s, power, streams
    in flight, and whether AITER reports missing tables for 32 CUs.
@@ -362,6 +362,111 @@ Steps, 128 in / 256 out, same serving settings as the whole-card runs:
 
 Open: Gemma in DPX or left out of the four-way picture; whether the mode
 survives a reboot.
+
+Whole-card references (SPX), 10-minute holds, 128 in / 256 out, 0 errors
+in every run:
+
+| Model | Engines | Streams | Output tok/s | GPU W | ms/token p50 | TTFT p95 | Earlier short reading | Run |
+|---|---|---|---|---|---|---|---|---|
+| LFM2-24B-A2B bf16 | 2 | 8,192 | 42,081 | 447 | 191 | 4.2–4.4 s | 45,519 | run_415–417 (mean of three) |
+| LFM2.5-24B-A2B FP8 | 2 | 8,192 | 40,855 | 446 | 197 | 5.6 s | 40,732 | run_438 |
+| Gemma-4-26B-A4B FP8 | 1 | 1,536 | 16,724 | 449 | 90 | 0.9 s | 17,433 | run_440 |
+| Qwen3.5-35B-A3B MXFP4 | 1 | 2,048 | 15,114 | 446 | 134 | 1.7 s | 15,966 | run_439 |
+| Qwen3.8-27B Quark-AWQ-MXFP4 | 1 | 1,024 | 4,389 | 448 | 225 | 7.9 s | 5,710 | run_441 |
+
+- Qwen3.8-27B holds 4,389, 23% under its 15-second reading of 5,710. Its
+  prompt processing is slow (TTFT p95 7.9 s), so a short window between
+  prompt waves reads well above the sustained rate. Use 4,389.
+- Gemma and Qwen3.5 land within 0.5% of their `vllm bench serve` figures
+  (16,765 and 15,046).
+- Four engines on the unpartitioned card (arms in
+  `/data/capsim/partition/spx/skipped`) were not run. They would separate
+  the effect of four engines from the effect of partitions; run the
+  matching one only if a CPX result lands far from its reference.
+
+### Partition and layout results (2026-11-18 to 19)
+
+All rows are 10-minute holds at 128 in / 256 out with the card at its
+450 W cap. Mode switches: `sudo amd-smi set -g 0 --accelerator-partition
+SPX|DPX|CPX`, card idle, no driver reload.
+
+What the card reports: CPX shows four devices of 36.0 GiB, DPX two of
+72.0 GiB (memory mode `CAPPING`). Power and activity are reported on the
+first partition only, for the whole card. In CPX the video decoder and
+JPEG engines are shared between pairs of partitions.
+
+Harness changes these runs needed (in `simulator/`, with tests):
+
+- `gpu_vendor.py`: a partitioned card reports "N/A" blocks for every
+  partition but the first and gives the first the whole card's memory;
+  both are handled.
+- `arrivals.py`: a new session goes to the engine with the fewest in
+  flight. Taking turns piled 3,600 of 5,120 streams onto the slowest of
+  four engines.
+- `spread_s` on a hold: start the streams evenly over a period.
+
+LFM2 layouts, output tok/s:
+
+| Model | Mode | Engines | Streams offered / in flight | Output tok/s | TTFT p95 | Errors | Run |
+|---|---|---|---|---|---|---|---|
+| LFM2 bf16 | SPX | 2 | 8,192 / 8,060 | 42,081 | 4.2–4.4 s | about 0.1% stalled | run_415–417 |
+| LFM2 bf16 | DPX | 1 per half | 8,192 / 8,069 | 42,831 | 4.2 s | 79 stalled | run_450 |
+| LFM2 bf16 | DPX | 1 per half, step budget 32,768 | 8,192 / 7,936 | 41,018 | 5.2 s | 184 stalled | run_451 |
+| LFM2 bf16 | DPX | 1 per half, step budget 16,384 | 12,288 / 9,179 | 36,129 | 32 s | 7,983 stalled | run_453 |
+| LFM2 bf16 | DPX | 1 per half, step budget 16,384 | 16,384 / 9,973 | 35,803 | 61 s | 86,017 | run_453 |
+| LFM2 bf16 | SPX | 2, step budget 6,144 | 8,192 / 8,024 | 42,184 | 5.0 s | 139 stalled | run_456 |
+| LFM2 bf16 | SPX | 2, starts spread over 50 s | 8,192 / 8,128 | 42,278 | 0.86 s | 176 stalled | run_457 |
+| LFM2 bf16 | DPX | 1 per half, starts spread over 50 s | 8,192 / 8,129 | 42,216 | 0.84 s | 201 stalled | run_459 |
+| LFM2 bf16 | DPX | same, repeat | 8,192 / 8,127 | 42,182 | 0.84 s | 203 stalled | run_461 |
+| LFM2 bf16 | DPX | same, session cache in bf16 (not FP8) | 8,192 / 6,016 | 34,535 | 22 s | 306 stalled | run_460 |
+| LFM2 bf16 | SPX | 1, stream interval 32, 8 API servers | 4,096 / 4,049 | 27,745 (346 W) | 1.8 s | 0 | run_455 |
+| LFM2.5 FP8 | SPX | 2 | 8,192 / 8,072 | 40,855 | 5.6 s | 0 | run_438 |
+| LFM2.5 FP8 | SPX | 4, starts spread | 8,192 / 8,129 | 37,772 | 1.0 s | 0 | run_458 |
+| LFM2.5 FP8 | SPX | 4 | 5,120 / 5,006 | 35,285 | 2.8 s | 0 | run_454 |
+| LFM2.5 FP8 | DPX | 2 per half | 5,120 / 4,690 | 33,863 | 5.7 s | 0 | run_452 |
+| LFM2.5 FP8 | CPX | 1 per quarter, even load | 5,120 / 3,351 | 27,792 | 24 s | 0 | run_447 |
+| LFM2.5 FP8 | CPX | 1 per quarter, uneven load | 5,120 / 2,742 | 27,231 | 82 s | 0 | run_446 |
+| LFM2.5 FP8 | CPX | 1 per quarter, stream cap 2,048 | 8,192 / 1,829 | 21,680 | 149 s | 2 stalled | run_442 |
+
+Other models in CPX (one engine per quarter):
+
+| Model | Whole card | CPX | Share | Note |
+|---|---|---|---|---|
+| Qwen3.8-27B MXFP4 | 4,389 | 2,786 (run_448; 2,119 before the stream cap was sized, run_444) | 63% | about 63 streams fit per partition |
+| Qwen3.5-35B-A3B MXFP4 | 15,114 | not measured | | did not start until graph capture was cut to 11 sizes (10.1 to 2.7 GiB); stopped before a result |
+| Gemma-4-26B-A4B FP8 | 16,724 | did not start | | 27.5 GiB model copy leaves no session memory in 36 GiB |
+
+Findings:
+
+- Two-way partitioning costs nothing: one engine per half gave 42,831
+  against 42,081 on the whole card, and 42,216 / 42,182 with spread
+  starts against 42,278. The 42,831 was not repeated; treat the two
+  modes as equal.
+- Two engines is the best count for LFM2. Four engines hold four model
+  copies and repeat the fixed per-step work: 37,772 on the whole card at
+  the same 8,192 streams (92% of two engines), 33,863 as two per half,
+  27,792 as one per quarter.
+- A 36 GiB partition is too small for 19–29 GB models at high stream
+  counts. The loss is model size against partition size, not the
+  boundary. In CPX the engine also reported far fewer cache tokens per
+  GiB than in DPX or SPX (213k from 5.3 GiB against 526k from 5.25 GiB);
+  not explained.
+- Partition 0 in CPX ran about 22% slower than the other three at equal
+  load; not explained.
+- Throughput for LFM2 sits at 41,000–42,900 across whole card, two
+  halves, three step budgets and spread starts, at the power cap each
+  time. More streams, a larger step budget and a single engine with
+  lighter host work are all worse or no better.
+- Spreading the stream starts keeps the rate (42,278) and cuts TTFT p95
+  from 4.2 s to 0.86 s; the 10-second rate stays within 40,000–44,600.
+  The 48,000 seen between waves was decode with no prompts to process.
+- Leaving the session cache in bf16 halves the cache (1.65M tokens
+  against 3.3M) and the card then holds 6,016 streams: 34,535.
+- Recommended setting for LFM2 bf16 on one MI350P: two engines (whole
+  card or one per half), 4,096 streams each, FP8 session cache,
+  `--stream-interval 8 --api-server-count 4`, default step budget,
+  starts spread: about 42,200 output tok/s with TTFT p95 under 0.9 s.
+- The card was returned to SPX after the last run.
 
 ## Results to date (2026-11-16)
 

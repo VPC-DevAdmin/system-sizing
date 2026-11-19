@@ -114,3 +114,34 @@ def test_assert_gpu_idle_on_amd(amd, monkeypatch):
     monkeypatch.setattr(gpu_vendor, "amd_compute_pids", lambda: [7])
     with pytest.raises(RuntimeError, match="already active"):
         worker.assert_gpu_idle(eng)
+
+
+def test_amd_partitions(monkeypatch):
+    """A card split into partitions (CPX): amd-smi lists one device per
+    partition, reports "N/A" for the usage of all but the first, and gives
+    the first the whole card's memory."""
+    metric = [{"gpu": 0,
+               "usage": {"gfx_activity": {"value": 90, "unit": "%"}},
+               "power": {"socket_power": {"value": 440, "unit": "W"}},
+               "mem_usage": {"total_vram": {"value": 147440, "unit": "MB"},
+                             "used_vram": {"value": 30000, "unit": "MB"}}},
+              {"gpu": 1, "usage": "N/A", "power": {"socket_power": "N/A"},
+               "temperature": "N/A", "clock": "N/A",
+               "mem_usage": {"total_vram": {"value": 36860, "unit": "MB"},
+                             "used_vram": {"value": 30000, "unit": "MB"}}}]
+    monkeypatch.setattr(gpu_vendor, "_amd_json", lambda *a, **k: metric)
+    first, second = gpu_vendor.amd_sample_devices()
+    assert first["power_w"] == 440 and second["power_w"] is None
+    assert second["sm_util_pct"] is None and round(second["vram_total_gb"]) == 36
+
+    static = [{"gpu": i, "asic": {"market_name": "AMD Instinct MI350P"},
+               "vram": {"size": {"value": 147440 if i == 0 else 36860, "unit": "MB"}},
+               "bus": {"bdf": f"0000:8b:00.{i}"}} for i in range(4)]
+    static.append({"gpu": 4, "asic": {"market_name": "AMD Instinct MI350P"},
+                   "vram": {"size": {"value": 147440, "unit": "MB"}},
+                   "bus": {"bdf": "0000:c1:00.0"}})
+    monkeypatch.setattr(gpu_vendor, "vendor", lambda: "amd")
+    monkeypatch.setattr(gpu_vendor, "_amd_json", lambda *a, **k: static)
+    sizes = [mib for _, mib in gpu_vendor.query_gpus()]
+    # Four partitions of one card share its memory; a whole card keeps its own.
+    assert sizes == [36860, 36860, 36860, 36860, 147440]

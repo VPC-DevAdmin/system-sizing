@@ -516,6 +516,9 @@ async def run_headline_sweep(
     # and report client and engine token totals (None:
     # simulation.headline_batch_requests; 0: off).
     batch_requests: int | None = None,
+    # Start each rung's streams evenly over this many seconds instead of
+    # all at once (0: all at once). Measurement starts after the spread.
+    spread_s: float = 0.0,
 ) -> Path:
     """Sweep concurrency at saturation. Returns the summary JSON path."""
     sim = cfg.simulation
@@ -916,10 +919,11 @@ async def run_headline_sweep(
                 await pool.set_outstanding(0)
                 await _wait_idle(float(sim.headline_refill_max_s))
             else:
-                await pool.set_outstanding(n)
+                await pool.set_outstanding(n, spread_s=spread_s)
 
                 # Let the batch fill at the new pressure before measuring.
-                settle_end = time.monotonic() + sim.headline_clear_s
+                settle_end = (time.monotonic() + sim.headline_clear_s
+                              + max(0.0, float(spread_s or 0.0)))
                 while time.monotonic() < settle_end:
                     m = await _metrics()
                     pool.drain_turn_queue()
@@ -1138,6 +1142,7 @@ async def run_headline_sweep(
             # gives (template_floor), against which every rung's
             # prefix_hit_rate is judged.
             "prefix_cache": prefix_cache,
+            "start_spread_s": float(spread_s or 0.0),
             "ladder": ladder,
             "shape": _cohort_shape(cohort),
             "rungs": [asdict(r) for r in rungs],

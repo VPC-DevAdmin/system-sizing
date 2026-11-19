@@ -593,3 +593,87 @@ def test_revert_waits_for_running_requests_not_just_the_queue(monkeypatch):
     asyncio.run(r._revert_to_stable())
     assert calls == [("rate", 4.0), ("trim", 2400)]
     assert len(seen) == 3            # did not stop at the empty queue with 4,000 running
+
+
+def test_new_sessions_go_to_the_engine_with_the_fewest_in_flight(monkeypatch):
+    """Four engines on a partitioned MI350P: one was slightly slower, and
+    handing each new session to the next engine in turn piled 3,600 of
+    5,120 streams onto it while the other three ran half empty. A held
+    stream count has to stay spread evenly across engines of unequal
+    speed."""
+    from simulator import arrivals
+    from simulator.virtual_user import SharedState
+
+    slow, fast = object(), object()
+    in_flight = {id(slow): 0, id(fast): 0}
+
+    async def fake_user(*, client, stats, **kw):
+        in_flight[id(client)] += 1
+        try:
+            await asyncio.sleep(0.2 if client is slow else 0.01)
+            stats.sessions_completed += 1
+        finally:
+            in_flight[id(client)] -= 1
+
+    monkeypatch.setattr(arrivals, "run_virtual_user", fake_user)
+
+    async def main():
+        launcher = arrivals.SessionArrivalLauncher(
+            persona_weights={"quick_lookup": 1.0},
+            clients=[slow, fast], model_id="m", corpus=None,
+            state=SharedState(), request_timeout_s=5,
+        )
+        launcher.start()
+        launcher.set_outstanding(8)
+        await asyncio.sleep(0.15)              # the fast engine has turned over many times
+        seen = dict(in_flight)
+        await launcher.stop()
+        return seen
+
+    seen = asyncio.run(main())
+    assert seen[id(slow)] == 4 and seen[id(fast)] == 4
+
+
+def test_held_streams_can_start_spread_over_a_period(monkeypatch):
+    """Streams of equal length that all start together finish together,
+    and the engine then gets its prompts in waves (LFM2 on the MI350P:
+    about 48k tok/s between waves, 20-32k during one). ``spread_s`` starts
+    the first fill evenly over a period; replacements start at once, so
+    the spread carries on."""
+    import time
+    from simulator import arrivals
+    from simulator.virtual_user import SharedState
+
+    starts: list[float] = []
+
+    async def fake_user(*, stats, **kw):
+        starts.append(time.monotonic())
+        await asyncio.sleep(0.6)                 # longer than the spread
+        stats.sessions_completed += 1
+
+    monkeypatch.setattr(arrivals, "run_virtual_user", fake_user)
+
+    async def main():
+        launcher = arrivals.SessionArrivalLauncher(
+            persona_weights={"quick_lookup": 1.0},
+            clients=[object()], model_id="m", corpus=None,
+            state=SharedState(), request_timeout_s=5,
+        )
+        launcher.start()
+        t0 = time.monotonic()
+        launcher.set_outstanding(10, spread_s=0.5)
+        await asyncio.sleep(0.25)
+        early = len(starts)                      # about half the first fill
+        await asyncio.sleep(0.3)
+        first_fill = list(starts)                # all ten, none replaced yet
+        await asyncio.sleep(0.4)
+        held, total = len(launcher._sessions), len(starts)
+        await launcher.stop()
+        return t0, early, first_fill, held, total
+
+    t0, early, first_fill, held, total = asyncio.run(main())
+    assert 3 <= early <= 8                       # not all at once, not none
+    assert len(first_fill) == 10
+    assert max(first_fill) - t0 >= 0.4           # the last one waits its turn
+    assert held == 10                            # the count is held throughout
+    assert total > 10                            # finished streams were replaced

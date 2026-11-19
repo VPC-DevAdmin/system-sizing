@@ -46,6 +46,9 @@ class StartRunRequest(BaseModel):
     # totals. One or the other.
     hold_s: Optional[float] = None
     batch_requests: Optional[int] = None
+    # Headline sweeps only: start each rung's streams evenly over this
+    # many seconds instead of all at once.
+    spread_s: Optional[float] = None
     # Headline sweeps and the joint search: the prefix-cache reuse the
     # sweep is built to reach (simulation.prefix_reuse): "industry",
     # "consumer_chat", "conversation", "template" or a share such as

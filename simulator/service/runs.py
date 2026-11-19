@@ -481,6 +481,10 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             raise HTTPException(422, "batch_requests must be between 0 and 5000000")
         if req.hold_s and req.batch_requests:
             raise HTTPException(422, "pass hold_s or batch_requests, not both")
+        if req.spread_s is not None and not 0 <= req.spread_s <= 600:
+            raise HTTPException(422, "spread_s must be between 0 and 600 seconds")
+        if req.spread_s and req.batch_requests:
+            raise HTTPException(422, "spread_s is for held rungs, not batch_requests")
         is_sweep = True
         coro_factory = lambda: run_headline_sweep(  # noqa: E731
             cfg, cohort_from_persona(wid), new_run=req.new_run,
@@ -489,6 +493,7 @@ async def _start_run_locked(app, req: StartRunRequest) -> dict:
             progress=sweep_progress,
             hold_s=req.hold_s,
             batch_requests=req.batch_requests,
+            spread_s=float(req.spread_s or 0.0),
         )
     elif kind == "cohort":
         wid = req.workload.get("id")

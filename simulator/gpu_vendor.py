@@ -105,6 +105,14 @@ def _num(v) -> Optional[float]:
         return None
 
 
+def _section(record: dict, key: str) -> dict:
+    """One block of an amd-smi record. A block the device cannot report
+    (usage and clocks on every partition but the first) is the string
+    "N/A", read here as empty."""
+    value = record.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def _amd_json(*args: str, timeout: int = 10) -> list[dict]:
     r = subprocess.run(["amd-smi", *args, "--json"], capture_output=True,
                        text=True, timeout=timeout)
@@ -132,11 +140,23 @@ def query_gpus() -> Optional[list[tuple[str, float]]]:
                     out.append((parts[0], _num(parts[1]) or 0.0))
             return out
         if v == "amd":
-            out = []
-            for g in _amd_json("static", "--asic", "--vram", timeout=15):
-                name = (g.get("asic") or {}).get("market_name") or "AMD GPU"
-                size = (g.get("vram") or {}).get("size")
+            out, cards = [], []
+            for g in _amd_json("static", "--asic", "--vram", "--bus", timeout=15):
+                name = (_section(g, "asic")).get("market_name") or "AMD GPU"
+                size = (_section(g, "vram")).get("size")
                 out.append((name, _num(size) or 0.0))   # amd-smi "MB" is MiB
+                # Partitions of one card (DPX, CPX) are functions of one
+                # PCI device: 0000:8b:00.0 .. 0000:8b:00.3.
+                bdf = str(_section(g, "bus").get("bdf") or "")
+                cards.append(bdf.rsplit(".", 1)[0] if "." in bdf else f"gpu{len(cards)}")
+            # The first partition reports the whole card's memory; each
+            # partition really has the share its siblings report.
+            for card in set(cards):
+                members = [i for i, c in enumerate(cards) if c == card]
+                share = min((out[i][1] for i in members if out[i][1] > 0), default=0.0)
+                if len(members) > 1 and share:
+                    for i in members:
+                        out[i] = (out[i][0], share)
             return out
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return None
@@ -148,11 +168,8 @@ def amd_sample_devices() -> list[dict]:
     devices: list[dict] = []
     for g in _amd_json("metric", "--usage", "--power", "--clock",
                        "--temperature", "--mem-usage"):
-        usage = g.get("usage") or {}
-        mem = g.get("mem_usage") or {}
-        power = g.get("power") or {}
-        temp = g.get("temperature") or {}
-        clocks = g.get("clock") or {}
+        usage, mem, power = _section(g, "usage"), _section(g, "mem_usage"), _section(g, "power")
+        temp, clocks = _section(g, "temperature"), _section(g, "clock")
         gfx = [_num((c or {}).get("clk")) for k, c in clocks.items()
                if k.startswith("gfx_") and isinstance(c, dict)]
         gfx = [c for c in gfx if c is not None]

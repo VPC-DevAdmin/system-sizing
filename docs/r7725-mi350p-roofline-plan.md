@@ -531,6 +531,102 @@ sessions.
   Qwen3.8, two engines at 320 streams each is the choice when per-stream
   speed matters.
 
+### Why the other models trail LFM2 (2026-11-19)
+
+Question: LFM2-24B-A2B gives 42,000 output tok/s; Qwen3.5-35B-A3B has a
+similar active-parameter count and gives 15,000. What is the difference,
+and can the other models be raised? Data: `/data/capsim/dig` (arms,
+results, `membw.log`), profile `/data/capsim/huggingface/prof/dig_qwen35*`,
+runs run_472 to run_479. All holds are 10 minutes, one engine, whole
+card, 450 W cap, starts spread, 0 errors unless noted.
+
+Work the card does per second, from the spread-start holds. "Processed"
+is output tokens plus prompt tokens the GPU computed (cache hits left
+out). Active parameters are estimates from each model's `config.json`.
+
+| Model | Active per token | Output tok/s | Processed tok/s | Processed x 2 x active, TFLOP/s | Run |
+|---|---|---|---|---|---|
+| LFM2-24B-A2B bf16 (two engines) | about 2.0B | 42,278 | 52,500 | about 210 | run_457 |
+| Gemma-4-26B-A4B FP8 | about 3.8B | 16,599 | 26,100 | about 200 | run_463 |
+| Qwen3.5-35B-A3B MXFP4 | about 2.85B | 14,400 | 22,400 | about 130 | run_465 |
+| Qwen3.8-27B MXFP4 (dense) | 27B | 4,501 | 7,700 | about 410 | run_467 |
+
+- Gemma is explained by arithmetic: it does about the same work per
+  second as LFM2, each token costs 1.9 times as much, and it gets no
+  prompt reuse where LFM2 gets 56% (worth 14% on LFM2).
+- Qwen3.5-35B-A3B is the outlier: about 60% of the work per second.
+
+Qwen3.5-35B-A3B profile (vLLM torch profiler, 30 engine steps at 2,037
+streams in flight; 133 ms of GPU kernel time per step against a 141 ms
+step):
+
+| Kernel group | Share of GPU time |
+|---|---|
+| Linear-attention layers (`qwen_gdn_attention_core`) | 47% |
+| of which the recurrent-state update | 37% |
+| of which the causal convolution | 7% |
+| Dense matrix multiplies (`aten::mm`, rocBLAS) | 18% |
+| Expert layers (AITER fused MoE, MXFP4) | 12% |
+| Sampling (top-k/top-p, Gumbel, temperature) | 6% |
+| Full attention (AITER paged attention) | 5% |
+| State copies for the prefix cache | 2% |
+
+- 30 of the 40 layers are linear-attention (gated delta rule) layers.
+  Each keeps 32 heads x 128 x 128 values of state per stream: 1.05 MB
+  in bf16 per layer, 31 MB per stream. Every generated token reads and
+  rewrites all of it: about 63 MB of memory traffic per token. LFM2's 30
+  convolution layers keep a few kilobytes, and its 10 attention layers
+  read about 10 KB per token of context.
+- At 2,037 streams one layer's update moves 4.3 GB (read plus write) in
+  1.63 ms: about 2.6 TB/s.
+- Memory probe on this card at 450 W (`membw.py`, PyTorch, 2.14 GB
+  tensor): scale in place 3.05 TB/s, copy 2.63 TB/s, fill 3.3 TB/s. The
+  state update runs at about 86% of the fastest read-and-write pass, so
+  a better kernel has at most about 14% to give on 37% of the time.
+- Memory-controller activity is the highest of the four models on
+  Qwen3.5 (37%; LFM2 25%, Gemma 30%, Qwen3.8 27%).
+- The experts, the part the "A3B" label counts, are 12% of GPU time. The
+  model is bound by memory traffic from its state, not by active
+  parameters, and no serving setting removes that. The state is constant
+  per stream whatever the context length, so 128 in / 256 out is this
+  design's worst case; it should compare better at long contexts (not
+  measured here).
+
+Lever runs:
+
+| Model | Change | Output tok/s | Against base | Note | Run |
+|---|---|---|---|---|---|
+| Gemma-4-26B | base (spread starts) | 16,599 | | | run_463 |
+| Gemma-4-26B | `--generation-config vllm` (no top-k 64 / top-p 0.95) | 17,059 | +2.8% | | run_473 |
+| Gemma-4-26B | `--block-size 8` | did not start | | attention kernel: "block_size not supported" | run_474 |
+| Gemma-4-26B | 256 in / 256 out, reuse on (47% hits) | 14,984 | | | run_478 |
+| Gemma-4-26B | 256 in / 256 out, reuse off | 12,999 | | reuse is worth +15% at this shape | run_479 |
+| Qwen3.5-35B-A3B | base (spread starts) | 14,400 | | | run_465 |
+| Qwen3.5-35B-A3B | `--generation-config vllm` (no top-k 20 / top-p 0.95) | 14,566 | +1.2% | | run_475 |
+| Qwen3.5-35B-A3B | `--no-enable-prefix-caching` | 14,648 | +1.7% | no memory freed | run_476 |
+| Qwen3.5-35B-A3B | MTP, 1 draft token, bf16 convolution state | 15,109 | +4.9% | 1,235 of 2,048 streams fit (cache 99% full), rest queued, TTFT p95 15 s, rung not marked steady; 81 ms per token against 139 | run_477 |
+
+- Sampling differs by model. capsim sends temperature 0.7 and the engine
+  adds each model's shipped defaults: Gemma top-k 64 / top-p 0.95, Qwen
+  top-k 20 / top-p 0.95, LFM2.5 top-k 50 and a repetition penalty, LFM2
+  bf16 none. `--generation-config vllm` puts them all on plain
+  temperature sampling: +2.8% on Gemma, +1.2% on Qwen3.5 (one run each).
+- Gemma cannot reuse the 71-token shared prompt at 128 in: its cache
+  blocks are 64 and 128 tokens (hits land on 128) and the engine rejects
+  a smaller block. At 256 in / 256 out the shared prompt covers one
+  block and reuse gives +15% (14,984 against 12,999), but the larger
+  shape is slower than 128 in without reuse (16,599). A larger shape
+  does not raise Gemma's output rate.
+- Multi-token prediction on Qwen3.5 gives the original reference's total
+  (15,114) with 40% fewer streams, each 1.7 times faster. It needs a run
+  sized to about 1,200 streams before the figure is quoted.
+- Not raised by any lever tried: the gap to LFM2. Expected ceilings from
+  what was measured: Gemma about 17,000 (plain sampling); Qwen3.5 about
+  15,000.
+- Not tried: the 600 W setting (the owner's decision); AITER tuning for
+  the dense multiplies (18% of Qwen3.5's time, untuned shapes); Qwen3.5
+  at a long-context shape.
+
 ## Results to date (2026-11-16)
 
 Everything below is one GPU, 450 W cap, new images (vLLM nightly `9bc16ae6`

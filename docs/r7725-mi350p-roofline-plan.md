@@ -468,6 +468,69 @@ Findings:
   starts spread: about 42,200 output tok/s with TTFT p95 under 0.9 s.
 - The card was returned to SPX after the last run.
 
+### The LFM2 mechanisms on the other models (2026-11-19)
+
+Question: do the three things that worked for LFM2 (two engines sharing
+the card, stream starts spread over one request's duration, stream count
+sized to the memory two engines leave) raise throughput on the other
+models? Whole card (SPX), 10-minute holds, 128 in / 256 out, 450 W cap,
+0 errors in every run. Arms and results:
+`/data/capsim/partition/spx4`; references are run_438 to run_441.
+
+| Model | Engines | Streams | Starts | Output tok/s | Against reference | TTFT p50 / p95 | ms/token p50 | Run |
+|---|---|---|---|---|---|---|---|---|
+| LFM2.5-24B-A2B FP8 | 2 | 8,192 | together | 40,855 | reference | 1.16 / 5.6 s | 197 | run_438 |
+| LFM2.5-24B-A2B FP8 | 2 | 8,192 | spread 50 s | 40,026 | -2.0% | 0.84 / 0.96 s | 202 | run_462 |
+| Gemma-4-26B-A4B FP8 | 1 | 1,536 | together | 16,724 | reference | 0.53 / 0.87 s | 90 | run_440 |
+| Gemma-4-26B-A4B FP8 | 1 | 1,536 | spread 23 s | 16,599 | -0.7% | 0.29 / 0.33 s | 92 | run_463 |
+| Gemma-4-26B-A4B FP8 | 2 | 2 x 768 | spread 23 s | 15,699 | -6.1% | 0.30 / 0.35 s | 97 | run_464 |
+| Qwen3.5-35B-A3B MXFP4 | 1 | 2,048 | together | 15,114 | reference | 0.65 / 1.68 s | 134 | run_439 |
+| Qwen3.5-35B-A3B MXFP4 | 1 | 2,048 | spread 34 s | 14,400 | -4.7% | 0.43 / 0.49 s | 141 | run_465 |
+| Qwen3.5-35B-A3B MXFP4 | 2 | 2 x 768 | spread 34 s | 14,121 | -6.6% | 0.34 / 0.50 s | 91 | run_466 |
+| Qwen3.5-35B-A3B MXFP4 | 2 | 2 x 896 | spread 34 s | 14,179 | -6.2% | 0.38 / 0.54 s | 116 | run_470 |
+| Qwen3.8-27B MXFP4 | 1 | 1,024 | together | 4,389 | reference | 2.19 / 7.9 s | 225 | run_441 |
+| Qwen3.8-27B MXFP4 | 1 | 1,024 | spread 58 s | 4,501 | +2.6% | 0.75 / 0.91 s | 226 | run_467 |
+| Qwen3.8-27B MXFP4 | 1, serving settings | 1,024 | spread 58 s | 4,475 | +2.0% | 0.71 / 0.89 s | 227 | run_468 |
+| Qwen3.8-27B MXFP4 | 2, serving settings | 2 x 320 | spread 58 s | 4,498 | +2.5% | 0.49 / 0.73 s | 141 | run_469 |
+| Qwen3.8-27B MXFP4 | 2, serving settings | 2 x 416 | spread 58 s | 4,400 | +0.3% | 0.59 / 1.00 s | 187 | run_471 |
+
+"Serving settings" is `--stream-interval 8 --api-server-count 4`, which
+the Qwen3.8 reference did not have. The two-engine Qwen runs cut graph
+capture to about a dozen sizes (`--compilation-config`
+`cudagraph_capture_sizes`) so each engine keeps 41 to 46 GiB for
+sessions.
+
+- No mechanism raised throughput on these models. Every run is within 7%
+  of its reference; the only results above it are Qwen3.8's, by 0.3 to
+  2.6%, which one run each cannot separate from run-to-run spread.
+- Two engines helped LFM2 because one engine left the card at about
+  357 W with its scheduling process at 100% of a host core. Gemma,
+  Qwen3.5 and Qwen3.8 hold the card at 445 to 450 W with one engine, so
+  a second engine has no idle GPU time to use and costs a second model
+  copy: Gemma -6%, Qwen3.5 -6 to -7%.
+- Spread starts cut first-token p95 on every model: LFM2.5 5.6 to
+  0.96 s, Gemma 0.87 to 0.33 s, Qwen3.5 1.68 to 0.49 s, Qwen3.8 7.9 to
+  0.91 s. The rate moves by -4.7% to +2.6%.
+- Qwen3.8 with two engines at 640 streams gave the single engine's total
+  (4,498 against 4,501 at 1,024 streams) with each stream 60% faster
+  (141 against 226 ms per token). Raising it to 832 streams did not
+  raise the total (4,400).
+- Filling the memory two engines leave did not help: Qwen3.5 at 2 x 896
+  (session memory 92% used) gave 14,179 against 14,121 at 2 x 768.
+- The two Qwen3.5 engines did not share the card evenly: 8,439 and 5,682
+  tok/s at 2 x 768, 7,765 and 6,414 at 2 x 896, with the same settings,
+  memory and streams in flight. Gemma, Qwen3.8 and LFM2.5 split evenly.
+  Not explained.
+- Gemma and the two Qwen models get no prefix-cache hits at this shape.
+  The engine's cache block is 128 tokens for Gemma and 832 for the Qwen
+  hybrids, and the shared system prompt is 71 tokens, so no block is
+  ever shared. LFM2's 56% reuse (worth about 12%) is not available to
+  them at 128 in.
+- Recommended setting per model: keep each reference configuration and
+  add spread starts. Use two engines only for LFM2 and LFM2.5. For
+  Qwen3.8, two engines at 320 streams each is the choice when per-stream
+  speed matters.
+
 ## Results to date (2026-11-16)
 
 Everything below is one GPU, 450 W cap, new images (vLLM nightly `9bc16ae6`
